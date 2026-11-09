@@ -1,0 +1,4107 @@
+/* Design tokens + component styles for Nojaé.
+   Two-theme surface system layered on top of Pico CSS. */
+
+:root {
+  --pico-font-family: 'Inter', system-ui, sans-serif;
+  --pico-font-family-monospace: 'JetBrains Mono', ui-monospace, SFMono-Regular,
+    monospace;
+  --pico-font-size: 14px;
+  --pico-line-height: 1.5;
+  --pico-border-radius: 8px;
+  --pico-form-element-spacing-vertical: 0.5rem;
+  --pico-form-element-spacing-horizontal: 0.75rem;
+
+  --bi-radius-lg: 12px;
+  --bi-space-1: 0.5rem;
+  --bi-space-2: 0.875rem;
+  --bi-space-3: 1.25rem;
+  --bi-space-4: 2rem;
+  --bi-appbar-height: 60px;
+  /* Width of ONE chat tool panel (MCP or LSP). The two sit side by side in
+     the tools dock at the bottom of the Chat left column, and the reasoning
+     timeline above them fills that same width, so the column is
+     --bi-chat-tools-col-width wide. Sized so connector names fit next to
+     their switch (also wide enough that the vertical scrollbar never
+     squeezes a row sideways). Keep the calc's gap in sync with
+     `.chat-tools-dock-body`'s gap. */
+  --bi-chat-panel-width: 15.5rem;
+  --bi-chat-tools-col-width: calc(2 * var(--bi-chat-panel-width) + 0.5rem);
+
+  /* Gradient gauge ramp: green → yellow → orange → red (theme-independent). */
+  --bi-gauge-low: #22c55e;
+  --bi-gauge-mid: #eab308;
+  --bi-gauge-high: #f97316;
+  --bi-gauge-max: #ef4444;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --pico-primary: #4f46e5;
+  --pico-primary-hover: #4338ca;
+  --pico-primary-hover-background: #4338ca;
+  --pico-primary-underline: rgba(79, 70, 229, 0.4);
+  --pico-background-color: #f5f7fb;
+  --pico-card-background-color: #ffffff;
+  --pico-card-sectioning-background-color: #ffffff;
+  --pico-color: #111827;
+  --pico-muted-color: #64748b;
+  --pico-muted-border-color: #e2e8f0;
+  --pico-code-background-color: #f1f5f9;
+  --pico-code-color: #111827;
+  --pico-secondary: #64748b;
+  --pico-secondary-hover: #475569;
+  --pico-secondary-background: #f1f5f9;
+  --pico-secondary-hover-background: #e2e8f0;
+  --pico-secondary-color: #111827;
+  --pico-secondary-hover-color: #111827;
+  --pico-secondary-border-color: #e2e8f0;
+  --bi-success: #059669;
+  --bi-danger: #dc2626;
+  --bi-warning: #d97706;
+  --bi-info: #2563eb;
+  --bi-violet: #7c3aed;
+
+  --bi-hl-keyword: #cf222e;
+  --bi-hl-string: #0a3069;
+  --bi-hl-comment: #6e7781;
+  --bi-hl-number: #0550ae;
+  --bi-hl-function: #8250df;
+  --bi-hl-variable: #953800;
+  --bi-hl-type: #1a7f37;
+
+  --bi-surface: #ffffff;
+  --bi-surface-2: #f1f5f9;
+  --bi-border: #e2e8f0;
+  --bi-icon: #111827;
+  --bi-appbar-bg: rgba(255, 255, 255, 0.82);
+  --bi-brand-gradient: linear-gradient(135deg, #4f46e5, #7c3aed);
+  --bi-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.08);
+  --bi-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --pico-primary: #6366f1;
+  --pico-primary-hover: #818cf8;
+  --pico-primary-hover-background: #818cf8;
+  --pico-primary-underline: rgba(129, 140, 248, 0.4);
+  --pico-background-color: #0a0f1c;
+  --pico-card-background-color: #0f172a;
+  --pico-card-sectioning-background-color: #0f172a;
+  --pico-color: #e2e8f0;
+  --pico-muted-color: #8b98ad;
+  --pico-muted-border-color: #24314a;
+  --pico-code-background-color: #16213a;
+  --pico-code-color: #e2e8f0;
+  --pico-secondary: #8b98ad;
+  --pico-secondary-hover: #cbd5e1;
+  --pico-secondary-background: #16213a;
+  --pico-secondary-hover-background: #1d2b4a;
+  --pico-secondary-color: #e2e8f0;
+  --pico-secondary-hover-color: #ffffff;
+  --pico-secondary-border-color: #24314a;
+  --bi-success: #34d399;
+  --bi-danger: #f87171;
+  --bi-warning: #fbbf24;
+  --bi-info: #60a5fa;
+  --bi-violet: #a78bfa;
+
+  --bi-hl-keyword: #ff7b72;
+  --bi-hl-string: #a5d6ff;
+  --bi-hl-comment: #8b949e;
+  --bi-hl-number: #79c0ff;
+  --bi-hl-function: #d2a8ff;
+  --bi-hl-variable: #ffa657;
+  --bi-hl-type: #7ee787;
+
+  --bi-surface: #0f172a;
+  --bi-surface-2: #16213a;
+  --bi-border: #24314a;
+  --bi-icon: #e2e8f0;
+  --bi-appbar-bg: rgba(10, 15, 28, 0.82);
+  --bi-brand-gradient: linear-gradient(135deg, #6366f1, #a78bfa);
+  --bi-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --bi-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+html {
+  background-color: var(--pico-background-color);
+}
+
+body {
+  margin: 0;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* -- application bar ------------------------------------------------------- */
+
+.appbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--bi-space-3);
+  height: var(--bi-appbar-height);
+  padding: 0 clamp(1rem, 3vw, 2rem);
+  background-color: var(--bi-appbar-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--bi-border);
+}
+
+.appbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background-image: var(--bi-brand-gradient);
+  color: #ffffff;
+  box-shadow: var(--bi-shadow-sm);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.brand-name {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.brand-sub {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.7rem;
+  color: var(--pico-muted-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+
+.appbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-2);
+  flex: 0 0 auto;
+  justify-self: end;
+}
+
+/* -- session meters in the app bar ----------------------------------------- */
+
+/* The shared elapsed clock (SessionClock.vue): one readout for the whole app,
+   because a Benchmark run and a WorkBench reply cannot run at the same time —
+   so it sits immediately left of the status pill and reads whichever is live.
+   Compact on purpose: the app bar is `--bi-appbar-height` tall, so the digits
+   stay at the pill's own size instead of the Benchmark panel's 1.75rem.
+   `min-width` is fixed to the width of `00:00:00` (tabular digits) so the
+   actions row never shifts sideways as the clock ticks past a minute or an
+   hour. */
+.session-clock {
+  flex: 0 0 auto;
+  margin: 0;
+  min-width: 8ch;
+  box-sizing: border-box;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--bi-border);
+  border-radius: 999px;
+  background-color: var(--bi-surface);
+  text-align: center;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  color: var(--pico-muted-color);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.session-clock--running {
+  color: var(--bi-violet);
+  border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
+}
+
+/* The token-rate and context counters (SessionStatBadges.vue), left of the tab
+   strip. They never take part in the centre cell's stretching, so the tab
+   strip stays centred. */
+.session-stat-badges {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-1);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.session-stat-badges .badge {
+  white-space: nowrap;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  justify-content: center;
+}
+
+/* Each counter keeps the width of its longest active figure even while idle
+   (`— t/s` / `— ctx` are much shorter), so starting a session cannot reflow
+   the centred tab strip. The values are em-relative to the badge's own font
+   size and cover the `≈` estimate marker plus a wide figure
+   (`≈ 123.4 t/s`, `≈ ctx 123.4k / 128k`), so an active reading always fits. */
+.session-stat-badges .badge--rate {
+  min-width: 6.8em;
+}
+
+.session-stat-badges .badge--context {
+  min-width: 10.8em;
+}
+
+/* -- status pill ------------------------------------------------------------ */
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--bi-border);
+  background-color: var(--bi-surface);
+  color: var(--pico-muted-color);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: currentColor;
+}
+
+.status-running {
+  color: var(--bi-info);
+  border-color: color-mix(in srgb, var(--bi-info) 40%, transparent);
+}
+
+.status-running .status-dot {
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+.status-finished {
+  color: var(--bi-success);
+  border-color: color-mix(in srgb, var(--bi-success) 40%, transparent);
+}
+
+.status-failed {
+  color: var(--bi-danger);
+  border-color: color-mix(in srgb, var(--bi-danger) 40%, transparent);
+}
+
+.status-cancelled {
+  color: var(--bi-warning);
+  border-color: color-mix(in srgb, var(--bi-warning) 40%, transparent);
+}
+
+/* Chat reply in flight (app-bar pill reuses the run-status styles). */
+.status-thinking,
+.status-reasoning {
+  color: var(--bi-violet);
+  border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
+}
+
+.status-thinking .status-dot,
+.status-reasoning .status-dot {
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+/* A batch lot is running (app-bar pill, B10). Same violet as a chat reply —
+   the pill is reading the same violet family for "the model is working" — but
+   with its own branch so the label can stay literal. The post-lot outcome
+   reuses the run-status tones already defined above (status-cancelled /
+   status-failed / status-finished), so no new colour is introduced. */
+.status-batch {
+  color: var(--bi-violet);
+  border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
+}
+
+.status-batch .status-dot {
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes bi-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+
+/* -- run controls ----------------------------------------------------------- */
+
+/* Both buttons are plain .icon-btn circles — the same shape the WorkBench
+   composer uses for Send / Stop — so only the accent color differs here. */
+.run-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* The rules below carry the `.run-controls` ancestor on purpose: it lifts them
+   above the generic `.icon-btn` (and `.icon-btn:disabled`) rules, which would
+   otherwise flatten the accent. */
+.run-controls .run-btn-play {
+  background-color: var(--pico-primary);
+  border-color: var(--pico-primary);
+  color: #ffffff;
+  box-shadow: var(--bi-shadow-sm);
+}
+
+.run-controls .run-btn-play:hover:not(:disabled) {
+  background-color: var(--pico-primary-hover);
+  border-color: var(--pico-primary-hover);
+}
+
+/* Running: the button is inert (one run at a time) but keeps its accent and
+   the pulse ring, so it still reads as the control that owns the run. */
+.run-controls .run-btn-play.is-running {
+  animation: bi-glow 1.6s ease-in-out infinite;
+  background-color: var(--pico-primary);
+  border-color: var(--pico-primary);
+  opacity: 1;
+}
+
+.run-controls .run-btn-stop {
+  background-color: var(--bi-surface);
+  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
+  color: var(--bi-danger);
+}
+
+.run-controls .run-btn-stop:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--bi-danger) 12%, var(--bi-surface));
+}
+
+/* `.icon-btn:disabled` would flatten both of them to the neutral surface, so
+   each keeps its own accent while inert (only the opacity dimming applies). */
+.run-controls .run-btn-play:disabled {
+  background-color: var(--pico-primary);
+  border-color: var(--pico-primary);
+  box-shadow: var(--bi-shadow-sm);
+}
+
+.run-controls .run-btn-stop:disabled {
+  background-color: var(--bi-surface);
+  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
+}
+
+@keyframes bi-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--pico-primary) 45%, transparent); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--bi-border);
+  background-color: var(--bi-surface);
+  color: var(--pico-color);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.icon-btn:hover {
+  background-color: var(--bi-surface-2);
+  border-color: var(--pico-muted-color);
+}
+
+/* Pico's button rules set `--pico-color: white` and `color: white` on every
+   button (custom properties inherit into the svg). Use our own --bi-icon
+   token, which Pico never touches, for button-internal icon colors. */
+.icon-btn {
+  color: var(--bi-icon);
+}
+
+.icon-btn svg {
+  stroke: var(--bi-icon);
+}
+
+/* Icons, now that both run buttons are .icon-btn: the generic rule above gives
+   every icon button's glyph the muted stroke, so the two accents are restated
+   here (and the solid play triangle gets no outline at all). */
+.run-controls .run-btn-play svg {
+  fill: #ffffff;
+  stroke: none;
+}
+
+.run-controls .run-btn-stop svg {
+  stroke: var(--bi-danger);
+}
+
+.run-controls .run-btn-stop rect {
+  fill: var(--bi-danger);
+}
+
+/* -- layout ------------------------------------------------------------------ */
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: var(--bi-space-3);
+  align-items: stretch;
+  box-sizing: border-box;
+  height: calc(100vh - var(--bi-appbar-height));
+  padding: var(--bi-space-3) clamp(1rem, 3vw, 2rem) var(--bi-space-4);
+}
+
+.stats-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-2);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.stream-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-2);
+  min-width: 0;
+  min-height: 0;
+}
+
+.stream-col .stream-panel {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  .stats-col {
+    order: 2;
+    overflow: visible;
+  }
+
+  .stream-col .stream-panel {
+    height: calc(100vh - var(--bi-appbar-height) - 8.5rem);
+  }
+}
+
+/* -- panels & metric cards ---------------------------------------------------- */
+
+.panel {
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  padding: var(--bi-space-2) 1.1rem;
+  box-shadow: var(--bi-shadow-sm);
+}
+
+.run-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  text-align: center;
+}
+
+.run-meta {
+  word-break: break-word;
+}
+
+.metric-card {
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  padding: 0.8rem 1.1rem;
+  box-shadow: var(--bi-shadow-sm);
+}
+
+.metric-card .metric-label {
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+  margin: 0;
+}
+
+.metric-card .metric-value {
+  font-size: 1.375rem;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0.15rem 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-card .metric-delta {
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+  margin: 0;
+}
+
+.failed-label {
+  margin-top: 0.15rem;
+}
+
+/* -- captions, errors, links --------------------------------------------------- */
+
+.caption {
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+  margin: 0;
+}
+
+.caption.mono {
+  font-family: var(--pico-font-family-monospace);
+}
+
+.error-line {
+  color: var(--bi-danger);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.alert-error {
+  color: var(--bi-danger);
+  background-color: color-mix(in srgb, var(--bi-danger) 8%, var(--bi-surface));
+  border: 1px solid color-mix(in srgb, var(--bi-danger) 35%, transparent);
+  border-radius: var(--bi-radius-lg);
+  padding: 0.6rem 0.85rem;
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.download-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+  color: var(--pico-primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-decoration: none;
+  box-shadow: var(--bi-shadow-sm);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.download-link:hover {
+  background-color: var(--bi-surface-2);
+  border-color: var(--pico-primary);
+}
+
+/* -- stream panel ----------------------------------------------------------------- */
+
+.stream-panel {
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  box-shadow: var(--bi-shadow-sm);
+  height: calc(100vh - var(--bi-appbar-height) - 8.5rem);
+  min-height: 420px;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  overscroll-behavior: contain;
+}
+
+.stream-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  flex: 1;
+  min-height: 100%;
+  text-align: center;
+  color: var(--pico-muted-color);
+  padding: 2rem;
+}
+
+.stream-empty-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.question-card {
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  padding: 0.85rem 1.1rem;
+}
+
+.question-card .question-meta {
+  margin-bottom: 0.15rem;
+}
+
+.question-card .question-text {
+  font-weight: 600;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.question-card .question-verdict {
+  margin: 0.6rem 0 0.25rem;
+}
+
+.answer {
+  overflow-wrap: break-word;
+}
+
+.answer :first-child { margin-top: 0; }
+.answer :last-child { margin-bottom: 0; }
+
+.answer pre {
+  background-color: var(--pico-code-background-color);
+  color: var(--pico-code-color);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--pico-border-radius);
+  overflow-x: auto;
+}
+
+.answer code {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.85em;
+}
+
+.answer pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+/* Tool-line icon: prefixes each post-tool-round continuation line in the
+   chat answer (useChat arms it after a tool_result, lib/markdown.js swaps
+   the sentinel for the inline wrench SVG at render time). */
+.answer .tool-line-icon {
+  display: inline-block;
+  vertical-align: -0.15em;
+  margin-right: 0.35rem;
+  color: var(--pico-muted-color);
+}
+
+.answer .mermaid-block {
+  display: block;
+  margin: 0.75rem 0;
+  text-align: center;
+  overflow-x: auto;
+  /* Labels without an explicit color (e.g. state-diagram nodes) inherit
+     the app text color, which is near-invisible on the light diagram
+     plate in dark mode; mermaid's own class rules still override this. */
+  color: #333333;
+}
+
+.answer .mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+  /* Fixed mermaid default theme: keep a light plate so its dark label
+     text stays readable on the dark app background. */
+  background-color: #ffffff;
+  border-radius: var(--pico-border-radius);
+  padding: 0.5rem;
+}
+
+/* Pico colors raw p/div/span elements with the app theme color, which
+   leaks into the HTML labels mermaid renders inside foreignObject (e.g.
+   state-diagram node captions nest the text in a <p>) and makes them
+   near-invisible on the light plate in dark mode. Mermaid's own
+   id-scoped rules keep winning for the elements it styles. */
+.answer .mermaid-block svg :is(p, div, span, li) {
+  color: #333333;
+}
+
+.answer .mermaid-block pre {
+  text-align: left;
+}
+
+.answer pre .hljs-comment,
+.answer pre .hljs-quote {
+  color: var(--bi-hl-comment);
+  font-style: italic;
+}
+
+.answer pre .hljs-keyword,
+.answer pre .hljs-selector-tag,
+.answer pre .hljs-doctag,
+.answer pre .hljs-template-tag,
+.answer pre .hljs-name,
+.answer pre .hljs-section {
+  color: var(--bi-hl-keyword);
+}
+
+.answer pre .hljs-built_in,
+.answer pre .hljs-type,
+.answer pre .hljs-title.class_ {
+  color: var(--bi-hl-type);
+}
+
+.answer pre .hljs-literal,
+.answer pre .hljs-number,
+.answer pre .hljs-symbol,
+.answer pre .hljs-bullet,
+.answer pre .hljs-link {
+  color: var(--bi-hl-number);
+}
+
+.answer pre .hljs-string,
+.answer pre .hljs-regexp,
+.answer pre .hljs-addition,
+.answer pre .hljs-meta .hljs-string {
+  color: var(--bi-hl-string);
+}
+
+.answer pre .hljs-title,
+.answer pre .hljs-title.function_,
+.answer pre .hljs-attr,
+.answer pre .hljs-attribute {
+  color: var(--bi-hl-function);
+}
+
+.answer pre .hljs-variable,
+.answer pre .hljs-template-variable,
+.answer pre .hljs-property,
+.answer pre .hljs-selector-attr,
+.answer pre .hljs-selector-pseudo {
+  color: var(--bi-hl-variable);
+}
+
+.answer pre .hljs-meta,
+.answer pre .hljs-meta .hljs-keyword {
+  color: var(--bi-hl-comment);
+}
+
+.answer pre .hljs-deletion {
+  color: var(--bi-danger);
+}
+
+.answer pre .hljs-emphasis { font-style: italic; }
+.answer pre .hljs-strong { font-weight: 700; }
+
+.answer table {
+  font-size: 0.85em;
+  margin: 0.5rem 0;
+}
+
+.question-card .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 0.5rem 0;
+  padding: 0.125rem 0;
+}
+
+/* -- badges ------------------------------------------------------------------------ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.badge.green { color: var(--bi-success); }
+.badge.red { color: var(--bi-danger); }
+.badge.violet { color: var(--bi-violet); }
+.badge.info { color: var(--bi-info); }
+.badge.gray { color: var(--pico-muted-color); }
+
+/* -- run result banners -------------------------------------------------------------- */
+
+.result-banner {
+  border-radius: var(--bi-radius-lg);
+  padding: 0.6rem 0.9rem;
+  font-weight: 500;
+  font-size: 0.9rem;
+  border: 1px solid;
+  animation: bi-fade-in 0.25s ease;
+}
+
+@keyframes bi-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.result-banner.success {
+  border-color: color-mix(in srgb, var(--bi-success) 45%, transparent);
+  color: var(--bi-success);
+  background-color: color-mix(in srgb, var(--bi-success) 8%, var(--bi-surface));
+}
+
+.result-banner.warning {
+  border-color: color-mix(in srgb, var(--bi-warning) 45%, transparent);
+  color: var(--bi-warning);
+  background-color: color-mix(in srgb, var(--bi-warning) 8%, var(--bi-surface));
+}
+
+/* -- progress -------------------------------------------------------------------------- */
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.progress-row progress {
+  margin: 0;
+  flex: 1;
+  height: 8px;
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  background-color: var(--bi-surface-2);
+  overflow: hidden;
+}
+
+.progress-row progress::-webkit-progress-bar {
+  background-color: transparent;
+}
+
+.progress-row progress::-webkit-progress-value {
+  background-color: var(--pico-primary);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.progress-row progress::-moz-progress-bar {
+  background-color: var(--pico-primary);
+  border-radius: 999px;
+}
+
+/* Batch meter, above the composer row (BatchProgressBar.vue). The <progress>
+   and its caption come from `.progress-row` / `.caption.mono` above; this
+   block only stacks the three lines. It fills `.chat-textarea-col`, which owns
+   the whole composer width now that no side panel stands beside the textarea.
+   The bottom margin keeps the bordered panel off the action-button row below
+   it — the column's own `gap` is only 2px, too tight to read as its edge. */
+.batch-progress {
+  flex: 0 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0 0 0.4rem;
+  padding: 0.4rem;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+}
+
+.batch-progress .caption {
+  margin: 0;
+}
+
+/* Neutral meter, sized to the panel; `.progress-row` already styles the bar. */
+.batch-progress .progress-row {
+  gap: 0;
+}
+
+/* Native <dialog> launching a task lot (Pico card, see the SettingsDialog and
+   memory-dialog notes above — the element itself is never sized). */
+.batch-dialog > article {
+  width: 620px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.batch-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+/* -- settings dialog ------------------------------------------------------------ */
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background-color: var(--bi-surface);
+  border-color: var(--bi-border);
+}
+
+/* Pico renders <dialog> as the full-viewport overlay; the card itself is the
+   inner <article> (already centered, capped at calc(100vh - 2rem), scrollable).
+   Only nudge Pico's defaults here — never size the dialog element itself. */
+.settings-dialog > article,
+/* The agent-modes editor (AgentModesDialog.vue) is this card with another
+   subject: same fixed size (switching a tab must never resize the dialog), same
+   two-column body, same footer. It therefore shares the rule instead of
+   restating it — see the agent-modes block below for what it adds. */
+.agent-modes-dialog > article {
+  /* Fixed card size so switching sections never resizes the dialog; the
+     editor column scrolls instead. Clamped to the viewport on small screens. */
+  width: 900px;
+  height: 600px;
+  max-width: 94vw;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+  box-shadow: var(--bi-shadow-md);
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+/* Two-column body: section list (1/4) beside the section editor (3/4).
+   Fills the fixed card height; the editor scrolls, the nav stays put. */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: 1fr 3fr;
+  gap: var(--bi-space-3);
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: var(--bi-space-2);
+}
+
+.settings-nav {
+  align-self: start;
+}
+
+.settings-editor {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+}
+
+.settings-nav li {
+  width: 100%;
+}
+
+.settings-nav button {
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: var(--pico-border-radius);
+  background-color: transparent;
+  /* Pico's button rules redefine --pico-color on buttons (see .tab-btn
+     note); use the theme token instead. */
+  color: var(--bi-icon);
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav button:hover {
+  background-color: var(--bi-surface-2);
+}
+
+.settings-nav button.active {
+  background-color: var(--bi-surface-2);
+  border-color: var(--bi-border);
+  color: var(--pico-primary);
+  font-weight: 600;
+}
+
+.settings-editor > section > label:first-of-type,
+.settings-editor > section > .settings-grid {
+  margin-top: 0;
+}
+
+.settings-section-title {
+  margin: 0 0 var(--bi-space-1);
+  font-size: 1rem;
+}
+
+.settings-editor textarea {
+  resize: vertical;
+  min-height: 5rem;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--bi-space-2);
+}
+
+/* Password input with an inline show/hide (eye) toggle. */
+.password-field {
+  position: relative;
+  display: block;
+}
+
+.password-field input {
+  padding-right: 2.75rem;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--pico-border-radius);
+  background: transparent;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+}
+
+.password-toggle:hover {
+  /* Same Pico trap as .tree-context-item: on a <button> Pico redefines
+     --pico-color to its inverse, which is white in both themes — invisible
+     on the light --bi-surface-2 hover. */
+  color: var(--bi-icon);
+  background-color: var(--bi-surface-2);
+}
+
+.password-toggle svg {
+  pointer-events: none;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--bi-space-1);
+}
+
+.settings-actions button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  padding-inline: 1.25rem;
+}
+
+@media (max-width: 640px) {
+  .settings-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-nav ul {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .settings-nav button {
+    width: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* -- agent-modes dialog --------------------------------------------------------
+
+   The modes editor (AgentModesDialog.vue) is the Settings card with another
+   subject, so almost nothing is declared here: its `<article>` shares the
+   settings card rule above, and its body, nav, editor column and footer carry
+   the `settings-*` classes and are laid out by those rules. What follows is only
+   what this card has and Settings does not — the create affordance in the nav,
+   the stacked finding lines, the two hub switches, the in-place delete confirm —
+   plus the colours that mark a tab whose entry holds Save. No size is repeated
+   and the `<dialog>` element is never sized (see the settings card note). */
+
+/* The editor column: the card is already tall enough for the fields it shows, so
+   the shared `.settings-editor` scroll is never needed here — and a scrollbar
+   that has nothing to scroll is just a stolen edge. Clipped instead (Settings
+   keeps its `overflow-y: auto`). */
+.agent-modes-editor {
+  overflow-y: hidden;
+}
+
+/* One finding per line: the dialog renders a list of findings inside a single
+   `<p>`, and each is a `<span>` — without this they would run together as one
+   sentence, which is the opposite of what a list of errors is for. */
+.agent-modes-finding {
+  display: block;
+}
+
+/* The lines the card can say about the file as a whole (a conflict, "saving
+   will create this file", the loader's file-level findings). They sit between
+   the hint and the body, so each keeps one tight margin. */
+.agent-modes-conflict,
+.agent-modes-creates-file,
+.agent-modes-file-findings,
+.agent-modes-file-notes,
+.agent-modes-server-findings {
+  margin: 0 0 var(--bi-space-1);
+}
+
+/* The nav's create affordance, under the tab list: a labelled field and one
+   button, both as narrow as the column they sit in. */
+.agent-modes-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-1);
+}
+
+.agent-modes-create {
+  margin: var(--bi-space-1) 0 0;
+  font-size: 0.82rem;
+}
+
+/* Both rules below are scoped through `.settings-nav button` on purpose: the
+   card reuses the settings nav, whose selector weighs (0,1,1) and would
+   otherwise out-rank a bare class here — a Create that looked like an inert
+   tab, and a broken tab whose red never arrived. */
+
+/* Create is an *action*, not another tab: it keeps the nav's width but gets a
+   filled surface and a visible edge, so the list above it stays the list. */
+.settings-nav button.agent-modes-create-button {
+  margin-top: var(--bi-space-1);
+  border-color: var(--bi-border);
+  background-color: var(--bi-surface-2);
+  color: var(--bi-icon);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.settings-nav button.agent-modes-create-button:hover:not(:disabled) {
+  border-color: var(--pico-muted-color);
+}
+
+/* A tab whose entry blocks Save. The tab stays clickable — D3 wants the user to
+   *reach* the broken entry, not be blocked from it — so the mark is colour, not
+   a disabled control. It also wins over the active tab's primary colour: an
+   entry that holds Save is the more important thing to say about that tab. */
+.settings-nav button.agent-modes-tab--broken {
+  color: var(--bi-danger);
+  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
+}
+
+/* The two hub switches side by side, each reading as a sentence rather than a
+   checkbox in a column. */
+.agent-modes-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bi-space-2);
+}
+
+.agent-modes-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+/* A finding printed under the field it names: it belongs to that field, so it
+   must not look like a paragraph of prose between two fields. */
+.agent-modes-field-finding {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+}
+
+/* The mode tab's action row: Reset and Delete on one line, each as wide as
+   its word — Pico would otherwise stack them full-width. */
+.agent-modes-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bi-space-1);
+  margin-top: var(--bi-space-2);
+}
+
+.agent-modes-actions button {
+  width: auto;
+  margin-bottom: 0;
+}
+
+/* Under the action row: the refusal sentence when the entry is the default,
+   and the confirm asked *in place* (this card is already the modal, so
+   nothing nests inside it). */
+.agent-modes-delete {
+  margin-top: var(--bi-space-1);
+}
+
+.agent-modes-delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-1);
+  margin-top: var(--bi-space-1);
+}
+
+.agent-modes-delete-yes {
+  width: auto;
+  margin: 0;
+}
+
+/* -- tab navigation (centered in the application bar) ------------------------- */
+
+/* Grid cell between the brand and the actions: the tab pill plus the working
+   location field next to it, kept together and centred. */
+.appbar-center {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-3);
+  min-width: 0;
+  justify-self: center;
+}
+
+/* The working location, edited where it is read: the field holds what the
+   user has typed, the Set button applies it, and the live value the server
+   applied is the field's own `title`. Two rows tall when a switch has
+   something to say, one when it has not. */
+.appbar-location {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* A measure the server confirms a path to. An `<input>`'s own intrinsic width
+   is ~20 characters, which spells a real path mostly as ellipsis; the centre
+   cell is sized to its content, so the width has to be asked for here rather
+   than left to flex. The centre cell is still the only one allowed to give way
+   (the actions row is `flex: 0 0 auto` and the brand holds its own line), so on
+   a narrower window this box shrinks to whatever of the path still fits. */
+  width: 20rem;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
+.appbar-location-row {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-1);
+  min-width: 0;
+}
+
+/* `input.` on purpose: Pico sizes a text field with `input:not([type=…])`
+   rules (a fixed `height`, `width: 100%`, a one-spacing bottom margin) that a
+   bare class cannot beat, and a 37px field with a 14px bottom margin is taller
+   than the bar itself. The element keeps the specificity the tag rules have,
+   and theme.css is loaded after Pico, so these win. */
+input.appbar-location-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  font-family: var(--pico-font-family-monospace);
+  unicode-bidi: isolate;
+}
+
+/* Set is the bar's only text button: narrow enough to leave the field the
+   width, tall enough to read as a control. Pico's button rules would otherwise
+   give it the full block width and a large size. */
+.appbar-location-set {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+/* One line for the answer to a switch (a refusal, or a seed that did not
+   land). The bar is one fixed row tall, so the sentence is truncated and
+   carried whole in its `title`. */
+.appbar-location-note {
+  margin: 0;
+  font-size: 0.65rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--bi-warning);
+}
+
+.appbar-location-note--error {
+  color: var(--bi-danger);
+}
+
+/* The app bar's three cells cannot be squeezed forever: the grid's `1fr` side
+   tracks stop at their content's own width, so past that point the centre cell
+   would ride over the actions row. The meters and the tab strip are what the
+   bar is now for, so the working-location field is what leaves. Same 1100 px
+   step the Chat shell already uses. */
+@media (max-width: 1100px) {
+  .appbar-location {
+    display: none;
+  }
+}
+
+.tab-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--bi-border);
+  background-color: var(--bi-surface-2);
+  flex: 0 0 auto;
+}
+
+.tab-btn {
+  margin: 0;
+  padding: 0.32rem 1rem;
+  border: none;
+  border-radius: 999px;
+  background-color: transparent;
+  color: var(--pico-muted-color);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.tab-btn.active {
+  background-color: var(--bi-surface);
+  /* --pico-color is redefined to white by Pico's button rules on this
+     element (see .icon-btn note); use the theme token instead. */
+  color: var(--bi-icon);
+  box-shadow: var(--bi-shadow-sm);
+}
+
+.tab-btn:not(.active):not(:disabled):hover {
+  color: var(--bi-icon);
+}
+
+.tab-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* -- chat screen ----------------------------------------------------------------- */
+
+/* Two columns side by side under the app bar, each a flex *column* with its
+   own splitter: the left is the reasoning timeline above the tools dock, the
+   right is the conversation above the composer. Every splitter therefore
+   sizes only its own column — the composer bar never reaches the left one. */
+.chat-shell {
+  display: flex;
+  flex-direction: row;
+  gap: var(--bi-space-2);
+  box-sizing: border-box;
+  width: 100%;
+  height: calc(100vh - var(--bi-appbar-height));
+  padding: var(--bi-space-2) clamp(1rem, 3vw, 2rem) var(--bi-space-3);
+}
+
+.chat-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-2);
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The left column is as wide as the two tool panels it stacks under the
+   timeline (see --bi-chat-tools-col-width); the conversation takes the rest.
+   `--single` (only one of the two panels has something to show) narrows it to
+   one panel's width — the timeline and the dock both just fill the column. */
+.chat-col--left {
+  flex: 0 0 var(--bi-chat-tools-col-width);
+  gap: 0px;
+}
+
+.chat-col--left.chat-col--single {
+  flex-basis: var(--bi-chat-panel-width);
+}
+
+.chat-col--right {
+  flex: 1 1 auto;
+  gap: 0px;
+}
+
+/* The two focalisation controls, in a third flex item between the columns
+   (see WorkBenchFocusGutter). A flex item rather than an overlay is the whole
+   point: it never has to know --bi-chat-tools-col-width, the --single variant
+   or the breakpoints below, it only takes its 28px out of the row.
+
+   The negative inline margins cancel the two gaps a third child would add —
+   the box lands in the gap that already separates the columns, so the visible
+   space either side of a 14px mark stays ~7px and the conversation loses
+   little. Nothing overlaps: the margins pull into gap space only.
+
+   Top-aligned so the controls sit at the top of the column, and `flex: none`
+   on the buttons keeps each 28px target whole at any window height. There
+   is deliberately no separator drawn between them: in 28px of width a rule
+   reads as noise next to the marks, and the gap alone groups them. */
+.chat-col-gutter {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 28px;
+  align-self: flex-start;
+  margin-inline: calc(-1 * var(--bi-space-2));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.25rem;
+}
+
+/* Pico's own button rules would paint these primary-coloured with a 1rem
+   bottom margin, so every one of them is reset here. At rest the mark is
+   muted; hover and keyboard focus bring it to the foreground colour (wf-03
+   makes the dashes go solid at the same step). The target is 28px — the
+   mark is the glyph, not the click area. */
+.chat-gutter-btn {
+  flex: none;
+  margin: 0;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--pico-border-radius);
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.chat-gutter-btn:is(:hover, :focus-visible) {
+  background-color: var(--bi-surface-2);
+  color: var(--bi-icon);
+}
+
+/* Pico's own focus ring is a box-shadow, which the reset above removes, so the
+   keyboard ring is restated the way the other bare buttons in this file do —
+   inset, because the gutter's box already ends at the two columns' edges and an
+   outside ring would sit on top of them. */
+.chat-gutter-btn:focus-visible {
+  outline: 2px solid var(--pico-primary);
+  outline-offset: -2px;
+}
+
+/* The three marks of the strip (see WorkBenchFocusGutter): each is one glyph of
+   the generated "JetBrains Mono Nerd Icons UI" face, so the character — not the
+   box around it — is what a state changes. What "lighting up" changes is the
+   color (the rule above) and the opacity, never the size, so the target cannot
+   slip under the cursor.
+
+   The colors come from the two theme blocks (`--pico-muted-color` at rest,
+   `--bi-icon` lit), so light and dark both work without a second rule, and the
+   rest opacity is 0.85 because that is where the mark clears 3:1 against the
+   page in *both* themes (measured: 3.4 light / 5.0 dark; at 0.75 the light
+   theme falls to 2.8, and a control nobody sees cannot be clicked). Lit it is
+   16.2 / 13.0 against the button's own hover surface.
+
+   That family is `unicode-range`-gated to the private-use code points of the
+   component's generated block (tools/nerd_icons.py), so it claims these marks
+   and no text; the fallback is only what draws while the woff2 is in flight. */
+.chat-gutter-mark {
+  font-family: 'JetBrains Mono Nerd Icons UI', var(--pico-font-family-monospace);
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+
+.chat-gutter-btn:is(:hover, :focus-visible) .chat-gutter-mark {
+  opacity: 1;
+}
+
+/* Locked while a reply streams (§3.2, and the same reason the other controls of
+   this app answer to): the button is `:disabled`, and the dimming is what the
+   tooltip then says. */
+.chat-gutter-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* -- focalisation: the two states ------------------------------------------
+
+   The whole geometry of the feature is these rules — `display: none` and a
+   `flex` basis, one per state, on the columns. Never `v-if`: the reasoning
+   panel holds its displayed lines in a component-local cache and its column
+   count in a ResizeObserver, so unmounting it would re-cut every reasoning
+   line of the session from MIN_BUDGET and lose the scroll position. Hiding in
+   CSS also keeps the two splitters, useAutoScroll's ref and the panel's cache
+   alive without any help.
+
+   They sit *after* `.chat-col--single` above, which they out-specify only by
+   order: at equal class count the later rule wins, and that is what lets
+   `reasoning` take the row whether the left column is one panel wide or two.
+
+   `reasoning` takes the dock and its bar out with the right column: left in
+   the flow the dock would still claim its minimum height, so the timeline
+   would gain width but not height and would not be the maximised surface the
+   state is for. Nothing here writes or zeroes the dragged dock height
+   (nojae:chatToolsColumn) or the composer split — a state leaves
+   elements out of the flow, it never resizes, so `normal` finds both exactly
+   as they were dragged.
+
+   No @media rule mentions the gutter, and that is a decision, not an
+   oversight: as a flex item it crosses both breakpoints and both column
+   variants without knowing they exist, and it is the only surface no state
+   hides — the chevron that takes a column away is the way back to it, so
+   hiding the gutter on a narrow screen would strand one. */
+.chat-shell--conversation .chat-col--left {
+  display: none;
+}
+
+.chat-shell--reasoning .chat-col--right {
+  display: none;
+}
+
+.chat-shell--reasoning .chat-col--left {
+  flex: 1 1 auto;
+}
+
+.chat-shell--reasoning .chat-tools-dock,
+.chat-shell--reasoning .chat-col-resizer {
+  display: none;
+}
+
+.chat-output {
+  flex: 4 1 0;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+}
+
+.chat-input {
+  flex: 1 1 0;
+  /* The composer splitter's own minimum (useSplitter's CHAT_MIN_RESIZED): the
+     button row plus a usable textarea (the stat badges and the session clock
+     moved to the app bar, so the floor came down with them). Stated here too
+     so the flex floor and the drag clamp agree, and a very short window cannot
+     crush the composer under its own content before anything has been
+     dragged. */
+  min-height: 96px;
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+/* Draggable separator between two panes — the shared look of every splitter in
+   the app (chat output/input, editor sidebar, editor terminal): a 10 px hit
+   area showing a thin pill on hover/focus/drag, pointer-captured and
+   touch-friendly. `--vertical` names the *bar*, as aria-orientation does: a
+   standing bar measures width instead of height, so its pill is tall. */
+.pane-resizer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.pane-resizer::before {
+  content: '';
+  width: 48px;
+  height: 3px;
+  border-radius: 999px;
+  background-color: color-mix(in srgb, var(--pico-muted-color) 30%, transparent);
+  transition: background-color 120ms ease, width 120ms ease;
+}
+
+.pane-resizer:hover::before,
+.pane-resizer:focus-visible::before,
+.pane-resizer.dragging::before {
+  width: 72px;
+  background-color: var(--pico-primary);
+}
+
+.pane-resizer.dragging::before {
+  width: 96px;
+}
+
+.pane-resizer--vertical {
+  cursor: col-resize;
+}
+
+.pane-resizer--vertical::before {
+  width: 3px;
+  height: 48px;
+  transition: background-color 120ms ease, height 120ms ease;
+}
+
+.pane-resizer--vertical:hover::before,
+.pane-resizer--vertical:focus-visible::before,
+.pane-resizer--vertical.dragging::before {
+  width: 3px;
+  height: 72px;
+}
+
+.pane-resizer--vertical.dragging::before {
+  width: 3px;
+  height: 96px;
+}
+
+/* Chat: the two thin bars, one per column — conversation over composer, and
+   reasoning timeline over the tools dock. Both overlap the column gap a
+   little so the hit area is bigger than the pill looks. */
+.chat-resizer {
+  height: 10px;
+  margin: -3px 0;
+}
+
+.chat-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  resize: none;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.chat-send {
+  margin: 0;
+}
+
+.chat-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Container holding the composer row (memory bullets + the session icon
+   buttons) and the textarea below it, so that row stays centered over the
+   textarea itself rather than the whole input row. Vertical spacing is
+   pinned to the row's 0.5rem margin-bottom plus the 2px column gap, so the
+   row visually sticks to the textarea. */
+.chat-textarea-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+}
+
+.chat-textarea-col .chat-textarea {
+  height: auto;
+  min-height: 0;
+  margin: 0;
+}
+
+/* The composer row (WorkBenchInput.vue): session icon buttons on the left
+   (attach / copy / save / load), memory bullets in the middle, and the run
+   buttons on the right (restart / send-stop). The three columns are
+   `auto minmax(0, 1fr) auto`: each button group keeps its own width and so
+   stays pinned to its own side of the row, while the bullets get all the
+   remaining width (and center themselves inside it). The `minmax(0, …)`
+   floor lets the middle column shrink on narrow columns — the bullets wrap
+   onto a second line inside it instead of pushing the buttons outwards. */
+.chat-bullet-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.chat-bullet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* Only relevant once a group wraps onto several lines: keep it hugging the
+   outer edge of the row it is pinned to. */
+.chat-bullet-actions--left {
+  justify-content: flex-start;
+}
+
+.chat-bullet-actions--right {
+  justify-content: flex-end;
+}
+
+/* Buttons and bullets keep their own size in that row (Pico's input-group
+   rules would otherwise stretch the group's children, and the bullets' own
+   margin would offset them from the buttons beside them). `.memory-bullets`
+   fills its grid cell — the `width: 100%` Pico puts on [role=group] already
+   does that, but it is restated here because the buttons must never be
+   squeezed by it: they sit in their own `auto` columns. */
+.chat-bullet-row .memory-bullets {
+  width: 100%;
+  margin: 0;
+}
+
+.chat-bullet-actions .icon-btn {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+/* The agent-mode dropdown (am-07), last item of the composer's left action
+   group. A column rather than a bare <select>, because the findings line
+   belongs under it and must not become a fourth grid cell of the bullet row.
+   Pico's `select { margin-bottom: … }` and `width: 100%` would stretch it
+   across the row and push the bullets, so the width is pinned and the margin
+   zeroed. Height matches the icon buttons it sits beside (36px). */
+.chat-mode-col {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The select and its pencil, on one line (eds-07). The row exists so the two
+   stay adjacent while the quiet lines keep the column below them; with the list
+   unloaded the select is absent and the row holds the pencil alone, which is
+   what keeps the editor reachable when the file is broken. */
+.chat-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+/* The pencil that opens the modes editor. `.icon-btn` gives it the composer's
+   button size and its disabled look; all that is left to say is that it must
+   never be squeezed by a long label in the select beside it. */
+.chat-mode-edit {
+  flex: 0 0 auto;
+}
+
+.chat-mode-select {
+  width: auto;
+  max-width: 12rem;
+  height: 36px;
+  margin: 0;
+  padding: 0 1.6rem 0 0.5rem;
+  font-size: 0.82rem;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius);
+  background-color: var(--bi-surface);
+  /* Pico sets --pico-color to white on its form controls in some contexts;
+     the icon token is the one Pico never touches (see the .icon-btn note). */
+  color: var(--bi-icon);
+  cursor: pointer;
+}
+
+.chat-mode-select:hover:not(:disabled) {
+  border-color: var(--pico-muted-color);
+}
+
+.chat-mode-select:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* One quiet caption about the workspace's own modes file — deliberately not
+   `.alert-error`: the defaults still work, and the fix lives outside the app. */
+.chat-mode-findings {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--pico-muted-color);
+}
+
+/* Nine numbered registration slots above the textarea (MemoryBullets.vue).
+   Pico's input-group rules (`[role=group] { margin-bottom: var(--pico-spacing) }`)
+   would otherwise push the row away from the textarea and offset the bullets
+   from the buttons beside them, so the margin and padding are zeroed here;
+   the space below the row comes from `.chat-bullet-row`.
+   A filled bullet's background is set inline (the slot color), which also
+   wins over Pico's button hover background; the number color follows the
+   background luminance.
+   The selectors are scoped under .memory-bullets on purpose: the wrapper's
+   role="group" activates Pico's input-group rules ([role="group"] button
+   { width: auto }, [role="group"] > :not(:last-child) { right radii 0 },
+   [role="group"] > * { flex: 1 1 auto }) which otherwise outrank a bare
+   .memory-bullet (0,1,0), squashing the circles into 8px-wide flat slivers.
+   .memory-bullets .memory-bullet ties those rules on specificity (0,2,1)
+   and wins on source order (theme.css loads after Pico). */
+.memory-bullets {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0;
+  margin-bottom: 0.5rem;
+  padding: 0;
+}
+
+.memory-bullets .memory-bullet {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--bi-border);
+  border-radius: 50%;
+  background-color: #808080;
+  color: #ffffff;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 120ms ease;
+}
+
+.memory-bullets .memory-bullet:hover {
+  transform: scale(1.12);
+}
+
+.memory-bullets .memory-bullet:focus-visible {
+  outline: 2px solid var(--pico-primary);
+  outline-offset: 2px;
+}
+
+/* Native <dialog> editing one memory bullet (Pico card, see the
+   SettingsDialog note above). */
+.memory-dialog > article {
+  width: 780px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.memory-color {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.memory-color input[type='color'] {
+  inline-size: 3rem;
+  block-size: 2rem;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.15rem;
+}
+
+/* The dock at the bottom of the Chat left column: its head strip (title plus
+   the fold button, and the enabled-hub summary while folded) over the MCP
+   panel beside the LSP panel. It fills the column's width, so the reasoning
+   timeline above it is the same width by construction. Each panel scrolls
+   vertically when its list outgrows the dock's height, which the column's
+   own splitter bounds — and the dock shrinks down to its head strip when a
+   short window would otherwise push the timeline under its floor.
+   `.chat-lsp-panel` (WorkBenchLspPanel.vue) reuses every rule of this
+   column — rows, dots, labels. */
+.chat-tools-dock {
+  /* Height when nothing has been dragged yet: a list's worth of switches,
+     clamped so the timeline above stays readable whatever the hub files
+     declare. Once the bar is dragged, the view writes the whole shorthand
+     inline (`flex: 0 0 <px>`), which replaces this. In px on purpose — the
+     splitter clamps its drag in px too (104 min), and the root font size is
+     not 16px here. */
+  flex: 0 1 clamp(104px, 26%, 256px);
+  min-width: 0;
+  min-height: 0;
+  /* Pico's `section { margin-bottom: … }` would float the dock that far above
+     its column's bottom edge, visibly unaligned with the composer's textarea
+     on the other side of the shell. The column's gap is the only spacing
+     wanted here — and the splitter measures its drag without that margin. */
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Folded (or with nothing to switch): the head strip only, sized by its own
+   content — so `flex` has to be reset, or the basis above would keep the
+   empty body's height. */
+.chat-tools-dock--collapsed {
+  flex: 0 0 auto;
+  gap: 0;
+}
+
+/* Pinned, so squeezing the dock ever further takes the switch list rather
+   than the strip that carries the unfold button. */
+.chat-tools-dock-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.2rem 0.45rem;
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.chat-tools-dock-title {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+/* Folded, the strip is the only thing left, so it has to carry the state the
+   two switch lists used to show. */
+.chat-tools-dock-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--pico-muted-color);
+}
+
+/* Half the size of the chat action buttons: this strip is a single line, so a
+   36px circle would be the one thing deciding its height. `margin: 0 0 0 auto`
+   also undoes the 1rem bottom margin Pico puts on every <button>, which would
+   otherwise add that 1rem to the strip. */
+.chat-tools-dock-toggle {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin: 0 0 0 auto;
+}
+
+.chat-tools-dock-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.chat-mcp-panel,
+.chat-lsp-panel {
+  flex: 1 1 0;
+  min-height: 0;
+  /* The vertical scrollbar eats a few pixels: rows must never spill
+     sideways (labels ellipsize instead of triggering a horizontal bar). */
+  min-width: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.25rem;
+}
+
+.chat-mcp-title {
+  margin: 0;
+}
+
+/* Title + hub-restart button on one line, above the switch list. Both panels
+   share it (`.chat-lsp-panel` reuses every rule of this column). */
+.chat-hub-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.chat-hub-head .chat-mcp-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Smaller than the chat action buttons: it sits inside a narrow panel. */
+.chat-hub-restart {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* The restart is awaited server-side (cold language-server starts take
+   seconds), so the icon spins while the request is in flight. Gated on its
+   own class, not on :disabled — the button is also disabled for unrelated
+   reasons (a streaming conversation). */
+.chat-hub-restart--busy svg {
+  animation: chat-hub-restart-spin 1s linear infinite;
+}
+
+@keyframes chat-hub-restart-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chat-mcp-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+  margin: 0;
+  min-width: 0;
+}
+
+.chat-mcp-row .chat-mcp-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status dot between the switch and the label: green running, red
+   (configuration/startup) error, gray stopped/disabled/starting. */
+.chat-mcp-dot {
+  flex: 0 0 auto;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+}
+
+.chat-mcp-dot--green {
+  background: var(--bi-success);
+}
+
+.chat-mcp-dot--red {
+  background: var(--bi-danger);
+}
+
+.chat-mcp-dot--gray {
+  background: var(--pico-muted-color);
+}
+
+/* Activated in Settings but not running: its tools are unavailable. */
+.chat-mcp-row--dim {
+  opacity: 0.45;
+}
+
+.chat-stop,
+.chat-stop:hover {
+  color: var(--bi-danger);
+}
+
+.chat-stop svg {
+  stroke: var(--bi-danger);
+}
+
+.chat-stop rect {
+  fill: var(--bi-danger);
+}
+
+/* Pause: the non-destructive twin of Stop, so it borrows Stop's icon-button
+   shape but the warning accent — interrupting is a request, not a kill. */
+.chat-pause,
+.chat-pause:hover {
+  color: var(--bi-warning);
+}
+
+.chat-pause svg {
+  stroke: var(--bi-warning);
+}
+
+.chat-pause rect {
+  fill: var(--bi-warning);
+}
+
+/* Pause armed, ack not in yet: blinking IS the disabled state (the button
+   cannot be clicked while it pulses). */
+.chat-pause.is-paused-blink {
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+/* A user turn is as wide as the assistant's card, so the two affordances that
+   mark it - the user icon and the edit pencil - hang off the bubble's top
+   corners instead of sitting beside it: as flex siblings each would steal about
+   1.6rem of the width the message wants. They are children of the *bubble*
+   (whose padding-box is the containing block) offset by half their own size, so
+   each chip straddles the corner it marks: half outside, half recovering part
+   of the panel. */
+.chat-turn {
+  /* BFC: keeps the bubble's top offset margin inside the turn, so the panel's
+     own gap stays the vertical rhythm between turns. */
+  display: flow-root;
+  min-width: 0;
+}
+
+.chat-turn .chat-bubble {
+  position: relative;
+  margin: 0.9rem 0 0 0.85rem;
+  /* Extra top padding keeps the first line clear of both chips. */
+  padding-top: 1.1rem;
+}
+
+.chat-turn-chip {
+  position: absolute;
+  top: -0.8rem;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--pico-primary) 35%, transparent);
+  border-radius: 50%;
+  /* Opaque like the panel behind, so a chip reads as punched over the bubble
+     rather than merged into its tint. Pico forces `--pico-color: white` onto
+     every <button>, so the glyph colour is set here rather than inherited. */
+  background-color: var(--bi-surface);
+  color: var(--pico-muted-color);
+}
+
+.chat-turn-avatar {
+  left: -0.8rem;
+}
+
+.chat-turn-edit {
+  right: -0.8rem;
+  cursor: pointer;
+}
+
+.chat-turn-edit:hover,
+.chat-turn-edit:focus-visible {
+  color: var(--bi-icon);
+  border-color: var(--pico-primary);
+}
+
+/* The assistant card's copy chip: the same punched-over-corner chip as a user
+   turn's, hung off the card's top-right corner. The card is the containing
+   block, so this class — not the shared `.question-card`, which the benchmark's
+   cards also use — is what makes it positioned. */
+.chat-answer-card {
+  position: relative;
+}
+
+.chat-msg-copy {
+  right: -0.8rem;
+  /* Half visible at rest: the affordance is there to be found, not to be read.
+     Hovering the card (not just the chip) brings it up, so the pointer does not
+     have to land on a 1.6rem circle to use it. */
+  opacity: 0.4;
+  cursor: pointer;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-answer-card:hover .chat-msg-copy:not(:disabled),
+.chat-msg-copy:hover:not(:disabled),
+.chat-msg-copy:focus-visible {
+  opacity: 1;
+  color: var(--bi-icon);
+  border-color: var(--pico-primary);
+}
+
+/* Nothing streamed yet to copy: the chip stays in its recessed resting look. */
+.chat-msg-copy:disabled {
+  cursor: default;
+}
+
+/* Every user-side bubble - a sent turn or the composer draft - fills the
+   panel's width like the assistant's card does. Nothing else uses this class,
+   so width lives here once rather than per caller. */
+.chat-bubble {
+  align-self: stretch;
+  max-width: none;
+  margin: 0;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--pico-primary) 35%, transparent);
+  border-radius: var(--bi-radius-lg);
+  background-color: color-mix(in srgb, var(--pico-primary) 8%, var(--bi-surface));
+  overflow-wrap: break-word;
+}
+
+/* Live markdown preview of the composer draft: same box as a sent user bubble
+   (so it lines up with it) but dashed and dimmed until it becomes the message.
+   It owns no chips, so only the indent is inherited. */
+.chat-bubble--draft {
+  margin-left: 0.85rem;
+  border-style: dashed;
+  opacity: 0.7;
+}
+
+/* Image attach: the file input is a plain picker, driven by the icon button. */
+.chat-file-input {
+  display: none;
+}
+
+.chat-attach {
+  position: relative;
+}
+
+/* Dot on the attach button while an image is pending in the composer. */
+.chat-attach-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--bi-violet);
+  pointer-events: none;
+}
+
+.chat-bubble .chat-thumb {
+  display: block;
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 8px;
+  object-fit: contain;
+  margin-bottom: 0.5rem;
+}
+
+.chat-bubble .chat-thumb:last-child {
+  margin-bottom: 0;
+}
+
+/* Right-aligned pending-image chip above the draft preview: thumbnail plus
+   name/size and a remove button, dashed like the draft it accompanies. */
+.chat-attachment {
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: min(75%, 46rem);
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px dashed color-mix(in srgb, var(--pico-primary) 35%, transparent);
+  border-radius: var(--bi-radius-lg);
+  background-color: color-mix(in srgb, var(--pico-primary) 8%, var(--bi-surface));
+}
+
+.chat-attachment .chat-thumb {
+  max-width: 96px;
+  max-height: 72px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.chat-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.chat-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.chat-attachment-remove {
+  flex: none;
+  opacity: 0.55;
+}
+
+.chat-attachment-remove:hover,
+.chat-attachment-remove:focus-visible {
+  opacity: 1;
+}
+
+/* Clickable chat thumbnails: the <img> is wrapped in a bare button so it can
+   open the full-size lightbox. Keep the exact visual rhythm the bare thumb
+   had inside bubbles (button owns the margins now). */
+.chat-thumb-zoom {
+  display: block;
+  width: fit-content;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  cursor: zoom-in;
+}
+
+.chat-thumb-zoom:focus-visible {
+  outline: 2px solid var(--pico-primary);
+  outline-offset: 2px;
+}
+
+.chat-bubble .chat-thumb-zoom {
+  margin-bottom: 0.5rem;
+}
+
+.chat-bubble .chat-thumb-zoom:last-child {
+  margin-bottom: 0;
+}
+
+.chat-thumb-zoom .chat-thumb {
+  margin-bottom: 0;
+}
+
+/* -- full-size image lightbox -------------------------------------------------- */
+
+/* Native modal dialog reused as a lightbox — deliberately not Pico's card
+   pattern (no <article>, no padding): the image *is* the dialog content and
+   scrolls inside it whenever it is larger than the viewport. */
+.image-lightbox[open] {
+  display: flex;
+
+  /* Pico centers the dialog content (justify/align-items: center) for its
+     <article> card pattern; with an overflowing <img> that makes the top/left
+     edges unreachable even at scroll position 0. The image centers itself
+     with margin: auto instead, which collapses to 0 on overflow. */
+  justify-content: flex-start;
+  align-items: flex-start;
+  width: fit-content;
+  height: fit-content;
+  max-width: 92vw;
+  max-height: 92vh;
+  margin: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: auto;
+}
+
+.image-lightbox::backdrop {
+  background-color: rgb(0 0 0 / 0.72);
+}
+
+/* margin:auto centers a small image at its natural size; when the image
+   overflows the dialog the auto margins collapse to 0, so the top/left edges
+   stay reachable through the scrollbars. */
+.image-lightbox img {
+  display: block;
+  flex: none;
+  margin: auto;
+  max-width: none;
+  max-height: none;
+  border-radius: var(--bi-radius-lg);
+}
+
+.image-lightbox-close {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1;
+  border-color: color-mix(in srgb, var(--pico-color) 25%, transparent);
+}
+
+.chat-typing {
+  animation: bi-pulse 1.4s ease-in-out infinite;
+}
+
+/* A reply the server cut short before finishing: the fragment stays in the
+   conversation (and is re-posted on the next turn), so the bubble says so.
+   Muted-size but danger-coloured — it qualifies the text above it rather than
+   shouting over it. */
+.chat-truncated {
+  color: var(--bi-danger);
+}
+
+/* A reply the user paused on purpose: not a fault, so it carries the same
+   warning accent as the ⏸ button rather than the danger one above it. */
+.chat-paused {
+  color: var(--bi-warning);
+}
+
+/* Vertical timeline of what the chat stream on the right never shows: the
+   model's streamed reasoning flows interleaved with the MCP tool-call
+   badges, in emission order. Independent scroll. Deliberately not
+   `.stream-panel`: that class pins a fixed viewport height. The content
+   scrolls inside `.chat-tool-scroll` so the iteration gauge stays
+   bottom-pinned and always visible.
+
+   Size: it fills its column's width (`.chat-col--left`), and takes every
+   pixel of that column's height the tools dock and their bar leave free —
+   which is all of it while the dock is folded. `min-height` is the floor
+   flex still honours when a short window lets the dock's own content claim
+   the column (the dock shrinks and scrolls instead). */
+.chat-tool-panel {
+  flex: 1 1 0;
+  min-width: 0;
+  /* The dock splitter's `minOther` in px: the flex floor and the drag clamp
+     must agree about how small the timeline may get. */
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.chat-tool-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Live View (see WorkBenchToolPanel.vue and lib/reasoning-window): the panel
+   paints only the rows its box can hold, and `useAutoScroll` pins that box's
+   scroll to its bottom every frame, so the timeline is always at its end —
+   there is nothing above the top to scroll back to. A vertical bar would then
+   only be a drag target able to pull the pruned head back into view and leave
+   the reader off the bottom of the flow, so the box clips instead.
+   `hidden` over `scroll`: `scroll` keeps a bar the content cannot exceed,
+   and clipping is the box's own decision, never a hint at a range. The
+   horizontal axis is untouched, so a long row still gets its own bar. */
+.chat-tool-scroll--live {
+  overflow-y: hidden;
+}
+
+/* Gauge footer strip: surface must match the gauge mask color. */
+.chat-tool-gauge {
+  flex: none;
+  padding: 0.6rem 0.5rem;
+  border-top: 1px solid var(--bi-border);
+  background-color: var(--bi-surface);
+}
+
+/* The Live View's control is not here: it is the third mark of the gutter
+   between the two chat columns (see WorkBenchFocusGutter.vue and `.chat-gutter-*`
+   above), so no state of the timeline — a pruned history, a folded dock, a
+   focalised screen — can take the switch out of reach, and the panel's only
+   footer is the iteration gauge. */
+
+/* -- Reusable gradient gauge (GaugeBar.vue) -------------------------------- */
+.gauge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.gauge-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--pico-muted-border-color) 80%, transparent);
+  background-image: linear-gradient(
+    90deg,
+    var(--bi-gauge-low) 0%,
+    var(--bi-gauge-mid) 45%,
+    var(--bi-gauge-high) 72%,
+    var(--bi-gauge-max) 100%
+  );
+}
+
+/* Unfilled remainder painted over the full-size gradient, so the color at
+   the fill tip reflects the level (green when low, red near the cap). */
+.gauge-mask {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  right: 1px;
+  background-color: var(--bi-surface);
+  transition: left 0.3s ease;
+}
+
+.gauge-caption {
+  flex: none;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--pico-muted-color);
+  white-space: nowrap;
+}
+
+.chat-tool-list {
+  --bi-chat-tool-gap: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--bi-chat-tool-gap);
+  margin: 0;
+  padding: 0.5rem;
+  list-style: none;
+}
+
+.chat-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: 999px;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.75rem;
+  color: var(--pico-muted-color);
+}
+
+/* Reasoning (thinking) text block of the timeline: plain text — thinking is
+   not markdown, and it stays XSS-safe as a Vue text interpolation. Same
+   small mono muted look as the brand subtitle and the tool badges.
+   Wrapping is NOT left to the browser here: each row arrives already cut to
+   the panel's column budget (see lib/reasoning-lines), which is what keeps a
+   line the reader is looking at from jumping when the row above it grows.
+   `tab-size` must match TAB_WIDTH in that module — it is the tab advance the
+   column budget counts with. */
+.chat-reasoning {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--pico-muted-color);
+  tab-size: 4;
+  padding: 0;
+}
+
+/* One display row of reasoning text. Its height is known before it is
+   painted (font-size × line-height), so growing the flow never resizes a row
+   that has finished streaming, and the panel's scroll position can be derived
+   by arithmetic. `pre` keeps the characters exactly as received — cutting
+   already happened, and a re-wrap here would defeat it.
+   The `1lh` form is the row's own line box; the em form above it is the
+   fallback for engines without the `lh` unit. */
+.chat-reasoning-line {
+  display: block;
+  height: 1.45em;
+  height: 1lh;
+  white-space: pre;
+  overflow: hidden;
+}
+
+/* Zero-height measuring row (see WorkBenchToolPanel.vue): a normal list item,
+   so it is as wide as a reasoning row, holding one unbreakable probe whose
+   width gives the font's advance width. Hidden but still laid out — its boxes
+   are the whole point — and it adds no height of its own. */
+.chat-reasoning-measure {
+  height: 0;
+  /* It is the list's last item, so the list's gap would still put a blank
+     line under it: the offset takes that gap back. */
+  margin-top: calc(-1 * var(--bi-chat-tool-gap));
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.8rem;
+  line-height: 0;
+  tab-size: 4;
+}
+
+/* `nowrap` is load-bearing: without it the probe would wrap to the host's
+   width and report that width instead of its own, making the measured column
+   count meaningless. */
+.chat-reasoning-probe {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.chat-tool-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-tool.running .chat-tool-state {
+  animation: bi-pulse 1.4s ease-in-out infinite;
+}
+
+.chat-tool.ok .chat-tool-state {
+  color: var(--bi-success);
+}
+
+.chat-tool.error .chat-tool-state {
+  color: var(--bi-danger);
+}
+
+/* Narrow screens: the Chat left column (timeline over the tools dock) shrinks.
+   The column's width is derived from the per-panel token, so one override
+   keeps the timeline and the dock aligned at every breakpoint. */
+@media (max-width: 1100px) {
+  .chat-shell {
+    --bi-chat-panel-width: 11rem;
+  }
+}
+
+@media (max-width: 820px) {
+  .chat-shell {
+    --bi-chat-panel-width: 7rem;
+  }
+}
+
+/* -- MCP connectors in the settings dialog ------------------------------------ */
+.mcp-panel {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--bi-radius-lg);
+}
+
+.mcp-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.mcp-panel-header label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.mcp-panel-header input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
+.mcp-panel-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mcp-port-badge {
+  color: var(--pico-muted-color);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.78rem;
+}
+
+.mcp-description {
+  margin: 0.4rem 0 0;
+}
+
+.mcp-external-tag {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--pico-muted-color);
+  text-transform: none;
+}
+
+.mcp-externals-error {
+  white-space: pre-line;
+}
+
+.mcp-iterations {
+  max-width: 12rem;
+  margin-top: 1rem;
+}
+
+/* -- editor screen ------------------------------------------------------------
+   The Editor tab: a grid with the navigator spanning both rows on the left,
+   the code pane in the right column's top row and the terminal strip under it.
+   The two splitter bars are grid tracks of their own, so the panes never shift
+   when a track is resized.
+
+   The shell has no padding and the grid no gap: the three panels take the
+   whole area under the app bar and meet along the splitter bars, so the screen
+   is filled edge to edge and none of them has rounded corners. */
+
+.editor-shell {
+  /* Tracks. `auto` is a resizer bar, so a dragged size only ever names a pane;
+     both custom properties are set by useSplitter once the user drags, and a
+     double-click / Home brings these untouched defaults back. */
+  --bi-editor-sidebar: minmax(200px, 260px);
+  --bi-editor-terminal: 220px;
+  display: grid;
+  grid-template-columns: var(--bi-editor-sidebar) auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto var(--bi-editor-terminal);
+  gap: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: calc(100vh - var(--bi-appbar-height));
+  padding: 0;
+}
+
+/* Placement stated explicitly rather than left to auto-placement, so adding a
+   pane later cannot reshuffle the grid. The navigator spans every row: its
+   right border and the terminal's left edge are the same line, which is the
+   brief's "terminal full width minus the bottom of the file explorer". */
+.editor-nav-col {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-resizer-v {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+
+.editor-area-slot {
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor-resizer-h {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.editor-terminal-slot {
+  grid-column: 3;
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Standing bar between the tree and the code pane: 10 px wide, no vertical
+   margin (its row is exactly its height). */
+.editor-resizer-v {
+  width: 10px;
+  align-self: stretch;
+}
+
+/* Lying bar between the code pane and the terminal. */
+.editor-resizer-h {
+  height: 10px;
+}
+
+/* -- navigator ---------------------------------------------------------------- */
+
+/* The column's slot: the navigator fills it, so its tree column is what
+   scrolls rather than the panel overflowing the screen. */
+.editor-nav-slot {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Drawer toggle, shown only in the single-column fallback below. */
+.editor-nav-toggle {
+  display: none;
+}
+
+.editor-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-1);
+  min-height: 0;
+  min-width: 0;
+  padding: var(--bi-space-1) 0;
+  border: 1px solid var(--bi-border);
+  border-radius: 0;
+  background-color: var(--bi-surface);
+}
+
+.editor-nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--bi-space-1);
+  padding: 0 var(--bi-space-2);
+}
+
+/* The head's two buttons (refresh, collapse-all) sit as one unit at the right
+   of the workspace name, so `space-between` above still pins title-left. */
+.editor-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-1);
+  flex: 0 0 auto;
+}
+
+/* The code pane's mode, live ("read-write" while the WorkBench is idle,
+   "read-only" while a reply streams or a diff is the active tab). It lives in
+   this header rather than in the code pane's tab strip because it states a fact
+   about the pane, not about one tab — and the strip is a row that shrinks as
+   buffers pile up, while this corner is always free. The root folder's own name
+   is no longer shown here: the tree's root row already names it and carries the
+   absolute path in its `title`.
+   Below 1024 px the tree becomes a drawer, so a closed drawer hides the badge
+   with its pane — an accepted consequence of the documented desktop-only scope. */
+.editor-mode-badge {
+  min-width: 0;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.editor-nav-error,
+.editor-nav-empty,
+.editor-nav-footer,
+.editor-nav-selected {
+  margin: 0;
+  padding: 0 var(--bi-space-2);
+}
+
+.editor-nav-footer {
+  border-top: 1px solid var(--bi-border);
+  padding-top: var(--bi-space-1);
+  color: var(--pico-muted-color);
+  font-size: 0.72rem;
+}
+
+/* The batch count, in the same footer caption area: it belongs to the marks, so
+   it is the one line there that is coloured rather than muted, and it sits
+   right under the policy note without a second border. */
+.editor-nav-selected {
+  padding-top: 0.15rem;
+  color: var(--bi-violet);
+  font-size: 0.72rem;
+}
+
+.editor-nav-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  outline: none;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem var(--bi-space-2);
+  border-radius: var(--pico-border-radius);
+  cursor: pointer;
+  user-select: none;
+  /* Anchor for `.tree-mark-sr`: an absolutely-positioned span with no positioned
+     ancestor resolves against the *document*, so the tree's `overflow-y: auto`
+     cannot clip it and the hidden label of the last marked row extends the page
+     — a second, page-wide vertical scrollbar appears beside the tree's own once
+     enough folders are open. */
+  position: relative;
+}
+
+/* Indent by depth. Each row carries its own depth in --tree-depth (the tree is
+   a stack of `role="group"` wrappers, so nested padding would compound twice),
+   which keeps the rule one line however deep the checkout goes. The
+   `.tree-row.depth-N` class is emitted too, as a hook for later panes. */
+.tree-row {
+  padding-left: calc(var(--bi-space-2) + 0.85rem * var(--tree-depth, 0));
+}
+
+/* Pico's input-group rules match *any* [role="group"], and every opened folder
+   is wrapped in one (WorkspaceTreeItem.vue) for ARIA. Left alone they apply to
+   the wrapper — `display: inline-flex`, a `margin-bottom`, and the
+   `> :not(:first-child)` radius squashing — so the entries of a folder lay out
+   side by side instead of stacked under it. The reset mirrors the one above
+   .memory-bullets: `.tree-group` ties [role="group"] on specificity (0,1,0) and
+   wins on source order (theme.css loads after Pico), and the child rule
+   outranks [role="group"] > :not(:first-child) (0,2,0) to give a row back the
+   rounded corners the hover and focus highlight need. */
+.tree-group {
+  display: block;
+  width: auto;
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.tree-group > .tree-row {
+  border-radius: var(--pico-border-radius);
+}
+
+.tree-row:hover {
+  background-color: var(--bi-surface-2);
+}
+
+.tree-row--selected {
+  background-color: color-mix(in srgb, var(--pico-primary) 12%, var(--bi-surface));
+}
+
+.tree-row--focused {
+  outline: 2px solid var(--pico-primary);
+  outline-offset: -2px;
+}
+
+/* A row of the batch — the third row tone, beside the two above. `--selected`
+   is a background tint in the primary hue and `--focused` is an outline, so a
+   third *background* would be unreadable in combination with either: the mark
+   gets a stripe on the leading edge as well, which survives both, so a row that
+   is marked *and* focused, or marked *and* the pane's file, still says all it
+   is. The colour is a theme token (`--bi-violet`), so it reads correctly in the
+   light and the dark theme — the hues differ, the three signals stay distinct. */
+.tree-row--marked {
+  background-color: color-mix(in srgb, var(--bi-violet) 16%, var(--bi-surface));
+  box-shadow: inset 0.25rem 0 0 var(--bi-violet);
+}
+
+/* Marked and the pane's file: the primary tint is the one the eye follows into
+   the pane, so it keeps the background and the mark keeps its stripe (this rule
+   only has to win the background, which source order alone would give to
+   `.tree-row--marked` above). */
+.tree-row--marked.tree-row--selected {
+  background-color: color-mix(in srgb, var(--pico-primary) 12%, var(--bi-surface));
+}
+
+.tree-chevron {
+  display: inline-flex;
+  width: 12px;
+  transition: transform 0.12s ease;
+  color: var(--pico-muted-color);
+}
+
+.tree-chevron.open {
+  transform: rotate(90deg);
+}
+
+.tree-icon {
+  display: inline-flex;
+  /* A Nerd Font glyph picked by file type (web/src/lib/file-icons.js), not an
+     SVG. The leading family is the icons-only face, whose unicode-range is
+     exactly the code points that module emits, so only the glyph can fall
+     through to it — the label next to it keeps the normal mono face. The fixed
+     box keeps the label column aligned whatever glyph a row draws, and the
+     centre keeps a wide glyph (a language logo) on the same axis as a narrow
+     one (a plain file). */
+  font-family: 'JetBrains Mono Nerd Icons', var(--pico-font-family-monospace);
+  font-size: 0.85rem;
+  font-weight: 400;
+  line-height: 1;
+  flex: 0 0 auto;
+  width: 1.05rem;
+  justify-content: center;
+  color: var(--pico-muted-color);
+}
+
+.tree-name {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-truncated,
+.tree-error {
+  margin: 0.2rem 0;
+  padding-left: calc(var(--bi-space-2) + 1.2rem);
+}
+
+/* -- the inline name row (TreeNameInput) ------------------------------------
+   The row where a new file or folder is named, sitting inside the listing it
+   will appear in. Pico styles every `input` as a block with margins, which in a
+   flex row would wrap and tower over its neighbours — so it is reset to an
+   inline field that takes the width the name column would have had. */
+.tree-row--creating {
+  cursor: text;
+  user-select: text;
+}
+
+.tree-name-input {
+  flex: 1 1 auto;
+  min-width: 4rem;
+  margin: 0;
+  padding: 0.1rem 0.3rem;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.8rem;
+  line-height: 1.3;
+  background-color: var(--bi-surface);
+  border: 1px solid var(--pico-primary);
+  border-radius: var(--pico-border-radius);
+}
+
+.tree-name-input-action {
+  flex: 0 0 auto;
+  width: 1.4rem;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: var(--pico-border-radius);
+  background: none;
+  color: var(--pico-muted-color);
+  font-size: 0.85rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tree-name-input-action:hover {
+  color: var(--pico-color);
+}
+
+/* The refusal of a name — a create's or a rename's — sits *in* the listing it
+   was typed into rather than in a toast elsewhere, because the fix is to edit
+   what is under the caret. `.tree-row-error` is the shared name for that line
+   across both modes. */
+.tree-name-input-error,
+.tree-row-error {
+  margin: 0.15rem 0 0.25rem;
+  padding-left: calc(var(--bi-space-2) + 1.2rem);
+  font-size: 0.75rem;
+  color: var(--bi-danger);
+}
+
+/* -- the unstaged marker (WorkspaceTreeItem) ---------------------------------
+   A dot after the file name, coloured by what git says about it. It is a
+   decoration on the row, not a control: it takes no click, and its meaning is
+   carried by the `title` of the dot plus a visually-hidden label — colour alone
+   is never the only signal. `flex: 0 0 auto` keeps it on screen when a long
+   name is ellipsised.
+
+   The colours are the app's own status tokens, chosen to read like git's:
+   amber for a modification, green for something git does not track yet. A
+   folder's mark ("something inside changed") uses the muted token, because it
+   is a hint about a subtree rather than a claim about this file. */
+.tree-mark {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--bi-warning);
+}
+
+.tree-mark--untracked,
+.tree-mark--added {
+  background-color: var(--bi-success);
+}
+
+.tree-mark--deleted {
+  background-color: var(--bi-danger);
+}
+
+.tree-mark--conflict {
+  background-color: var(--bi-violet);
+}
+
+.tree-mark--below {
+  background-color: color-mix(in srgb, var(--pico-muted-color) 70%, transparent);
+}
+
+/* Same visually-hidden pattern as .editor-tab-dirty-sr: the marker's words go
+   to a screen reader without becoming text a sighted user sees twice. */
+.tree-mark-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* -- file context menu (WorkspaceNavigator) ----------------------------------
+   Teleported to <body> and fixed-positioned at the cursor, so the tree's
+   scrolling container cannot clip it. One surface for every row kind — file,
+   folder and root — whose items come from one table (lib/tree-menu), so an item
+   that would be lying is *absent* from that list rather than rendered disabled:
+   no "Close" without a buffer, no "View diff…" without a committed side, no
+   "Rename…"/"Delete" on the workspace root. */
+.tree-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 12rem;
+  padding: var(--bi-space-1) 0;
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--pico-border-radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+}
+
+.tree-context-item {
+  display: block;
+  width: 100%;
+  padding: 0.3rem 0.9rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  /* Pico's button rules redefine --pico-color on the button itself (see the
+     .icon-btn note), so on this element it resolves to white — invisible on
+     the light surface. Use the token Pico never touches. */
+  color: var(--bi-icon);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tree-context-item:hover {
+  background-color: var(--bi-surface-2);
+  color: var(--bi-icon);
+}
+
+/* Tab reaches these items (they are plain buttons in a `role="menu"`), so the
+   caret has to be visible on one — the hover background alone would leave a
+   keyboard user without any answer to "which item is Enter about to run?". */
+.tree-context-item:focus-visible {
+  outline: 2px solid var(--pico-primary);
+  outline-offset: -2px;
+  background-color: var(--bi-surface-2);
+  color: var(--bi-icon);
+}
+
+/* The one destructive item in the tree's menu. It only *asks* — the move to the
+   trash happens in the dialog — but the tone has to say what the item can lead
+   to before it is clicked. */
+.tree-context-item--danger {
+  color: var(--bi-danger);
+}
+
+.tree-context-item--danger:hover {
+  color: var(--bi-danger);
+  background-color: color-mix(in srgb, var(--bi-danger) 8%, var(--bi-surface));
+}
+
+/* The slot bounds the height; the navigator takes it, so its tree column is
+   what scrolls instead of the whole panel overflowing the screen. */
+.editor-nav-slot .editor-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* -- code pane ---------------------------------------------------------------- */
+
+.editor-area {
+  /* Pico gives every bare `section` a bottom block margin. In a grid whose rows
+     are sized to the panes that margin shrinks the item inside its own track, so
+     it reads as a gap *between* the pane and its resizer bar — the one thing
+     this edge-to-edge shell must not have (the tree, an `<aside>`, has none). */
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--bi-border);
+  border-radius: 0;
+  background-color: var(--bi-surface);
+}
+
+.editor-area-head {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: var(--bi-space-2);
+  padding: 0;
+  border-bottom: 1px solid var(--bi-border);
+  min-height: 2.1rem;
+}
+
+/* The open-file tabs: one chip per buffer, the strip above the Monaco body.
+   They are square cells *of* the header strip: they stretch to its full height,
+   with no gap and no radius between them, so the borders they share read as the
+   dividers between tabs. */
+.editor-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  /* The strip's own scrollbar, when the tabs overflow it: the browser default
+     is a full-height track that steals a third of the chip, so it is reduced to
+     a thin line in the existing border tone — it should read as an overflow
+     hint, not as chrome. `scrollbar-width` is Firefox; the pseudo-element is
+     Chromium/Safari. The wheel scrolls it too (see EditorArea's onTabsWheel). */
+  scrollbar-width: thin;
+  scrollbar-color: var(--bi-border) transparent;
+}
+
+.editor-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.editor-tabs::-webkit-scrollbar-track {
+  background: none;
+}
+
+.editor-tabs::-webkit-scrollbar-thumb {
+  border-radius: 2px;
+  background-color: var(--bi-border);
+}
+
+.editor-tabs::-webkit-scrollbar-thumb:hover {
+  background-color: var(--pico-primary);
+}
+
+/* A chip is a span wrapping two buttons (a button cannot contain one), so it
+   carries the path in `title` and the active state: an inset bar along its top
+   edge marks the selected one, and the same bar (lighter) marks the one the
+   keyboard is on. Inset, because the strip clips horizontally. */
+.editor-tab {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 0;
+  max-width: 22ch;
+  padding: 0;
+  border: 1px solid var(--bi-border);
+  border-bottom: 0;
+  border-radius: 0;
+  background-color: var(--bi-surface);
+  color: var(--pico-muted-color);
+}
+
+/* Whole-tab hover (the inner buttons stay transparent, so it shows through):
+   the tab is one clickable surface, so the feedback belongs to the cell. */
+.editor-tab:not(.active):hover {
+  background-color: var(--bi-surface-2);
+}
+
+/* Adjacent tabs share one line rather than drawing two. */
+.editor-tab + .editor-tab {
+  border-left: 0;
+}
+
+.editor-tab.active {
+  box-shadow: inset 0 2px 0 var(--pico-primary);
+  color: var(--pico-color);
+}
+
+/* The roving tabindex normally puts the keyboard on the selected chip; this is
+   the case where the two differ — ← → moved the caret, not the file. */
+.editor-tab:focus-within {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--pico-primary) 45%, transparent);
+}
+
+.editor-tab.active:focus-within {
+  box-shadow: inset 0 2px 0 var(--pico-primary);
+}
+
+/* The name button fills the rest of the cell, so clicking anywhere on the tab
+   that is not the × selects the file. */
+.editor-tab-name {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0 0.25rem 0 0.6rem;
+  border: 0;
+  /* Anchor for `.editor-tab-dirty-sr` (see the .tree-row note): without it the
+     hidden label is positioned against the document and extends the page. */
+  position: relative;
+  border-radius: 0;
+  background: none;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.75rem;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* The unsaved-changes marker: a small filled circle before the file name. It
+   sits first so a long, ellipsised name cannot push it off the visible edge.
+   The colour is the app's danger tone so it reads as "this buffer differs from
+   disk" in both themes; it is `flex: 0 0 auto` so it never shrinks away. */
+.editor-tab-dirty {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--bi-danger);
+}
+
+/* Screen-reader text for the dot, kept out of sight (and out of the truncating
+   label box) rather than shown as a `*` the sighted user never sees. */
+.editor-tab-dirty-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The freshness marker: same row and same size as the dirty dot, but a ring
+   rather than a fill, because it reports something *outside* the buffer (the
+   disk moved) instead of the buffer's own unsaved state. Warning for "changed
+   on disk", danger for "gone from disk" — and unlike the dot it is clickable,
+   which is how a turned-down conflict is answered later. */
+.editor-tab-stale {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: 2px solid var(--bi-warning);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+
+.editor-tab-stale--deleted {
+  border-color: var(--bi-danger);
+}
+
+.editor-tab-stale-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* -- the Editor pane's dialogs (EditorTreeDialogs) --------------------------
+   Pico renders <dialog> as the full-viewport overlay and the <article> as the
+   card; only the card is sized here, same shape as the other dialogs. It stays
+   narrow: the answer is a sentence and three buttons, and a Compare opens a
+   pane-wide diff rather than a wider dialog. */
+.editor-conflict-dialog > article {
+  width: 560px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.editor-conflict-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+/* Overwrite is the destructive answer, so it borrows the danger tone while
+   keeping Pico's secondary shape — the primary button belongs to Reload. */
+.editor-conflict-overwrite {
+  color: var(--bi-danger);
+  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
+}
+
+/* The close confirm shares the conflict dialog's card shape. Discard is the
+   destructive answer and borrows the danger tone; Save and close keeps Pico's
+   primary shape, and Cancel (the default, first) gets the secondary one. */
+.editor-close-dialog > article {
+  width: 480px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.editor-close-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+.editor-close-discard {
+  color: var(--bi-danger);
+  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
+}
+
+/* The delete confirm shares the same card shape. Cancel is first (and so the
+   default for Enter and Esc); Delete is the destructive answer and wears the
+   danger tone, as the other two confirms do. The keep-line is a caption, not a
+   button — it states the retention the server actually applies. */
+.editor-delete-dialog > article {
+  width: 520px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.editor-delete-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+.editor-delete-dialog code {
+  font-size: 0.78em;
+}
+
+.editor-delete-confirm {
+  color: var(--bi-danger);
+  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
+}
+
+.editor-delete-keeps {
+  margin-bottom: 0;
+}
+
+/* The search dialog. Same card family as the three confirms, but wide: two of
+   its columns (a file's path and a line of its text) want to breathe, and Pico's
+   own 700px `dialog > article` would ellipsise the paths into uselessness. The
+   card is not the scroller — the results area below is — so the scope line, the
+   form and the footer stay readable while 500 rows move between them. */
+.editor-search-dialog > article {
+  width: 820px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.editor-search-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+/* The read-only scope line: the path in mono (it is a path), and the kind as a
+   suffix, so `docs/old (folder)` and `docs/old (file)` read apart. The whole line
+   is a caption already, so nothing else needs a colour of its own. */
+.editor-search-scope-path {
+  font-family: var(--pico-font-family-monospace);
+}
+
+/* The field row: the input takes the width and the submit is a square cell of
+   its own beside it, so the button never steals a third of the query. */
+.editor-search-field {
+  display: flex;
+  align-items: end;
+  gap: var(--bi-space-1);
+}
+
+.editor-search-field-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.editor-search-submit {
+  flex: 0 0 auto;
+  width: auto;
+  padding: var(--pico-form-element-spacing-vertical) var(--bi-space-2);
+}
+
+/* The two switches on one line rather than Pico's stacked form rows — they are
+   two modifiers of the same query, not two questions. */
+.editor-search-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--bi-space-3);
+  margin-bottom: var(--bi-space-1);
+}
+
+.editor-search-switches label.checkbox {
+  margin-bottom: 0;
+  font-size: 0.85rem;
+}
+
+.editor-search-error {
+  margin-bottom: var(--bi-space-1);
+}
+
+/* The server's one sentence, last in the card. Pico styles a dialog `footer` for
+   a row of buttons — right-aligned, with a divider and a negative bottom margin
+   to sit flush with the card edge. This is a caption, not a button row, so it
+   goes back to the card's own flow: left-aligned, and the divider stays (it is
+   what separates the sentence from the scroll area above it). */
+.editor-search-footer {
+  text-align: start;
+}
+
+/* The one scroller: 500 rows must not make the dialog taller than the window, so
+   the rows scroll inside a bounded box while the header above and the footer
+   below stay put. Horizontally too, because a snippet keeps its line unbroken. */
+.editor-search-results {
+  max-height: min(46vh, 26rem);
+  overflow: auto;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+}
+
+.editor-search-results .caption {
+  padding: var(--bi-space-1) var(--bi-space-2);
+}
+
+.editor-search-table {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+/* The column names stay above 500 rows of scrolling, so a row halfway down is
+   still readable. Pico already gives `th` an opaque background, which is what
+   makes sticking it possible without a band of its own. */
+.editor-search-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* The path column is the one with something long and uninteresting in it, so it
+   is the one allowed to ellipsise (the full path rides in the button's `title`). */
+.editor-search-cell-path {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-search-cell-line {
+  width: 1%;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--pico-muted-color);
+}
+
+/* A row is a click target: the whole button is the row's affordance, so it
+   carries no button chrome of its own — the same flat shape the tree's rows use.
+   The path verbatim, in mono, because it is the string the tab strip will name. */
+.editor-search-hit {
+  display: inline;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--pico-primary);
+  font: inherit;
+  font-family: var(--pico-font-family-monospace);
+  text-align: start;
+}
+
+.editor-search-hit:hover {
+  background: none;
+  text-decoration: underline;
+}
+
+/* The snippet is the file's own text: mono, unstyled, and never wrapped —
+   `white-space: pre` keeps the line's indentation exactly as the file has it,
+   which is the only thing a code snippet has to be right about. Pico gives
+   inline `code` a background and a smaller size; neither suits a whole line. */
+.editor-search-snippet {
+  display: block;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--pico-color);
+  font-size: inherit;
+  white-space: pre;
+}
+
+/* The matched span. Pico's own `mark` tone, so it follows the light/dark theme
+   without a new colour of its own to keep in sync. */
+.editor-search-mark {
+  background-color: var(--pico-mark-background-color);
+  color: var(--pico-mark-color);
+}
+
+/* The quick-open dialog. Same card family as the search one, but narrow: what
+   it shows is one field and a column of paths, and a wide card would only
+   stretch them into whitespace. The card is not the scroller — the list below
+   is — so the field and the footer stay put while the rows move between them. */
+.quickopen-dialog > article {
+  width: 560px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.quickopen-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+/* The one scroller, like the search results: a 5000-row payload must not make
+   the dialog taller than the window. */
+.quickopen-results {
+  max-height: min(46vh, 26rem);
+  overflow: auto;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+}
+
+/* A row is a click target: the whole button is the row's affordance, so it
+   carries no button chrome of its own — the same flat shape the tree's rows and
+   the search hits use. The path verbatim, in mono, because it is the string the
+   tab strip will name. */
+.quickopen-row {
+  display: block;
+  width: 100%;
+  padding: 0.15rem var(--bi-space-2);
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--pico-color);
+  font: inherit;
+  text-align: start;
+  margin: 0;
+}
+
+.quickopen-row code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-size: 0.8rem;
+  white-space: pre;
+}
+
+.quickopen-row:hover {
+  background: none;
+  text-decoration: none;
+}
+
+/* The selected row is highlighted at all times, not only under the pointer —
+   the keyboard is the primary path (§2.2), so the highlight follows ↑/↓ and
+   Enter acts on exactly what is highlighted. */
+.quickopen-row.is-selected {
+  background-color: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+}
+
+/* The matched span. Pico's own `mark` tone, so it follows the light/dark theme
+   without a new colour of its own to keep in sync — the same choice the search
+   highlight made. */
+.quickopen-mark {
+  background-color: var(--pico-mark-background-color);
+  color: var(--pico-mark-color);
+}
+
+/* The server's one sentence, last in the card — left-aligned like the search
+   footer, for the same reason: it is a caption, not a button row. */
+.quickopen-footer {
+  text-align: start;
+}
+
+/* The batch move's modal. Same card family as the confirms, and the same width
+   as the delete one: what it shows is a list of paths and one field, and a
+   longer card would only stretch the paths into whitespace. Nothing here is
+   theme-specific — the colours all come from the Pico variables both themes
+   set. */
+.editor-move-dialog > article {
+  width: 520px;
+  max-width: 94vw;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.editor-move-dialog .caption {
+  margin: 0.25rem 0;
+}
+
+/* The subject list is capped so a 40-file batch cannot make the dialog taller
+   than the window: the field and the two buttons have to stay on screen, which
+   is why the cap is CSS and not the component's business. */
+.editor-move-list {
+  max-height: min(30vh, 16rem);
+  overflow: auto;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+  padding: var(--bi-space-1) var(--bi-space-2);
+  margin-bottom: var(--bi-space-1);
+}
+
+/* One `<input>`, labelled by the question it answers (D6: a *folder*, never a
+   full target path). */
+.editor-move-field {
+  margin-bottom: var(--bi-space-1);
+}
+
+.editor-move-error {
+  margin-bottom: var(--bi-space-1);
+}
+
+/* The pane's save affordances, in the header row *beside* the tab scroller: the
+   strip scrolls under its own wheel rule, so a button inside it would scroll out
+   of reach. Same square cell as a chip, so the header stays one line of cells. */
+.editor-save-actions {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+.editor-save-button {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--bi-border);
+  border-radius: 0;
+  background: none;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+}
+
+.editor-save-button:hover:not(:disabled) {
+  color: var(--pico-color);
+}
+
+/* A clean buffer has nothing to save, and that is the common state — so the
+   disabled button must recede rather than look like a control that is broken. */
+.editor-save-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* A save in flight: the chip is busy rather than idle, since a large file is not
+   instantaneous and the dot has not had the chance to clear yet. */
+.editor-tab-saving .editor-tab-dirty {
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+/* Pico gives a focused button its own ring; the chip's inset bar already marks
+   the caret, so the inner buttons add none of their own. */
+.editor-tab-name:focus,
+.editor-tab-close:focus {
+  box-shadow: none;
+}
+
+/* The grid item that clips: ellipsis has to sit on the box the text is in, not
+   on the cell that sizes it. */
+.editor-tab-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-tab-close {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 1.4rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 0.95rem;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+}
+
+.editor-tab-close:hover {
+  color: var(--bi-danger);
+}
+
+.editor-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* One column: the message line (refusal or note), then the scrolling text. */
+.editor-body-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-1);
+  padding: var(--bi-space-1) var(--bi-space-2) var(--bi-space-2);
+}
+
+.editor-raw-message {
+  flex: 0 0 auto;
+  word-break: break-word;
+  display: flex;
+  align-items: baseline;
+  gap: var(--bi-space-1);
+}
+
+.editor-raw-message-path {
+  font-family: var(--pico-font-family-monospace);
+  opacity: 0.75;
+}
+
+.editor-raw-message-dismiss {
+  flex: 0 0 auto;
+  padding: 0 0.3rem;
+  border: 0;
+  background: none;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+}
+
+.editor-raw-note {
+  flex: 0 0 auto;
+}
+
+/* -- write-feedback stack -----------------------------------------------------
+   The Editor's notices (useEditorNotices, EditorNoticeStack.vue) teleport to
+   `<body>`, so they sit outside every pane's stacking context and are readable
+   from the tree as well as the code pane. Bottom-centre: it must not cover the
+   tab strip (top), the composer (WorkBench's bottom) or a right-click point in
+   the tree (left). The tone is carried by the border and the icon colour only —
+   never colour alone — and the × gives every line a dismissal the timer will
+   not do on its own. */
+.editor-notice-stack {
+  position: fixed;
+  z-index: 1100;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  /* The stack must never swallow a click aimed at whatever is under it, only
+     its own lines are interactive. */
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-1);
+  width: min(46rem, calc(100vw - 4rem));
+}
+
+.editor-notice {
+  pointer-events: auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--bi-space-1);
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--bi-border);
+  border-left-width: 3px;
+  border-radius: var(--bi-radius-lg);
+  /* The app surface, opaque: this floats over code, so a translucent panel
+     would read as part of the text behind it. */
+  background-color: var(--bi-surface);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  animation: bi-fade-in 0.2s ease;
+}
+
+.editor-notice-text {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.editor-notice--error {
+  border-left-color: var(--bi-danger);
+  color: var(--bi-danger);
+}
+
+.editor-notice--warn {
+  border-left-color: var(--bi-warning);
+  color: var(--bi-warning);
+}
+
+.editor-notice--ok {
+  border-left-color: var(--bi-success);
+  color: var(--pico-color);
+}
+
+.editor-notice-dismiss {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 0.3rem;
+  border: 0;
+  background: none;
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--pico-muted-color);
+  cursor: pointer;
+}
+
+.editor-notice-dismiss:hover {
+  color: var(--bi-danger);
+}
+
+/* The Monaco host: the pane gives it the box, Monaco owns everything inside
+   it (its own scrollers, its own line-number gutter), so nothing here may
+   add padding or a border — Monaco measures this element.
+   `monaco-pico.css` (imported by MonacoEditor.vue) is what keeps Pico's
+   element rules off Monaco's own textarea/input/button DOM. */
+.editor-monaco {
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+/* The rendered-markdown panel (the tree's "Preview"), a sibling of the Monaco
+   surfaces in the same pane. It must NOT reuse `.editor-monaco`: that element is
+   `overflow: hidden` because Monaco measures it and owns its own scroller, so a
+   rendered document given that class could not scroll. Sizing only — the markup
+   inside is MarkdownStream's `.answer`, the one stylesheet for rendered markdown
+   (already light/dark through the Pico variables and the hljs token rules), and
+   `.editor-body-col` already supplies the padding every other panel gets. */
+.editor-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.editor-preview .answer {
+  max-width: 88ch;
+}
+
+/* -- terminal strip ----------------------------------------------------------- */
+
+.editor-terminal {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--bi-border);
+  border-radius: 0;
+  background-color: var(--bi-surface);
+  overflow: hidden;
+}
+
+.editor-terminal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-2);
+  padding: var(--bi-space-1) var(--bi-space-2);
+  border-bottom: 1px solid var(--bi-border);
+}
+
+.editor-terminal-title {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--pico-muted-color);
+}
+
+/* pid + cwd from the `open` frame. Not uppercase (an absolute path must read
+   as typed) and clipped with an ellipsis so a long workspace path never pushes
+   the status/buttons off the header. */
+.editor-terminal-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.8;
+}
+
+.editor-terminal-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: auto;
+}
+
+/* Reconnect dot: muted while there is no session; the live and connecting
+   tones reuse the status-pill palette already in use (bi-*). */
+.editor-terminal-dot {
+  background-color: color-mix(in srgb, var(--pico-muted-color) 45%, transparent);
+}
+
+.editor-terminal-dot--open {
+  background-color: var(--bi-success);
+}
+
+.editor-terminal-dot--connecting {
+  background-color: var(--bi-info);
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+.editor-terminal-dot--error {
+  background-color: var(--bi-danger);
+}
+
+.editor-terminal-new,
+.editor-terminal-kill {
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+
+/* Body fills the strip and is the sizing context for xterm. The host must take
+   the whole box (fit() reads its clientWidth/Height), so the not-running banner
+   is an overlay, not a sibling that would steal rows from the grid. */
+.editor-terminal-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.editor-term-host {
+  position: absolute;
+  inset: 0;
+  padding: 2px 0 0 4px;
+  min-height: 0;
+}
+
+/* xterm paints into .xterm inside the host; match the app surface so no
+   stray white edge appears before the JS theme applies, and keep the body's
+   own surface behind it. */
+.editor-term-host .xterm {
+  height: 100%;
+}
+
+.editor-term-banner {
+  position: absolute;
+  top: var(--bi-space-1);
+  left: var(--bi-space-2);
+  right: var(--bi-space-2);
+  pointer-events: none;
+}
+
+/* web-links hover: the full URL, so a printed link is diagnosable before the
+   user opens it (the click uses the default window.open handler). */
+.term-link-tooltip {
+  position: absolute;
+  z-index: 10;
+  max-width: 60%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--bi-border);
+  background-color: var(--bi-surface-2);
+  color: var(--pico-color);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* -- narrow screens: one column, tree as a drawer ------------------------------
+   Desktop-only is the documented scope, so this is a usability floor: nothing
+   is clipped and the tree stays reachable, but there is no phone layout. The
+   shell stays a grid and re-places every pane explicitly (the wide layout
+   places by grid line, not by area name), and the terminal stays draggable —
+   only the sidebar track disappears, so its bar is hidden and its variable
+   goes unused. */
+@media (max-width: 1024px) {
+  .editor-shell {
+    --bi-editor-terminal: 180px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto var(--bi-editor-terminal);
+    height: auto;
+    min-height: calc(100vh - var(--bi-appbar-height));
+  }
+
+  .editor-nav-col { grid-column: 1; grid-row: 1; }
+  .editor-area-slot { grid-column: 1; grid-row: 2; min-height: 40vh; }
+  .editor-resizer-h { grid-column: 1; grid-row: 3; }
+  .editor-terminal-slot { grid-column: 1; grid-row: 4; }
+
+  /* No sidebar to size in a single column: the bar has no track to sit in. */
+  .editor-resizer-v {
+    display: none;
+  }
+
+  .editor-nav-toggle {
+    display: block;
+    width: 100%;
+    margin: 0 0 var(--bi-space-1);
+    padding: 0.35rem 0.6rem;
+    font-size: 0.75rem;
+    text-align: left;
+  }
+
+  .editor-nav-slot {
+    display: none;
+  }
+
+  .editor-shell:not(.nav-collapsed) .editor-nav-slot {
+    display: flex;
+    max-height: 45vh;
+  }
+}

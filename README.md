@@ -1,0 +1,672 @@
+# Nojaé
+
+**Nojaé started as a tool for measuring LLM endpoints, and it has grown
+into the workspace those measurements were only ever meant to feed: a place
+where a model writes your code, in front of you.**
+
+It is a self-hosted web app — FastAPI behind, Vue 3 in front, one browser tab
+in between — that puts a coding agent to work on a real checkout. The WorkBench
+tab drives the conversation: a model of your choice, the file tools, the
+language servers and the shell commands it is allowed to use, and a workspace
+whose read/write policy you set. The Editor tab shows the same tree the agent
+changes, with a Monaco pane and a real terminal, so you watch each edit land and
+commit it when you agree. The Benchmark tab, where the project began, is still
+there and still useful — it is now one tool among the others rather than the
+reason for the app.
+
+Everything streams: answers, reasoning, tool calls and timings reach the browser
+over Server-Sent Events, and nothing about your code or your endpoint leaves the
+machine.
+
+---
+
+## 1. Getting started
+
+You need **Python ≥ 3.10** for the backend and **Node.js** for the frontend. The
+app is desktop-browser only.
+
+### Git Bash on Windows 🪟
+
+On Windows, **Git for Windows is not optional**. It is what gives the two most
+useful parts of the app a vocabulary there:
+
+- The `console` MCP connector runs its whitelisted commands through Git's POSIX
+  toolset (`ls.exe`, `grep.exe`, `find.exe`, `mv.exe` in `<Git>\usr\bin`) rather
+  than a `cmd` vocabulary, so the same command list behaves the same on both
+  systems.
+- The Editor's terminal opens **Git Bash** as its shell, over a pseudo-console.
+  It never falls back to `cmd.exe` or PowerShell: one working location gets one
+  tool vocabulary.
+
+The app looks for an installation in the usual places — `git` on `PATH` first,
+then `C:\Program Files\Git`, `%LOCALAPPDATA%\Programs\Git`, Scoop and Chocolatey.
+An installation is only accepted when its `usr\bin\ls.exe` is really there, so a
+lone `git.exe` cannot be mistaken for one. If yours sits somewhere else, point
+`NOJAE_GIT_BASH_DIR` at its install root. When nothing answers, the
+terminal and the connector refuse **in words**, naming every folder they
+searched — they never half-work.
+
+### Setup on Windows
+
+```powershell
+# 1. Backend — from the project root
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[mcp,lsp,windows]"
+```
+
+`pip install -e .` alone gives you the benchmark, the chat and the Editor; the
+extras are what add the rest, and none of them is mandatory:
+
+| Extra | What it adds |
+|---|---|
+| `mcp` | The MCP SDK and Playwright — the WorkBench connectors. |
+| `lsp` | The LSP client — the language-server tools. |
+| `windows` | The Editor terminal's pseudo-console driver. Never pulled in on Linux. |
+| `test` | `pytest` and its plugins. |
+
+```powershell
+# 2. Frontend
+cd web
+npm install
+npm run build
+cd ..
+```
+
+Node is easiest to manage with [Volta](https://volta.sh), which pins the runtime
+per project: `volta install node@22` in the project root, then `npm install -g
+volta` once per machine. Volta keeps its shims in `%LOCALAPPDATA%\Volta\bin`, and
+those shims shell out to `volta.exe` in `%ProgramFiles%\Volta` — remember both
+folders, they come back when you declare a language server.
+
+### Run on Windows
+
+```powershell
+.venv\Scripts\Activate.ps1
+nojae
+```
+
+Then open <http://127.0.0.1:8001>. The Editor's terminal needs Git Bash to be
+installed (and the `windows` extra); without either, it shows you what is missing
+instead of an empty pane.
+
+### Setup on Linux
+
+Either environment works — pick one virtualenv manager, not both at once.
+
+**Plain venv:**
+
+```bash
+cd /path/to/nojae
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[mcp,lsp]"
+```
+
+**pyenv:** this project ships a `.python-version` naming a `nojae`
+virtualenv, which activates when you `cd` into the project. Create that
+environment once (`pyenv virtualenv 3.12 nojae`, or let `pyenv install` do
+it), then:
+
+```bash
+pip install -e ".[mcp,lsp]"
+```
+
+> If you use a venv while pyenv is installed, make sure only **one** environment
+> is active — pyenv shims otherwise shadow `.venv/bin`.
+
+Then build the frontend. With **Volta**, `volta install node@22` in the project
+root is enough and no `PATH` editing is involved; Volta installs under
+`~/.volta/bin`, which your shell profile already puts on `PATH`:
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+```
+
+Finally, when a connector drives a browser, install its runtime once:
+
+```bash
+playwright install --with-deps chromium
+```
+
+### Run on Linux
+
+```bash
+source .venv/bin/activate     # or: pyenv activate nojae
+nojae
+```
+
+Then open <http://127.0.0.1:8001>. The terminal pane runs `$SHELL` (falling back
+to `/bin/sh`) over a kernel PTY.
+
+### Development (hot reload)
+
+Two processes, on either system:
+
+```bash
+uvicorn src.api.server:app --reload --port 8001   # the API on :8001
+cd web && npm run dev                             # Vite on :5173, proxying /api to :8001
+```
+
+### Tests
+
+```bash
+pip install -e ".[test]"
+pytest                # backend
+cd web && npm test    # frontend
+```
+
+The suite is hermetic: it needs no reachable model, and `NOJAE_DISABLE_MCP`
+/ `NOJAE_DISABLE_LSP` switch the two hubs off entirely.
+
+### Setting up tests for nojae
+
+The end-to-end suite (`cd web && npm run test:e2e`) has **its own** model
+connection, so a spec can never talk to the server your workspace is configured
+with. Two files, one switch:
+
+| File | Holds |
+|---|---|
+| `.env.test` (from `.env.test.example`) | The **app-level** keys — `QUESTION_SET`, `LLM_DEBUG`, the four `VERIFIER_AGENT_*`, `NOJAE_PYTHON_ROOT`: the same set `.env` holds. |
+| `.nojae/nojae-test-settings.json` | The suite's **model connection** — the same members as the workspace's `nojae-settings.json`: server, key, model id, prompt, sampling, the vision flag, `lspEnabled`, `maxToolIteration`. |
+
+`web/playwright.config.js` parses `.env.test` into the environment of the server
+under test and exports `NOJAE_TEST_SETTINGS=1`, which is the one switch
+that makes that server read the test settings file instead of the workspace's
+own. Nothing else turns it on — the backend suite pins it off.
+
+**The test settings file is created by hand and never by the app.** It has no
+committed template and the app never seeds, saves or rewrites it, so a
+Settings-dialog save cannot change what the suite talks to, and it is invisible
+to the built-in Editor (`.nojae` is reserved) — edit it outside the app. It is
+gitignored with the rest of `.nojae`, so it may hold a real key; no document
+about it may.
+
+```json
+{
+  "serverUrl": "http://<test-host>:8080/v1",
+  "serverApiKey": "",
+  "endpoint": "<the test model id, exactly as the server names it>",
+  "supportsVision": false,
+  "sysprompt": "You are a helpful assistant.",
+  "temperature": 1,
+  "topP": 0.95,
+  "topK": 20,
+  "minP": 0,
+  "repeatPenalty": 1.0,
+  "presencePenalty": 0,
+  "reasoning": "off",
+  "lspEnabled": [],
+  "maxToolIteration": 25
+}
+```
+
+Write it at `<working location>/.nojae/nojae-test-settings.json` — the working
+location the server boots on, which is the repo root unless
+`NOJAE_PATH_LOCATION` says otherwise. The pinned samplers and
+`"reasoning": "off"` are what keep the streaming specs reproducible.
+
+**A missing file stops the whole suite before a spec runs**, with a message
+naming the path — there is no fallback to the workspace's settings file, because
+a suite that quietly reached your own server and key would be green while
+proving nothing. Fix it by writing the file above; then make sure the server it
+names is reachable, since the endpoint stays a real one.
+
+Two checks confirm the fixture really is what the suite talks to (one machine,
+by hand):
+
+1. Put a deliberately wrong `endpoint` in the file and run the suite — the
+   failure names `nojae-test-settings.json`.
+2. Move the file away and run it again — the suite refuses to start, before any
+   spec runs.
+
+Both are cheap, and together they rule out the one failure mode this file
+exists to prevent: a green run measured against someone else's server.
+
+---
+
+## 2. Configuring the app
+
+Four files hold the settings and the declarations. The two hub declaration files
+are **hot**: a change is picked up by **Settings → Refresh MCP** /
+**Refresh LSP**, or by the toggles in the Settings dialog, without an app
+restart. `.env` and
+`.nojae/nojae-settings.json` follow the other rule: a save from the dialog is
+live at once, a hand-edit needs a server restart.
+
+| File | Declares |
+|---|---|
+| `.env` (from `.env.example`) | The verifier, the question set, and `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on). |
+| `.nojae/nojae-settings.json` (seeded from `nojae-settings.default.json`) | The model connection, sampling and LSP activation for this workspace. |
+| `.nojae/mcp-settings.json` (seeded from `mcp_connectors/mcp-settings.default.json`) | The MCP connectors the agent may call. |
+| `.nojae/lsp-settings.json` (written from the seeded `.nojae/lsp-settings.template.json`) | The language servers. |
+
+The two declaration files may carry API keys, so they are gitignored and their
+secrets are never returned by the API; the settings file holds the model key too
+(gitignored with the rest of `.nojae`), and the Settings dialog writes it. All
+three belong to the **working location**: when a folder becomes it, the app
+seeds the model connection and the MCP declaration from their committed
+templates — the MCP one with the `console` and `fedit` connectors pre-declared —
+and leaves the LSP *template* beside it, a copy of
+`lsp_connectors/lsp_servers.example.json`. No seed ever overwrites an existing
+file. The LSP declaration is never seeded as a working file — its entries name
+machine-local paths — you write it yourself from the template.
+
+The workspace's agent-modes file, `.nojae/agent-modes.json`, is seeded the same
+way and is not in that table because it declares nothing that runs: it holds the
+personas the composer's modes send to the model, and the app writes it from the
+pencil beside the mode dropdown. Like the hub declarations it is **hot** — the
+modes are re-read whenever the file changes, so a hand-edit outside the app needs
+no restart either. Like every other file of that folder it stays out of the
+Editor's tree — `.nojae` is reserved — so the pencil is the app's own way in.
+
+### The MCP setup file — `.nojae/mcp-settings.json`
+
+One entry per connector id, each with an `enable` flag that is the only switch
+that counts. Two kinds:
+
+- **`remote`** — a Streamable HTTP endpoint (`url` plus optional `headers`);
+- **`local`** — a stdio child the hub starts and owns (`command` as an argv list,
+  e.g. launched through `npx`).
+
+Any `url`, `command`, `headers` or `env` value may reference an environment
+variable as `${NAME}`, or `${NAME:-fallback}` when the variable is optional. The
+reference is expanded when the file is read, using the environment the connector
+runs with — the app's own, `.env` included — so one declaration works on every
+machine and a secret can stay out of the file. Two names answer from the app
+itself rather than from the environment: `${PROJECT_ROOT}` is this install's
+own folder, always right by construction. Only the braced `${…}` form is
+special, an
+expanded value is never re-split into arguments, and an unset name is left
+written as-is and reported as a validation note in **Settings → MCP** rather
+than blanked.
+
+**On Linux:**
+
+```json
+{
+  "context7": {
+    "type": "remote",
+    "enable": true,
+    "url": "${MCP_BASE_URL:-https://mcp.context7.com/mcp}",
+    "headers": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
+  },
+  "chrome-devtools": {
+    "type": "local",
+    "enable": true,
+    "command": ["npx", "-y", "chrome-devtools-mcp@latest",
+                "--executablePath=/usr/bin/chromium", "--headless"]
+  },
+  "console": {
+    "type": "local",
+    "enable": true,
+    "description": "Console command",
+    "command": ["/home/me/.pyenv/versions/nojae/bin/python",
+                "${NOJAE_PATH_LOCATION}/mcp_connectors/console_mcp.py",
+                "--root-dir", "${NOJAE_PATH_LOCATION}", "--transport", "stdio"]
+  },
+  "fedit": {
+    "type": "local",
+    "enable": true,
+    "description": "File editor",
+    "command": ["/home/me/.pyenv/versions/nojae/bin/python",
+                "${NOJAE_PATH_LOCATION}/mcp_connectors/fedit_mcp.py",
+                "--root-dir", "${NOJAE_PATH_LOCATION}", "--transport", "stdio"]
+  }
+}
+```
+
+**On Windows**, the same entries with the interpreter written the way a Windows
+venv lays out — and nothing else about the file changes:
+
+```json
+{
+  "console": {
+    "type": "local",
+    "enable": true,
+    "description": "Console command",
+    "command": ["${NOJAE_PATH_LOCATION}\\.venv\\Scripts\\python.exe",
+                "${NOJAE_PATH_LOCATION}\\mcp_connectors\\console_mcp.py",
+                "--root-dir", "${NOJAE_PATH_LOCATION}", "--transport", "stdio"]
+  },
+  "fedit": {
+    "type": "local",
+    "enable": true,
+    "description": "File editor",
+    "command": ["${NOJAE_PATH_LOCATION}\\.venv\\Scripts\\python.exe",
+                "${NOJAE_PATH_LOCATION}\\mcp_connectors\\fedit_mcp.py",
+                "--root-dir", "${NOJAE_PATH_LOCATION}", "--transport", "stdio"]
+  }
+}
+```
+
+The `npx` lines work as they do on Linux — the connector process inherits your
+`PATH`, where npm put `npx` — so the only real difference is which Python you
+name. Two rules of thumb anyway: the brace closes right after the variable name
+(`${NOJAE_PATH_LOCATION}/web`, never `${NOJAE_PATH_LOCATION/web}`),
+and a backslash inside a JSON string is written twice.
+
+`console` and `fedit` are the two connectors shipped with the app — the shell
+command surface and the file-edit surface (read, preview, apply, revert). Batch
+mode needs both. They take `--root-dir`, so their reach is bounded by their own
+deny-list, and `console` execs one command with no shell: no pipes, no
+redirections, no command chains. `chrome-devtools` and `context7` are third-party
+and entirely optional.
+
+### The LSP setup file — `.nojae/lsp-settings.json`
+
+When a folder becomes the working location, the app leaves
+`.nojae/lsp-settings.template.json` in its reserved folder — a copy of the
+committed `lsp_connectors/lsp_servers.example.json`, never overwritten. Copy
+it to `.nojae/lsp-settings.json` and adapt it; the app reads only
+`lsp-settings.json`, and a workspace without one simply has no language
+servers. One entry per server id: a stdio `command`, the `workspaceRoot` it
+indexes, the file `extensions` it owns and the `tools` to expose. An enabled
+server adds `lsp_<id>_<action>` tools — diagnostics, hover, definition,
+references, symbols, completion, formatting — to the WorkBench tab.
+`${NAME}` expansion works here exactly as it does for MCP.
+
+Two gates must agree for a server to run: its `enable` flag in
+`lsp-settings.json` **and** its id in the `lspEnabled` array of
+`.nojae/nojae-settings.json`, so a prepared declaration can stay entirely
+dormant. The ids are the server ids in the file — `pyright`, `typescript` and
+`vue` in the examples below — and the Settings dialog's LSP section toggles
+that array for you (a hand-edit of it needs a server restart, as for every
+member of that file). A freshly seeded workspace has `lspEnabled: []`, so even
+a declaration with every `enable` set to true starts nothing until you switch
+the servers on there.
+
+Install the servers themselves with npm, the same line on either system (the
+`lsp` extra only brings the Python client side):
+
+```bash
+npm install -g pyright typescript typescript-language-server @vue/language-server
+```
+
+**On Linux** — the form of the committed example, where `${VOLTA_BIN:-/usr/local/bin}`
+covers both a Volta-managed install and a plain global one:
+
+```json
+{
+  "pyright": {
+    "enable": true,
+    "label": "Pyright (Python)",
+    "extensions": [".py", ".pyi"],
+    "command": ["${VOLTA_BIN:-/usr/local/bin}/pyright-langserver", "--stdio"],
+    "workspaceRoot": "${NOJAE_PATH_LOCATION}",
+    "env": { "PATH": "${VOLTA_BIN:-/usr/local/bin}:/usr/local/bin:/usr/bin:/bin" },
+    "initializationOptions": { "typeCheckingMode": "standard" },
+    "tools": ["diagnostics", "hover", "definition", "references", "document_symbols"],
+    "idleShutdownSeconds": 300
+  },
+  "typescript": {
+    "enable": true,
+    "label": "TypeScript",
+    "extensions": [".ts", ".tsx", ".js", ".mjs", ".cjs", ".json"],
+    "command": ["typescript-language-server", "--stdio"],
+    "workspaceRoot": "${NOJAE_PATH_LOCATION}/web",
+    "lazy": true,
+    "initializationOptions": { "tsserver": { "path": "/usr/local/lib/node_modules/typescript" } },
+    "tools": ["diagnostics", "hover", "definition", "references", "document_symbols",
+              "completion", "signature_help", "formatting"],
+    "idleShutdownSeconds": 300
+  },
+  "vue": {
+    "enable": true,
+    "label": "Vue",
+    "extensions": [".vue"],
+    "command": ["vue-language-server", "--stdio",
+                "--tsdk=${NOJAE_PATH_LOCATION}/web/node_modules/typescript/lib"],
+    "workspaceRoot": "${NOJAE_PATH_LOCATION}/web",
+    "lazy": true,
+    "tools": ["diagnostics", "hover", "definition", "references", "document_symbols",
+              "completion", "formatting"],
+    "idleShutdownSeconds": 300
+  }
+}
+```
+
+**On Windows** the same three entries take a different shape, and the two
+differences are exactly why a Linux declaration copied verbatim fails there:
+
+```json
+{
+  "pyright": {
+    "enable": true,
+    "extensions": [".py", ".pyi"],
+    "command": ["pyright-langserver", "--stdio"],
+    "workspaceRoot": "${NOJAE_PATH_LOCATION}",
+    "env": { "PATH": "${LOCALAPPDATA}\\Volta\\bin;${ProgramFiles}\\Volta" },
+    "initializationOptions": { "typeCheckingMode": "standard" },
+    "tools": ["diagnostics", "hover", "definition", "references", "document_symbols"],
+    "idleShutdownSeconds": 300
+  },
+  "typescript": {
+    "enable": true,
+    "extensions": [".ts", ".tsx", ".js", ".mjs", ".cjs", ".json"],
+    "command": ["typescript-language-server", "--stdio"],
+    "workspaceRoot": "${NOJAE_PATH_LOCATION}/web",
+    "lazy": true,
+    "env": { "PATH": "${LOCALAPPDATA}\\Volta\\bin;${ProgramFiles}\\Volta" },
+    "tools": ["diagnostics", "hover", "definition", "references", "document_symbols",
+              "completion", "signature_help", "formatting"],
+    "idleShutdownSeconds": 300
+  },
+  "vue": {
+    "enable": true,
+    "extensions": [".vue"],
+    "command": ["vue-language-server", "--stdio",
+                "--tsdk=${NOJAE_PATH_LOCATION}/web/node_modules/typescript/lib"],
+    "workspaceRoot": "${NOJAE_PATH_LOCATION}/web",
+    "lazy": true,
+    "env": { "PATH": "${LOCALAPPDATA}\\Volta\\bin;${ProgramFiles}\\Volta" },
+    "tools": ["diagnostics", "hover", "definition", "references", "document_symbols",
+              "completion", "formatting"],
+    "idleShutdownSeconds": 300
+  }
+}
+```
+
+- **The `PATH` separator is `;`, not `:`** — and an `env.PATH` *replaces* the
+  child's `PATH` wholesale, so it must carry every folder the command resolves
+  through: with Volta, both the shim folder and the one holding `volta.exe` and
+  `node.exe`, otherwise the shim starts and immediately fails.
+- **Write the command as the bare program name.** What npm and Volta install
+  under `pyright-langserver` is a `#!/bin/bash` script Windows cannot exec; the
+  hub resolves `argv[0]` with `shutil.which` over the child's own `PATH`, which
+  honours `PATHEXT` and finds the `.cmd` beside it. When nothing answers the
+  name, the server is left at `error` with a sentence naming the command and the
+  folders searched.
+
+`${VOLTA_BIN}` is a POSIX idea and there is no conditional in `${…}` — no
+platform test, no OS-dependent default — which is why the example file states the
+Windows form in a `_windows_note` instead of pretending one string fits both.
+
+Two more knobs worth knowing:
+
+- **`"lazy": true`** spawns a server on its first tool call instead of with the
+  app (tsserver's cold start is multi-second and eats RAM). A settings panel
+  listing a lazy server as *stopped* is not a failure.
+- **`lsp_connectors/restricted-paths.txt`** lists, one prefix per line and in
+  both platforms' path forms (`/etc`, `${SystemRoot}`, `${HOME}/.ssh`,
+  `${USERPROFILE}/.aws`, …), the roots no `workspaceRoot` may sit inside. A
+  language server indexing a secret tree would put that tree in the model's
+  context window, so the declaration is refused instead.
+
+### The working location
+
+One value roots every file-touching part of the app — the `--root-dir` of the
+local connectors, every `workspaceRoot`, the Editor's tree and the terminal's
+starting directory: `NOJAE_PATH_LOCATION`. It is seeded with the install
+directory at startup, so a fresh checkout needs no configuration, and it is
+deliberately **not** a `.env` key, so a settings save can neither erase it nor
+resurrect a stale value.
+
+The **app bar** holds that value as an editable field: type another folder and
+press **Set** to repoint the MCP and LSP tools, the Editor's tree and new
+terminal sessions at it in one step. Set is inert while a benchmark run, a
+WorkBench reply or a batch is running — a session must not have its root moved
+out from under it. The change is process-local, and the next start is back at
+the install directory. Export the variable (or set it in `.env`) to pin it
+permanently. The folder must exist and must not sit under a restricted path. In
+a declaration, reference it as `${NOJAE_PATH_LOCATION}` — the app defines
+it for the connectors and the language servers it starts.
+
+That folder gets its own read/write policy in `<working location>/.nojae/read-write-policy.json`,
+which answers one question per file — `rw`, `ro` or `hidden` — for the Editor
+*and* for the agent's file tools: a folder you mark `ro` is not editable by an
+agent either. The file is seeded for you (dependency and build folders come
+read-only) and edited outside the app — see
+[`docs/POLICY-MANAGEMENT-DOC-EN.md`](docs/POLICY-MANAGEMENT-DOC-EN.md).
+
+### LLM configuration — `.env`
+
+Copy `.env.example` to `.env` when you want a verifier or a different question
+set. This file holds only what is scoped to **this nojae install**: the
+model connection — server, key, model id, system prompt, sampling, the vision
+flag, the LSP ids to activate and the cap on one chat reply's tool loop — lives
+in the workspace's `.nojae/nojae-settings.json`, which the Settings dialog
+writes and which travels with the folder (see the table at the top of this
+section). What is left here is the verifier, the question set and two technical
+keys, and the dialog edits the first two but not those two:
+
+```bash
+#QUESTION_SET=legacy                # resources/<name>.json
+#LLM_DEBUG=1                        # logs every request payload to the console
+#VERIFIER_AGENT_SERVERURL=http://127.0.0.1:8080/v1   # second model, Benchmark tab
+#VERIFIER_AGENT_ENDPOINT=verifier-model
+#NOJAE_PYTHON_ROOT=           # the python the stdio connectors run on
+```
+
+`LLM_DEBUG` and `NOJAE_PYTHON_ROOT` are **hand-edited**: they are managed
+keys, so a settings save keeps them, but nothing in the dialog edits them.
+`LLM_DEBUG=1` makes the LLM client log the payload of every request to the
+server console — very verbose, and switched back off once the failure is read.
+
+A `.env` save **regenerates the file from a fixed template**: fixed key set and
+order, empty optional keys commented out, hand-written extras lost. Add or rename
+a key and you change the template, the renderer and the committed example
+together.
+
+The e2e suite reads the same app-level keys from `.env.test`, and its model
+connection from the test settings file — see
+[Setting up tests for nojae](#setting-up-tests-for-nojae).
+
+### Run
+
+Both systems, once the two builds above are done:
+
+```bash
+nojae          # API + UI on http://127.0.0.1:8001
+```
+
+Nothing else is required for the Editor. A fresh checkout's WorkBench needs one
+thing: the model connection, which the Settings dialog writes into the
+workspace's settings file — a freshly seeded one is not configured yet and says
+so. The connectors and servers only decide how far the agent may reach.
+
+---
+
+## 3. What the app does
+
+### WorkBench — where the work happens 💬
+
+![The WorkBench tab](docs/workbench-tab.png)
+
+A streaming chat with your configured model, in an **agent mode** you pick from
+the composer: **Chat** (no tools at all), **Code** (file tools and language
+servers — the mode that implements, and leaves the tree compiling and tested),
+**Architect** (reads and asks, writes only a markdown spec), and **Todo builder**,
+which turns a spec into a numbered lot of task files and is defined by the app.
+A mode replaces the persona sent to the model and decides whether a whole tool
+hub reaches it at all; it can only ever narrow what Settings already allows. The
+**pencil** beside that dropdown edits the modes file itself —
+`<working location>/.nojae/agent-modes.json` — as fields instead of JSON: per mode
+a label, the two hub switches and the persona (with a button that puts
+nojae's own persona back for the three it ships), plus create, delete and
+this workspace's default, with the app's caps enforced as you type. The app-owned
+**Todo builder** is not in it — the app defines that mode, and the file never
+declares it. Saving writes the whole file, the bytes it replaced going to the
+app's backup folder, and the dropdown reloads from that answer. The file stays
+editable outside the app too: one that changed there since the dialog read it is
+reported as a conflict rather than overwritten.
+
+**Batch mode** works through a folder of task files — `todos/` by default, files
+named `01-slug.md`, `02-slug.md`, …, with `00-…` as the lot's big picture, which
+rides on every request. One task is one chat turn; the app never reads a task
+body, it only hands the model the path and lets its own connectors open it. A
+task counts as finished when its **file has left the folder** — the agent moves
+it into `todos/done`, which is its own acknowledgement — so a file still in place
+is relaunched with a note saying why, up to three times, after which the lot
+aborts. The mode is pinned when the lot launches, the conversation is reset
+between tasks, and continuity comes from disk: git and the files that moved.
+Batch mode refuses to start unless the connectors it depends on are on.
+
+Around the composer: the reasoning and tool panel (every tool call, its result
+and the server that answered), image attach when `supportsVision` is on,
+workspace-scoped prompt helpers, a session stopwatch and context-size badge, and
+Save / Load of a conversation as a plain JSON file. Markdown renders with KaTeX,
+highlighted code and Mermaid diagrams, always through the sanitizer.
+
+Every reply carries its own copy button, on the top-right corner of its panel:
+half-visible until the pointer enters the card, it puts that one answer on the
+clipboard as the model wrote it. The composer's own button above the textarea is
+the one that copies the whole conversation, as markdown.
+
+### Editor — the same tree, in your hands 🗂
+
+![The Editor tab](docs/editor-tab.png)
+
+The working location as a file tree and a Monaco pane: create, rename, move and
+delete, save with a diff against the last commit, git status badges on the rows,
+a search that answers for the same set of files the tree lists, and **one
+terminal per connection**, on the platform's pseudo-terminal — `$SHELL` on
+POSIX, Git Bash on Windows.
+
+Nothing here is destroyed. Every save keeps the bytes it replaced in a backup
+folder, and a delete moves the file into a dated batch under the reserved
+`.nojae/trash/` of the current working location (kept 30 days), so a restore is
+one `mv` away. `Ctrl`+click a group of rows, right-click, `Move to…`: the set
+moves whole in one request, and a file that is open keeps its tab and its
+unsaved edits at the new path.
+
+The code pane is served by the same language servers the WorkBench tools use:
+`Ctrl`+click a name to land on its definition, hover a symbol for its type and
+docstring, and find its references — answered about the buffer on screen, unsaved
+edits included. They are the servers you declared and switched on for the
+conversation, so a server switched off in the WorkBench **Tools** panel is a dead
+`Ctrl`+click here too, and the pane's status line names the one serving the file
+you are looking at. A file no server claims is quiet: the gesture simply does
+nothing, and the status line says why. Setting the servers up is *The LSP setup
+file* above.
+
+The Editor's writes are the browser's own surface — never reachable from a
+connector, a tool or a chat path — and they are refused while a reply streams.
+That is asserted by a test rather than trusted.
+
+### Benchmark — the original tool ⏱
+
+![The Benchmark tab](docs/benchmark-tab.png)
+
+Run a question set against the configured model and watch answers, scores,
+timings and token/s arrive live. Sets are JSON files in `resources/` —
+`legacy`, `78qcm`, `122qcm`, `30hardmath` — and an optional **verifier LLM**
+judges each answer against the expected one, so wording differences do not cost
+a point. Timing is measured app-side from chunk arrivals, anchored after a model
+warm-up, so loading and verification never enter the numbers; token/s counts
+completion tokens only. One run at a time, cancellation honoured between
+questions and mid-stream, and an answer the server cut short is failed rather
+than graded.
+
+### One configuration, one streaming layer
+
+All three tabs call the model through the same client against an
+OpenAI-compatible endpoint — llama.cpp, vLLM, or a hosted one — so adding a model
+is configuration, never code. Every event the server emits is numbered, so a
+reconnecting browser replays what it missed and a refresh loses nothing.
+Configuration changes are live the moment the Settings dialog saves them; a
+hand-edit of a hub declaration file is picked up by its **Refresh**, and only a
+hand-edit of `.env` or of the workspace settings file waits for a server restart.

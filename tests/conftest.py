@@ -1,0 +1,662 @@
+"""Suite-wide fixtures and the platform gate (win-01).
+
+The two markers below are how the suite stays a usable signal on a platform
+where some of these tests cannot run: a test whose subject the platform will
+not provide is *skipped with a sentence naming the invariant it would have
+checked*, never weakened. On Linux neither marker ever fires, so the whole
+suite still runs there.
+"""
+
+import logging
+import os
+import shutil
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+from typing import Iterator
+from typing import Callable
+from typing import cast
+from typing import Optional
+from typing import Dict
+from typing import Tuple
+
+import pytest
+
+from src.core import editorfs
+from src.core.job import RunJob
+from src.core.termhub import drivers as termhub_drivers
+from src.core.termhub import pty_conpty as termhub_conpty
+from src.core.termhub import shells as termhub_shells
+
+
+# --- the platform gate (win-01) ---------------------------------------------
+#
+# Every platform guard in the suite consults one of the ``_Probe`` objects
+# below: a per-file copy of a probe is how a guard drifts from what it guards.
+# A probe answers by *trying*, not by the platform's name, where a try is
+# possible (symlinks, a shell through the terminal's own selection seam, a
+# driver through the terminal's driver seam, ``/proc``); where it is not
+# (``/etc/shadow`` exists, ``chmod`` is meaningful), the difference sits behind
+# the named seam ``posix_behaviour`` instead. The attempt is lazy --
+# ``bool(probe)`` runs it once and caches the verdict -- so collection-only
+# commands touch no filesystem.
+
+
+class _Probe:
+    """A platform capability, attempted on first use and kept for the session.
+
+    A probe is truthy while the capability *is* there. pytest calls ``bool()`` on
+    a ``skipif`` condition at setup time, which is exactly where the attempt
+    belongs, so a probe (or its negation, as :func:`skip_unless` builds one) is
+    itself a usable condition. The guard markers below consult their probes the
+    same way.
+    """
+
+    def __init__(
+        self,
+        attempt: Callable[[], bool],
+        description: str,
+        detail: Optional[Callable[[], str]] = None,
+    ) -> None:
+        self._attempt = attempt
+        self.description = description
+        # What the attempt *learned* when it failed, for the skip sentence. A
+        # capability a seam refuses usually says why, and naming that is what
+        # makes "Git is missing" distinguishable from "the driver is missing"
+        # in a runner's output -- so the detail travels with the verdict.
+        self._detail = detail
+        self._verdict: Optional[bool] = None
+        self._lock = threading.Lock()
+
+    def __bool__(self) -> bool:
+        with self._lock:
+            if self._verdict is None:
+                self._verdict = bool(self._attempt())
+            return self._verdict
+
+    def refusal_detail(self) -> str:
+        """The failed attempt's own sentence, if it has one (asked only once
+        the verdict is no)."""
+        return "" if self._detail is None else str(self._detail())
+
+    def clear_verdict(self) -> None:
+        """Forget the cached attempt, so the next question asks again."""
+        with self._lock:
+            self._verdict = None
+
+    def __repr__(self) -> str:
+        # Never answers the probe -- a repr during collection must not touch the
+        # filesystem, so the verdict is shown only once it is already known.
+        return f"<probe: {self.description} -> {self._verdict}>"
+
+
+def _symlink_probe_forms(directory: Path) -> None:
+    """Create every shape of symlink a test in this suite asks for.
+
+    All three are attempted, because the tests use all three and a platform may
+    grant them differently: a plain file link, a *directory* link
+    (``target_is_directory=True``), and a ``target_is_directory=True`` link to a
+    name that does not exist -- the dangling form the Editor's create, rename
+    and delete tests plant. Any one raising means an unprivileged process
+    cannot make the link that test needs.
+    """
+    target_file = directory / "probe-target.txt"
+    target_file.write_text("x", encoding="utf-8")
+    target_dir = directory / "probe-target-dir"
+    target_dir.mkdir()
+
+    os.symlink(target_file, directory / "probe-file")
+    os.symlink(target_dir, directory / "probe-dir", target_is_directory=True)
+    os.symlink(
+        directory / "probe-never-existed",
+        directory / "probe-dangling",
+        target_is_directory=True,
+    )
+
+
+def _symlinks_are_allowed() -> bool:
+    """Try once, in a private temporary directory, to make every symlink shape."""
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="nojae-symlink-probe-"
+        ) as raw:
+            _symlink_probe_forms(Path(raw))
+    except OSError:
+        return False
+    return True
+
+
+symlink_probe = _Probe(_symlinks_are_allowed, "create a symlink")
+posix_probe = _Probe(lambda: os.name == "posix", "POSIX process semantics")
+windows_probe = _Probe(lambda: os.name == "nt", "Windows process semantics")
+proc_fs_probe = _Probe(lambda: Path("/proc").is_dir(), "a readable /proc")
+
+
+# --- the volume's case answer (tst-01) ----------------------------------------
+#
+# Several suites pin a *pair* of verdicts by forcing ``fscase.case_folded`` and
+# planting the two spellings the pair is about — ``.nojae`` and ``.NOJAE``,
+# ``denied-root`` and ``Denied-Root``. That only holds where the volume can hold
+# both names at once: NTFS answers one folder for both, so the second
+# ``mkdir`` raises and the planted premise is false. The probe is the app's own
+# question (plant a cased name, ``stat`` the other spelling, compare
+# ``st_dev``/``st_ino`` — the same measurement as ``mcp_connectors/fscase``),
+# so a test of a folded pair and a test that skips one cannot disagree about
+# this volume. A case-sensitive volume — the Linux runner, any ext4 — keeps
+# both spellings, so the marker never fires there and the whole suite runs.
+
+
+def _volume_folds_case() -> bool:
+    with tempfile.TemporaryDirectory(prefix="nojae-case-probe-") as raw:
+        planted = Path(raw) / "ProbeName"
+        planted.write_text("x", encoding="utf-8")
+        try:
+            cased = os.stat(planted)
+            try:
+                other = os.stat(Path(raw) / "probename")
+            except OSError:
+                return False
+            return (cased.st_dev, cased.st_ino) == (other.st_dev, other.st_ino)
+        finally:
+            planted.unlink(missing_ok=True)
+
+
+case_folded_probe = _Probe(_volume_folds_case, "a volume that folds name case")
+
+
+# --- the terminal's capability probes (csl-08) --------------------------------
+#
+# The pane's own seams answer these questions, so the suite asks the seams
+# rather than re-implementing them: ``termhub.shells`` decides *which program*
+# the terminal would run (``$SHELL`` → ``/bin/sh`` on POSIX, ``TERMINAL_SHELL``
+# → Git Bash on Windows, else a refusal naming what was looked for) and
+# ``termhub.drivers`` decides *whether a pseudo-terminal mechanism exists at
+# all*. The old probe (``$SHELL`` or ``/bin/sh``, judged with ``shutil.which``)
+# answered "no shell" on every Windows machine, which is why a real session
+# under test was impossible there. One probe per question, consulted by the
+# guards *and* by the tests that want the program itself, so a test that spawns
+# a session and a test that skips one can never disagree about this machine.
+
+_selected_shell: Optional[str] = None
+_shell_refusal = ""
+
+
+def _offer_a_shell() -> bool:
+    """Ask ``termhub.shells`` once; keep its answer for the tests and the skip."""
+    global _selected_shell, _shell_refusal
+    try:
+        _selected_shell = termhub_shells.select_shell()[0]
+    except Exception as exc:
+        # Whatever the seam refuses with (no shell on the platform, no Git
+        # install), it is the same refusal ``spawn()`` would raise, so this is
+        # the pane's own answer rather than a second opinion on it — and its
+        # sentence is what a skip gets to quote, so "Git is missing" and "the
+        # driver is missing" stay tellable apart in a runner's output.
+        _shell_refusal = str(exc)
+        return False
+    return True
+
+
+shell_probe = _Probe(
+    _offer_a_shell,
+    "a shell this machine offers the terminal",
+    lambda: _shell_refusal,
+)
+driver_probe = _Probe(
+    termhub_drivers.driver_available,
+    "a pseudo-terminal driver (the kernel PTY, or the 'windows' extra's ConPTY)",
+)
+# The one answer to "is the *Windows* driver installed", so a test class that
+# needs a real pseudo-console and the seam's own selection cannot disagree about
+# whether this box has one (the same rule as the shell probe above).
+windows_driver_probe = _Probe(
+    termhub_conpty.available,
+    "the Windows pseudo-console driver (pywinpty, the 'windows' extra)",
+)
+
+
+def selected_shell() -> Optional[str]:
+    """The program a terminal session would run here, or ``None``."""
+    if not shell_probe:
+        return None
+    return _selected_shell
+
+
+def _pane_can_run(tool: str) -> bool:
+    """Could the *pane's* shell run ``tool``? Asked of the environment the seam
+    would hand that child, not of this process's ``PATH``.
+
+    A Git Bash session's child is given Git's own directories first
+    (:func:`termhub.shells.child_environment`), so ``stty`` is reachable there
+    while ``shutil.which`` in the test process answers nothing — the app itself
+    is not launched from Git Bash. The child's answer is the one a terminal
+    assertion needs, and asking it through the seam keeps the test and the pane
+    from disagreeing about the search path.
+    """
+    program = selected_shell()
+    if program is None:
+        return False
+    child = termhub_shells.child_environment((program, "-i"), 80, 24)
+    for entry in child.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        for suffix in ("", ".exe"):
+            if os.path.isfile(os.path.join(entry, tool + suffix)):
+                return True
+    return False
+
+
+# C §6's resize assertion comes in two halves: the size the *driver* reports is
+# platform-neutral and asserted wherever a session can open; the size the
+# *shell* re-reads needs a shell carrying `stty`. Whether it does is an
+# environment fact about the program the seam selected, so a probe answers it —
+# the terminal twin of ``console_tool`` below, one probe for the one tool the
+# suite runs through the pane.
+stty_probe = _Probe(
+    lambda: _pane_can_run("stty"), "`stty` on the pane shell's own search path"
+)
+
+
+# The marker names, each answering to one probe plus the sentence a bare marker
+# skips with. A skipped test must say which invariant it would have checked, so
+# a test whose own name does not say it passes its own sentence as the marker's
+# argument:
+# ``@pytest.mark.requires_symlink("a symlinked lot file must never be read")``.
+_GUARD_MARKERS: Dict[str, Tuple[_Probe, str]] = {
+    "requires_symlink": (
+        symlink_probe,
+        "the invariant needs a symlink this platform will not let an "
+        "unprivileged process create",
+    ),
+    "posix_behaviour": (
+        posix_probe,
+        "the invariant is a POSIX-only fact with no probe that answers it",
+    ),
+    "windows_behaviour": (
+        windows_probe,
+        "the invariant is a Windows-only fact (the Windows trees, the Windows "
+        "environment values, Git's toolset) with no probe that answers it",
+    ),
+    # The terminal's capabilities (csl-08), marked rather than skipif-ed so the
+    # sentence can carry what the probe *learned* — the seam's own refusal —
+    # which a skipif reason, fixed at import time, cannot. A session test names
+    # the ones it opens through; a skip then says which capability is absent
+    # rather than repeating a sentence that could describe any of them.
+    "needs_shell": (
+        shell_probe,
+        "the terminal's own shell selection (termhub.shells: POSIX $SHELL -> "
+        "/bin/sh, Windows TERMINAL_SHELL -> Git Bash) names no program here",
+    ),
+    "needs_driver": (
+        driver_probe,
+        "no pseudo-terminal driver answers available (the kernel PTY, or the "
+        "'windows' extra's ConPTY), so no session can spawn at all",
+    ),
+    "needs_stty": (
+        stty_probe,
+        "the invariant is that the *shell* re-reads the window the server set, "
+        "which needs `stty` on the pane shell's own search path",
+    ),
+    "needs_windows_driver": (
+        windows_driver_probe,
+        "the invariant can only be measured on a real pseudo-console, which "
+        "needs the 'windows' extra installed",
+    ),
+    # A pair of verdicts obtained by forcing ``fscase.case_folded`` while both
+    # spellings sit on disk as two folders. On a volume that folds case they are
+    # one folder, so the "not folded" half is no longer the pair's other answer
+    # — it describes a name that cannot exist there.
+    "case_sensitive_volume": (
+        _Probe(
+            lambda: not bool(case_folded_probe),
+            "a volume that keeps two names differing only in case apart",
+        ),
+        "the test plants both spellings of one name and asks the fold probe to "
+        "answer each way, which only a case-sensitive volume can hold",
+    ),
+}
+
+
+def skip_unless(probe: _Probe, reason: str) -> pytest.MarkDecorator:
+    """A ``skipif`` for one platform capability a test needs, with its sentence.
+
+    A fact that a named marker does not cover (``/proc`` only, not all of
+    POSIX) keeps its own guard, but built on this one helper so the probe and
+    the reason live together. ``skipif(not probe)`` would answer the probe at
+    import time; the wrapper below defers the verdict to the test's setup.
+    """
+    absent = _Probe(lambda: not bool(probe), f"absence of {probe.description}")
+    # ``cast`` only for the stub: pytest's own skipif signature wants a plain
+    # bool, and it evaluates the condition by calling bool() on it.
+    return pytest.mark.skipif(cast(bool, absent), reason=reason)
+
+
+# A few tests can only observe the rule they pin by *running* a program (the
+# console connector's decoder, its timeout, its output cap). Whether that
+# program is on PATH is an environment fact, so a probe answers it rather than a
+# platform name — the same answer on Windows and on a Linux box with a thin
+# PATH. One probe per tool, cached, so the tests asking about `printf` attempt
+# it once.
+_tool_probes: Dict[str, _Probe] = {}
+
+
+def console_tool(tool: str, reason: str) -> pytest.MarkDecorator:
+    """Skip a test whose subject can only be seen through ``tool``.
+
+    ``reason`` names the invariant the test would have checked, as every skip's
+    sentence must.
+    """
+    probe = _tool_probes.get(tool)
+    if probe is None:
+        probe = _Probe(lambda: shutil.which(tool) is not None, f"`{tool}` on PATH")
+        _tool_probes[tool] = probe
+    return skip_unless(probe, reason)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the guard markers, so ``--strict-markers`` stays clean."""
+    for name, (_, default_reason) in _GUARD_MARKERS.items():
+        config.addinivalue_line("markers", f"{name}(reason=None): {default_reason}")
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Turn a guard marker into the skip its probe says the platform needs."""
+    for name, (probe, default_reason) in _GUARD_MARKERS.items():
+        for mark in item.iter_markers(name=name):
+            if probe:
+                continue
+            reason = str(mark.args[0]) if mark.args else default_reason
+            detail = probe.refusal_detail()
+            if detail:
+                reason = f"{reason} ({detail})"
+            pytest.skip(f"{name}: {reason}")
+
+
+@pytest.fixture
+def _hermetic() -> Iterator[pytest.MonkeyPatch]:
+    """A ``MonkeyPatch`` a guard owns, so a test's ``undo()`` cannot lift the guard.
+
+    Every hermeticity guard below used to patch through the test's own
+    ``monkeypatch``. That is the same instance a test body can call ``undo()``
+    on, and ``undo()`` reverts *everything* recorded on it — the test's patches
+    **and** every autouse guard's. The suite then read the developer's machine
+    for the rest of the test: the working location fell back to the install
+    directory, so the modes and settings lookups answered from this checkout's
+    own ``.nojae`` — a real model connection, a real API key, and whatever
+    agents that developer happens to have defined today. A test asserting a
+    fixed list of mode ids therefore failed or passed on the contents of a file
+    no test wrote, which is the machine-dependence ``test_env_isolation.py``
+    exists to forbid.
+
+    So a guard patches on an instance of its own and undoes it in its own
+    teardown. A test still overrides a guard by patching the same key on its own
+    ``monkeypatch`` (guards set up first, test body later), and the override is
+    still reverted before the guard's own undo — the ordering is unchanged.
+    """
+    guard = pytest.MonkeyPatch()
+    try:
+        yield guard
+    finally:
+        guard.undo()
+
+
+@pytest.fixture(autouse=True)
+def _no_mcp_processes(_hermetic: pytest.MonkeyPatch) -> None:
+    """Never spawn real MCP connector subprocesses from app lifespans in tests."""
+    _hermetic.setenv("NOJAE_DISABLE_MCP", "1")
+
+
+@pytest.fixture(autouse=True)
+def _no_lsp_processes(_hermetic: pytest.MonkeyPatch) -> None:
+    """Never spawn real language servers from app lifespans in tests."""
+    _hermetic.setenv("NOJAE_DISABLE_LSP", "1")
+
+
+@pytest.fixture(autouse=True)
+def _no_test_settings_mode(_hermetic: pytest.MonkeyPatch) -> None:
+    """Pin the e2e settings switch **off** for the whole backend suite (T-D7).
+
+    ``NOJAE_TEST_SETTINGS`` makes a process read
+    ``.nojae/nojae-test-settings.json`` instead of the workspace's own settings
+    file. That file is a hand-authored e2e fixture the app never seeds, so an
+    exported ``1`` in the runner's shell would leave the *whole* suite reading a
+    file that is not there and failing en masse for a reason no traceback
+    explains. Clearing it here is what keeps the suite's answer independent of
+    the machine it runs on; the e2e suite is the only thing that turns it on,
+    through ``web/playwright.config.js``. A unit test that wants the mode flips
+    it itself with ``monkeypatch.setenv`` — the switch is read per call.
+    """
+    from src.core import workspace_settings
+
+    _hermetic.delenv(workspace_settings.TEST_SETTINGS_KEY, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_trash_of_its_own(_hermetic: pytest.MonkeyPatch,
+                         tmp_path: Path) -> None:
+    """Keep every test's sweep off the app repo's legacy ``logs/trash``.
+
+    ``sweep_trash`` prunes that folder as well as the workspace's own, and the
+    app sweeps once at boot — so without this pin, running the suite would
+    expire the developer's real old batches. Tests that assert about batches
+    patch ``TRASH_DIR``/``LEGACY_TRASH_DIR`` themselves (the ``trash`` /
+    ``legacy_trash`` fixtures); this only closes the paths that never ask.
+    """
+    _hermetic.setattr(
+        editorfs.constants, "LEGACY_TRASH_DIR", tmp_path / "legacy-trash-unused"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_legacy_tool_cap(_hermetic: pytest.MonkeyPatch) -> None:
+    """Keep the tool-loop cap deterministic for the ``.env`` half.
+
+    ``create_app()`` loads the developer's own ``.env`` once, so a key this file
+    *used* to own would leak into every test and depend on the machine it runs
+    on. ``MAX_TOOL_ITERATION`` and ``LSP_ENABLED`` are the two that moved out of
+    ``.env`` into the workspace's ``.nojae/nojae-settings.json`` (so a stale
+    entry in a developer's ``.env`` is now read by nothing); clearing them anyway
+    is what keeps this fixture honest while the ``.env`` template still renders
+    them, and the leak that move opens — the file itself — is closed by
+    :func:`_no_workspace_settings_leak` below.
+    ``MCP_ENABLED`` is gone from the config entirely (connectors activate only
+    through their ``enable`` flag in ``mcp-settings.json``); clearing it keeps a
+    stale entry in a developer's ``.env`` from confusing the suite.
+    """
+    _hermetic.delenv("MAX_TOOL_ITERATION", raising=False)
+    _hermetic.delenv("LSP_ENABLED", raising=False)
+    _hermetic.delenv("MCP_ENABLED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_workspace_settings_leak(
+    _hermetic: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[None]:
+    """Point the workspace settings file at a throw-away location for every test.
+
+    The model connection (server, key, sampling, ``lspEnabled``, the tool-loop
+    cap) lives in ``<working location>/.nojae/nojae-settings.json`` now, so the
+    suite's ``SETTING_KEYS`` wipe loops no longer stand between a test and the
+    developer's own file — live server URL and real API key and every test that
+    reads group 1 would answer with them. Nothing replaces those loops for this
+    store, so the guard is the *location*: unless a test names its own working
+    location, it gets a fresh folder under its ``tmp_path`` rather than this
+    checkout, and the settings lookup can only find a file that test wrote.
+
+    A test that picks its own location (the folder's own style,
+    ``monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))``) overrides
+    this, because its own fixture or body runs later; one that deliberately
+    clears the key asks for the boot default and gets it. ``tests/conftest`` is
+    the only place this is done, and ``tests/test_env_isolation.py`` is the
+    invariant stated as a test rather than trusted as a fixture.
+
+    The throw-away root is a **sibling** of ``tmp_path`` rather than a folder
+    inside it: several suites pin that a workspace they point at stayed empty
+    (``assert list(workspace.iterdir()) == []`` is how "a reader never writes"
+    is checked), so a guard folder of the fixture's own would falsify the very
+    assertion those tests exist to make.
+    """
+    from src import config as config_module
+    from src.core import workspace_settings
+
+    root = workspace_settings_guard_root(tmp_path)
+    root.mkdir(exist_ok=True)
+    _hermetic.setenv(config_module.PATH_LOCATION_KEY, str(root))
+    # The cache is keyed on the resolved path, so it must be empty on both sides
+    # of a test: an entry made about another workspace's file must never answer
+    # here, and one made here must never answer there.
+    workspace_settings.invalidate_workspace_settings()
+    yield
+    workspace_settings.invalidate_workspace_settings()
+
+
+@pytest.fixture(autouse=True)
+def _no_debug_switch_leak(_hermetic: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep the LLM debug switch off, and process state clean, for every test.
+
+    Two leaks would make that switch machine-dependent otherwise:
+    ``create_app()`` loads the developer's own ``.env`` (which may carry
+    ``LLM_DEBUG``, or the legacy key it falls back to), and ``save_settings``
+    writes the key straight into ``os.environ``, which ``monkeypatch`` never
+    undoes. The switch itself also mutates what no fixture can undo on its own —
+    the level and handler of the ``nojae.llm`` logger, and the payload
+    hook of ``core/llmkit/client``, which an app boot re-points at ``config``.
+
+    So both keys are cleared up front, and the logger and the hook are handed
+    back as they were found — except the handler the switch itself attaches,
+    which is the switch's own state to rebuild and must not come back bound to a
+    stream that has since gone (and never without the ``propagate`` off that
+    belongs to it). Without this, a test asserting the client's hook defaults to
+    off would pass or fail on the order the settings tests ran in.
+    """
+    from src import config as config_module
+    from src.core.llmkit import client as llmkit_client
+    from src.core.llmkit import constants as llmkit_constants
+
+    logger = logging.getLogger(llmkit_constants.DEBUG_LOGGER_NAME)
+    saved = (
+        logger.level,
+        list(logger.handlers),
+        logger.propagate,
+        llmkit_client.debug_enabled,
+    )
+    _hermetic.delenv(config_module.LLM_DEBUG_KEY, raising=False)
+    _hermetic.delenv(config_module.LEGACY_LLM_DEBUG_KEY, raising=False)
+    yield
+    level, handlers, propagate, hook = saved
+    kept = [
+        handler
+        for handler in handlers
+        if not isinstance(handler, config_module._DebugStreamHandler)
+    ]
+    logger.setLevel(level)
+    logger.handlers[:] = kept
+    # The handler being dropped takes its ``propagate = False`` with it: leaving
+    # that behind would silence a logger that now has nowhere to write.
+    logger.propagate = propagate or len(kept) != len(handlers)
+    llmkit_client.debug_enabled = hook
+
+
+def workspace_settings_guard_root(tmp_path: Path) -> Path:
+    """The throw-away working location :func:`_no_workspace_settings_leak` pins."""
+    return tmp_path.parent / f"{tmp_path.name}-workspace"
+
+
+def write_workspace_settings(
+    root: Path, **members: Any
+) -> Path:
+    """Write ``root/.nojae/nojae-settings.json`` from the template plus overrides.
+
+    The suite's way of saying "this workspace's model connection is these
+    values": the committed template supplies every member (so a test never
+    hand-assembles a document the reader might reject), and ``members`` replaces
+    whichever ones the test is about. ``serverUrl``/``endpoint`` default to real
+    values, because the template's are instruction sentences and a reader would
+    report the file *not configured* (spec D8).
+
+    The path is built from the module's own ``POLICY_DIRNAME`` /
+    ``active_settings_filename()`` — never a literal — so a test that flips the
+    test-settings mode writes the file that mode reads, and the settings cache is
+    invalidated so the write answers immediately (D4: a hand-write is not a
+    restart).
+    """
+    import json
+
+    from src.core import workspace_settings
+
+    raw: Dict[str, Any] = json.loads(
+        workspace_settings.WORKSPACE_SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+    )
+    raw["serverUrl"] = "http://test-server:8080/v1"
+    raw["endpoint"] = "test-model"
+    raw.update(members)
+    folder = root / workspace_settings.POLICY_DIRNAME
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / workspace_settings.active_settings_filename()
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    workspace_settings.invalidate_workspace_settings()
+    return path
+
+
+def neutralise_workspace_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    absent: bool = False,
+    **members: Any,
+) -> Path:
+    """Point the workspace settings lookup at ``tmp_path``, on a file it owns.
+
+    The twin of what this file does for ``.env`` (``monkeypatch.setattr(
+    config_module, "ENV_PATH", tmp_path / ".env")`` beside the ``SETTING_KEYS``
+    wipe): a test that wants to know what group 1 answers must first make sure it
+    is asking about a file **it** created. The autouse
+    :func:`_no_workspace_settings_leak` already moves the location for every
+    test; this is the same move for a test or fixture that owns its own root,
+    plus the write of the file it will read.
+
+    By default that write is a *configured* document (``:func:`write_workspace_settings`
+    — the template plus ``members``), because a test about values needs values:
+    the seed alone would answer "not configured" (D8). ``absent=True`` writes no
+    file at all, which is how a test asks what an unconfigured workspace answers.
+    """
+    from src import config as config_module
+    from src.core import workspace_settings
+
+    monkeypatch.setenv(config_module.PATH_LOCATION_KEY, str(tmp_path))
+    workspace_settings.invalidate_workspace_settings()
+    if not absent:
+        write_workspace_settings(tmp_path, **members)
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _pane_shell_is_the_apps_default(_hermetic: pytest.MonkeyPatch) -> None:
+    """Pin the terminal pane's shell to the app's own default for every test.
+
+    On POSIX the pane runs ``$SHELL`` when it names an executable program
+    (:mod:`src.core.termhub.shells`), so the suite would otherwise drive each
+    test shell in whatever the developer has as a login shell — and a configured
+    interactive shell loads that developer's own startup files. A zsh with a
+    prompt theme was measured to swallow a keystroke of whatever it types first
+    (here, the redraw ate the ``s`` of ``sleep`` in the command a tree test
+    types), so a session assertion can fail on one machine and pass on another.
+    Same class as the cap leak above: the environment, not the code, decides the
+    outcome.
+
+    Clearing the key asks the selection seam its documented POSIX question,
+    whose answer is the fallback shell — no test computes a path. It is *not* a
+    skip condition: every platform's own answer still runs (Windows names Git
+    Bash and ignores this key entirely), and a runner that offers no fallback
+    keeps skipping with the seam's own sentence through ``shell_probe``.
+    """
+    _hermetic.delenv(termhub_shells.constants.SHELL_KEY, raising=False)
+    # The probe caches its verdict for the session, and the markers consult it;
+    # a verdict taken from the ambient shell is the machine's, not this test's.
+    shell_probe.clear_verdict()
+
+
+@pytest.fixture
+def job() -> Iterator[RunJob]:
+    """Provide a fresh, empty benchmark run job."""
+    yield RunJob()

@@ -1,0 +1,2777 @@
+"""REST + SSE endpoints for the benchmark run."""
+
+import asyncio
+import base64
+import binascii
+import json
+import re
+import threading
+import uuid
+from contextlib import suppress
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Union
+
+import os
+
+import httpx
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from src.api.events import EventBus, sse_format
+from src.config import (
+    QUESTION_SET_DEFAULT,
+    PATH_LOCATION_KEY,
+    TRUTHY_VALUES,
+    agent_instructions_block,
+    list_question_sets,
+    load_endpoints_config,
+    load_questions,
+    load_settings,
+    max_tool_iteration,
+    lsp_enabled_ids,
+    path_location,
+    default_path_location,
+    save_settings,
+    questions_path,
+)
+from src.core.mcphub import (
+    ensure_mcp_settings_file,
+    load_externals,
+    mcp_settings_file_state,
+    set_externals_enabled,
+)
+from src.core.lsphub import (
+    all_servers,
+    ensure_lsp_settings_template,
+    lsp_settings_file_state,
+    lsp_settings_template_state,
+    restricted_lsp_roots,
+    set_lsp_enabled,
+)
+from src.core import editorfs
+from src.core.editorfs import fscase, policy_seed
+from src.core.editorfs.policy import _is_within
+from src.core import agent_modes
+from src.core import agent_modes_write
+from src.core import prompt_helpers
+from src.core import termhub
+from src.core.termhub import policy as term_policy
+from src.core.termhub import drivers as term_drivers
+from src.core import workspace_settings
+from src.core.bench import run_benchmark
+from src.core import batch as batch_core
+from src.core.chat import stream_chat
+from src.core.job import RunJob
+from src.core.llm import RunCancelled
+from src.core.llmkit.client import models_url
+from src.core.llmkit.sanitize import sanitize_content
+from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
+from src.core.utils import RESULTS_PATH
+
+
+class SettingsFieldsMixin(BaseModel):
+    """Tolerant request fields: JSON scalars are accepted and stringified.
+
+    ``null`` means "unset" and unknown keys are ignored, so hand-written
+    clients may post numbers (``"temp": 0.2``) or omit optional fields.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _stringify_scalars(cls, value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list, BaseModel)) or isinstance(value, bool):
+            return value
+        if isinstance(value, (str, int, float)):
+            return str(value)
+        raise ValueError("expected a string or number")
+
+
+class VerifierSettingsIn(SettingsFieldsMixin):
+    """Verifier agent settings as sent by the settings dialog."""
+
+    serverUrl: str = ""
+    apiKey: str = ""
+    endpoint: str = ""
+    sysprompt: str = ""
+
+
+class SettingsIn(SettingsFieldsMixin):
+    """Benchmark settings as sent by the settings dialog (raw strings)."""
+
+    serverUrl: str = ""
+    apiKey: str = ""
+    endpoint: str = ""
+    sysprompt: str = ""
+    temp: str = ""
+    topP: str = ""
+    topK: str = ""
+    minP: str = ""
+    repeatPenalty: str = ""
+    presencePenalty: str = ""
+    reasoning: str = ""
+    # ``Union[bool, str]`` rather than ``str``: the dialog's checkbox sends a
+    # native boolean now (the workspace file's own type, D6), and
+    # ``_stringify_scalars`` passes a bool through untouched — a plain ``str``
+    # field would reject it before that pass meant anything.
+    supportsVision: Union[bool, str] = ""
+    questionSet: str = ""
+    verifier: VerifierSettingsIn = VerifierSettingsIn()
+
+    @field_validator("verifier", mode="before")
+    @classmethod
+    def _empty_verifier(cls, value: Any) -> Any:
+        # Accept "verifier": null / "" / {} as "all verifier fields unset".
+        return value or VerifierSettingsIn()
+
+
+class QuestionSetIn(SettingsFieldsMixin):
+    """Question set selection as sent by the settings dialog."""
+
+    questionSet: str = ""
+
+
+class PathLocationIn(SettingsFieldsMixin):
+    """Working-location change as sent by the app bar's location field."""
+
+    path: str = ""
+
+
+class PromptHelperSlotIn(BaseModel):
+    """One prompt-helper bullet as sent by the slot dialog.
+
+    ``index`` addresses one of the fixed slots (this workspace's
+    ``.nojae/prompt-helpers.json`` always holds exactly
+    ``prompt_helpers.SLOT_COUNT``, so there is nothing to create or delete);
+    saving empty ``content`` clears the slot.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    index: int = Field(ge=0, le=prompt_helpers.SLOT_COUNT - 1)
+    color: str = prompt_helpers.DEFAULT_COLOR
+    content: str = ""
+
+    @field_validator("color")
+    @classmethod
+    def _require_hex_color(cls, value: str) -> str:
+        if not prompt_helpers.COLOR_RE.match(value):
+            raise ValueError("color must be a 6-digit hex color (e.g. #808080)")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def _cap_content(cls, value: str) -> str:
+        if len(value) > prompt_helpers.CONTENT_MAX_CHARS:
+            raise ValueError(
+                f"content exceeds the {prompt_helpers.CONTENT_MAX_CHARS} "
+                "character cap"
+            )
+        return value
+
+
+class McpIn(BaseModel):
+    """MCP connector activation as sent by the settings dialog."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: List[str] = []
+    maxIterations: int = Field(default=25, ge=1, le=500)
+
+
+class LspIn(BaseModel):
+    """Language-server activation as sent by the settings dialog.
+
+    ``maxIterations`` is the same shared MCP+LSP tool-loop cap the MCP
+    section edits — posting it from either section keeps one value.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: List[str] = []
+    maxIterations: int = Field(default=25, ge=1, le=500)
+
+
+class LspQueryIn(BaseModel):
+    """One Editor-pane question to the language-server hub.
+
+    ``action`` is the app's own vocabulary — ``status``, ``definition``,
+    ``hover`` or ``references`` — never an LSP method name: the hub is the only
+    thing that speaks the protocol. It is a plain string rather than a
+    ``Literal`` on purpose, because the editor's action table lives in
+    ``core/lsphub/editor.py`` and a copy of it here would be a second authority
+    that drifts; an action the table does not know is answered quietly by the
+    hub, not refused with a 422.
+
+    ``line`` and ``character`` are **0-based**, LSP-native, and absent for the
+    actions that need no position (the browser's ``lib/`` module does the
+    ``+1``). ``text`` travels **only when the buffer is dirty**: the buffer is
+    the source of truth, so a clean buffer omits it and the hub reads the file.
+    ``lspEnabled`` is the conversation-scoped allowlist the Tools panel holds;
+    ``None`` means "no filter" — the failed-snapshot case, which must not blind
+    the pane.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    action: str
+    path: Optional[str] = None
+    line: Optional[int] = None
+    character: Optional[int] = None
+    text: Optional[str] = None
+    lspEnabled: Optional[List[str]] = None
+
+
+class FileSaveIn(BaseModel):
+    """A save of one whole editor buffer (``PUT /api/fs/file``).
+
+    ``ifUnmodifiedSince`` is the ``mtime`` the ``GET /api/fs/file`` that filled
+    this buffer reported — the optimistic-concurrency token the save guard
+    compares against the disk. ``None`` means the client holds no expectation
+    and skips the guard; the route logs that, because the SPA always sends the
+    token and its absence is the shape of a client bug.
+
+    The size cap is deliberately *not* a validator here: over-cap is a refusal
+    of the same shape as the read route's (``413`` naming the size), and a
+    Pydantic validator would answer ``422`` instead. ``editorfs.write_file``
+    owns it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    text: str = ""
+    ifUnmodifiedSince: Optional[float] = None
+
+
+class FileRenameIn(BaseModel):
+    """A rename, and therefore a move (``POST /api/fs/rename``).
+
+    ``to`` is the whole workspace-relative **target path**, not a new leaf name:
+    that is what makes a move the same route as a rename, and it means the
+    target's parent chain is a user-supplied path like any other, gated the same
+    way. A name-only field would push the joining into the client and leave the
+    server unable to check the folder a file lands in.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    frm: str = Field(alias="from")
+    to: str
+
+
+class FileMoveBatchIn(BaseModel):
+    """Several files into one folder that already exists (``POST /api/fs/move-batch``).
+
+    ``paths`` are the whole workspace-relative **source** paths and ``to_parent``
+    is the destination **folder** ("" is the working location) — deliberately two
+    fields, never a joined target: the server joins each source's own name to
+    that folder, so the ancestor gate always sees the folder the file really
+    lands in. That is ``FileCreateIn``'s argument in reverse — there a client
+    that joined a name to a folder could hide the joining, and here a client that
+    sent whole targets could hide a target no gate was shown.
+
+    No name field either: this route moves, it never renames. Renaming while
+    moving stays ``POST /api/fs/rename``'s job, so there is one basename rule in
+    the app, not two.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    paths: List[str]
+    to_parent: str
+
+
+class FileCreateIn(BaseModel):
+    """A new file or folder (``POST /api/fs/create``).
+
+    ``path`` is the whole workspace-relative path of the thing to create — its
+    parent must already exist, so this is one name per request and never a
+    ``mkdir -p``. ``dir`` picks a folder over an empty file.
+
+    A name-only field is deliberately *not* offered: the client joins the name
+    it collected to the folder it pointed at, so the route sees one path and the
+    gate that checks the ancestor chain sees the whole of it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    dir: bool = False
+
+
+class AgentModesSaveIn(BaseModel):
+    """The whole agent-modes document, back to disk (``POST /api/agent-modes/save``).
+
+    ``document`` is the dialog's own shape: its entries in the dialog's order plus
+    its ``default``. It stays **loose JSON** here on purpose — the rules about what
+    a modes document may hold (the closed vocabulary, the caps, a reserved id, a
+    ``default`` naming no declared mode) are :mod:`core.agent_modes_write`'s, and
+    they are reported as the *loader's* findings naming the JSON pointer. A Pydantic
+    model mirroring those rules here would answer a broken entry with FastAPI's
+    field-path error instead of the sentence the dialog already knows how to put on
+    the field, and it would be a second voice for one vocabulary.
+
+    What *is* validated here is the transport half: ``document`` must be an object
+    (a body holding a list or a string could not name entries at all), and
+    ``mtime`` is the token ``GET /api/agent-modes/document`` published — the same
+    optimistic-concurrency token ``FileSaveIn.ifUnmodifiedSince`` is, in the string
+    spelling the document read hands out. A malformed *body* is a 422 from FastAPI;
+    a malformed *document* is a 422 from the core.
+
+    ``version`` and ``readme`` are deliberately not fields: D6 says the version is
+    the app's constant and the readme belongs to the file on disk, so a body that
+    carried them would be asking for something this save ignores.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    document: Dict[str, Any]
+    mtime: Optional[str] = None
+
+
+# Base64-decoded image size limit for multimodal chat messages (the client
+# applies the same limit before reading a file).
+MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024
+_CHAT_IMAGE_DATA_URL = re.compile(
+    r"^data:image/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$"
+)
+
+
+class ChatImageUrl(BaseModel):
+    """Image reference inside a multimodal chat content part."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def _require_data_url(cls, value: str) -> str:
+        match = _CHAT_IMAGE_DATA_URL.match(value)
+        if match is None:
+            raise ValueError(
+                "image_url.url must be a base64 data URL "
+                "(data:image/png|jpeg|webp|gif;base64,...)"
+            )
+        try:
+            decoded = base64.b64decode(match.group(2), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(f"image data is not valid base64: {exc}") from exc
+        if len(decoded) > MAX_CHAT_IMAGE_BYTES:
+            raise ValueError(
+                f"image is too large ({len(decoded)} bytes, max "
+                f"{MAX_CHAT_IMAGE_BYTES})"
+            )
+        return value
+
+
+class ChatContentPart(BaseModel):
+    """One OpenAI-style multimodal content part (text or image_url)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["text", "image_url"]
+    text: Optional[str] = None
+    image_url: Optional[ChatImageUrl] = None
+
+    @field_validator("text")
+    @classmethod
+    def _neutralise_control_tokens(cls, value: Optional[str]) -> Optional[str]:
+        # Runs are removed before any further shape check sees the text,
+        # so a part that was only a run reads as empty to the validators
+        # below and to ``ChatIn._require_turns`` -- an incoming message of
+        # nothing but control tokens is a 422, never a silent empty turn.
+        # The second half of the rule: the seam also sanitizes on the way
+        # out, so the run is removed at both doors and never lives inside
+        # the app's message objects at all.
+        return None if value is None else sanitize_content(value)
+
+    @model_validator(mode="after")
+    def _require_payload(self) -> "ChatContentPart":
+        if self.type == "text" and self.text is None:
+            raise ValueError("text content part requires text")
+        if self.type == "image_url" and self.image_url is None:
+            raise ValueError("image_url content part requires image_url")
+        return self
+
+
+class ChatMessage(BaseModel):
+    """One chat turn as sent by the chat screen.
+
+    ``content`` is a plain string or a list of multimodal parts (user
+    messages only) so images travel as base64 data URLs in the standard
+    OpenAI format on the way to the OpenAI-compatible server.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    role: Literal["user", "assistant"]
+    content: Union[str, List[ChatContentPart]]
+
+    @model_validator(mode="after")
+    def _require_payload(self) -> "ChatMessage":
+        if isinstance(self.content, str):
+            # Same incoming-door rule as the text parts: runs are gone
+            # before the shape checks, so history that only smuggled
+            # control tokens reads as empty and the message is refused.
+            self.content = sanitize_content(self.content)
+        if not isinstance(self.content, str):
+            if self.role == "assistant":
+                raise ValueError("assistant messages must use plain text content")
+            if not self.content:
+                raise ValueError("message content must not be empty")
+            has_image = any(part.type == "image_url" for part in self.content)
+            has_text = any(
+                part.type == "text" and (part.text or "").strip()
+                for part in self.content
+            )
+            if not has_image and not has_text:
+                raise ValueError("message content must not be empty")
+        return self
+
+    def payload(self) -> Dict[str, Any]:
+        """Shape the message for the LLM client (parts dumped to plain dicts)."""
+        if isinstance(self.content, str):
+            return {"role": self.role, "content": self.content}
+        return {
+            "role": self.role,
+            "content": [part.model_dump(exclude_none=True) for part in self.content],
+        }
+
+
+class ChatIn(BaseModel):
+    """Chat request body: the full conversation history."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    messages: List[ChatMessage]
+    # Conversation-scoped MCP filter: ids of the connectors whose tools this
+    # conversation may use (intersection with the Settings-activated set).
+    # ``None`` means "no filter" — every activated connector stays eligible,
+    # which keeps older clients and the existing chat tests unchanged.
+    mcpEnabled: Optional[List[str]] = None
+    # Same conversation-scoped filter for the LSP language servers (the Chat
+    # tab's per-conversation LSP toggles).
+    lspEnabled: Optional[List[str]] = None
+    # The agent mode for this turn (see core.agent_modes). ``None`` means "the
+    # workspace's default": a client predating the feature keeps working, the
+    # same compatibility rule as mcpEnabled/lspEnabled above.
+    agentMode: Optional[str] = None
+
+    # Batch mode only: the task lot's big-picture text (the ``NN == 0`` file),
+    # which ``core.chat`` appends to the system message of *every* task turn.
+    # Size-capped with the very number the listing enforced when it handed the
+    # body over, so the two sides cannot drift. Not otherwise validated as
+    # trusted input: this is a single-user app and the same person already owns
+    # the workspace's ``sysprompt``, so a caller-chosen system
+    # block grants no new privilege.
+    batchContext: Optional[str] = None
+
+    @field_validator("batchContext")
+    @classmethod
+    def _cap_batch_context(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        # Read through the module so a patch of the cap (the tests) applies.
+        cap = batch_core.MAX_BATCH_LOT_BYTES
+        if len(value.encode("utf-8")) > cap:
+            raise ValueError(
+                f"batchContext is too large ({len(value.encode('utf-8'))} "
+                f"bytes, max {cap})"
+            )
+        return value
+
+    @field_validator("messages")
+    @classmethod
+    def _require_turns(cls, value: List[ChatMessage]) -> List[ChatMessage]:
+        if not value:
+            raise ValueError("messages must not be empty")
+        for message in value:
+            # Only a blank *user* turn is a client bug. A blank assistant
+            # turn is a legitimate artefact: the display sanitizer removes
+            # a run-only answer, and a round the server ended before any
+            # text leaves nothing to show. Refusing it would answer every
+            # later turn of that conversation with a 422 the user cannot
+            # clear from the UI -- the brick is worse than the empty turn.
+            if (
+                message.role == "user"
+                and isinstance(message.content, str)
+                and not message.content.strip()
+            ):
+                raise ValueError("message content must not be empty")
+        return value
+
+    @field_validator("agentMode")
+    @classmethod
+    def _mode_id_shape(cls, value: Optional[str]) -> Optional[str]:
+        """The *shape* of a mode id — not whether it exists.
+
+        Only this belongs in the model: "is this a mode that exists right now"
+        is a question about a file that may have been edited a second ago, so a
+        ``Literal[...]`` or an enum here would freeze the list at import time
+        and break the hot-edit property the loader promises. The existence
+        check is ``resolve_mode()``'s job, called from ``post_chat`` (D14).
+
+        An empty or whitespace-only value is not a shape error: it is the
+        documented way of asking for the workspace's default (the same rule
+        ``resolve_mode`` applies), so it normalises to ``None`` here rather than
+        turning "use the default" into a refusal.
+        """
+        if value is None or not value.strip():
+            return None
+        if len(value) > agent_modes.MAX_MODE_ID_CHARS or re.match(
+            agent_modes.MODE_ID_PATTERN, value
+        ) is None:
+            raise ValueError(
+                "agentMode must be a mode id or empty for the default: a "
+                "lowercase letter, then "
+                "letters, digits, '_' or '-' (up to "
+                f"{agent_modes.MAX_MODE_ID_CHARS} characters)"
+            )
+        return value
+
+
+# Strong references to in-flight chat pump tasks (the event loop only keeps
+# weak references to bare tasks).
+_CHAT_TASKS: set = set()
+
+
+class ChatHandle:
+    """The one in-flight chat reply, so another request can pause it.
+
+    ``POST /api/chat/pause`` is a separate HTTP request from the reply's own
+    stream, so the pause flag has to live in a process-wide slot — the same
+    shape ``RunState`` uses for the run. Mono-user app, one tab: one handle,
+    no chat id.
+    """
+
+    def __init__(self, pause_event: threading.Event, cancel_event: threading.Event) -> None:
+        self.pause_event = pause_event
+        self.cancel_event = cancel_event
+
+
+# Set for the duration of one streaming reply (cleared when its SSE generator
+# ends), so a finished or aborted reply can never be paused afterwards.
+_CHAT_HANDLE: Optional[ChatHandle] = None
+
+
+def _arm_chat_handle(cancel_event: threading.Event, pause_event: threading.Event) -> None:
+    """Publish the in-flight reply so /chat/pause can reach it."""
+    global _CHAT_HANDLE
+    _CHAT_HANDLE = ChatHandle(pause_event=pause_event, cancel_event=cancel_event)
+
+
+def _clear_chat_handle(cancel_event: threading.Event) -> None:
+    """Retire the handle, but only if it is still this reply's (a newer
+    conversation must never be un-registered by an old stream's ``finally``)."""
+    global _CHAT_HANDLE
+    if _CHAT_HANDLE is not None and _CHAT_HANDLE.cancel_event is cancel_event:
+        _CHAT_HANDLE = None
+
+
+def _refuse_if_chat_streaming(what: str) -> None:
+    """409 while a chat reply is in flight — the one place that rule is written.
+
+    A reply is the only other writer of the workspace, so a mutation landing in
+    the middle of one races the model's own tool edits. The check is the same
+    process-wide slot ``POST /api/chat/pause`` uses; the client-side rule in
+    ``useEditorMode`` is the *display* of this and the server is the enforcement.
+
+    (The hub-restart and path-location routes ask the wider question instead —
+    ``_CHAT_TASKS``, which also covers a reply whose handle is not armed yet —
+    because they tear down what that reply is using. A file write only needs to
+    know a reply is streaming.)
+    """
+    if _CHAT_HANDLE is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot {what} while a chat reply is streaming",
+        )
+
+
+# Dialog field -> JSON member of the workspace's ``.nojae/nojae-settings.json``,
+# used for both directions of the settings API. Spec D7: the file keeps the
+# approved member names (``serverApiKey``, ``temperature``), the dialog keeps
+# its field names (``apiKey``, ``temp``), and this table is the only bridge.
+# The sibling of ``VERIFIER_ENV_KEYS`` below: group 1 reaches
+# ``core.workspace_settings``, the verifier block still reaches ``.env``.
+WORKSPACE_SETTING_KEYS: Dict[str, str] = {
+    "serverUrl": "serverUrl",
+    "apiKey": "serverApiKey",
+    "endpoint": "endpoint",
+    "sysprompt": "sysprompt",
+    "temp": "temperature",
+    "topP": "topP",
+    "topK": "topK",
+    "minP": "minP",
+    "repeatPenalty": "repeatPenalty",
+    "presencePenalty": "presencePenalty",
+    "reasoning": "reasoning",
+    "supportsVision": "supportsVision",
+}
+
+# What GET answers for a member the file does not hold — the spec key map's
+# "member absent means", as the payload type each member is read as: strings
+# stay empty strings, the vision flag is ``False``, sampling numbers are
+# ``null`` so the dialog shows an unset field and the request body omits it.
+_WORKSPACE_ABSENT: Dict[type, Any] = {str: "", bool: False, float: None, int: None}
+
+VERIFIER_ENV_KEYS: Dict[str, str] = {
+    "serverUrl": "VERIFIER_AGENT_SERVERURL",
+    "apiKey": "VERIFIER_AGENT_SERVERURL_API_KEY",
+    "endpoint": "VERIFIER_AGENT_ENDPOINT",
+    "sysprompt": "VERIFIER_AGENT_SYSPROMPT",
+}
+
+
+def _settings_json(values: Dict[str, str]) -> Dict[str, Any]:
+    """Shape both stores into the settings dialog's payload.
+
+    The types ws-05 reads: group 1 answers with the workspace file's **native
+    JSON values** — ``supportsVision`` is ``true``/``false``, the sampling
+    fields are numbers (``0.2``, ``20``) or ``null`` when the member is absent
+    (the file never holds ``"0.2"`` or ``"1"``, the dotenv wart D6 ends) —
+    while the verifier block and ``questionSet`` stay ``.env``'s strings. A
+    stored template instruction sentence reaches the dialog verbatim; the
+    ``workspaceSettings`` block beside it says the file is not configured
+    (D8) or malformed (D9) with the one sentence that names the path. An
+    absent ``sysprompt`` answers the built-in default, which is what the
+    model then receives.
+    """
+    workspace = workspace_settings.load_workspace_settings()
+    data: Dict[str, Any] = {}
+    for field, member in WORKSPACE_SETTING_KEYS.items():
+        value = workspace.get(member)
+        if value is None:
+            value = _WORKSPACE_ABSENT[
+                workspace_settings.active_settings_keys()[member]
+            ]
+        data[field] = value
+    data["sysprompt"] = workspace.get("sysprompt") or DEFAULT_LLM_SYSPROMPT
+    data["questionSet"] = values.get("QUESTION_SET", "")
+    data["verifier"] = {
+        field: values.get(key, "") for field, key in VERIFIER_ENV_KEYS.items()
+    }
+    data["workspaceSettings"] = workspace_settings.workspace_settings_state()
+    return data
+
+
+def _workspace_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate the dialog's group-1 fields into native JSON members.
+
+    ``SettingsFieldsMixin`` stringified every scalar but a boolean, so this is
+    the seam where the strings end: each field is coerced through the type the
+    file's member map declares (number / integer / boolean / string) and the
+    file must never hold ``"0.2"`` or ``"1"``. An empty field **omits** the
+    member — "member absent means" is the spec key map, and the writer refuses
+    a ``""`` or ``null`` member. A numeric field that is not a number is
+    passed through as the raw string: the validation gate in
+    ``post_settings`` rejects it with the same pydantic field-error shape the
+    sampler enum produces, and the write below only happens once the gate has
+    passed, so an uncoercible value can never reach either disk.
+    """
+    values: Dict[str, Any] = {}
+    for field, member in WORKSPACE_SETTING_KEYS.items():
+        raw = payload.get(field)
+        if isinstance(raw, bool):
+            values[member] = raw
+            continue
+        text = (raw or "").strip()
+        if not text:
+            continue
+        expected = workspace_settings.active_settings_keys()[member]
+        if expected is bool:
+            # The dialog's checkbox sends a native boolean (handled above);
+            # this pass exists for hand-written clients still sending the
+            # .env spellings ("1", "true", "on"), and an explicit
+            # off-spelling is an explicit ``false``.
+            values[member] = text.lower() in TRUTHY_VALUES
+        elif expected is int:
+            try:
+                number = float(text)
+            except ValueError:
+                values[member] = text
+                continue
+            values[member] = int(number) if number.is_integer() else text
+        elif expected is float:
+            try:
+                values[member] = float(text)
+            except ValueError:
+                values[member] = text
+        elif member == "reasoning" and text.lower() == "none":
+            # The dialog's "none" means *unset*, as it did for ``REASONING``
+            # in ``.env``: omit the member so the request body omits it.
+            continue
+        else:
+            values[member] = text
+    return values
+
+
+def _save_workspace_group_one(current: Dict[str, Any], values: Dict[str, Any]) -> None:
+    """Write the dialog's members, so a cleared field leaves its member absent.
+
+    ``save_workspace_settings`` preserves the members it was not given, which
+    is right for a partial writer like ``post_lsp`` and wrong for this dialog:
+    it owns every member in ``WORKSPACE_SETTING_KEYS``, so a field the user
+    cleared must clear, not carry over (spec key map: "member absent means").
+    When such a member stands in the file, the file is removed first and the
+    members that should survive — the two the dialog does not own
+    (``lspEnabled``, ``maxToolIteration``) plus the freshly written ones — go
+    through the writer in one save, which over an absent file writes exactly
+    the members it is given. The module stays the file's only writer and the
+    only formater of its bytes.
+
+    The test-mode refusal is consulted **here as well as in the writer**, and
+    before the ``os.remove`` below: this is the one caller that deletes the file
+    it is about to write, so a refusal that only lived in the writer would have
+    already destroyed the suite's fixture. Both call sites ask the same
+    predicate, so neither can disagree about what is refused.
+    """
+    if workspace_settings.test_settings_mode():
+        raise HTTPException(
+            status_code=409,
+            detail=workspace_settings.test_settings_write_refusal(),
+        )
+    owned = set(WORKSPACE_SETTING_KEYS.values())
+    carried = {m: v for m, v in current.items() if m not in owned}
+    desired = {**carried, **values}
+    removals = (set(current) & owned) - set(values)
+    if not values and not removals:
+        # Nothing to save: a dialog that sent no group-1 values must not
+        # create a file an unconfigured workspace does not have.
+        return
+    if removals:
+        with suppress(FileNotFoundError):
+            os.remove(workspace_settings.workspace_settings_path())
+    workspace_settings.save_workspace_settings(desired)
+
+
+def _model_ids(payload: Any) -> List[str]:
+    """Extract model ids from an OpenAI-compatible /models payload."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    ids = [
+        item["id"]
+        for item in data or []
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    return sorted(set(ids))
+
+
+# Last known context window per (models url, model id): success is cached
+# indefinitely (n_ctx only changes with a server restart, which also flips
+# the url/model key), failures fall back to the stale value or None.
+_CTX_WINDOW_CACHE: Dict[tuple, int] = {}
+
+
+def _context_window(server_url: str, api_key: str, model: str) -> Optional[int]:
+    """Context window (tokens) of the configured model, None when unknown.
+
+    Reads ``meta.n_ctx`` from an OpenAI-compatible ``/models`` entry
+    (llama.cpp exposes it); a server that omits it is not an error — the
+    chat occupancy badge then just shows the used side without a limit.
+    """
+    if not server_url.strip():
+        return None
+    url = models_url(server_url)
+    key = (url, model)
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        with httpx.Client(timeout=3.0) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        entries = [item for item in data or [] if isinstance(item, dict)]
+        entry = next((item for item in entries if item.get("id") == model), None)
+        if entry is None and entries:
+            entry = entries[0]
+        meta = entry.get("meta") if entry else None
+        n_ctx = meta.get("n_ctx") if isinstance(meta, dict) else None
+        if isinstance(n_ctx, int) and n_ctx > 0:
+            _CTX_WINDOW_CACHE[key] = n_ctx
+            return n_ctx
+    except (httpx.HTTPError, ValueError):
+        pass
+    return _CTX_WINDOW_CACHE.get(key)
+
+
+def _settings_env_values(settings: SettingsIn) -> Dict[str, str]:
+    """Convert a settings payload into the managed ``.env`` key/value mapping.
+
+    Only what ``.env`` still owns: the verifier block and the question-set
+    choice. Group 1 translates through :data:`WORKSPACE_SETTING_KEYS`, and
+    ``LLM_DEBUG`` is **not emitted at all** (spec section 7): the key is
+    hand-edited like ``NOJAE_PYTHON_ROOT``, and an always-emitted ``""``
+    here would win over the stored value in ``post_settings``'
+    ``{**load_settings(), ...}`` merge and switch the debug logging off on
+    every save. A field the dialog does not own keeps whatever the merge
+    beside the write carries forward.
+    """
+    payload = settings.model_dump()
+    values: Dict[str, str] = {}
+    verifier = payload.get("verifier") or {}
+    for field, key in VERIFIER_ENV_KEYS.items():
+        values[key] = (verifier.get(field) or "").strip()
+    question_set = (payload.get("questionSet") or "").strip()
+    if question_set:
+        values["QUESTION_SET"] = question_set
+    return values
+
+
+class RunState:
+    """Process-wide state for the single active (or last) benchmark run."""
+
+    def __init__(self) -> None:
+        self.status: str = "idle"  # idle | running | finished | failed | cancelled
+        self.run_id: Optional[str] = None
+        self.job: Optional[RunJob] = None
+        self.bus: Optional[EventBus] = None
+        self.error: Optional[str] = None
+        self.cancel_event: Optional[threading.Event] = None
+
+    def reset(self) -> None:
+        self.job = RunJob()
+        self.bus = EventBus()
+        self.error = None
+        self.cancel_event = threading.Event()
+
+
+def _active_connector_ids() -> List[str]:
+    """Connector ids whose tools chat may use.
+
+    Every connector is declared in the workspace's
+    ``.nojae/mcp-settings.json`` and activated by its ``enable`` flag there
+    (single source of truth, no .env key involved).
+    """
+    connectors, _errors = load_externals()
+    return [connector["id"] for connector in connectors if connector["enable"]]
+
+
+def _active_server_ids() -> List[str]:
+    """Language-server ids whose tools chat may use.
+
+    Both gates must agree: the id is listed in ``lspEnabled`` (the workspace
+    settings-file switch that lets a whole prepared config file stay dormant)
+    *and* its ``enable`` flag is true in ``.nojae/lsp-settings.json`` (the
+    MCP-externals precedent for file-declared entries).
+    """
+    enabled = set(lsp_enabled_ids())
+    servers, _errors = all_servers()
+    return [
+        server["id"]
+        for server in servers
+        if server["enable"] and server["id"] in enabled
+    ]
+
+
+def _allowed_server_ids(enabled: Optional[List[str]]) -> List[str]:
+    """The Settings-activated server ids, narrowed by a caller's allowlist.
+
+    One implementation, shared by chat (``_lsp_tool_kwargs``) and the Editor
+    pane's query route, so the two can never disagree about what "this server
+    is switched on" means. ``enabled`` is the conversation-scoped allowlist the
+    Tools panel holds; it is intersected with the Settings-activated ids, so
+    Settings stays the authority — an unknown or stale id silently drops and a
+    server deactivated in Settings can never leak back in. ``None`` means "no
+    filter": every activated server stays eligible, which is the failed-snapshot
+    case and must not blind the pane.
+    """
+    server_ids = _active_server_ids()
+    if enabled is not None:
+        allowed = set(enabled)
+        server_ids = [server_id for server_id in server_ids if server_id in allowed]
+    return server_ids
+
+
+def _mcp_tool_kwargs(
+    request: Request, enabled: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Extra ``stream_chat`` kwargs when MCP connectors are active for chat.
+
+    ``enabled`` is the conversation-scoped connector allowlist from the chat
+    body (the Chat tab's per-conversation MCP toggles); it is intersected
+    with the Settings-activated ids so Settings stays the authority — unknown
+    or stale ids silently drop and a connector deactivated in Settings can
+    never leak back into a running conversation. ``None`` means no filter.
+    Returns ``{}`` when nothing is active so the no-MCP call shape (and the
+    existing chat tests that stub ``stream_chat``) stays untouched.
+    """
+    manager = getattr(request.app.state, "mcp", None)
+    if manager is None:
+        return {}
+    connector_ids = _active_connector_ids()
+    if enabled is not None:
+        allowed = set(enabled)
+        connector_ids = [cid for cid in connector_ids if cid in allowed]
+    try:
+        tools, tool_to_server = manager.active_tool_defs(connector_ids)
+    except Exception:  # noqa: BLE001 — never block chat because of the hub
+        return {}
+    if not tools:
+        return {}
+
+    def tool_executor(name: str, arguments: Dict[str, Any]) -> str:
+        return manager.call_tool_sync(tool_to_server[name], name, arguments)
+
+    return {
+        "tools": tools,
+        "tool_executor": tool_executor,
+        "tool_servers": tool_to_server,
+        "max_tool_iterations": max_tool_iteration(),
+    }
+
+
+# Chat-side budget for one LSP tool call: covers a lazy server's cold start
+# (initialize can take INIT_TIMEOUT seconds while it indexes the project)
+# plus the request itself and the diagnostics wait.
+LSP_TOOL_TIMEOUT = 90.0
+
+
+def _lsp_tool_kwargs(
+    request: Request, enabled: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Extra ``stream_chat`` kwargs when language servers are active for chat.
+
+    Same conversation-scoped filter as MCP: ``enabled`` is intersected with
+    the Settings-activated ids, so a server disabled in Settings can never
+    leak back into a running conversation. ``{}`` when nothing is active.
+    """
+    manager = getattr(request.app.state, "lsp", None)
+    if manager is None:
+        return {}
+    server_ids = _allowed_server_ids(enabled)
+    try:
+        tools, tool_to_server = manager.active_tool_defs(server_ids)
+    except Exception:  # noqa: BLE001 — never block chat because of the hub
+        return {}
+    if not tools:
+        return {}
+
+    def tool_executor(name: str, arguments: Dict[str, Any]) -> str:
+        return manager.call_tool_sync(
+            tool_to_server[name], name, arguments, timeout=LSP_TOOL_TIMEOUT
+        )
+
+    return {
+        "tools": tools,
+        "tool_executor": tool_executor,
+        "tool_servers": tool_to_server,
+    }
+
+
+def _chat_tool_kwargs(
+    request: Request,
+    mcp_enabled: Optional[List[str]] = None,
+    lsp_enabled: Optional[List[str]] = None,
+    mode: Optional[agent_modes.AgentMode] = None,
+) -> Dict[str, Any]:
+    """The single tool loop of ``stream_chat``, fed by both hubs.
+
+    Three levels gate the tools that reach that loop and they only ever
+    **intersect**: **Settings** (``_active_connector_ids`` /
+    ``_active_server_ids``, the whole install), the **agent mode**
+    (``mode.mcptools`` / ``mode.lsptools``, one hub, D3/D4) and the
+    **conversation** (``mcp_enabled`` / ``lsp_enabled``, one connector). All
+    three narrow the same allowlist, so Settings stays the authority and an
+    open mode can never *grant* a connector the user unticked.
+
+    The merge lives here (not in ``core/chat.py``): ``stream_chat`` keeps
+    taking one ``tools`` list, one executor and one iteration cap, and the
+    ``tool_servers`` map is what makes every tool call attributable to its
+    hub in the Chat UI. MCP tools win a name clash (LSP tool names are
+    namespaced, so in practice they cannot collide).
+
+    ``mode=None`` means "no mode gate" and keeps the pre-feature call shape
+    byte-for-byte.
+    """
+    # D3: a mode with the flag false must take the hub away from the *model*,
+    # not just from the prompt. ``[]`` — not ``None``, which is the documented
+    # "no filter" sentinel on ``mcp_enabled``/``lsp_enabled``: passing ``None``
+    # here would open the hub wide. This is the one line to get wrong.
+    # The empty allowlist makes both helpers return ``{}``, so ``stream_chat``
+    # receives no ``tools`` key at all and no ``TOOL_NOTICE`` is appended.
+    if mode is not None and not mode.mcptools:
+        mcp_enabled = []
+    if mode is not None and not mode.lsptools:
+        lsp_enabled = []
+    mcp_kwargs = _mcp_tool_kwargs(request, mcp_enabled)
+    lsp_kwargs = _lsp_tool_kwargs(request, lsp_enabled)
+    if not mcp_kwargs and not lsp_kwargs:
+        return {}
+    if not lsp_kwargs:
+        return mcp_kwargs
+    if not mcp_kwargs:
+        # _mcp_tool_kwargs owns the shared iteration cap; add it when only
+        # LSP contributes tools.
+        return {**lsp_kwargs, "max_tool_iterations": max_tool_iteration()}
+
+    tools = list(mcp_kwargs["tools"])
+    tool_to_server = dict(mcp_kwargs["tool_servers"])
+    for definition in lsp_kwargs["tools"]:
+        name = definition["function"]["name"]
+        if name in tool_to_server:
+            continue
+        tool_to_server[name] = lsp_kwargs["tool_servers"][name]
+        tools.append(definition)
+    mcp_executor = mcp_kwargs["tool_executor"]
+    lsp_executor = lsp_kwargs["tool_executor"]
+    lsp_tool_names = set(lsp_kwargs["tool_servers"])
+
+    def tool_executor(name: str, arguments: Dict[str, Any]) -> str:
+        if name in lsp_tool_names:
+            return lsp_executor(name, arguments)
+        return mcp_executor(name, arguments)
+
+    return {
+        "tools": tools,
+        "tool_executor": tool_executor,
+        "tool_servers": tool_to_server,
+        "max_tool_iterations": max_tool_iteration(),
+    }
+
+
+def build_router(state: RunState) -> APIRouter:
+    """Create the API router bound to a run-state instance."""
+    router = APIRouter(prefix="/api")
+
+    def _load_config() -> EndpointsConfig:
+        """The configuration every model call is made with, or a refusal.
+
+        Two kinds of refusal, in the shape the client already renders: a
+        ``ValidationError`` from a sampler value pydantic rejects keeps the
+        422 field list, and the workspace settings file being absent, broken or
+        still the template's instruction text answers 422 with the one sentence
+        that names the file and its path (spec D8, D9). The second is why no
+        chat or benchmark request can dial a sentence as a URL or benchmark on
+        invented defaults: there is nothing to call until that file says what
+        to call.
+        """
+        config, error = load_endpoints_config()
+        if isinstance(error, str):
+            raise HTTPException(status_code=422, detail=error)
+        if error is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=json.loads(error.json()),
+            )
+        assert config is not None
+        return config
+
+    @router.get("/config")
+    def get_config() -> Dict[str, Any]:
+        config = _load_config()
+        try:
+            questions = load_questions()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Could not load {questions_path()}: {exc}"
+            ) from exc
+        models = config.model_list()
+        sampling = config.to_kwargs()
+        sampling_summary = (
+            ", ".join(f"{k}={v}" for k, v in sampling.items()) or "defaults"
+        )
+        return {
+            "models": models,
+            "serverUrl": config.serverUrl,
+            "supportsVision": config.supports_vision,
+            "samplingSummary": sampling_summary,
+            # Chat occupancy gauge cap: the configured model's context window
+            # (meta.n_ctx), None when the server does not expose it.
+            "contextWindow": _context_window(
+                config.serverUrl, config.apiKey or "none", models[0] if models else ""
+            ),
+            "questionCount": len(questions),
+            "totalTests": len(questions) * len(models),
+            "verifierConfigured": bool(config.verifierAgent and config.verifierAgent.endpoint),
+            "runStatus": state.status,
+            "hasResults": RESULTS_PATH.is_file(),
+        }
+
+    @router.get("/settings")
+    def get_settings() -> Dict[str, Any]:
+        """The dialog's payload: group 1 from the workspace file, groups 2/3
+        from ``.env``, plus the file's own state block (see
+        :func:`_settings_json` for the payload types)."""
+        return _settings_json(load_settings())
+
+    @router.post("/settings")
+    def post_settings(settings: SettingsIn) -> Dict[str, Any]:
+        # The .env is process-wide configuration; changing it mid-run would
+        # silently mix two configurations into one result set.
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot change settings while a benchmark run is in progress",
+            )
+        workspace_values = _workspace_values(settings.model_dump())
+        # Settings keys not covered by this dialog (question set when unset,
+        # LLM_DEBUG, NOJAE_PYTHON_ROOT) are merged from the current
+        # values so saving here never drops them.
+        env_values = {**load_settings(), **_settings_env_values(settings)}
+        merged_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in env_values or env_values[key]
+        }
+        merged_env.update({k: v for k, v in env_values.items() if v})
+        current_workspace = workspace_settings.load_workspace_settings()
+        try:
+            # One gate before **either** write: the merged future state of
+            # both stores is validated exactly the way every later model call
+            # builds it, so a bad sampler value cannot reach either disk.
+            EndpointsConfig.from_workspace(
+                {**current_workspace, **workspace_values}, merged_env
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=json.loads(exc.json())) from exc
+        # Note: keys that were set as real process environment variables before
+        # startup keep precedence in the live process until restart; the file
+        # is still updated. The file itself is regenerated from a fixed
+        # template, so custom comments in .env are not preserved.
+        _save_workspace_group_one(current_workspace, workspace_values)
+        save_settings(env_values)
+        return _settings_json(load_settings())
+
+    @router.get("/question-sets")
+    def get_question_sets() -> Dict[str, Any]:
+        """List available question sets and the currently selected one."""
+        return {
+            "questionSets": list_question_sets(),
+            "current": os.environ.get("QUESTION_SET", QUESTION_SET_DEFAULT),
+        }
+
+    @router.post("/question-sets")
+    def post_question_set(body: QuestionSetIn) -> Dict[str, Any]:
+        """Select the active question set source.
+
+        Persists the choice to ``.env`` via ``save_settings`` so the next run
+        uses the selected file. Rejected with 409 while a run is in progress
+        and 422 for an unknown question set id.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot change question set while a benchmark run is in progress",
+            )
+        selected = (body.questionSet or "").strip()
+        available = [s["id"] for s in list_question_sets()]
+        if not selected:
+            raise HTTPException(
+                status_code=422, detail="No question set selected"
+            )
+        if selected not in available:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown question set: {selected}"
+            )
+        # Merge with current settings so unrelated keys are preserved.
+        current = load_settings()
+        merged = dict(current)
+        merged["QUESTION_SET"] = selected
+        save_settings(merged)
+        return {
+            "questionSets": list_question_sets(),
+            "current": os.environ.get("QUESTION_SET", QUESTION_SET_DEFAULT),
+        }
+
+    @router.get("/prompt-helpers")
+    def get_prompt_helpers() -> Dict[str, Any]:
+        """Return this workspace's prompt-helper slots.
+
+        A missing ``.nojae/prompt-helpers.json`` answers the nine default slots
+        and writes nothing — a reader that writes is how a stray ``.nojae``
+        turns up in a project someone only meant to browse. A file that cannot
+        be used (bad JSON, an unknown ``version``, a list that does not hold
+        exactly ``prompt_helpers.SLOT_COUNT`` entries) is a 422 naming the path
+        and, where the count is the complaint, the count found: it is never
+        padded, truncated or rewritten (spec D4).
+        """
+        try:
+            return {"slots": prompt_helpers.load_prompt_helpers()}
+        except prompt_helpers.PromptHelpersFileError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/prompt-helpers")
+    def post_prompt_helpers(body: PromptHelperSlotIn) -> Dict[str, Any]:
+        """Persist one prompt-helper slot and return the full set of nine.
+
+        Chat-adjacent configuration, so (unlike settings/question sets) it is
+        not gated while a benchmark run is in progress. Invalid index, color
+        or oversized content are rejected with 422 by the request model; an
+        unusable file on disk is a 422 of its own, never a 500, and the bytes
+        stay as they were.
+        """
+        try:
+            slots = prompt_helpers.save_prompt_helper(
+                body.index, body.color, body.content
+            )
+        except prompt_helpers.PromptHelpersFileError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"slots": slots}
+
+    def _mcp_payload(
+        request: Request, extra_errors: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Connector list (live ``.nojae/mcp-settings.json`` scan) merged with manager status.
+
+        Connectors are active on their file ``enable`` flag — the single
+        source of truth. Secret material (``headers``/``env``) is stripped.
+        """
+        manager = getattr(request.app.state, "mcp", None)
+        statuses = {s["id"]: s for s in (manager.status() if manager else [])}
+        connectors, errors = load_externals()
+        if extra_errors:
+            errors = errors + list(extra_errors)
+        payload_connectors = []
+        for connector in connectors:
+            status = statuses.get(connector["id"], {})
+            payload_connectors.append(
+                {
+                    key: value
+                    for key, value in connector.items()
+                    if key not in ("headers", "env")
+                }
+                | {
+                    "active": connector["enable"],
+                    "status": status.get("status", "stopped"),
+                    "error": status.get("error"),
+                }
+            )
+        return {
+            "installed": bool(manager and manager.installed),
+            "connectors": payload_connectors,
+            "maxIterations": max_tool_iteration(),
+            "externalsError": "\n".join(errors) if errors else None,
+        }
+
+    @router.get("/mcp")
+    def get_mcp(request: Request) -> Dict[str, Any]:
+        """List the declared MCP connectors with live status."""
+        return _mcp_payload(request)
+
+    @router.post("/mcp")
+    def post_mcp(body: McpIn, request: Request) -> Dict[str, Any]:
+        """Activate MCP connectors for the Chat tab and set the iteration cap.
+
+        Toggles write the entry ``enable`` flag back to the workspace's
+        ``.nojae/mcp-settings.json`` (the only activation source) and
+        start/stop the connector right away; the shared MCP+LSP tool-loop cap
+        is ``maxToolIteration`` in the workspace's ``.nojae/nojae-settings.json``
+        — written as a real integer, the form the reader reads.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot change MCP settings while a benchmark run is in progress",
+            )
+        requested = [item.strip() for item in body.enabled if item.strip()]
+        connectors, _errors = load_externals()
+        connector_ids = {connector["id"] for connector in connectors}
+        unknown = [item for item in requested if item not in connector_ids]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown MCP connectors: {', '.join(unknown)}",
+            )
+        enabled = set(requested)
+        # The cap moved to the workspace's settings file with the rest of the
+        # tool-loop knobs (same writer call ``post_lsp`` uses), so the panel's
+        # save lands where ``config.max_tool_iteration()`` reads it.
+        workspace_settings.save_workspace_settings(
+            {"maxToolIteration": int(body.maxIterations)}
+        )
+        write_errors = (
+            set_externals_enabled({cid: cid in enabled for cid in connector_ids})
+            if connector_ids
+            else []
+        )
+        manager = getattr(request.app.state, "mcp", None)
+        if manager is not None and hasattr(manager, "start_connector"):
+            for connector in connectors:
+                connector_id = connector["id"]
+                current = manager.connector_status(connector_id)
+                if connector_id in enabled and current not in ("running", "starting"):
+                    manager.start_connector(connector_id)
+                elif connector_id not in enabled and current in ("running", "starting"):
+                    manager.stop_connector(connector_id)
+        return _mcp_payload(request, extra_errors=write_errors)
+
+    async def _restart_mcp_hub(request: Request) -> Dict[str, Any]:
+        """Tear the MCP hub down and rebuild it from a fresh file scan.
+
+        Shared by ``POST /mcp/restart`` and the working-location endpoint: a
+        changed ``${NOJAE_PATH_LOCATION}`` only takes effect once every
+        connector is relaunched with the new argv.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot restart the MCP hub while a benchmark run is in progress",
+            )
+        if _CHAT_TASKS:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot restart the MCP hub while a chat reply is streaming",
+            )
+        manager = getattr(request.app.state, "mcp", None)
+        if manager is None or not hasattr(manager, "restart"):
+            raise HTTPException(status_code=503, detail="MCP hub is not available")
+        if os.environ.get("NOJAE_DISABLE_MCP"):
+            # Same dev/test switch the app lifespan honours: endpoints stay
+            # usable but nothing is connected.
+            connectors = []
+        else:
+            connectors, _errors = load_externals()
+        await manager.restart(connectors)
+        # The payload re-scans the file, so it re-derives the same validation
+        # errors — they must not be passed as extra_errors or they appear twice.
+        return _mcp_payload(request)
+
+    @router.post("/mcp/restart")
+    async def post_mcp_restart(request: Request) -> Dict[str, Any]:
+        """Restart the MCP hub: re-read ``.nojae/mcp-settings.json`` and reconnect.
+
+        Everything is torn down (client sessions and, with them, every local
+        stdio child process) and rebuilt from a fresh scan of the declaration
+        file, so an edit made by hand — a new connector, a changed ``command``,
+        another ``cwd`` — takes effect without restarting the web app.
+        Validation problems do not abort the restart: the connectors that did
+        parse come back up and the errors are returned in ``externalsError``.
+
+        Awaited, so the response carries the real post-restart status of every
+        connector (a failing one burns its whole retry window — the button
+        stays busy while that happens).
+        """
+        return await _restart_mcp_hub(request)
+
+    def _lsp_payload(
+        request: Request, extra_errors: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Language-server list (file scan + validation errors) + live status.
+
+        A server is active when its ``enable`` flag and ``lspEnabled`` agree.
+        Secret material (``env``) is stripped.
+        """
+        manager = getattr(request.app.state, "lsp", None)
+        statuses = {s["id"]: s for s in (manager.status() if manager else [])}
+        servers, errors = all_servers()
+        if extra_errors:
+            errors = errors + list(extra_errors)
+        enabled_ids = set(lsp_enabled_ids())
+        payload_servers = []
+        for server in servers:
+            status = statuses.get(server["id"], {})
+            payload_servers.append(
+                {
+                    key: value
+                    for key, value in server.items()
+                    if key not in ("env", "initializationOptions")
+                }
+                | {
+                    "active": server["enable"] and server["id"] in enabled_ids,
+                    "status": status.get("status", "stopped"),
+                    "error": status.get("error"),
+                    "toolCount": status.get("toolCount", 0),
+                }
+            )
+        return {
+            "installed": bool(manager and manager.installed),
+            "servers": payload_servers,
+            "maxIterations": max_tool_iteration(),
+            "serversError": "\n".join(errors) if errors else None,
+        }
+
+    @router.get("/lsp")
+    def get_lsp(request: Request) -> Dict[str, Any]:
+        """List declared language servers with live status."""
+        return _lsp_payload(request)
+
+    @router.post("/lsp")
+    def post_lsp(body: LspIn, request: Request) -> Dict[str, Any]:
+        """Activate language servers for the Chat tab.
+
+        Activation writes both places: the ids persist as ``lspEnabled`` in the
+        workspace's ``.nojae/nojae-settings.json`` — a JSON array, the form the
+        reader reads — and the ``enable`` flag is written back to
+        ``.nojae/lsp-settings.json`` (both must agree for a server to run, so
+        a prepared config file can stay entirely dormant). Running servers are
+        hot-started/stopped right away; ``maxIterations`` updates the shared
+        MCP+LSP tool-loop cap, which travels in the same file and so is written
+        by the same call.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot change LSP settings while a benchmark run is in progress",
+            )
+        requested = [item.strip() for item in body.enabled if item.strip()]
+        servers, _errors = all_servers()
+        known_ids = {server["id"] for server in servers}
+        unknown = [item for item in requested if item not in known_ids]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown LSP servers: {', '.join(unknown)}",
+            )
+        enabled = set(requested)
+        # Both activation gate and cap live in the workspace's settings file now,
+        # as native JSON: ``lspEnabled`` is a real array (not the comma string the
+        # ``.env`` key held) and ``maxToolIteration`` a real integer. Writing them
+        # through the writer — not ``save_settings`` — is what keeps the toggles
+        # live the moment the readers moved to the file (spec D4: a dialog save is
+        # a caching invalidation, so the next request already sees these).
+        workspace_settings.save_workspace_settings(
+            {
+                "lspEnabled": list(dict.fromkeys(requested)),
+                "maxToolIteration": int(body.maxIterations),
+            }
+        )
+        write_errors = (
+            set_lsp_enabled({sid: sid in enabled for sid in known_ids})
+            if known_ids
+            else []
+        )
+        manager = getattr(request.app.state, "lsp", None)
+        if manager is not None and hasattr(manager, "start_server"):
+            for server in servers:
+                server_id = server["id"]
+                current = manager.server_status(server_id)
+                # Only ``running`` means "nothing to do". The hub decides
+                # whether a start is worth starting (a live session or an
+                # attempt already in flight is a no-op), so a server stuck in
+                # ``starting`` can be re-activated from the panel instead of
+                # being un-clickable until a full hub restart.
+                if server_id in enabled and current != "running":
+                    manager.start_server(server_id)
+                elif server_id not in enabled and current in ("running", "starting"):
+                    manager.stop_server(server_id)
+        return _lsp_payload(request, extra_errors=write_errors)
+
+    async def _restart_lsp_hub(request: Request) -> Dict[str, Any]:
+        """Tear the LSP hub down and rebuild it from a fresh file scan.
+
+        Shared by ``POST /lsp/restart`` and the working-location endpoint: a
+        changed ``${NOJAE_PATH_LOCATION}`` only takes effect once every
+        language server is respawned on the new ``workspaceRoot``.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot restart the LSP hub while a benchmark run is in progress",
+            )
+        if _CHAT_TASKS:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot restart the LSP hub while a chat reply is streaming",
+            )
+        manager = getattr(request.app.state, "lsp", None)
+        if manager is None or not hasattr(manager, "restart"):
+            raise HTTPException(status_code=503, detail="LSP hub is not available")
+        if os.environ.get("NOJAE_DISABLE_LSP"):
+            # Same dev/test switch the app lifespan honours: endpoints stay
+            # usable but nothing is spawned.
+            servers, active_ids = [], []
+        else:
+            servers, _errors = all_servers()
+            # Same two-gate rule as the startup lifespan, kept in one place.
+            active_ids = _active_server_ids()
+        await manager.restart(servers, active_ids)
+        # The payload re-scans the file, so it re-derives the same validation
+        # errors — they must not be passed as extra_errors or they appear twice.
+        return _lsp_payload(request)
+
+    @router.post("/lsp/restart")
+    async def post_lsp_restart(request: Request) -> Dict[str, Any]:
+        """Restart the LSP hub: re-read ``.nojae/lsp-settings.json`` and respawn.
+
+        Every language server is shut down (``shutdown``/``exit``, then
+        SIGTERM/SIGKILL) and respawned from a fresh scan of the declaration
+        file, so a hand-edited entry — a new server, a changed ``command``,
+        another ``workspaceRoot`` — takes effect without restarting the web
+        app. The two activation gates (the entry ``enable`` flag and
+        ``lspEnabled``) are re-applied exactly as at startup, so a dormant
+        file stays dormant. Invalid entries never spawn: the valid ones come
+        back up and the problems are reported in ``serversError``.
+
+        Awaited, so the response carries real post-restart status (a cold
+        language-server start is multi-second — the button stays busy).
+        """
+        return await _restart_lsp_hub(request)
+
+    @router.post("/lsp/query")
+    def post_lsp_query(body: LspQueryIn, request: Request) -> Dict[str, Any]:
+        """Answer one Editor-pane question about a buffer, as structured JSON.
+
+        The Editor's code pane asks the hub one question at a time in the app's
+        own vocabulary — ``status``, ``definition``, ``hover``, ``references`` —
+        and gets back the envelope ``core/lsphub/editor.py`` defines: the
+        answering server's id, a one-line reason when there is none, and the
+        action's structured answer. No JSON-RPC crosses this boundary and no LSP
+        method name appears in the browser; the hub stays the only thing that
+        talks to a language server. The answer carries positions and hover text,
+        never file bytes — this is not a second file reader.
+
+        A ``POST`` because the buffer's text travels with it when the buffer is
+        dirty, and that can be large: a ``GET`` would put a megabyte in a query
+        string. A plain ``def``, not ``async def``, so FastAPI runs it in a
+        threadpool — the hub bridge blocks on a future, and blocking the event
+        loop would stall every other request.
+
+        It is a **read**: it names no write route, writes nothing, and is
+        therefore not refused while a chat reply streams. A file no server
+        claims is a quiet answer (``server: null`` with a reason), never an
+        error — the gesture falls through to whatever Monaco would have done.
+        """
+        manager = getattr(request.app.state, "lsp", None)
+        if manager is None:
+            # The hub is disabled in tests and in a hermetic e2e run: the pane
+            # must degrade to the status quo, so this is the quiet envelope
+            # rather than a 500.
+            return {
+                "status": "no_server",
+                "server": None,
+                "reason": "the language-server hub is not available",
+                "action": body.action,
+                "result": None,
+            }
+        position = None
+        if body.line is not None and body.character is not None:
+            position = {"line": body.line, "character": body.character}
+        return manager.query_editor_sync(
+            body.action,
+            body.path,
+            position=position,
+            text=body.text,
+            allowed_ids=_allowed_server_ids(body.lspEnabled),
+        )
+
+    def _path_location_payload() -> Dict[str, Any]:
+        return {
+            "key": PATH_LOCATION_KEY,
+            "path": path_location(),
+            "default": default_path_location(),
+        }
+
+    def _policy_block() -> Dict[str, Any]:
+        """What the workspace's policy file looks like, **read-only**.
+
+        pol-05 seeds a default ``.nojae/read-write-policy.json`` at the two
+        moments a folder becomes the working location (boot, and the switch
+        below), so a GET must not write one: the app bar reads the location far
+        more often than a workspace is switched, and a read that leaves a folder
+        in someone's project is the mistake the seeding rules forbid. ``state``
+        is ``existing`` / ``absent`` / ``failed`` here, and the app bar leaves
+        ``absent`` as the plain fact it is.
+        """
+        return policy_seed.policy_file_state(path_location())
+
+    def _agent_modes_block() -> Dict[str, Any]:
+        """What the workspace's agent-modes file looks like, **read-only**.
+
+        The same half of the pair as :func:`_policy_block`: am-03 seeds
+        ``.nojae/agent-modes.json`` at the two moments a folder becomes the
+        working location, so a GET reports the file instead of leaving one
+        behind. ``absent`` is a plain fact there too — a workspace whose seed
+        failed chats on the built-in modes, so the dropdown (am-07) simply has
+        nothing of that project's own to offer.
+        """
+        return agent_modes.agent_modes_file_state(path_location())
+
+    def _prompt_helpers_block() -> Dict[str, Any]:
+        """What the workspace's prompt-helpers file looks like, **read-only**.
+
+        The third of the reserved folder's readers: mbl-02 seeds
+        ``.nojae/prompt-helpers.json`` at the two moments a folder becomes the
+        working location, so a GET reports the file instead of leaving one
+        behind. ``absent`` is a plain fact there too — a workspace whose seed
+        failed, or one that predates the feature, chats on nine empty bullets.
+        """
+        return prompt_helpers.prompt_helpers_file_state(path_location())
+
+    def _mcp_settings_block() -> Dict[str, Any]:
+        """What the workspace's MCP declaration file looks like, **read-only**.
+
+        The fourth reserved-folder reader: the MCP seed runs at the two
+        moments a folder becomes the working location, so a GET reports the
+        file instead of leaving one behind. ``absent`` is a plain fact — a
+        workspace whose seed failed has no MCP connectors, and the Settings →
+        MCP panel says so.
+        """
+        return mcp_settings_file_state(path_location())
+
+    def _lsp_settings_block() -> Dict[str, Any]:
+        """What the workspace's LSP declaration file looks like, **read-only**.
+
+        The declaration is hand-written — only its *template* is seeded (its
+        entries are per-machine) — so this report is the panel's way to say
+        "no language servers declared yet" and point at the template below.
+        """
+        return lsp_settings_file_state(path_location())
+
+    def _lsp_template_block() -> Dict[str, Any]:
+        """What the workspace's LSP template file looks like, **read-only**.
+
+        The sixth reserved-folder reader: the LSP template seed runs at the
+        two moments a folder becomes the working location, so a GET reports
+        the file instead of leaving one behind. ``absent`` is a plain fact —
+        the example is still committed, the workspace just lost the copy-me
+        shortcut.
+        """
+        return lsp_settings_template_state(path_location())
+
+    def _workspace_settings_block() -> Dict[str, Any]:
+        """What the workspace's model-connection file looks like, **read-only**.
+
+        The seventh reserved-folder reader: the settings seed runs at the two
+        moments a folder becomes the working location, so a GET reports the file
+        instead of leaving one behind. Its ``state`` is the *reader's* vocabulary
+        (``ok`` / ``absent`` / ``failed``) rather than the seeder's, because the
+        usable/broken question is what the app bar has to render, and the two
+        unusable-but-not-broken cases (no file yet, still the template's
+        instruction text) come through ``message`` with the file's path.
+        ``GET /api/settings`` is where the same sentence reaches the dialog, and
+        a chat or benchmark request refuses with it — both belong to the task that
+        cuts the reads over, so nothing here reads the file's values yet.
+        """
+        return workspace_settings.workspace_settings_state()
+
+    @router.get("/path-location")
+    def get_path_location() -> Dict[str, Any]:
+        """Effective working location of the MCP/LSP hubs.
+
+        The value ``${NOJAE_PATH_LOCATION}`` expands to in the
+        workspace's ``.nojae/mcp-settings.json`` and in the workspace's
+        ``.nojae/lsp-settings.json`` — read live from the environment,
+        so it reflects a change made through ``POST /path-location`` rather
+        than a stale startup snapshot.
+        """
+        return _path_location_payload() | {
+            "policy": _policy_block(),
+            "agentModes": _agent_modes_block(),
+            "promptHelpers": _prompt_helpers_block(),
+            "mcpSettings": _mcp_settings_block(),
+            "lspSettings": _lsp_settings_block(),
+            "lspSettingsTemplate": _lsp_template_block(),
+            "workspaceSettings": _workspace_settings_block(),
+        }
+
+    @router.post("/path-location")
+    async def post_path_location(
+        body: PathLocationIn, request: Request
+    ) -> Dict[str, Any]:
+        """Point both hubs at another directory and reload their tools.
+
+        Sets ``NOJAE_PATH_LOCATION`` in this process' environment, then
+        restarts the MCP and LSP hubs so both declaration files are re-read and
+        every connector/language server is relaunched against the new value —
+        the same effect as the refresh buttons, in one call.
+
+        The value is deliberately *not* persisted: it is process state, and the
+        next boot always re-seeds it to the install directory (see
+        ``config.setup_path_location``), so a machine move can never be broken
+        by a remembered path. Rejected with 422 when the directory is missing
+        or sits on the LSP workspace-root deny-list (a language server indexing
+        a secret tree would hand its contents to the model); in that case the
+        environment is left untouched and nothing is restarted.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot change the working location while a benchmark run is in progress",
+            )
+        # Every precondition of the two restarts is checked *before* the
+        # environment is touched: an env value the hubs never picked up is the
+        # worst possible outcome (the panel would disagree with the tools).
+        if _CHAT_TASKS:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot change the working location while a chat reply is streaming",
+            )
+        for attr, label in (("mcp", "MCP"), ("lsp", "LSP")):
+            hub = getattr(request.app.state, attr, None)
+            if hub is None or not hasattr(hub, "restart"):
+                raise HTTPException(
+                    status_code=503, detail=f"{label} hub is not available"
+                )
+        raw = (body.path or "").strip()
+        if not raw:
+            raise HTTPException(
+                status_code=422, detail="Working location must not be empty"
+            )
+        if not os.path.isabs(raw):
+            raise HTTPException(
+                status_code=422, detail="Working location must be an absolute path"
+            )
+        # Expanduser + realpath: a '~' or a symlinked checkout must land on the
+        # same canonical prefix the hubs compare against, and what the panel
+        # shows must be what the declaration files expand to.
+        expanded = os.path.realpath(os.path.expanduser(raw))
+        if not os.path.isdir(expanded):
+            raise HTTPException(
+                status_code=422, detail=f"Working location does not exist: {raw}"
+            )
+        # The same deny-list question ``editorfs.policy._check_workspace_root``
+        # asks for the tree, so both entry points answer with one rule
+        # (A-D2.2, win-06) — folded by the probe of the root being *set*, since
+        # that is the volume the denied entry would sit on here. The fold answer
+        # is asked *after* the existence check above and is best-effort: a root
+        # the probe cannot write to answers ``False``, which is the strict side.
+        fold = fscase.case_folded(expanded)
+        for denied in restricted_lsp_roots():
+            entry = os.path.realpath(denied)
+            if _is_within(entry, expanded, fold=fold):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Working location is on the deny-list: {denied}",
+                )
+        previous = os.environ.get(PATH_LOCATION_KEY)
+        os.environ[PATH_LOCATION_KEY] = expanded
+        # The workspace's MCP declaration file is seeded here — *before* the
+        # two restarts — for one reason: the declaration now lives inside the
+        # new root's ``.nojae``, so the MCP restart re-scans the very file
+        # this seeds. Seeding it after the restart would rebuild the hub over
+        # an unseeded folder and leave the new workspace on **zero**
+        # connectors until the next restart. This breaks the "all seeds after
+        # the restarts" rule the three below still follow only because it is
+        # safe: ``ensure_mcp_settings_file`` answers a dict and raises
+        # nothing, so a seeding hiccup cannot be mistaken for a hub failure
+        # and cannot trip the rollback below.
+        mcp_settings_block = ensure_mcp_settings_file(expanded)
+        # The workspace's model-connection file follows the MCP seed across the
+        # same exception to the "all seeds after the restarts" rule the three
+        # below still keep, for the same reason and with the same safety:
+        # ``lspEnabled`` is read *during* ``_restart_lsp_hub()``
+        # (``_active_server_ids()`` → ``config.lsp_enabled_ids()``), so seeding
+        # after would restart the hub over a folder with no settings file and
+        # leave the new workspace on **zero** language servers until the next
+        # restart — and, like the MCP one, ``ensure_workspace_settings_file``
+        # answers a dict and raises nothing, so a seeding hiccup cannot be
+        # mistaken for a hub failure and cannot trip the rollback below.
+        #
+        # Its cache is invalidated here too (spec D4), for the reason spelled out
+        # beside the modes invalidation below: the ``existing`` answer writes
+        # nothing, so it never reaches the invalidation inside the seeder, and an
+        # entry cached about the new root while it was only being browsed would
+        # otherwise outlive the switch. It sits on the same side of the restarts
+        # as the seed because the restart is the reader that ordering exists for.
+        workspace_settings_block = workspace_settings.ensure_workspace_settings_file(
+            expanded
+        )
+        workspace_settings.invalidate_workspace_settings()
+        try:
+            mcp = await _restart_mcp_hub(request)
+            lsp = await _restart_lsp_hub(request)
+        except BaseException:
+            # Guards above mean a refusal can no longer happen here, so this
+            # only fires on an unexpected hub failure: put the environment back
+            # so the panel and the next file scan agree. (If the MCP restart
+            # already landed, its live sessions keep the new argv until the
+            # next restart — a restart button or a reboot re-aligns them.)
+            if previous is None:
+                os.environ.pop(PATH_LOCATION_KEY, None)
+            else:
+                os.environ[PATH_LOCATION_KEY] = previous
+            raise
+        # Seed the new root's default policy file here — the second of pol-05's
+        # two entry points (the other is boot, ``api/server.py``). It goes
+        # *after* the two hub restarts on purpose: a seeding hiccup must not be
+        # mistaken for a hub failure, because the except above would then roll
+        # the environment back for a reason that has nothing to do with the
+        # switch. And it goes before the response is built, so the Editor's
+        # tree re-roots onto a workspace whose rules already exist.
+        #
+        # A failure is a note in the payload, never an error: an unseeded
+        # workspace opens fine, it just has no level-B rules to filter it.
+        #
+        # The agent-modes file (am-03) is seeded at the same moment, by the same
+        # rule, and its own cache is invalidated *after* its write (inside
+        # ``ensure_agent_modes_file``, exactly where pol-05's seeder invalidates
+        # the policy cache) — so the first read of the new root sees the file
+        # that was just created rather than a cached "absent". The cache is
+        # keyed on the root, so a switch would miss it anyway; the invalidation
+        # is there because the boot path can land on a root that was already
+        # read while it was unseeded.
+        policy_block = policy_seed.ensure_policy_file(expanded)
+        modes_block = agent_modes.ensure_agent_modes_file(expanded)
+        # Explicit, and after both seeds: the cache is keyed on the root so a
+        # switch would miss anyway, but saying it next to the policy it mirrors
+        # is what makes the ordering obvious to the next reader — and it covers
+        # the ``existing`` answer, which writes nothing and so never gets to the
+        # invalidation inside the seeder.
+        agent_modes.invalidate_agent_modes_cache()
+        # And the workspace's case-folding answer (win-05): it is cached per root
+        # exactly as the policy file's rules are, so the same switch that makes
+        # the tree re-root must make the verdict forget which filesystem it
+        # probed — otherwise a workspace opened after a switch would be judged
+        # with the previous volume's case semantics.
+        fscase.invalidate_case_cache()
+        # The prompt-helpers file (mbl-02) is seeded at this same moment, by the
+        # same rule, and it has **no cache to invalidate** — unlike the two
+        # above, the file is read afresh every time the chat tab opens or the
+        # location changes (nine small strings do not earn a cache and its
+        # invalidation rules), so saying nothing here is the whole mechanism.
+        # It comes last of the three seeds for the reason the others share: a
+        # seeding hiccup is a note in the payload, never a hub failure.
+        helpers_block = prompt_helpers.ensure_prompt_helpers_file(expanded)
+        # The LSP template seed (the fifth of the reserved folder's files, and
+        # the sixth counting the LSP declaration itself, which is *not* seeded
+        # — its entries are per-machine, so the app only ever hands out the
+        # copy-me template). Same moment, same rule as the seeds above: after
+        # the restarts, so a seeding hiccup is a note in the payload and
+        # cannot be mistaken for a hub failure; and no scan reads the
+        # template, so nothing in the restart waits on this write.
+        lsp_template_block = ensure_lsp_settings_template(expanded)
+        return (
+            _path_location_payload()
+            | {
+                "mcp": mcp,
+                "lsp": lsp,
+                "policy": policy_block,
+                "agentModes": modes_block,
+                "promptHelpers": helpers_block,
+                "mcpSettings": mcp_settings_block,
+                "lspSettings": lsp_settings_file_state(expanded),
+                "lspSettingsTemplate": lsp_template_block,
+                "workspaceSettings": workspace_settings_block,
+            }
+        )
+
+    @router.get("/fs/tree")
+    def get_fs_tree(path: str = "") -> Dict[str, Any]:
+        """One directory level of the active workspace, for the Editor tab.
+
+        ``path`` is relative to ``NOJAE_PATH_LOCATION`` ("" is its root)
+        — the same working location both hubs point at, so the tree browses
+        exactly what the tools are working on. One level per call keeps the
+        first paint at one ``listdir`` however big the checkout is.
+
+        All the rules live in ``core/editorfs`` (the three locks on the path,
+        the entry cap, and one policy verdict per path — built in for the app's
+        own files, and read from the workspace's ``.nojae/read-write-policy.json``
+        for everyone else's); this route only turns a
+        :class:`~src.core.editorfs.policy.WorkspacePathError` into its HTTP
+        status. This route reads: every write route under ``/api/fs`` is gated by
+        the same verdict, belongs to the browser alone, and no hub or tool may
+        ever gain one.
+        """
+        try:
+            return editorfs.list_dir(path)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/fs/file")
+    def get_fs_file(path: str) -> Dict[str, Any]:
+        """The whole text of one workspace-relative file, for the Editor tab.
+
+        The same gate as the tree — ``editorfs`` resolves the path inside the
+        working location and asks the policy verdict — so a name the listing
+        pruned answers this read as absent (404), never as a refusal that would
+        confirm it exists. One verdict, every surface that touches disk. Past
+        ``editorfs.constants.MAX_EDITOR_BYTES``
+        the answer is 413 naming the size; a binary file answers ``binary: true``
+        with no ``text`` key rather than an error, so the pane can label it.
+
+        ``mtime`` in the payload is the token the save guard compares: the
+        client sends it back as ``ifUnmodifiedSince`` and a disk mtime that has
+        moved since answers 409 instead of overwriting someone else's change.
+        It is also what the freshness probe (``/api/fs/stat``) compares for the
+        open buffers. This route reads; the write routes are browser-only.
+        """
+        try:
+            return editorfs.read_file(path)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/fs/search")
+    def get_fs_search(
+        path: str = "",
+        q: str = "",
+        caseSensitive: bool = False,
+        regex: bool = False,
+    ) -> Dict[str, Any]:
+        """Every match of one query inside one scope of the active workspace.
+
+        ``path`` is the scope and uses the tree's convention — workspace-relative,
+        with "" meaning the whole workspace — so the row a gesture was made on is
+        what gets searched: a folder is its subtree, a file is that file's own
+        content. ``q`` also defaults to "" so an unset query reaches the core's
+        one-sentence refusal ("empty query") rather than a framework validation
+        error, and the parameter names are camelCase because that is the wire form
+        the rest of this surface uses.
+
+        All the rules live in :func:`src.core.editorfs.search.search_workspace`:
+        the walk, the one policy verdict per child (a search sees exactly what the
+        tree shows, so a hidden name is pruned and never counted), the symlinks it
+        refuses to open, the four caps and the single footer sentence the payload
+        carries. This route only turns the core's two errors into their HTTP
+        status: 400 for a pattern that is not a pattern (carrying ``re``'s own
+        message), 422 for a scope outside the working location or refused by a
+        lock, 404 for a scope that is absent or hidden.
+
+        This route reads. It opens files and reports their lines, and changes
+        nothing on disk — the write routes below the divider are the ones the
+        guard suite isolates.
+        """
+        try:
+            return editorfs.search_workspace(
+                path, query=q, case_sensitive=caseSensitive, regex=regex
+            )
+        except editorfs.SearchQueryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/fs/files")
+    def get_fs_files() -> Dict[str, Any]:
+        """Every candidate path of the quick-open finder (``GET /api/fs/files``).
+
+        No parameters: the scope is always the whole working location. The list
+        is fetched once per dialog open and filtered per keystroke in the
+        browser, so this is one bounded walk per open, not per keystroke.
+
+        All the rules live in
+        :func:`src.core.editorfs.quickopen.list_workspace_files`: the tree's
+        walk order, one policy verdict per child (``hidden`` pruned and never
+        counted, ``ro`` excluded — the finder is a shortcut to files you will
+        *edit*), a symlinked directory never descended, no file ever opened,
+        and ``MAX_QUICKOPEN_FILES`` bounding the payload with an honest count.
+        This route only transports the core's dict; it reads and writes
+        nothing.
+
+        This route reads. It changes nothing on disk — the write routes below
+        the divider are the ones the guard suite isolates.
+        """
+        return editorfs.list_workspace_files()
+
+    # -- the guarded write surface (browser-only) ------------------------------
+
+    @router.put("/fs/file")
+    def put_fs_file(body: FileSaveIn) -> Dict[str, Any]:
+        """One whole editor buffer, back to disk (``PUT /api/fs/file``).
+
+        The rules all live in :func:`src.core.editorfs.files.write_file` —
+        the write gate on the leaf (a path the policy hides or marks read-only
+        is refused 422, naming the level and the rule), the ``mtime`` guard
+        (409 whose ``detail`` is an object carrying both mtimes), the size cap
+        on the way in *and* on the file on disk (413: a buffer we never fully
+        read is never written back), a pre-save backup, and an atomic temp-file
+        + ``os.replace`` that keeps the file's mode and its exact bytes (CRLF
+        included, no normalisation).
+
+        Refused while a chat reply streams: that reply may be editing these
+        very files through its tools, so a save landing in the middle of one
+        would race the model. The payload answers the new ``size``/``mtime``
+        so the caller re-baselines on the server's truth.
+
+        This is a **browser** surface. No MCP connector, LSP tool or chat code
+        path may call it — the tools stay read-only by design, and the guard
+        suite in ``tests/test_editorfs_write.py`` asserts exactly that.
+        """
+        _refuse_if_chat_streaming("save")
+        try:
+            return editorfs.write_file(
+                body.path, body.text, if_unmodified_since=body.ifUnmodifiedSince
+            )
+        except editorfs.WorkspaceSaveConflict as exc:
+            # The object, not the sentence: the client offers reload-or-
+            # overwrite, and that choice needs both numbers, not prose.
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail_object)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.post("/fs/create")
+    def post_fs_create(body: FileCreateIn) -> Dict[str, Any]:
+        """One new file or folder inside the working location.
+
+        The rules live in :func:`src.core.editorfs.mutate.create_path` — the
+        write gate over the parent chain *and* the leaf name (422 naming the
+        policy level and the rule that matched, never the 404 a caller would
+        read as "the name is free"), the parent must already be a directory
+        (409 naming it: a typo becomes a refusal, never a stray tree — there is
+        no ``mkdir -p`` here), and never over an existing name, dangling symlink
+        included (409 whose ``detail`` is ``{"reason": "exists", …}``, closed
+        against a race with ``mkdir``/``O_EXCL`` rather than checked).
+
+        Refused while a chat reply streams, like every other write. The payload
+        answers ``path``/``dir``/``size``/``mtime`` — the shape a save answers,
+        so the client re-baselines the new empty buffer on the server's truth.
+
+        Browser-only, like ``PUT /api/fs/file``: no connector or LSP tool may
+        reach a route under ``/fs`` that mutates disk.
+        """
+        _refuse_if_chat_streaming("create a file or folder")
+        try:
+            return editorfs.create_path(body.path, is_dir=body.dir)
+        except editorfs.WorkspacePathExists as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail_object)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.delete("/fs/file")
+    def delete_fs_file(path: str) -> Dict[str, Any]:
+        """One file or one whole folder, moved to the trash (``DELETE /api/fs/file``).
+
+        The rules live in :func:`src.core.editorfs.mutate.trash_path` — the
+        write gate over the chain (422 naming the policy rule), the working
+        location itself refused outright (400), an absent path answered **404**
+        rather than "already deleted, fine", a top-level symlink refused (400,
+        its target may be outside the workspace), and the **all-or-nothing
+        subtree check**: one hidden or read-only descendant refuses the whole
+        delete, naming that descendant, and nothing at all moves. What is
+        deleted is never ``unlink``ed — it lands in
+        ``.nojae/trash/<batch>/<the relative path>`` of the **current** working
+        location (so a switch moves the trash with it) and is swept after
+        ``TRASH_RETENTION_DAYS``, which is why the payload names the batch.
+        That folder is reserved, so the pane cannot list or open it: the batch is
+        restored with ``mv`` in a terminal.
+
+        Refused while a chat reply streams, like every other write. The answer
+        carries ``entries`` — the descendant count from the server's own walk —
+        so the confirmation the UI already showed matches what happened.
+
+        Browser-only, like the other write routes: no connector or LSP tool may
+        reach a route under ``/fs`` that mutates disk.
+        """
+        _refuse_if_chat_streaming("delete a file or folder")
+        try:
+            return editorfs.trash_path(path)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.post("/fs/rename")
+    def post_fs_rename(body: FileRenameIn) -> Dict[str, Any]:
+        """One path to another path — a rename, which is also a move.
+
+        The rules live in :func:`src.core.editorfs.mutate.rename_path`: **both
+        ends** go through the write gate (``from`` whole, and ``to`` plus every
+        one of its ancestors — the rule that refuses an innocent file moving
+        into ``.git/…`` or ``mcp_connectors/…``), an absent source is 404, the
+        target's parent must already exist (409 naming it, no implicit
+        ``mkdir``), a folder cannot move into itself (409), and an occupied
+        target is 409 rather than ``os.rename``'s silent replacement. A
+        cross-device move (``EXDEV``) is refused rather than copied.
+
+        Refused while a chat reply streams, like every other write. Nothing is
+        backed up here, deliberately: the bytes did not change and the trash
+        plus git already describe the move. The payload answers
+        ``from``/``to``/``dir``/``size``/``mtime`` so the caller can re-point
+        its open buffers and re-baseline on the server's truth.
+
+        Browser-only, like the other write routes: no connector or LSP tool may
+        reach a route under ``/fs`` that mutates disk.
+        """
+        _refuse_if_chat_streaming("rename a file or folder")
+        try:
+            return editorfs.rename_path(body.frm, body.to)
+        except editorfs.WorkspacePathExists as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail_object)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.post("/fs/move-batch")
+    def post_fs_move_batch(body: FileMoveBatchIn) -> Dict[str, Any]:
+        """Several files into one existing folder — one request, or nothing moves.
+
+        The rules live in :func:`src.core.editorfs.mutate.move_paths_batch`,
+        which is ``rename_path``'s rules asked of every entry: both ends of each
+        move go through the write gate (422 naming the policy rule), an absent
+        source is 404, a **folder** in ``paths`` is 400, a symlink source is 400,
+        the destination folder must already be a directory (409 naming it — no
+        implicit ``mkdir``), and an occupied target is 409 with
+        ``{"reason": "exists", …}`` rather than ``os.rename``'s silent
+        replacement. Over the entry cap is 400 naming the cap.
+
+        The transaction is the **ordering**: every entry is validated before any
+        of them is applied, so a refusal leaves the whole set at home. The apply
+        loop itself is *not* atomic across paths — there is no filesystem
+        transaction to borrow — and it owns that: it stops at the first
+        ``OSError`` and the payload's ``moved`` array says exactly what landed
+        instead of pretending the list did.
+
+        Refused while a chat reply streams, like every other write. Nothing is
+        backed up, as for a rename: the bytes did not change. The payload answers
+        ``{"moved": [{"from", "to", "mtime"}…], "to_parent"}`` so the caller can
+        re-point its open buffers and re-list the two folders it touched.
+
+        Browser-only, like the other write routes: no connector or LSP tool may
+        reach a route under ``/fs`` that mutates disk.
+        """
+        _refuse_if_chat_streaming("move files")
+        try:
+            return editorfs.move_paths_batch(body.paths, body.to_parent)
+        except editorfs.WorkspacePathExists as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail_object)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/fs/stat")
+    def get_fs_stat(path: List[str] = Query(default_factory=list)) -> Dict[str, Any]:
+        """``mtime``/``size``/``exists`` for a handful of exact paths.
+
+        The freshness probe: the client names the files it has open, so nothing
+        has to poll a tree or run a file watcher. Every path goes through the
+        same gate as the tree.
+        """
+        try:
+            return {"paths": editorfs.stat_paths(path)}
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/fs/status")
+    def get_fs_status() -> Dict[str, Any]:
+        """Which files of the working location git considers unstaged.
+
+        One call for the whole tree (not one per row), so the navigator can mark
+        the modified and untracked files of every branch it has on screen. The
+        answer is workspace-relative, and a working location that is not a git
+        repository answers ``repo: false`` with an empty list — the silent,
+        non-error case the UI is expected to ignore.
+
+        Read-only like the rest of ``/api/fs``: the query is ``git status``, and
+        ``GIT_OPTIONAL_LOCKS=0`` keeps even it from touching the index on disk.
+        """
+        try:
+            return editorfs.git_status()
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/fs/diff")
+    def get_fs_diff(path: str) -> Dict[str, Any]:
+        """The two sides of one file: ``original`` as of ``HEAD``, ``modified``
+        as it sits on disk.
+
+        Returned as two texts rather than a patch so the editor renders the diff
+        itself. The path goes through the same gate as the tree and the file
+        read, and the disk side is read by that same reader — so the size cap,
+        the binary answer and the policy refusal are identical here. A file with
+        no committed side (added, untracked) gets an empty ``original``; the UI
+        does not offer the item for one.
+        """
+        try:
+            return editorfs.file_diff(path)
+        except editorfs.WorkspacePathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    # -- terminal: one PTY per WebSocket ---------------------------------------
+
+    @router.get("/terminal")
+    def get_terminal(request: Request) -> Dict[str, Any]:
+        """The live terminal sessions (pid, cwd, started, bytes) — for the
+        settings panel. Mirrors ``GET /api/mcp``: an orphan must be nameable, so
+        whatever the WebSocket registry holds is reported here. Read-only; the
+        shells themselves are driven by the WS, never by this route."""
+        hub = getattr(request.app.state, "terminal", None)
+        return {"sessions": hub.list_sessions() if hub is not None else []}
+
+    @router.websocket("/terminal")
+    async def terminal_ws(websocket: WebSocket) -> None:
+        """One shell on one PTY, bridged to the browser's xterm pane.
+
+        Guards, in order, each refusing *before* any process is spawned:
+        the Origin check (the app has no CORS/CSRF layer, so this is the one
+        cheap defence against a random page reaching a shell), the driver
+        check (a session needs an available pseudo-terminal driver — the
+        seam's capability answer in ``termhub.drivers``, not a platform
+        name), and the concurrent-session cap. A real shell can change
+        anything the app's user can — which is why it is *never* an MCP or
+        LSP tool, only this route,
+        used by the SPA. The tools stay read-only; a shell is a human surface.
+
+        ``cwd`` is always ``path_location()``; the server takes no path from the
+        client. Frames are JSON text (``input``/``resize``/``kill`` in,
+        ``open``/``output``/``exit``/``error`` out); the session owns the
+        framing and teardown, this route only adapts the socket to it.
+        """
+        hub = getattr(websocket.app.state, "terminal", None)
+        if hub is None:  # pragma: no cover - lifespan always sets it
+            await websocket.close(termhub.CLOSE_CODE_UNSUPPORTED, "Terminal unavailable")
+            return
+
+        headers = {k.lower(): v for k, v in websocket.headers.raw}
+        allowed, reason = term_policy.origin_allowed(headers)
+        if not allowed:
+            await websocket.close(
+                termhub.CLOSE_CODE_POLICY, f"Origin refused: {reason}"
+            )
+            return
+
+        if not term_drivers.driver_available():
+            await websocket.accept()
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": termhub.NO_DRIVER_MESSAGE,
+                }
+            )
+            await websocket.close(
+                termhub.CLOSE_CODE_UNSUPPORTED, termhub.NO_DRIVER_MESSAGE
+            )
+            return
+
+        if hub.is_full():
+            await websocket.close(
+                termhub.CLOSE_CODE_CAPACITY,
+                f"Too many terminal sessions (cap {hub.capacity()})",
+            )
+            return
+
+        # Publish a frame straight to the socket. Raises when the client is
+        # gone, which the session's reader treats as "stop pumping".
+        async def emit(event: Dict[str, Any]) -> None:
+            await websocket.send_json(event)
+
+        async def receive_frame():
+            try:
+                text = await websocket.receive_text()
+            except (WebSocketDisconnect, RuntimeError):
+                return None
+            try:
+                frame = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                # Malformed frame: ignored by the session, not fatal.
+                return {"type": ""}
+            return frame if isinstance(frame, dict) else {"type": ""}
+
+        try:
+            session = hub.create(emit)
+        except termhub.SessionCapacity as exc:
+            await websocket.close(termhub.CLOSE_CODE_CAPACITY, str(exc))
+            return
+
+        await websocket.accept()
+        try:
+            # One session per connection: no attach, no reuse.
+            session.spawn(cols=termhub.DEFAULT_COLS, rows=termhub.DEFAULT_ROWS)
+        except (termhub.TerminalUnsupported, OSError) as exc:
+            hub.drop(session.id)
+            await websocket.send_json({"type": "error", "message": str(exc)})
+            await websocket.close(termhub.CLOSE_CODE_UNSUPPORTED, "Could not spawn shell")
+            return
+
+        try:
+            await session.run(receive_frame)
+        finally:
+            hub.drop(session.id)
+            with suppress(Exception):
+                await websocket.close()
+
+    @router.get("/lsp/log")
+    def get_lsp_log(request: Request, server: str = "") -> Dict[str, Any]:
+        """Tail of one language server's log file (for the settings panel)."""
+        manager = getattr(request.app.state, "lsp", None)
+        if manager is None or not server:
+            raise HTTPException(status_code=404, detail="No LSP log available")
+        log = manager.log_tail(server) if hasattr(manager, "log_tail") else ""
+        return {"server": server, "log": log}
+
+    @router.get("/models")
+    async def get_models(serverUrl: str = "", apiKey: str = "") -> Dict[str, Any]:
+        """List models exposed by an OpenAI-compatible server URL."""
+        url = serverUrl.strip()
+        if not url:
+            raise HTTPException(status_code=422, detail="No server URL provided")
+        if not url.lower().startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=422, detail="Server URL must start with http:// or https://"
+            )
+        url = models_url(url)
+        headers = {}
+        if apiKey.strip():
+            headers["Authorization"] = f"Bearer {apiKey.strip()}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not fetch models from {url}: {exc}",
+            ) from exc
+        return {"models": _model_ids(payload)}
+
+    @router.get("/batch/tasks")
+    def get_batch_tasks(prefix: str = "", dir: str = "") -> Dict[str, Any]:
+        """List the numbered task lot of ``prefix`` in the workspace's ``dir``.
+
+        The whole backend surface batch mode has: names, sizes, the first
+        heading and the big-picture body — never a task body (the model opens
+        its task file with the connectors, which is why there is no file-read
+        route here). All the rules (prefix shape, the three folder locks,
+        numbering, caps) live in ``core/batch.py``; this route only turns a
+        :class:`core.batch.BatchListingError` into its HTTP status.
+        """
+        try:
+            return batch_core.task_lot(prefix, dir)
+        except batch_core.BatchListingError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/batch/prefixes")
+    def get_batch_prefixes(dir: str = "") -> Dict[str, Any]:
+        """Every task prefix available in the workspace's ``dir``.
+
+        The batch dialog's dropdown: it lists the lots the folder actually
+        holds, so a prefix is chosen rather than typed. One ``scandir`` of the
+        same folder ``GET /api/batch/tasks`` lists, with the same three locks
+        and the same "is a lot file" rule -- so a prefix is offered exactly when
+        listing it would return a non-empty lot. No file content is read here
+        either (B13): names only.
+        """
+        try:
+            return batch_core.task_prefixes(dir)
+        except batch_core.BatchListingError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.get("/agent-modes")
+    def get_agent_modes() -> Dict[str, Any]:
+        """The agent modes this workspace offers, **read-only** (am-06).
+
+        The composer's dropdown and the hub panels' gray-out both read this one
+        payload, which is why it carries ``mcptools``/``lsptools``/``editable``
+        and nothing else: the client never hardcodes the app-owned mode's id, it
+        reads ``editable: false`` from here.
+
+        Deliberately **absent**:
+
+        * ``systemMessage`` — long, displayed nowhere, and there is no editor
+          for it yet (D6 puts one in Settings in a later lot). Publishing it now
+          invites a half-built preview that is wrong the day the editor lands;
+        * ``instructions`` — the reserved mode's generated blocks, derived text
+          nobody should be copying into the DOM.
+
+        A **broken** file answers **200** with the usable defaults in ``modes``
+        plus the ``findings`` that name the pointer to fix (D11): a 4xx/5xx
+        would hide the fix and leave the dropdown unrenderable. The findings are
+        always a list, possibly empty, and ``source.loaded`` says whether the
+        file itself was understood.
+
+        This answers *about* ``.nojae/agent-modes.json``; it is not a way to
+        read it. There is no ``?path=`` and the raw bytes are never returned —
+        the same purpose-built reader the policy file has
+        (:func:`_policy_block` / ``policy_file_state``), and the folder stays
+        invisible to the tree, ``/api/fs/*``, git status and the diff.
+        """
+        resolved = agent_modes.resolve_modes()
+        return {
+            "modes": [
+                {
+                    "id": mode.id,
+                    "label": mode.label,
+                    "mcptools": mode.mcptools,
+                    "lsptools": mode.lsptools,
+                    "editable": mode.editable,
+                }
+                for mode in resolved["modes"]
+            ],
+            "default": resolved["default"],
+            "source": resolved["source"],
+            "findings": [
+                {"kind": finding.kind, "message": finding.message}
+                for finding in resolved["findings"]
+            ],
+        }
+
+    @router.get("/agent-modes/document")
+    def get_agent_modes_document() -> Dict[str, Any]:
+        """What this workspace's modes file **itself** says (the editor's read).
+
+        The editor's half of the two reads, and the reason it is a second route
+        rather than a wider version of the one above: ``GET /api/agent-modes``
+        answers *what can I select right now* (valid entries, plus the built-in
+        fallback, plus the app-owned mode last, no persona), while this answers
+        *what does my file say* — the file's own entries in the file's own order,
+        nothing added and nothing dropped, each persona verbatim in whichever JSON
+        form the file wrote it, and a **broken entry shown** with the finding that
+        names it. A dialog fed by the dropdown's list would show three modes for a
+        file that holds four, and its save would write back three.
+
+        All of the rules live in :func:`src.core.agent_modes.read_agent_modes_document`;
+        this route only serialises its ``ModeFinding`` objects into the same
+        ``{"kind", "message"}`` shape every other modes payload uses. Two things it
+        carries that the dropdown's read must not:
+
+        * ``source.mtime`` — the token the save below compares against, so this read
+          is **not cached** (a cached token would hand out a stale one and defeat
+          the conflict guard);
+        * ``caps`` / ``defaults`` — the numbers the form enforces and the built-in
+          document, so no cap is spelled in the client.
+
+        A broken file answers **200** like the reader does: the dialog is most
+        useful exactly then, and its findings are what the form puts on each field.
+        The app-owned mode is absent from ``entries`` (a hand-written entry for it
+        stays a *note* naming the pointer, which is correct server data and is not
+        filtered out).
+
+        Browser-only, and still no ``?path=``: this is a purpose-built reader for
+        one reserved-folder file — the pattern ``GET /api/path-location`` plus
+        ``policy_file_state`` establishes — never a way to read the folder.
+        """
+        document = agent_modes.read_agent_modes_document()
+
+        def rendered(findings: List[Any]) -> List[Dict[str, str]]:
+            return [{"kind": finding.kind, "message": finding.message}
+                    for finding in findings]
+
+        return {
+            **document,
+            "entries": [
+                {**entry, "findings": rendered(entry["findings"])}
+                for entry in document["entries"]
+            ],
+            "findings": rendered(document["findings"]),
+        }
+
+    @router.post("/agent-modes/save")
+    def post_agent_modes_save(body: AgentModesSaveIn) -> Dict[str, Any]:
+        """The whole modes document, back to disk (the editor's write).
+
+        The rules all live in :func:`src.core.agent_modes_write.save_agent_modes_document`:
+        it refuses what the loader itself would drop (422 whose ``detail`` is the
+        findings naming each JSON pointer), refuses a body declaring a mode
+        nojae owns, guards against landing on someone else's edit (409 whose
+        ``detail`` carries **both** ``mtime`` numbers), refuses to overwrite bytes
+        its own reader refuses, writes D6's shape (``version`` from the app's
+        constant, ``readme`` preserved from the file, entries in the dialog's order,
+        a persona as a list only when no line is blank), keeps the bytes it replaced
+        in the app's backup folder, and creates exclusively when the file was
+        absent. This route only maps those errors to their status — it decides
+        nothing about the file.
+
+        Refused while a chat reply streams: that reply is the only other writer of
+        the workspace, so this is the same gate every Editor write asks. It is
+        deliberately **not** gated during a benchmark run — a run never consults a
+        mode, so gating it would be a rule with no race behind it.
+
+        The answer is the **new** verdict in the shape ``GET /api/agent-modes``
+        publishes, plus the new ``mtime``, so the dropdown reloads from this response
+        instead of a second round-trip.
+
+        Browser-only, like every other write route: no connector tool, no LSP spec
+        and no chat path may reach it — which matters here more than anywhere,
+        because this file decides whether tools exist at all.
+        """
+        _refuse_if_chat_streaming("save the agent-modes file")
+        try:
+            return agent_modes_write.save_agent_modes_document(
+                body.document,
+                body.mtime,
+                backup=editorfs.backup_for_write,
+            )
+        except (agent_modes_write.AgentModesSaveConflict,
+                agent_modes_write.AgentModesDocumentInvalid) as exc:
+            # The object, not the sentence: a conflict has to be *acted on* (the
+            # dialog stays open and names both numbers) and an invalid document has
+            # to be shown per field, which needs the findings, not prose.
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail_object)
+        except agent_modes_write.AgentModesSaveError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    @router.post("/chat")
+    async def post_chat(body: ChatIn, request: Request) -> StreamingResponse:
+        """Stream one chat reply from the benchmark-configured LLM as SSE.
+
+        The sync LLM client runs in a worker thread feeding an ``asyncio.Queue``
+        (project convention: sync client in a thread + ``emit``); the SSE
+        generator polls the queue and disconnect, closing the upstream
+        stream via ``cancel_event`` when the client goes away.
+
+        While the reply streams, its events are also *pausable*: the handle
+        registered here lets ``POST /api/chat/pause`` arm ``pause_event``, which
+        ``core.chat.stream_chat`` checks at its next message boundary.
+        """
+        if state.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot chat while a benchmark run is in progress",
+            )
+        config = _load_config()
+        models = config.model_list()
+        if not models:
+            raise HTTPException(status_code=400, detail="No models configured (ENDPOINT)")
+
+        # The active agent mode contributes exactly two things to the system
+        # message: its persona replaces the configured ``LLM_SYSPROMPT`` (D1),
+        # and its generated blocks append after AGENTS.md. It is resolved
+        # **per request** — the modes file is edited outside the app, so a
+        # change lands on the *next* turn of an existing conversation, the same
+        # way an AGENTS.md edit does; am-01's mtime cache makes that cheap and
+        # nothing here adds a second cache layer.
+        mode, _mode_findings = agent_modes.resolve_mode(body.agentMode)
+        if mode is None:
+            # Unknown id → 422 naming it, never a silent fall back to the
+            # default (D14): the only way to reach here is a typo — in a JSON
+            # file edited by hand, or in a stale tab after a rename — and a
+            # default would answer the user's question with the wrong agent and
+            # no clue. The detail lists what *is* available so the fix is in the
+            # message. This is deliberately the opposite of D11 (a broken
+            # *file* still chats): there the failure is the app's to absorb.
+            # Raised before the pause handle is armed and before the SSE
+            # generator exists — a request that never streams must not own the
+            # handle a later request needs.
+            available = ", ".join(
+                entry.id for entry in agent_modes.resolve_modes()["modes"]
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown agent mode {body.agentMode!r}. "
+                       f"Available: {available}",
+            )
+        # An empty persona means "use the configured prompt" — the escape hatch
+        # for a workspace that wants the pre-mode behaviour back.
+        persona = mode.system_message or config.sysprompt
+
+        messages = [m.payload() for m in body.messages]
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        cancel_event = threading.Event()
+        pause_event = threading.Event()
+        _arm_chat_handle(cancel_event, pause_event)
+        # The same mode decides the hub gate (D3/D4): a mode whose flag is false
+        # contributes no tool schemas to the request at all, so the persona and
+        # the affordance can never disagree. Order of the three levels does not
+        # matter — they intersect.
+        tool_kwargs = _chat_tool_kwargs(
+            request, body.mcpEnabled, body.lspEnabled, mode=mode
+        )
+
+        def emit(event: Any) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        async def pump() -> None:
+            try:
+                await asyncio.to_thread(
+                    stream_chat,
+                    messages,
+                    models[0],
+                    config.serverUrl,
+                    emit,
+                    config.to_kwargs(),
+                    cancel_event=cancel_event,
+                    pause_event=pause_event,
+                    api_key=config.apiKey or "none",
+                    # The mode's persona, or the configured prompt when the mode
+                    # declares none (D1: the two are alternatives, never
+                    # stacked). Everything not WorkBench — the benchmark — keeps
+                    # reading ``LLM_SYSPROMPT`` through ``core/models.py``.
+                    sysprompt=persona,
+                    # Keywords from here on: the flag pair is optional on
+                    # ``stream_chat``, so a stub may omit it (tests do).
+                    # Project instructions ride on the system message: when the
+                    # working location carries AGENTS.md, its text is appended
+                    # there so every conversation starts already knowing the
+                    # project's conventions (see ``config.load_agent_instructions``).
+                    agent_instructions=agent_instructions_block(),
+                    # The mode's generated blocks (only the reserved Todo builder
+                    # has any) join after them, and are passed only when present
+                    # — same conditional shape as ``batch_instructions`` below, so
+                    # a request whose mode has no blocks keeps the call shape the
+                    # existing chat tests stub.
+                    **({"mode_instructions": "\n\n".join(mode.instructions)}
+                       if mode.instructions else {}),
+                    # The lot's big picture (batch mode only) rides alongside
+                    # the project instructions, never merged into ``sysprompt``:
+                    # that separation is what keeps the TOOL_NOTICE word check
+                    # judging only the prompt the user configured. It is passed
+                    # only when set, so a plain chat request keeps exactly the
+                    # call shape it always had.
+                    **({"batch_instructions": body.batchContext}
+                       if body.batchContext else {}),
+                    **tool_kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
+                emit({"event": "error", "message": str(exc)})
+            finally:
+                emit(None)  # sentinel: worker finished
+
+        task = asyncio.create_task(pump())
+        _CHAT_TASKS.add(task)
+        task.add_done_callback(_CHAT_TASKS.discard)
+
+        async def event_stream() -> AsyncIterator[str]:
+            seq = 0
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                    if item is None:
+                        return
+                    yield sse_format(seq, item)
+                    seq += 1
+                    if item.get("event") in ("done", "error", "pause_ack"):
+                        return
+            finally:
+                # Client gone (or terminal event): stop the worker thread,
+                # which closes the upstream LLM stream.
+                cancel_event.set()
+                _clear_chat_handle(cancel_event)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @router.post("/chat/pause", status_code=200)
+    async def post_chat_pause() -> Dict[str, Any]:
+        """Ask the one in-flight chat reply to stop at its next boundary.
+
+        Non-destructive twin of ``/run/stop``: the worker closes the upstream
+        stream, reports its exact usage and terminates the reply with
+        ``pause_ack``, so the client keeps the partial turn in its history.
+        Idempotent — a second call while the first is pending says so.
+        """
+        handle = _CHAT_HANDLE
+        if handle is None:
+            raise HTTPException(status_code=409, detail="No chat reply is streaming")
+        if handle.pause_event.is_set():
+            return {"paused": "pending"}
+        handle.pause_event.set()
+        return {"paused": "requested"}
+
+    @router.post("/run", status_code=202)
+    async def start_run() -> Dict[str, Any]:
+        # Exclusion in the direction ``POST /chat`` already enforces the other
+        # way (409 while a run is in progress): a benchmark must not start
+        # under a streaming chat reply, or two generations fight over the
+        # single _CHAT_HANDLE and the endpoint's own sampling configuration.
+        # Enforced here rather than only by a disabled button, because batch
+        # mode keeps a chat turn streaming for minutes at a time.
+        if _CHAT_TASKS:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot start a run while a chat reply is streaming",
+            )
+        config = _load_config()
+        questions = load_questions()
+        models = config.model_list()
+        if not models:
+            raise HTTPException(status_code=400, detail="No models configured (ENDPOINT)")
+        if not questions:
+            raise HTTPException(status_code=400, detail="No questions loaded")
+        if state.status == "running":
+            raise HTTPException(status_code=409, detail="A benchmark run is already in progress")
+
+        state.reset()
+        assert state.job is not None and state.bus is not None
+        state.run_id = uuid.uuid4().hex
+        state.status = "running"
+        state.bus.bind_loop(asyncio.get_running_loop())
+
+        sampling = config.to_kwargs()
+        state.bus.publish({
+            "event": "run_started",
+            "runId": state.run_id,
+            "models": models,
+            "totalTests": len(questions) * len(models),
+            "samplingSummary": ", ".join(f"{k}={v}" for k, v in sampling.items())
+            or "defaults",
+        })
+        asyncio.create_task(_execute_run(state, questions, config))
+        return {"runId": state.run_id}
+
+    @router.post("/run/stop", status_code=202)
+    async def stop_run() -> Dict[str, Any]:
+        if state.status != "running" or state.cancel_event is None:
+            raise HTTPException(status_code=409, detail="No benchmark run in progress")
+        state.cancel_event.set()
+        return {"runId": state.run_id, "cancelling": True}
+
+    @router.get("/run")
+    def get_run() -> Dict[str, Any]:
+        events: List[Any] = []
+        if state.bus is not None:
+            events = [
+                {"seq": seq, "event": event} for seq, event in state.bus.snapshot()
+            ]
+        return {
+            "status": state.status,
+            "runId": state.run_id,
+            "error": state.error,
+            "lastSeq": state.bus.last_seq if state.bus else -1,
+            "events": events,
+        }
+
+    @router.get("/run/events")
+    async def run_events(request: Request, since: int = -1) -> StreamingResponse:
+        last_event_id = request.headers.get("last-event-id")
+        if last_event_id and last_event_id.isdigit():
+            since = max(since, int(last_event_id))
+        if state.bus is None:
+            raise HTTPException(status_code=404, detail="No benchmark run started yet")
+
+        # Local alias: pyright does not keep `state.bus` narrowed inside the
+        # closure below (it could be reassigned between the check and the call).
+        bus = state.bus
+        async def event_stream() -> AsyncIterator[str]:
+            async for seq, event in bus.subscribe(since):
+                if await request.is_disconnected():
+                    return
+                yield sse_format(seq, event)
+            # Bus closed — let the EventSource client know the stream is over.
+            yield (
+                "event: stream_end\n"
+                + f"data: {json.dumps({'status': state.status})}\n\n"
+            )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @router.get("/results")
+    def get_results() -> FileResponse:
+        if not RESULTS_PATH.is_file():
+            raise HTTPException(status_code=404, detail="No results.json yet")
+        return FileResponse(
+            RESULTS_PATH, filename="results.json", media_type="application/json"
+        )
+
+    return router
+
+
+async def _execute_run(
+    state: RunState, questions: List[Dict], config: EndpointsConfig
+) -> None:
+    """Run the benchmark in a worker thread, publishing events to the bus."""
+    assert state.job is not None and state.bus is not None
+    bus = state.bus
+
+    def emit(event: Dict[str, Any]) -> None:
+        bus.publish(event)
+
+    try:
+        await asyncio.to_thread(
+            run_benchmark, questions, config, state.job, emit, state.cancel_event
+        )
+        state.status = "finished"
+    except RunCancelled:
+        state.status = "cancelled"
+        bus.publish({
+            "event": "run_finished",
+            "cancelled": True,
+            "totalRunningTime": state.job.total_running_time,
+            "totalTests": len(questions) * len(config.model_list()),
+        })
+    except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
+        state.error = str(exc)
+        state.status = "failed"
+        bus.publish({"event": "run_error", "message": str(exc)})
+    finally:
+        bus.close()

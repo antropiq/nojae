@@ -1,2 +1,25 @@
-/.nojae/
-/web/node_modules/
+# Workspace policy / stores (hidden folder, read-write-policy.json governs it)
+.nojae/
+
+# Secrets & run output (each secret file has a committed .example template)
+.env
+.env.test
+results.json
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store

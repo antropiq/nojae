@@ -1,0 +1,11 @@
+{
+  "include": ["src/**/*", "tests/**/*", "e2e/**/*", "*.config.js"],
+  "exclude": ["node_modules", "dist"],
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false
+  }
+}

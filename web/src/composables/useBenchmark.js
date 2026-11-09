@@ -1,0 +1,1006 @@
+import { reactive } from 'vue'
+import { renderMarkdown } from '../lib/markdown'
+import {
+  describeAgentModes,
+  describePolicy,
+  describePromptHelpers,
+} from '../lib/path-location-policy'
+import { loadAgentModes } from './useAgentModes'
+import { usePromptHelpers } from './usePromptHelpers'
+import { loadChatLsp, loadChatMcp } from './useChat'
+import { useWorkspaceTree } from './useWorkspaceTree'
+
+// Read handle on "a batch is running", registered by useBatch on import — the
+// same one-way hook useChat uses for its hub guards, so the two hubs' owners
+// never have to import the composable that owns the flag.
+let batchGuard = null
+
+export function registerBatchGuard(isRunning) {
+  batchGuard = typeof isRunning === 'function' ? isRunning : null
+}
+
+const state = reactive({
+  config: null,
+  configError: null,
+  startError: null,
+  status: 'idle', // idle | running | finished | failed | cancelled
+  activeTab: 'benchmark', // benchmark | chat | editor
+  runId: null,
+  stopping: false,
+  totalTests: 0,
+  current: 0,
+  successes: 0,
+  answered: 0,
+  tokenRate: 0,
+  failedLabel: 'Failed: none',
+  entries: [], // model | question | finished | error entries in stream order
+  clock: { mode: 'idle', baseMs: 0, startedAt: 0 }, // idle | ticking | checking | frozen
+  totalRunningTime: 0,
+  progress: 0,
+  hasResults: false,
+  settingsOpen: false,
+  settings: null,
+  settingsLoading: false,
+  settingsSaving: false,
+  settingsError: null,
+  // The workspace model-connection file's own state (``.nojae/nojae-settings.json``,
+  // the twin of ``mcpExternalsError``'s file): ``{state, path, error, configured,
+  // message}`` straight off ``GET``/``POST /api/settings``. Only the block is
+  // kept -- the wording is the server's sentence, which already names the file
+  // and its path, so the dialog shows it and translates nothing. ``path`` is
+  // also what the dialog's hint line names as the file it edits.
+  workspaceSettings: null,
+  questionSets: [],
+  questionSetsLoading: false,
+  questionSetsError: null,
+  benchmarkModels: [],
+  benchmarkModelsLoading: false,
+  benchmarkModelsError: null,
+  verifierModels: [],
+  verifierModelsLoading: false,
+  verifierModelsError: null,
+  mcpInstalled: false,
+  mcpConnectors: [],
+  mcpEnabled: [], // connector ids ticked in the dialog, saved via saveMcp()
+  mcpMaxIterations: 25,
+  mcpLoading: false,
+  mcpSaving: false,
+  mcpError: null,
+  mcpExternalsError: null, // .nojae/mcp-settings.json validation errors from the backend
+  lspInstalled: false, // pygls/lsprotocol importable server-side
+  lspServers: [],
+  lspEnabled: [], // server ids ticked in the dialog, saved via saveLsp()
+  lspMaxIterations: 25, // shared MCP+LSP tool-loop cap (one knob)
+  lspLoading: false,
+  lspSaving: false,
+  lspError: null,
+  lspServersError: null, // .nojae/lsp-settings.json validation errors from the backend
+  // Working location both hubs point at (${nojae_PATH_LOCATION} in
+  // .nojae/mcp-settings.json and .nojae/lsp-settings.json), shown and set from
+  // the app bar. ``pathLocation`` is what its input holds, ``pathLocationCurrent``
+  // the value the server confirmed — Set is enabled while the two differ.
+  pathLocation: '',
+  pathLocationCurrent: '',
+  pathLocationLoading: false,
+  pathLocationSaving: false,
+  pathLocationError: null,
+  // The workspace's own read-write policy file (pol-05). The server seeds a
+  // default ``.nojae/read-write-policy.json`` when a folder becomes the working
+  // location, and reports what happened: ``{state, path, error}`` with
+  // ``created`` / ``existing`` / ``absent`` / ``failed``. Only the block is
+  // kept: the wording is ``lib/path-location-policy``'s, and a ``failed`` seed
+  // is rendered as a *note* — never into ``pathLocationError``, because the
+  // switch itself succeeded and a red line there would claim it had not.
+  pathLocationPolicy: null,
+  // The one sentence the app bar shows under its field for this file: set from
+  // ``describePolicy`` only when its tone is ``warn``, so a ``created`` or
+  // ``absent`` report (and ``existing``, which has nothing to tell) leaves the
+  // bar's line out. Cleared on every attempt, so a note from a switch that has
+  // since worked cannot linger.
+  pathLocationPolicyNote: null,
+  // The second file in the same reserved folder (am-03): the workspace's
+  // agent-modes file, seeded at the same two moments and reported in the same
+  // shape as ``policy`` under the key ``agentModes``. Same tone rule — a
+  // ``failed`` seed is one more *line* on the switch's note, and a workspace
+  // without one chats on nojae's built-in modes, so ``absent`` needs no
+  // alarm at all.
+  pathLocationAgentModes: null,
+  pathLocationAgentModesNote: null,
+  // The third file of the reserved folder (mbl-02): the workspace's prompt
+  // helpers, the nine prompts behind the bullets above the composer. Reported
+  // in the same shape under ``promptHelpers``, plus two states of its own from
+  // the one-time lift of the old app-level file (``migrated`` /
+  // ``migration-skipped``, spec D6) — the second of those is a ``warn`` the
+  // user has to act on. Unlike its two neighbours this file is the app's own
+  // store, so the sentence is about the bullets, and the bullets themselves are
+  // reloaded on a switch (``usePromptHelpers``), not just described here.
+  pathLocationPromptHelpers: null,
+  pathLocationPromptHelpersNote: null,
+})
+
+let eventSource = null
+let lastSeq = -1
+let answeredMsSoFar = 0
+let renderScheduled = false
+let activeQuestion = null
+let cancelNoticeTimer = null
+
+function scheduleMarkdownRender() {
+  if (renderScheduled) return
+  renderScheduled = true
+  requestAnimationFrame(() => {
+    renderScheduled = false
+    if (activeQuestion)
+      activeQuestion.html = renderMarkdown(activeQuestion.raw, { mermaid: true })
+  })
+}
+
+function resetToIdle() {
+  disconnect()
+  resetUi()
+  state.status = 'idle'
+  state.runId = null
+  state.totalTests = 0
+}
+
+function resetUi() {
+  state.entries = []
+  state.current = 0
+  state.successes = 0
+  state.answered = 0
+  state.tokenRate = 0
+  state.failedLabel = 'Failed: none'
+  state.progress = 0
+  state.totalRunningTime = 0
+  state.stopping = false
+  state.clock = { mode: 'idle', baseMs: 0, startedAt: 0 }
+  activeQuestion = null
+  answeredMsSoFar = 0
+}
+
+function applyTiming(entry, event) {
+  entry.took = event.took
+  // `tokens` stays completion-only (the tok/s numerator); `consumed` is the
+  // prompt + completion figure shown to the user. Old servers without the
+  // field: fall back to completion + prompt, exact whenever usage was
+  // reported (and identical to `tokens` when it wasn't, promptTokens = 0).
+  entry.tokens = event.tokens
+  entry.consumed = event.consumed ?? event.tokens + (event.promptTokens ?? 0)
+  entry.ttft = event.ttft ?? 0
+  entry.genTook = event.genTook ?? 0
+  entry.promptTokens = event.promptTokens ?? 0
+  entry.tokensEstimated = !!event.tokensEstimated
+  // The server cut this answer short: the streamed text, its timing and the
+  // verdict below it all describe an unfinished reply.
+  entry.truncated = !!event.truncated
+}
+
+function applyEvent(event) {
+  switch (event.event) {
+    case 'run_started':
+      resetUi()
+      state.status = 'running'
+      state.runId = event.runId
+      state.totalTests = event.totalTests
+      // The server warms the model up first; the clock only starts ticking
+      // when the first question begins.
+      state.clock = { mode: 'starting', baseMs: 0, startedAt: 0 }
+      break
+    case 'model_started':
+      // The tested model lives in the app bar; no stream entry for it.
+      // The backend now warms the model up, so hold the chronometer at
+      // "Starting…" until question_started arrives.
+      state.clock = { mode: 'starting', baseMs: answeredMsSoFar, startedAt: 0 }
+      break
+    case 'question_started':
+      state.current = event.index
+      activeQuestion = {
+        type: 'question',
+        index: event.index,
+        number: event.number,
+        model: event.model,
+        question: event.question,
+        questionHtml: renderMarkdown(event.question),
+        raw: '',
+        html: '',
+        streaming: true,
+        startedAt: Date.now(),
+        succeeded: null,
+        took: 0,
+        tokens: 0,
+        consumed: 0,
+        ttft: 0,
+        genTook: 0,
+        promptTokens: 0,
+        tokensEstimated: false,
+        // Server cut this answer short (see applyTiming): the verdict badge
+        // shows "Cut short" instead of Correct/Incorrect.
+        truncated: false,
+        version: 0,
+      }
+      state.entries.push(activeQuestion)
+      // Keep the reactive proxy, not the raw object, so token mutations re-render.
+      activeQuestion = state.entries[state.entries.length - 1]
+      state.clock = {
+        mode: 'ticking',
+        baseMs: answeredMsSoFar,
+        startedAt: Date.now(),
+      }
+      break
+    case 'token':
+      if (activeQuestion) {
+        activeQuestion.raw += event.text
+        activeQuestion.version += 1
+        scheduleMarkdownRender()
+      }
+      break
+    case 'answer_done':
+      if (activeQuestion) {
+        applyTiming(activeQuestion, event)
+      }
+      answeredMsSoFar += event.took * 1000
+      state.clock = { mode: 'checking', baseMs: answeredMsSoFar, startedAt: 0 }
+      break
+    case 'question_done': {
+      if (activeQuestion) {
+        activeQuestion.streaming = false
+        activeQuestion.succeeded = event.succeeded
+        applyTiming(activeQuestion, event)
+        activeQuestion.html = renderMarkdown(activeQuestion.raw, {
+          mermaid: true,
+        })
+        activeQuestion = null
+      }
+      state.failedLabel = event.failedLabel
+      if (event.stats) {
+        state.current = event.stats.current
+        state.successes = event.stats.successes
+        state.answered = event.stats.answered
+        state.tokenRate = event.stats.tokenRate
+      }
+      state.progress = state.totalTests ? event.index / state.totalTests : 0
+      state.clock = { mode: 'frozen', baseMs: answeredMsSoFar, startedAt: 0 }
+      break
+    }
+    case 'run_finished': {
+      state.stopping = false
+      if (event.cancelled) {
+        // Revert the whole UI to its initial state; the cancelled notice
+        // fades out on its own after a few seconds.
+        resetUi()
+        state.status = 'cancelled'
+        state.entries.push({ type: 'cancelled' })
+        clearTimeout(cancelNoticeTimer)
+        cancelNoticeTimer = setTimeout(() => {
+          const i = state.entries.findIndex((e) => e.type === 'cancelled')
+          if (i !== -1) state.entries.splice(i, 1)
+        }, 5000)
+      } else {
+        state.status = 'finished'
+        state.totalRunningTime = event.totalRunningTime ?? answeredMsSoFar / 1000
+        state.progress = 1
+        state.entries.push({ type: 'finished' })
+        state.hasResults = true
+        state.clock = { mode: 'frozen', baseMs: answeredMsSoFar, startedAt: 0 }
+      }
+      disconnect()
+      break
+    }
+    case 'run_error':
+      state.entries.push({ type: 'error', message: event.message })
+      break
+    default:
+      break
+  }
+}
+
+function trackSeq(eventSourceEvent) {
+  if (eventSourceEvent && eventSourceEvent.lastEventId) {
+    const seq = parseInt(eventSourceEvent.lastEventId, 10)
+    if (!Number.isNaN(seq)) lastSeq = seq
+  }
+}
+
+const EVENT_NAMES = [
+  'run_started',
+  'model_started',
+  'question_started',
+  'token',
+  'answer_done',
+  'question_done',
+  'run_finished',
+  'run_error',
+  'stream_end',
+]
+
+function disconnect() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+}
+
+function connect(since = -1) {
+  disconnect()
+  lastSeq = since
+  eventSource = new EventSource(`/api/run/events?since=${since}`)
+  for (const name of EVENT_NAMES) {
+    eventSource.addEventListener(name, (e) => {
+      trackSeq(e)
+      if (name === 'stream_end') {
+        // Server closed the stream; reconnect if the run is still going.
+        if (state.status === 'running') {
+          eventSource.close()
+          eventSource = null
+          reconnectViaSnapshot()
+        }
+        return
+      }
+      applyEvent(JSON.parse(e.data))
+    })
+  }
+  eventSource.onerror = () => {
+    if (state.status !== 'running') {
+      disconnect()
+      return
+    }
+    eventSource.close()
+    eventSource = null
+    setTimeout(reconnectViaSnapshot, 2000)
+  }
+}
+
+async function reconnectViaSnapshot() {
+  try {
+    const res = await fetch('/api/run')
+    if (!res.ok) return
+    const snapshot = await res.json()
+    resetUi()
+    lastSeq = snapshot.lastSeq ?? -1
+    for (const item of snapshot.events || []) applyEvent(item.event)
+    state.status = snapshot.status
+    if (snapshot.status === 'running') connect(lastSeq)
+  } catch {
+    // Server unreachable; keep the retry loop alive while a run is active.
+    if (state.status === 'running') setTimeout(reconnectViaSnapshot, 2000)
+  }
+}
+
+function describeError(body, fallback) {
+  const detail = body?.detail
+  if (typeof detail === 'string' && detail) return detail
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      const field = Array.isArray(item?.loc)
+        ? item.loc.filter((part) => part !== 'body').join('.')
+        : ''
+      return field ? `${field}: ${item?.msg ?? 'invalid'}` : item?.msg ?? 'invalid'
+    })
+    if (messages.length) return messages.join(' · ')
+  }
+  return fallback
+}
+
+export function useBenchmark() {
+  async function loadConfig() {
+    state.configError = null
+    try {
+      const res = await fetch('/api/config')
+      const body = await res.json()
+      if (!res.ok) {
+        state.configError =
+          typeof body.detail === 'string'
+            ? body.detail
+            : JSON.stringify(body.detail)
+        return
+      }
+      state.config = body
+      state.hasResults = body.hasResults
+      state.status = body.runStatus
+      // A cancelled run must not replay its partial stream on load: the UI
+      // stays in its initial state, like after the stop button was used.
+      if (['running', 'finished', 'failed'].includes(body.runStatus)) {
+        await reconnectViaSnapshot()
+      }
+    } catch (exc) {
+      state.configError = `Could not reach the API: ${exc}`
+    }
+  }
+
+  async function start() {
+    state.startError = null
+    try {
+      const res = await fetch('/api/run', { method: 'POST' })
+      const body = await res.json().catch(() => ({}))
+      if (res.status === 409) {
+        // Another run is active (e.g. started in another tab) — follow it.
+        await reconnectViaSnapshot()
+        return
+      }
+      if (!res.ok) {
+        state.startError =
+          typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+        return
+      }
+      connect()
+    } catch (exc) {
+      state.startError = `Could not reach the API: ${exc}`
+    }
+  }
+
+  async function stop() {
+    state.startError = null
+    // Finished/failed runs keep the stop button enabled as a reset: clicking
+    // it returns the UI to its initial state so a new run can start clean.
+    if (state.status === 'finished' || state.status === 'failed') {
+      resetToIdle()
+      return
+    }
+    if (state.status !== 'running') return
+    state.stopping = true
+    try {
+      const res = await fetch('/api/run/stop', { method: 'POST' })
+      if (res.status === 409) {
+        // Run already ended between the click and the request.
+        await reconnectViaSnapshot()
+        return
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        state.startError =
+          typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+      }
+      // On success keep running until the run_finished(cancelled) event arrives.
+    } catch (exc) {
+      state.stopping = false
+      state.startError = `Could not reach the API: ${exc}`
+    }
+  }
+
+  function running() {
+    return state.status === 'running'
+  }
+
+  // A running batch pins the app to WorkBench: the tab buttons are disabled,
+  // but the refusal lives here too so a keyboard path cannot escape mid-lot
+  // (the same rule `status === 'running'` already enforces). Switching *to* the
+  // tab the batch is on stays allowed, which is what lets BatchModeDialog's
+  // Launch perform its own setTab('chat') — the flag is set only afterwards.
+  //
+  // The predicate is registered by useBatch rather than imported: useBenchmark
+  // already imports useChat, and useBatch imports both, so importing useBatch
+  // here would close a cycle. The flag itself stays single-owner
+  // (useBatch.state.active) — this only hands a read handle down.
+  function batchRunning() {
+    return !!batchGuard?.()
+  }
+
+  function setTab(tab) {
+    // Keyed on 'chat' on purpose: a running run needs the conversation to stay
+    // put, but the Editor tab is reachable during a run — reading files harms
+    // nothing the run is doing.
+    if (tab === 'chat' && state.status === 'running') return
+    if (batchRunning() && tab !== state.activeTab) return
+    state.activeTab = tab
+  }
+
+  function canStop() {
+    return ['running', 'finished', 'failed'].includes(state.status)
+  }
+
+  async function openSettings() {
+    if (state.status === 'running' || state.settingsLoading || batchRunning()) return
+    state.settingsError = null
+    state.settingsLoading = true
+    state.settingsOpen = true
+    try {
+      const res = await fetch('/api/settings')
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.settingsError = describeError(body, `Could not load settings (${res.status})`)
+        return
+      }
+      state.settings = body
+      state.workspaceSettings = body.workspaceSettings || null
+      state.benchmarkModels = []
+      state.verifierModels = []
+      state.benchmarkModelsError = null
+      state.verifierModelsError = null
+      state.questionSets = []
+      state.questionSetsLoading = false
+      state.questionSetsError = null
+      state.mcpConnectors = []
+      state.mcpEnabled = []
+      state.mcpError = null
+      state.mcpExternalsError = null
+      state.lspServers = []
+      state.lspEnabled = []
+      state.lspError = null
+      state.lspServersError = null
+      // The working location is not this dialog's business any more: its field
+      // and its answer lines live in the app bar, whose state a settings read
+      // must not clear (a seed warning the user has not read yet would vanish
+      // on an unrelated visit to the dialog). ``loadPathLocation()`` runs at
+      // boot and after every switch.
+      refreshModelLists()
+      loadQuestionSets()
+      loadMcp()
+      loadLsp()
+    } catch (exc) {
+      state.settingsError = `Could not reach the API: ${exc}`
+    } finally {
+      state.settingsLoading = false
+    }
+  }
+
+  function closeSettings() {
+    state.settingsOpen = false
+    state.settingsError = null
+  }
+
+  const MODEL_FIELDS = {
+    benchmark: {
+      serverUrl: () => state.settings?.serverUrl,
+      apiKey: () => state.settings?.apiKey,
+      current: () => state.settings?.endpoint,
+      setCurrent: (value) => {
+        state.settings.endpoint = value
+      },
+      models: 'benchmarkModels',
+      loading: 'benchmarkModelsLoading',
+      error: 'benchmarkModelsError',
+    },
+    verifier: {
+      // Same fallback as the backend: an unset verifier URL reuses the
+      // benchmark server URL.
+      serverUrl: () =>
+        state.settings?.verifier?.serverUrl || state.settings?.serverUrl,
+      apiKey: () => state.settings?.verifier?.apiKey,
+      current: () => state.settings?.verifier?.endpoint,
+      setCurrent: (value) => {
+        state.settings.verifier.endpoint = value
+      },
+      models: 'verifierModels',
+      loading: 'verifierModelsLoading',
+      error: 'verifierModelsError',
+    },
+  }
+
+  async function fetchModels(kind, resetSelection = false) {
+    const fields = MODEL_FIELDS[kind]
+    if (!fields || !state.settings || state[fields.loading]) return
+    state[fields.error] = null
+    // User-initiated refresh: the current selection belongs to the previous
+    // listing and is dropped immediately, before the new list is fetched.
+    if (resetSelection) fields.setCurrent('')
+    const serverUrl = (fields.serverUrl() || '').trim()
+    if (!serverUrl) {
+      state[fields.models] = []
+      return
+    }
+    state[fields.loading] = true
+    // Wipe the previous server's models so a refresh never shows stale options.
+    state[fields.models] = []
+    try {
+      let url = `/api/models?serverUrl=${encodeURIComponent(serverUrl)}`
+      const apiKey = (fields.apiKey() || '').trim()
+      if (apiKey) url += `&apiKey=${encodeURIComponent(apiKey)}`
+      const res = await fetch(url)
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state[fields.error] = describeError(
+          body,
+          `Could not load models (${res.status})`,
+        )
+        return
+      }
+      const models = body.models || []
+      state[fields.models] = models
+      // Keep the selection consistent with the listed models: a saved model
+      // from a previous server would otherwise stay bound invisibly and be
+      // saved again for a server that does not offer it.
+      if (!models.includes(fields.current())) {
+        fields.setCurrent(models[0] || '')
+      }
+    } catch (exc) {
+      state[fields.error] = `Could not reach the API: ${exc}`
+    } finally {
+      state[fields.loading] = false
+    }
+  }
+
+  function refreshModelLists() {
+    fetchModels('benchmark')
+    fetchModels('verifier')
+  }
+
+  async function saveSettings() {
+    if (!state.settings || state.settingsSaving) return
+    state.settingsError = null
+    state.settingsSaving = true
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state.settings),
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.settingsError = describeError(
+          body,
+          `Could not save settings (${res.status})`,
+        )
+        return
+      }
+      state.settings = body
+      state.workspaceSettings = body.workspaceSettings || null
+      state.settingsOpen = false
+      await loadConfig()
+    } catch (exc) {
+      state.settingsError = `Could not reach the API: ${exc}`
+    } finally {
+      state.settingsSaving = false
+    }
+  }
+
+  async function loadQuestionSets() {
+    state.questionSetsLoading = true
+    state.questionSetsError = null
+    try {
+      const res = await fetch('/api/question-sets')
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.questionSetsError = describeError(
+          body,
+          `Could not load question sets (${res.status})`,
+        )
+        return
+      }
+      state.questionSets = body.questionSets || []
+      if (!state.settings?.questionSet && body.current) {
+        state.settings.questionSet = body.current
+      }
+    } catch (exc) {
+      state.questionSetsError = `Could not reach the API: ${exc}`
+    } finally {
+      state.questionSetsLoading = false
+    }
+  }
+
+  async function loadLsp() {
+    state.lspLoading = true
+    state.lspError = null
+    try {
+      const res = await fetch('/api/lsp')
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.lspError = describeError(body, `Could not load LSP servers (${res.status})`)
+        return
+      }
+      state.lspInstalled = !!body.installed
+      state.lspServers = body.servers || []
+      // One shared counter: whichever section is opened last mirrors the
+      // server-side value, so both inputs always show the truth.
+      state.lspMaxIterations = body.maxIterations ?? 25
+      state.mcpMaxIterations = body.maxIterations ?? 25
+      state.lspServersError = body.serversError || null
+      state.lspEnabled = state.lspServers
+        .filter((server) => server.active)
+        .map((server) => server.id)
+    } catch (exc) {
+      state.lspError = `Could not reach the API: ${exc}`
+    } finally {
+      state.lspLoading = false
+    }
+  }
+
+  function toggleLsp(id, checked) {
+    const enabled = new Set(state.lspEnabled)
+    if (checked) enabled.add(id)
+    else enabled.delete(id)
+    // Keep declaration order so the saved list stays stable.
+    state.lspEnabled = state.lspServers
+      .map((server) => server.id)
+      .filter((serverId) => enabled.has(serverId))
+  }
+
+  async function saveLsp() {
+    if (state.lspSaving) return
+    state.lspError = null
+    state.lspSaving = true
+    try {
+      const res = await fetch('/api/lsp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: state.lspEnabled,
+          maxIterations: Number(state.lspMaxIterations) || 25,
+        }),
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.lspError = describeError(body, `Could not save LSP settings (${res.status})`)
+        return
+      }
+      state.lspInstalled = !!body.installed
+      state.lspServers = body.servers || []
+      state.lspMaxIterations = body.maxIterations ?? 25
+      state.mcpMaxIterations = body.maxIterations ?? 25
+      state.lspServersError = body.serversError || null
+      state.lspEnabled = state.lspServers
+        .filter((server) => server.active)
+        .map((server) => server.id)
+      state.settingsOpen = false
+      // Keep the Chat tab's conversation-scoped LSP panel in sync with the
+      // just-saved activation set (kept-OFF switches survive; a locked
+      // conversation keeps its frozen list — loadChatLsp is a no-op then).
+      loadChatLsp()
+    } catch (exc) {
+      state.lspError = `Could not reach the API: ${exc}`
+    } finally {
+      state.lspSaving = false
+    }
+  }
+
+  async function loadMcp() {
+    state.mcpLoading = true
+    state.mcpError = null
+    try {
+      const res = await fetch('/api/mcp')
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.mcpError = describeError(body, `Could not load MCP connectors (${res.status})`)
+        return
+      }
+      state.mcpInstalled = !!body.installed
+      state.mcpConnectors = body.connectors || []
+      state.mcpMaxIterations = body.maxIterations ?? 25
+      state.lspMaxIterations = body.maxIterations ?? 25
+      state.mcpExternalsError = body.externalsError || null
+      state.mcpEnabled = state.mcpConnectors
+        .filter((connector) => connector.active)
+        .map((connector) => connector.id)
+    } catch (exc) {
+      state.mcpError = `Could not reach the API: ${exc}`
+    } finally {
+      state.mcpLoading = false
+    }
+  }
+
+  function toggleMcp(id, checked) {
+    const enabled = new Set(state.mcpEnabled)
+    if (checked) enabled.add(id)
+    else enabled.delete(id)
+    // Keep discovery order so the saved list stays stable.
+    state.mcpEnabled = state.mcpConnectors
+      .map((connector) => connector.id)
+      .filter((connectorId) => enabled.has(connectorId))
+  }
+
+  async function saveMcp() {
+    if (state.mcpSaving) return
+    state.mcpError = null
+    state.mcpSaving = true
+    try {
+      const res = await fetch('/api/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: state.mcpEnabled,
+          maxIterations: Number(state.mcpMaxIterations) || 25,
+        }),
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.mcpError = describeError(body, `Could not save MCP settings (${res.status})`)
+        return
+      }
+      state.mcpInstalled = !!body.installed
+      state.mcpConnectors = body.connectors || []
+      state.mcpMaxIterations = body.maxIterations ?? 25
+      state.lspMaxIterations = body.maxIterations ?? 25
+      state.mcpExternalsError = body.externalsError || null
+      state.mcpEnabled = state.mcpConnectors
+        .filter((connector) => connector.active)
+        .map((connector) => connector.id)
+      state.settingsOpen = false
+      // Keep the Chat tab's conversation-scoped MCP panel in sync with the
+      // just-saved activation set (kept OFF switches survive; a locked
+      // conversation keeps its frozen list — loadChatMcp is a no-op then).
+      loadChatMcp()
+    } catch (exc) {
+      state.mcpError = `Could not reach the API: ${exc}`
+    } finally {
+      state.mcpSaving = false
+    }
+  }
+
+  async function loadPathLocation() {
+    state.pathLocationLoading = true
+    state.pathLocationError = null
+    try {
+      const res = await fetch('/api/path-location')
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.pathLocationError = describeError(
+          body,
+          `Could not load the working location (${res.status})`,
+        )
+        return
+      }
+      state.pathLocationCurrent = body.path || ''
+      state.pathLocation = state.pathLocationCurrent
+      // Read-only on purpose: GET never seeds (a read that writes a folder into
+      // someone's project is the mistake pol-05 forbids), so ``absent`` here is
+      // a real state — a workspace whose seed failed, or one opened before the
+      // feature existed.
+      state.pathLocationPolicy = body.policy || null
+      // Same rule as after a switch: only a ``warn`` tone becomes the bar's own
+      // line, so ``absent`` stays silent, and a lingering note from an earlier
+      // attempt cannot outlive the read that disproves it.
+      const described = describePolicy(body.policy)
+      state.pathLocationPolicyNote =
+        described && described.tone === 'warn' ? described.text : null
+      // The modes block rides along with it (am-03): read-only here too, so a
+      // plain ``absent`` is the ordinary state of a project that was never
+      // switched into.
+      state.pathLocationAgentModes = body.agentModes || null
+      const describedModes = describeAgentModes(body.agentModes)
+      state.pathLocationAgentModesNote =
+        describedModes && describedModes.tone === 'warn' ? describedModes.text : null
+      // And the helpers block (mbl-02) — read-only here as well, so ``absent``
+      // is the ordinary answer for a project that was never switched into, and
+      // needs no line under the field.
+      state.pathLocationPromptHelpers = body.promptHelpers || null
+      const describedHelpers = describePromptHelpers(body.promptHelpers)
+      state.pathLocationPromptHelpersNote =
+        describedHelpers && describedHelpers.tone === 'warn'
+          ? describedHelpers.text
+          : null
+    } catch (exc) {
+      state.pathLocationError = `Could not reach the API: ${exc}`
+    } finally {
+      state.pathLocationLoading = false
+    }
+  }
+
+  // Apply a new working location: the endpoint sets the env var and restarts
+  // both hubs in one call, so on return the MCP/LSP panels below already
+  // carry the post-restart statuses of the tools pointed at the new folder.
+  async function setPathLocation() {
+    if (state.pathLocationSaving) return
+    const next = (state.pathLocation || '').trim()
+    if (!next || next === state.pathLocationCurrent) return
+    state.pathLocationSaving = true
+    state.pathLocationError = null
+    state.pathLocationPolicyNote = null
+    state.pathLocationAgentModesNote = null
+    state.pathLocationPromptHelpersNote = null
+    try {
+      const res = await fetch('/api/path-location', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: next }),
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        state.pathLocationError = describeError(
+          body,
+          `Could not set the working location (${res.status})`,
+        )
+        return
+      }
+      // The server canonicalises the path (realpath), so adopt what it stored
+      // rather than what was typed: field and Set button then agree.
+      state.pathLocationCurrent = body.path || ''
+      state.pathLocation = state.pathLocationCurrent
+      // pol-05: the switch seeded this workspace's default policy file (or
+      // tried to). A ``failed`` state is a note, not an error — the location is
+      // set and both hubs restarted; only the workspace's own rules are
+      // missing. ``lib/path-location-policy`` is what turns the block into the
+      // sentence under the app bar's field — its own words, and the only place
+      // these three blocks are rendered.
+      state.pathLocationPolicy = body.policy || null
+      const described = describePolicy(body.policy)
+      state.pathLocationPolicyNote =
+        described && described.tone === 'warn' ? described.text : null
+      // am-03: the same switch seeded the modes file too, and the same tone
+      // rule applies — a ``failed`` seed adds one more clause to that line,
+      // never a red "the switch failed".
+      state.pathLocationAgentModes = body.agentModes || null
+      const describedModes = describeAgentModes(body.agentModes)
+      state.pathLocationAgentModesNote =
+        describedModes && describedModes.tone === 'warn' ? describedModes.text : null
+      // mbl-02: the third seed of the reserved folder, same tone rule again —
+      // and its two extra states mean a ``migration-skipped`` lift is one more
+      // line the user has to act on, still never a red "the switch failed".
+      state.pathLocationPromptHelpers = body.promptHelpers || null
+      const describedHelpers = describePromptHelpers(body.promptHelpers)
+      state.pathLocationPromptHelpersNote =
+        describedHelpers && describedHelpers.tone === 'warn'
+          ? describedHelpers.text
+          : null
+      // The hubs just restarted: refresh both panels so the tool lists and
+      // status dots show the new location.
+      if (body.mcp) {
+        state.mcpInstalled = !!body.mcp.installed
+        state.mcpConnectors = body.mcp.connectors || []
+        state.mcpExternalsError = body.mcp.externalsError || null
+        state.mcpEnabled = state.mcpConnectors
+          .filter((connector) => connector.active)
+          .map((connector) => connector.id)
+        loadChatMcp()
+      }
+      if (body.lsp) {
+        state.lspInstalled = !!body.lsp.installed
+        state.lspServers = body.lsp.servers || []
+        state.lspServersError = body.lsp.serversError || null
+        state.lspEnabled = state.lspServers
+          .filter((server) => server.active)
+          .map((server) => server.id)
+        loadChatLsp()
+      }
+      // The agent modes belong to the workspace just activated, so the list
+      // follows the root (am-07). `reseed: true`: an id that existed in the old
+      // root's `.nojae/agent-modes.json` probably does not exist in the new
+      // one, and the alternative to re-seeding `current` is a 422 on every send.
+      // A failed fetch is the composer's own quiet failure (no select, no
+      // `agentMode` in the payload), so it needs no note here — the one above
+      // is about the *file being seeded*, which this endpoint just reported.
+      loadAgentModes({ reseed: true })
+      // The prompt helpers belong to the workspace just activated too (spec
+      // D8): the bullet row is the only workspace state that used to survive a
+      // switch by accident, because nothing here reloaded it and the row only
+      // fetches when the chat tab mounts. Same un-awaited pattern as the two
+      // hub reloads above — the fetch is the composable's own quiet failure
+      // (its state stays nine slots plus its own error), not this save's.
+      usePromptHelpers().loadPromptHelpers()
+      // The Editor tab's tree browses this location, so the whole workspace-
+      // relative view of the app moves here: the tree forgets the listings it
+      // cached under the old root and re-roots, and the tabs that held files of
+      // the old one close with it (useWorkspaceTree.reRoot -> the buffer half's
+      // handler, registered by useEditorFiles when the Editor chunk loads).
+      // Driven from the save path rather than from the tab, because the tab may
+      // never have been opened — in which case there is nothing to forget.
+      // `refresh()` would be the wrong call: its cached paths mean something
+      // else entirely in another root. (The terminal's `cwd` moves with the same
+      // value: a new session is born on the current location.)
+      try {
+        await useWorkspaceTree().reRoot(state.pathLocationCurrent)
+      } catch (exc) {
+        // The hubs moved but the tree could not be listed: the panel and the
+        // tools agree, and the next tree request re-reads it. Say so rather
+        // than let it end the save as a failure.
+        state.pathLocationError = `Working location is set, but the file tree could not re-root: ${exc}`
+      }
+    } catch (exc) {
+      state.pathLocationError = `Could not reach the API: ${exc}`
+    } finally {
+      state.pathLocationSaving = false
+    }
+  }
+
+  return {
+    state,
+    loadConfig,
+    start,
+    stop,
+    running,
+    batchRunning,
+    setTab,
+    canStop,
+    openSettings,
+    closeSettings,
+    saveSettings,
+    loadQuestionSets,
+    fetchModels,
+    loadMcp,
+    toggleMcp,
+    saveMcp,
+    loadLsp,
+    toggleLsp,
+    saveLsp,
+    loadPathLocation,
+    setPathLocation,
+  }
+}

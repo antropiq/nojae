@@ -1,0 +1,241 @@
+import { expect, test } from '@playwright/test'
+
+// Task 01 — level: UI state. Nothing here streams: the spec only checks what
+// the app tells the user at boot (endpoint/model, tabs, empty run state).
+// Therefore every expected string is read from GET /api/config and
+// GET /api/path-location instead of being written in the spec, so the spec
+// follows the configuration (.env.test) instead of hardcoding it.
+test.describe('App boot: displayed configuration, tabs, empty state', () => {
+  // Opens the app and returns it to a *verified* idle state, plus the live
+  // config/path-location the assertions below are built from.
+  async function bootIdle(page) {
+    const configRes = await page.request.get('/api/config')
+    expect(
+      configRes.ok(),
+      `GET /api/config should succeed, got ${configRes.status()}`,
+    ).toBe(true)
+    const config = await configRes.json()
+
+    const pathRes = await page.request.get('/api/path-location')
+    expect(
+      pathRes.ok(),
+      `GET /api/path-location should succeed, got ${pathRes.status()}`,
+    ).toBe(true)
+    const pathLocation = (await pathRes.json()).path
+
+    await page.goto('/')
+
+    // The shared server may still carry the result of an earlier spec, so use
+    // the app's own control instead of assuming a clean server: after a
+    // finished or failed run the stop button *is* the reset.
+    const pill = page.locator('.status-pill')
+    await expect(pill, 'app bar should report a run status').toBeVisible()
+    const status = (await pill.textContent())?.trim()
+    if (status === 'finished' || status === 'failed') {
+      await page.getByLabel('Reset to initial state').click()
+      await expect(pill).toHaveText('idle', { timeout: 10_000 })
+      await expect(page.locator('.stream-empty')).toBeVisible()
+    } else {
+      // A *running* run belongs to somebody else on this port; cancelling it
+      // silently would hide the real problem.
+      expect(
+        status,
+        `the app on this port has a live run (status "${status}") - e2e needs a free server, use E2E_PORT`,
+      ).toBe('idle')
+    }
+
+    return { config, pathLocation }
+  }
+
+  test('app bar names the model and the server it will benchmark', async ({ page }) => {
+    const { config } = await bootIdle(page)
+
+    // Two `.brand-sub` lines: the model list, then "on <SERVER_URL>".
+    await expect(page.locator('.brand-sub')).toHaveText([
+      config.models.join(' · '),
+      `on ${config.serverUrl}`,
+    ])
+  })
+
+  test('three tabs exist, Benchmark selected', async ({ page }) => {
+    await bootIdle(page)
+
+    await expect(page.getByRole('tab', { name: 'Benchmark' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await expect(page.getByRole('tab', { name: 'WorkBench' })).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'Editor' })).toBeVisible()
+    expect(await page.getByRole('tab').count()).toBe(3)
+  })
+
+  test('stats column shows a run that has not happened yet', async ({ page }) => {
+    const { config } = await bootIdle(page)
+
+    // No stopwatch here any more: the elapsed readout is the app bar's shared
+    // session clock, which keeps running whichever tab is open.
+    await expect(page.locator('.stats-col .chronometer')).toHaveCount(0)
+    await expect(page.locator('.session-clock')).toHaveText('00:00:00')
+
+    const scoreCard = page
+      .locator('.metric-card')
+      .filter({ has: page.getByText('Score', { exact: true }) })
+    await expect(scoreCard.locator('.metric-value')).toHaveText('0/0')
+
+    const questionCard = page
+      .locator('.metric-card')
+      .filter({ has: page.getByText('Question in progress', { exact: true }) })
+    await expect(questionCard.locator('.metric-value')).toHaveText('--')
+
+    // Question count and sampling summary both come from the server payload.
+    await expect(page.locator('.run-meta')).toHaveText(
+      `${config.questionCount} questions · ${config.samplingSummary}`,
+    )
+  })
+
+  test('empty stream panel offers a start and no reset', async ({ page }) => {
+    await bootIdle(page)
+
+    // `.stream-empty-title` also exists in the hidden WorkBench view (tab
+    // views stay mounted via v-show), so scope it to the stream column.
+    const stream = page.getByRole('region', { name: 'Answer stream' })
+    await expect(stream.locator('.stream-empty-title')).toHaveText(
+      'Ready to benchmark',
+    )
+    await expect(stream.locator('.stream-empty')).toBeVisible()
+    await expect(page.getByLabel('Run benchmark')).toBeEnabled()
+    await expect(page.getByLabel('Reset to initial state')).toBeDisabled()
+  })
+
+  // The working location is *editable* here, not just displayed: the field and
+  // its Set button live in the app bar, and the settings dialog has no part in
+  // the switch (it has no section for it at all).
+  test('app bar shows the active working location, and offers to move it', async ({
+    page,
+  }) => {
+    const { pathLocation } = await bootIdle(page)
+
+    const field = page.locator('.appbar-location-input')
+    await expect(field).toHaveValue(pathLocation)
+    // Nothing is pending, so there is nothing to apply.
+    await expect(page.locator('.appbar-location-set')).toBeDisabled()
+
+    // The dialog no longer carries that row of its own.
+    await page.getByRole('button', { name: 'Open settings' }).click()
+    const nav = page.locator('.settings-nav')
+    await expect(nav.getByRole('button', { name: /working/i })).toHaveCount(0)
+    await page.locator('.settings-dialog').getByRole('button', { name: 'Cancel' }).click()
+  })
+
+  // The clock and the two counters are shared by the Benchmark and the
+  // WorkBench, because the two can never run at the same time (POST /api/chat
+  // 409s during a run, POST /api/run refuses during a reply). Idle, they read
+  // blank — the app bar never shows a finished session's figures as current.
+  test('app bar carries the shared session meters', async ({ page }) => {
+    await bootIdle(page)
+
+    await expect(page.locator('.session-clock')).toHaveText('00:00:00')
+    await expect(page.locator('.session-stat-badges .badge')).toHaveText([
+      '— t/s',
+      '— ctx',
+    ])
+
+    // The meters left the composer, so its column now owns the whole composer
+    // row: the textarea and its action buttons get the full width.
+    await page.getByRole('tab', { name: 'WorkBench' }).click()
+    const col = await page.locator('.chat-textarea-col').boundingBox()
+    const input = await page.locator('.chat-input').boundingBox()
+    expect(
+      Math.abs(col.width - input.width),
+      'the composer column should fill the input row',
+    ).toBeLessThan(1)
+  })
+
+  // The counters used to hug their (short) idle text, so a running session
+  // widened them and shoved the centred tab strip around. Each now reserves
+  // the width of its longest active figure.
+  test('idle session counters already fit their active figures', async ({ page }) => {
+    await bootIdle(page)
+
+    const measured = await page
+      .locator('.session-stat-badges .badge')
+      .evaluateAll((badges) =>
+        badges.map((badge) => {
+          // The widest reading each counter can ever show (estimate marker
+          // included), rendered as a clone of the badge itself so font,
+          // padding and border are identical.
+          const probe = badge.cloneNode(false)
+          probe.textContent = badge.classList.contains('badge--rate')
+            ? '≈ 123.4 t/s'
+            : '≈ ctx 123.4k / 128k'
+          badge.parentElement.appendChild(probe)
+          const active = probe.getBoundingClientRect().width
+          probe.remove()
+          return {
+            text: badge.textContent.trim(),
+            idle: badge.getBoundingClientRect().width,
+            active,
+          }
+        }),
+      )
+
+    expect(measured.map((m) => m.text)).toEqual(['— t/s', '— ctx'])
+    for (const m of measured) {
+      expect(
+        m.idle,
+        `the idle badge (${m.text}) must already be as wide as "${m.active}px" of active text`,
+      ).toBeGreaterThanOrEqual(m.active)
+    }
+  })
+
+  // The play/reset buttons are the composer's buttons: same icon-button shape,
+  // only the accent color differs.
+  test('run buttons share the WorkBench composer button shape', async ({ page }) => {
+    await bootIdle(page)
+
+    const shape = (selector) =>
+      page.locator(selector).evaluate((el) => {
+        const s = getComputedStyle(el)
+        return [s.width, s.height, s.borderRadius, s.padding, s.display]
+      })
+
+    await page.getByRole('tab', { name: 'WorkBench' }).click()
+    const composer = await shape('.chat-send')
+    expect(await shape('.run-btn-play')).toEqual(composer)
+    expect(await shape('.run-btn-stop')).toEqual(composer)
+  })
+
+  // The /api/config route is stubbed here on purpose: this test is about the
+  // warning the app raises for an unusable configuration, not about the
+  // configuration itself (the real one does have a verifier, checked below).
+  test('a missing verifier is announced instead of silently failing answers', async ({
+    page,
+  }) => {
+    const configRes = await page.request.get('/api/config')
+    expect(configRes.ok(), 'GET /api/config should succeed').toBe(true)
+    const config = await configRes.json()
+    expect(
+      config.verifierConfigured,
+      'the real config is expected to have a verifier, otherwise the stub proves nothing',
+    ).toBe(true)
+
+    await page.goto('/')
+    await expect(
+      page.getByText('No verifier agent configured'),
+      'the warning must be absent with the real config',
+    ).toHaveCount(0)
+
+    await page.route('/api/config', async (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...config, verifierConfigured: false }),
+      }),
+    )
+    await page.reload()
+
+    await expect(page.getByRole('alert')).toContainText(
+      'No verifier agent configured',
+    )
+  })
+})

@@ -1,0 +1,2086 @@
+"""Tests for the streaming chat core and the /api/chat SSE endpoint."""
+
+import base64
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.api import routes
+from src.api.server import create_app
+from src.core import agent_modes
+from src.core import agent_modes_defaults as modes_defaults
+from src.core import chat as chat_core
+from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
+# The chunk builders and the stream double come from ``tests/llmkit_fakes`` so
+# the stubs and ``llmkit.client.ChatStream`` are held to one interface.
+from tests.llmkit_fakes import (
+    CLOSE_DELIM,
+    OPEN_DELIM,
+    FakeStream,
+    content_chunk,
+    finish_chunk,
+    reasoning_chunk,
+    special_token,
+    tool_call_chunk,
+    usage_chunk,
+)
+
+
+class TestStreamChatTruncation:
+    """A server-cut reply must end on ``error``, not a tidy ``done``.
+
+    Without this, a stream that ends with no finish_reason chunk (llama.cpp
+    losing its upstream mid-generation) is indistinguishable from a finished
+    answer: the UI would settle to idle with a half-finished task, and a
+    half-streamed tool call would be executed with truncated arguments.
+    """
+
+    def _run(self, monkeypatch, generator, **kwargs):
+        monkeypatch.setattr("src.core.chat.stream_completion", lambda **kw: generator)
+        events = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            **kwargs,
+        )
+        return events
+
+    def test_cut_reply_ends_on_error_not_done(self, monkeypatch):
+        events = self._run(
+            monkeypatch,
+            FakeStream([content_chunk("half an "), content_chunk("answer")]),
+        )
+        assert [e["event"] for e in events][-1] == "error"
+        assert events[-1]["message"] == chat_core.TRUNCATION_MESSAGE
+        assert "done" not in [e["event"] for e in events]
+
+    def test_completed_reply_still_ends_on_done(self, monkeypatch):
+        events = self._run(
+            monkeypatch,
+            FakeStream([content_chunk("hi"), finish_chunk("stop")]),
+        )
+        assert events[-1]["event"] == "done"
+
+    def test_plain_iterable_is_left_alone(self, monkeypatch):
+        # Fails open, exactly as in the benchmark loop.
+        events = self._run(monkeypatch, iter([content_chunk("hi")]))
+        assert events[-1]["event"] == "done"
+
+    def test_cut_tool_call_is_not_executed(self, monkeypatch):
+        # The dangerous case: a tool call whose arguments stopped streaming
+        # would run with truncated JSON, and the model would be told its own
+        # arguments were invalid — blaming it for a transport cut.
+        executed = []
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "function": {
+                                    "name": "execute_command",
+                                    "arguments": '{"command": "ls -l',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        events = self._run(
+            monkeypatch,
+            FakeStream([chunk]),
+            tools=[{"type": "function", "function": {"name": "execute_command"}}],
+            tool_executor=lambda name, args: executed.append(name) or "ok",
+        )
+        assert executed == []
+        assert not [e for e in events if e["event"] == "tool_call"]
+        assert events[-1]["event"] == "error"
+
+    def test_reasoning_only_cut_ends_on_error(self, monkeypatch):
+        events = self._run(
+            monkeypatch, FakeStream([reasoning_chunk("thinking…")])
+        )
+        assert events[-1]["event"] == "error"
+
+    def test_empty_stream_is_not_flagged(self, monkeypatch):
+        events = self._run(monkeypatch, FakeStream([]))
+        assert events[-1]["event"] == "done"
+
+
+class TestStreamChat:
+    def _run(self, monkeypatch, chunks, cancel_event=None):
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion", lambda **kwargs: iter(chunks)
+        )
+        events = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            cancel_event=cancel_event,
+        )
+        return events
+
+    def test_emits_reasoning_once_then_tokens_then_done(self, monkeypatch):
+        events = self._run(
+            monkeypatch,
+            [
+                reasoning_chunk("thinking"),
+                reasoning_chunk(" more"),
+                content_chunk("Hel"),
+                content_chunk("lo"),
+                usage_chunk(prompt=5, completion=7, total=12),
+            ],
+        )
+        names = [e["event"] for e in events]
+        # The one-shot `reasoning` flag opens the phase, then every thinking
+        # delta streams as its own `reasoning_delta` frame.
+        assert names == [
+            "reasoning",
+            "reasoning_delta", "reasoning_delta",
+            "token", "token",
+            "done",
+        ]
+        assert [e["text"] for e in events if e["event"] == "reasoning_delta"] == [
+            "thinking", " more",
+        ]
+        text = "".join(e["text"] for e in events if e["event"] == "token")
+        assert text == "Hello"
+        # Reasoning is never ANSWER text: it stays out of `token` frames and
+        # out of the assistant turn fed back to the model.
+        assert all("thinking" not in e["text"] for e in events if e["event"] == "token")
+        assert events[0] == {"event": "reasoning"}  # flag carries no text
+        done = events[-1]
+        assert done["tokens"] == 7
+        assert done["tokensEstimated"] is False
+        # Single round: the occupancy figure is that round's total, exact.
+        assert done["contextTokens"] == 12
+        assert done["contextEstimated"] is False
+
+    def test_context_estimated_from_prompt_when_server_reports_no_usage(
+        self, monkeypatch,
+    ):
+        # No usage chunk at all: completion keeps its char estimate, and the
+        # occupancy figure adds the char estimate of the prompt the request
+        # carries (system prompt + user text) — flagged as estimated.
+        from src.core.models import DEFAULT_LLM_SYSPROMPT
+        from src.core.utils import estimate_completion_tokens
+
+        events = self._run(monkeypatch, [content_chunk("Hello there")])
+        done = events[-1]
+        prompt_est = estimate_completion_tokens(
+            DEFAULT_LLM_SYSPROMPT + chat_core.CONTROL_TOKEN_NOTICE + "hi?"
+        )
+        assert done["tokens"] == estimate_completion_tokens("Hello there")
+        # Without usage the occupancy figure is the char-based round
+        # estimate (prompt + estimated generation), flagged.
+        assert done["contextTokens"] == prompt_est + done["tokens"]
+        assert done["contextEstimated"] is True
+
+    def test_context_prompt_exact_when_only_completion_is_estimated(
+        self, monkeypatch,
+    ):
+        # prompt without completion or total: the exact prompt is kept, only
+        # the generation share is char-estimated (flagged).
+        events = self._run(
+            monkeypatch,
+            [content_chunk("abcd"), usage_chunk(prompt=40)],
+        )
+        done = events[-1]
+        assert done["tokens"] == 1  # 4 chars / 4
+        assert done["tokensEstimated"] is True
+        assert done["contextTokens"] == 41
+        assert done["contextEstimated"] is True
+
+    def test_reasoning_deltas_open_and_extend_decode_window(self, monkeypatch):
+        # t0, reasoning, reasoning, content — the usage-only chunk is not
+        # timed. The window must start at the first reasoning delta, like in
+        # the benchmark loop, so tok/s does not pretend thinking was free.
+        clock = [0.0, 1.0, 2.0, 6.0]  # t0 + one arrival per generated chunk
+        monkeypatch.setattr(
+            "src.core.chat.time.monotonic", lambda: clock.pop(0)
+        )
+        events = self._run(
+            monkeypatch,
+            [
+                reasoning_chunk("thinking"),
+                reasoning_chunk(" more"),
+                content_chunk("Hi"),
+                usage_chunk(prompt=5, completion=9, total=14),
+            ],
+        )
+        done = events[-1]
+        assert clock == []
+        assert done["ttft"] == 1.0  # first generated delta was reasoning
+        assert done["took"] == 6.0
+        assert done["tokens"] == 9  # completion usage counts reasoning tokens
+        # Single round: the decode window equals took - ttft, thinking included.
+        assert done["decode"] == 5.0
+
+    def test_prepends_system_prompt(self, monkeypatch):
+        from src.core.models import DEFAULT_LLM_SYSPROMPT
+
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1", lambda e: None
+        )
+        assert captured["messages"][0] == {
+            "role": "system",
+            # The standing app-owned notice rides every chat turn.
+            "content": DEFAULT_LLM_SYSPROMPT + chat_core.CONTROL_TOKEN_NOTICE,
+        }
+
+    def test_configured_sysprompt_is_prepended(self, monkeypatch):
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1", lambda e: None,
+            sysprompt="Answer concisely.",
+        )
+        assert captured["messages"][0] == {
+            "role": "system",
+            "content": "Answer concisely." + chat_core.CONTROL_TOKEN_NOTICE,
+        }
+
+    def test_existing_system_prompt_kept(self, monkeypatch):
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "system", "content": "be nice"}, {"role": "user", "content": "hi"}],
+            "m",
+            "http://s/v1",
+            lambda e: None,
+        )
+        # Kept as the base of the system message; the standing notice
+        # still rides, appended after it.
+        assert captured["messages"][0]["content"] == (
+            "be nice" + chat_core.CONTROL_TOKEN_NOTICE
+        )
+
+    def test_agent_instructions_appended_to_the_system_message(self, monkeypatch):
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1", lambda e: None,
+            sysprompt="Answer concisely.",
+            agent_instructions="project root is /srv/proj\n\nuse pytest",
+        )
+        system = captured["messages"][0]
+        assert system["role"] == "system"
+        assert system["content"].startswith("Answer concisely.")
+        assert system["content"].endswith("project root is /srv/proj\n\nuse pytest")
+
+    def test_blank_agent_instructions_leave_the_prompt_untouched(self, monkeypatch):
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1", lambda e: None,
+            sysprompt="Answer concisely.", agent_instructions="",
+        )
+        assert captured["messages"][0]["content"] == (
+            "Answer concisely." + chat_core.CONTROL_TOKEN_NOTICE
+        )
+
+    def test_agent_instructions_do_not_suppress_the_tool_notice(self, monkeypatch):
+        # Instruction files mention "tool" everywhere; the notice-skipping
+        # heuristic must judge only the configured prompt, so passing the
+        # instructions separately keeps the nudge alive.
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1", lambda e: None,
+            sysprompt="Answer concisely.",
+            tools=[{"type": "function", "function": {"name": "use_thing"}}],
+            tool_executor=lambda name, args: "ok",
+            agent_instructions="tools are documented in AGENTS.md",
+        )
+        system = captured["messages"][0]["content"]
+        assert chat_core.TOOL_NOTICE.strip() in system
+        assert system.endswith("tools are documented in AGENTS.md")
+
+    # -- mode_instructions: the mode's own generated blocks (am-04) ----------
+
+    def _captured_system(self, monkeypatch, **kwargs) -> str:
+        captured = {}
+
+        def fake_completion(**kw):
+            captured.update(kw)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1",
+            lambda e: None, **kwargs,
+        )
+        return captured["messages"][0]["content"]
+
+    def test_mode_instructions_are_appended_after_the_project_instructions(
+        self, monkeypatch
+    ):
+        content = self._captured_system(
+            monkeypatch,
+            sysprompt="Answer concisely.",
+            agent_instructions="project root is /srv/proj",
+            mode_instructions="the lot conventions",
+        )
+        assert content == (
+            "Answer concisely."
+            + chat_core.CONTROL_TOKEN_NOTICE
+            + "\n\nproject root is /srv/proj\n\nthe lot conventions"
+        )
+
+    def test_mode_instructions_are_no_op_when_absent_or_blank(self, monkeypatch):
+        # The regression guard: for anyone who never touches the feature the
+        # system message is byte-identical to the one chat produced before.
+        plain = self._captured_system(
+            monkeypatch, sysprompt="Answer concisely.",
+            agent_instructions="Project root /x",
+        )
+        for blank in (None, ""):
+            assert self._captured_system(
+                monkeypatch, sysprompt="Answer concisely.",
+                agent_instructions="Project root /x", mode_instructions=blank,
+            ) == plain
+        assert "conventions" not in plain
+
+    def test_mode_instructions_do_not_suppress_the_tool_notice(self, monkeypatch):
+        # Mirror of the agent_instructions case above: the blocks are appended
+        # *after* the notice heuristic has run, so text about tools in them
+        # cannot switch the notice off.
+        content = self._captured_system(
+            monkeypatch,
+            sysprompt="Answer concisely.",
+            tools=[{"type": "function", "function": {"name": "use_thing"}}],
+            tool_executor=lambda name, args: "ok",
+            mode_instructions="the tools here write files in todos/",
+        )
+        assert chat_core.TOOL_NOTICE.strip() in content
+        assert content.endswith("the tools here write files in todos/")
+
+    def test_a_persona_that_already_offers_tools_gets_no_notice(self, monkeypatch):
+        # The persona arrives as ``sysprompt``, so the existing word check
+        # judges it: a mode whose own text already speaks of tools needs no
+        # nudge, and ``mode_instructions`` below cannot talk it out of one.
+        content = self._captured_system(
+            monkeypatch,
+            sysprompt="Use the tools to prove the change.",
+            tools=[{"type": "function", "function": {"name": "use_thing"}}],
+            tool_executor=lambda name, args: "ok",
+        )
+        assert content.count(chat_core.TOOL_NOTICE.strip()) == 0
+        assert content.startswith("Use the tools")
+
+    def test_five_part_order_is_persona_notice_agents_mode_lot(self, monkeypatch):
+        content = self._captured_system(
+            monkeypatch,
+            sysprompt="PERSONA.",
+            tools=[{"type": "function", "function": {"name": "use_thing"}}],
+            tool_executor=lambda name, args: "ok",
+            agent_instructions="AGENTS_MD_BLOCK",
+            mode_instructions="MODE_BLOCKS",
+            batch_instructions="LOT_BIG_PICTURE",
+        )
+        order = [
+            content.index("PERSONA."),
+            content.index(chat_core.TOOL_NOTICE.strip()),
+            content.index("AGENTS_MD_BLOCK"),
+            content.index("MODE_BLOCKS"),
+            content.index("LOT_BIG_PICTURE"),
+        ]
+        assert order == sorted(order)
+        assert len(set(order)) == 5
+
+    def test_stream_chat_never_learns_what_a_mode_is(self):
+        """The seam: this module takes text, so the benchmark path is untouched."""
+        import inspect
+
+        source = inspect.getsource(chat_core)
+        assert "agent_modes" not in source
+        assert "mode_instructions" in source
+        names = list(inspect.signature(chat_core.stream_chat).parameters)
+        assert "mode" not in names
+        assert names.index("agent_instructions") < names.index("mode_instructions")
+        assert names.index("mode_instructions") < names.index("batch_instructions")
+
+    def test_call_failure_emits_error(self, monkeypatch):
+        def boom(**kwargs):
+            raise RuntimeError("down")
+
+        monkeypatch.setattr("src.core.chat.stream_completion", boom)
+        events = []
+        chat_core.stream_chat([{"role": "user", "content": "hi"}], "m", "http://s", events.append)
+        assert [e["event"] for e in events] == ["error"]
+        assert "down" in events[0]["message"]
+
+    def test_cancel_stops_without_done(self, monkeypatch):
+        cancel = threading.Event()
+        cancel.set()
+        stream = FakeStream([content_chunk("x")])
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion", lambda **kwargs: stream
+        )
+        events = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s", events.append,
+            cancel_event=cancel,
+        )
+        assert events == []
+        # The stream owns its own teardown now, so this is the assertion that
+        # the cancel path reaches it: one ``close()`` on the stream itself.
+        assert stream.close_calls == 1
+
+    def test_cancel_close_errors_are_swallowed(self, monkeypatch):
+        cancel = threading.Event()
+        cancel.set()
+        # The double is deliberately stricter than ``ChatStream.close()`` (which
+        # never raises): only a close that really fails exercises the
+        # best-effort wrapper on the cancel path.
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kwargs: FakeStream(
+                [content_chunk("x")],
+                close_error=RuntimeError("socket already gone"),
+            ),
+        )
+        events = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s", events.append,
+            cancel_event=cancel,
+        )
+        assert events == []
+
+    def test_estimates_tokens_without_usage(self, monkeypatch):
+        events = self._run(monkeypatch, [content_chunk("hello world!!!")])
+        done = events[-1]
+        assert done["event"] == "done"
+        assert done["tokens"] == 4
+        assert done["tokensEstimated"] is True
+
+    def test_char_estimate_covers_reasoning_text(self, monkeypatch):
+        # No usage at all: the ~4 chars/token fallback must count the
+        # reasoning deltas too (they were generated tokens), not just answer
+        # text: 8 reasoning chars + "hi" = 10 chars -> 3 tokens.
+        events = self._run(
+            monkeypatch,
+            [reasoning_chunk("thinking"), content_chunk("hi")],
+        )
+        done = events[-1]
+        assert done["tokens"] == 3
+        assert done["tokensEstimated"] is True
+
+    def test_total_minus_prompt_derived_across_rounds_without_completion(
+        self, monkeypatch,
+    ):
+        # A server that omits completion_tokens but reports total/prompt per
+        # request: without tools the single usage chunk still yields total -
+        # prompt, not flagged as estimated.
+        events = self._run(
+            monkeypatch,
+            [content_chunk("hi"), usage_chunk(prompt=5, total=12)],
+        )
+        done = events[-1]
+        assert done["tokens"] == 7
+        assert done["tokensEstimated"] is False
+
+    def test_multimodal_content_passed_through_untouched(self, monkeypatch):
+        captured = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return iter([])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        parts = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA="}},
+        ]
+        chat_core.stream_chat(
+            [{"role": "user", "content": parts}], "m", "http://s/v1", lambda e: None
+        )
+        # Only the system message is prepended; the multimodal parts are
+        # handed to the seam's ``messages`` as-is (the body they land in is
+        # asserted once in ``tests/test_llmkit_client.py``).
+        assert captured["messages"][1] == {"role": "user", "content": parts}
+
+
+def _config(endpoint: Optional[str] = "model-a") -> EndpointsConfig:
+    return EndpointsConfig(
+        serverUrl="http://localhost:8080/v1",
+        endpoint=endpoint,
+    )
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    app = create_app()
+    monkeypatch.setattr(routes, "load_endpoints_config", lambda: (_config(), None))
+    results = tmp_path / "results.json"
+    monkeypatch.setattr(routes, "RESULTS_PATH", results)
+    monkeypatch.setattr("src.core.utils.RESULTS_PATH", results)
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _events(body: str):
+    parsed = []
+    for frame in body.strip().split("\n\n"):
+        name = None
+        data = None
+        for line in frame.split("\n"):
+            if line.startswith("event: "):
+                name = line[len("event: "):]
+            elif line.startswith("data: "):
+                data = json.loads(line[len("data: "):])
+        if name is not None:
+            parsed.append((name, data))
+    return parsed
+
+
+# Real 1x1 transparent PNG.
+_PNG_DATA_URL = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def _oversized_data_url() -> str:
+    from src.api.routes import MAX_CHAT_IMAGE_BYTES
+
+    payload = base64.b64encode(b"x" * (MAX_CHAT_IMAGE_BYTES + 1)).decode()
+    return f"data:image/png;base64,{payload}"
+
+
+class TestChatEndpoint:
+    def test_happy_path_streams_frames(self, client, monkeypatch):
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            emit({"event": "token", "text": "Hel"})
+            emit({"event": "token", "text": "lo"})
+            emit({"event": "done", "took": 1.0, "ttft": 0.1, "tokens": 3,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        names = [name for name, _ in _events(response.text)]
+        assert names == ["token", "token", "done"]
+
+    def test_uses_first_configured_model_and_server(self, client, monkeypatch):
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["model"] = model
+            seen["server_url"] = server_url
+            seen["messages"] = messages
+            seen["api_key"] = api_key
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        client.post(
+            "/api/chat",
+            json={"messages": [
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"},
+                {"role": "user", "content": "c"},
+            ]},
+        )
+        assert seen["model"] == "model-a"
+        assert seen["server_url"] == "http://localhost:8080/v1"
+        assert seen["api_key"] == "none"
+        assert [m["role"] for m in seen["messages"]] == ["user", "assistant", "user"]
+
+    def test_multimodal_message_forwarded_as_parts(self, client, monkeypatch):
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["messages"] = messages
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": _PNG_DATA_URL}},
+                ],
+            }]},
+        )
+        assert response.status_code == 200
+        content = seen["messages"][0]["content"]
+        assert content[0] == {"type": "text", "text": "describe"}
+        assert content[1] == {"type": "image_url",
+                              "image_url": {"url": _PNG_DATA_URL}}
+
+    def test_image_only_message_accepted(self, client, monkeypatch):
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["messages"] = messages
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{
+                "role": "user",
+                "content": [{"type": "image_url",
+                             "image_url": {"url": _PNG_DATA_URL}}],
+            }]},
+        )
+        assert response.status_code == 200
+        assert len(seen["messages"][0]["content"]) == 1
+
+    @pytest.mark.parametrize(
+        "parts",
+        [
+            [],  # empty parts list
+            [{"type": "text", "text": "   "}],  # blank text only
+            [{"type": "text"}],  # text part without text
+            [{"type": "image_url"}],  # image part without image_url
+            # Not a data URL
+            [{"type": "image_url", "image_url": {"url": "http://x/y.png"}}],
+            # Disallowed media type
+            [{"type": "image_url", "image_url":
+              {"url": "data:image/svg+xml;base64,AAA="}}],
+            # Not base64
+            [{"type": "image_url", "image_url":
+              {"url": "data:image/png;base64,!!!not base64!!!"}}],
+            # Over the 10 MB decoded limit
+            [{"type": "image_url", "image_url": {"url": _oversized_data_url()}}],
+        ],
+    )
+    def test_invalid_multimodal_bodies_return_422(self, client, parts):
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": parts}]}
+        )
+        assert response.status_code == 422
+
+    def test_assistant_multimodal_content_returns_422(self, client):
+        response = client.post(
+            "/api/chat",
+            json={"messages": [
+                {"role": "assistant",
+                 "content": [{"type": "text", "text": "hi"}]},
+            ]},
+        )
+        assert response.status_code == 422
+
+
+class TestChatIncomingSanitization:
+    """The incoming door: no delimiter-wrapped control token gets *in*.
+
+    The seam also strips on the way out, but history is re-posted every
+    turn and a model asked about these tokens answers with them -- if the
+    runs lived inside the app's message objects, they would ride every
+    non-seam path (validation, UI state, logging) until the request was
+    built. Cleaning at the model boundary removes them once, at entry.
+    """
+
+    def _capture(self, monkeypatch) -> Dict[str, Any]:
+        seen: Dict[str, Any] = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["messages"] = messages
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        return seen
+
+    def test_reposted_history_arrives_clean_at_the_core(self, client, monkeypatch):
+        # The exact break in the field: an earlier answer *about* these
+        # tokens comes back as history and would re-close every later
+        # turn; at the boundary it is text again before anything reads it.
+        seen = self._capture(monkeypatch)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [
+                {"role": "user",
+                 "content": f"what is {special_token('im_start')} ?"},
+                {"role": "assistant",
+                 "content": f"it is written {special_token('im_start')}"},
+                {"role": "user", "content": "thanks"},
+            ]},
+        )
+        assert response.status_code == 200
+        contents = [m["content"] for m in seen["messages"]]
+        assert contents == ["what is  ?", "it is written ", "thanks"]
+
+    def test_multimodal_text_parts_arrive_clean(self, client, monkeypatch):
+        seen = self._capture(monkeypatch)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"a{special_token('evil')}b"},
+                    {"type": "image_url", "image_url": {"url": _PNG_DATA_URL}},
+                ],
+            }]},
+        )
+        assert response.status_code == 200
+        assert seen["messages"][0]["content"][0] == {"type": "text", "text": "ab"}
+
+    def test_a_message_of_only_control_tokens_is_refused_not_forwarded(
+        self, client, monkeypatch
+    ):
+        # The sanitized "" must hit the emptiness rule, not reach the
+        # model as a blank turn: refusing names the input as the problem.
+        self._capture(monkeypatch)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": special_token("evil")}]},
+        )
+        assert response.status_code == 422
+
+    def test_a_blank_assistant_turn_does_not_brick_the_conversation(
+        self, client, monkeypatch
+    ):
+        # The stream filter removed a run-only answer, so the client's
+        # history legitimately carries an empty assistant turn. Refusing
+        # it would answer every later continuation with a 422 the user
+        # cannot clear from the UI -- the brick is worse than the artefact.
+        seen = self._capture(monkeypatch)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [
+                {"role": "user", "content": f"what is {special_token('evil')} ?"},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": "continue"},
+            ]},
+        )
+        assert response.status_code == 200
+        assert [m["content"] for m in seen["messages"]] == [
+            "what is  ?", "", "continue",
+        ]
+
+    def test_text_part_of_only_control_tokens_alone_is_refused(
+        self, client, monkeypatch
+    ):
+        self._capture(monkeypatch)
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": special_token("evil")}],
+            }]},
+        )
+        assert response.status_code == 422
+
+
+class TestControlTokenNotice:
+    """The system message tells the model never to *generate* a raw run.
+
+    The input sanitizer cannot prevent the asked-about-the-tokens cut:
+    the model generates a raw run, the serving runtime tokenizes it as a
+    single end-of-turn token, and the reply dies mid-sentence reading as
+    a clean stop. The prevention that works is a standing chat-turn
+    instruction -- chat only: the benchmark measures raw behaviour and
+    builds its prompts in core/llm.py.
+    """
+
+    def _capture_system(self, monkeypatch, messages, **kwargs):
+        seen = {}
+
+        def capture(**kw):
+            seen["messages"] = kw["messages"]
+            return FakeStream([content_chunk("ok"), finish_chunk("stop")])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", capture)
+        events = []
+        chat_core.stream_chat(
+            messages,
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            **kwargs,
+        )
+        return seen["messages"][0]["content"]
+
+    def test_every_turn_carries_the_notice(self, monkeypatch):
+        system = self._capture_system(
+            monkeypatch, [{"role": "user", "content": "what is im_start ?"}]
+        )
+        assert "raw delimiter-wrapped form" in system
+
+    def test_a_caller_supplied_system_message_gets_the_notice_too(
+        self, monkeypatch
+    ):
+        system = self._capture_system(
+            monkeypatch,
+            [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "what is im_start ?"},
+            ],
+        )
+        assert system.startswith("be terse")
+        assert "raw delimiter-wrapped form" in system
+
+    def test_the_notice_coexists_with_the_tool_notice(self, monkeypatch):
+        system = self._capture_system(
+            monkeypatch,
+            [{"role": "user", "content": "hi"}],
+            sysprompt="be terse",
+            tools=[{"type": "function", "function": {"name": "read_file"}}],
+            tool_executor=lambda name, args: "r",
+        )
+        assert "browser/console" in system  # TOOL_NOTICE still applied
+        assert "raw delimiter-wrapped form" in system
+
+    def test_the_notice_names_the_code_fence_loophole(self, monkeypatch):
+        # The recorded break: the model followed the rule in prose -- its
+        # reasoning even said so -- then reproduced the raw form inside a
+        # fenced template example and was EOG-cut mid-fence. The notice
+        # must close that exemption in words the model cannot re-read
+        # around.
+        system = self._capture_system(
+            monkeypatch, [{"role": "user", "content": "what is a chat template?"}]
+        )
+        assert "code blocks" in system
+        assert "no exemption" in system
+
+    def test_the_notice_itself_is_not_a_smuggled_run(self):
+        # The guard against the guard becoming the hole: the instruction
+        # survives the sanitizer byte for byte, so it never spells the
+        # very run it forbids the model from spelling.
+        from src.core.chat import CONTROL_TOKEN_NOTICE
+        from src.core.llmkit.sanitize import sanitize_content
+
+        assert sanitize_content(CONTROL_TOKEN_NOTICE) == CONTROL_TOKEN_NOTICE
+
+
+class TestStreamedDisplayIsSanitized:
+    """What the panels (and the client's history) see is run-free.
+
+    A token-shaped run arrives split across content deltas, so the
+    frames must be filtered as one stream, not per frame: a model asked
+    about these tokens must be able to answer without the raw sequence
+    ever being painted or stored by the browser.
+    """
+
+    def _run_chunks(self, monkeypatch, chunks, **kwargs):
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion", lambda **kw: FakeStream(chunks)
+        )
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            "m",
+            "http://s/v1",
+            events.append,
+            **kwargs,
+        )
+        return events
+
+    def test_a_run_split_across_answer_chunks_never_reaches_a_token_frame(
+        self, monkeypatch
+    ):
+        events = self._run_chunks(
+            monkeypatch,
+            [
+                content_chunk("It is written "),
+                content_chunk(OPEN_DELIM + "im_st"),
+                content_chunk("art" + CLOSE_DELIM),
+                content_chunk(" in ChatML"),
+                finish_chunk("stop"),
+            ],
+        )
+        streamed = "".join(e["text"] for e in events if e["event"] == "token")
+        assert streamed == "It is written  in ChatML"
+        assert [e for e in events if e["event"] == "done"]
+
+    def test_reasoning_frames_are_filtered_as_one_stream(self, monkeypatch):
+        events = self._run_chunks(
+            monkeypatch,
+            [
+                reasoning_chunk("think about "),
+                reasoning_chunk(special_token("q")[:4]),
+                reasoning_chunk(special_token("q")[4:]),
+                reasoning_chunk(" now"),
+                finish_chunk("stop"),
+            ],
+        )
+        thought = "".join(
+            e["text"] for e in events if e["event"] == "reasoning_delta"
+        )
+        assert thought == "think about  now"
+
+    def test_a_held_partial_survives_truncation_before_the_error(
+        self, monkeypatch
+    ):
+        # The fragment is kept as streamed AND the benign held partial is
+        # flushed before the terminal error frame -- nothing vanishes.
+        events = self._run_chunks(
+            monkeypatch, [content_chunk("x"), content_chunk(OPEN_DELIM)]
+        )
+        names = [e["event"] for e in events]
+        assert names == ["token", "token", "error"]
+        assert events[1]["text"] == OPEN_DELIM
+
+    def test_tool_result_and_call_previews_reach_the_panel_run_free(
+        self, monkeypatch
+    ):
+        streams = [
+            FakeStream([
+                tool_call_chunk(call_id="c1",
+                                name=f"ech{special_token('x')}o",
+                                arguments='{"x": 1}'),
+                finish_chunk("stop"),
+            ]),
+            FakeStream([content_chunk("ok"), finish_chunk("stop")]),
+        ]
+        calls = []
+
+        def fake(**kw):
+            calls.append(kw)
+            return streams[len(calls) - 1]
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            "m",
+            "http://s/v1",
+            events.append,
+            tools=[{"type": "function", "function": {"name": "x"}}],
+            tool_executor=lambda name, args: f"result {special_token('s')} done",
+        )
+        call = next(e for e in events if e["event"] == "tool_call")
+        result = next(e for e in events if e["event"] == "tool_result")
+        assert call["tool"] == "echo"
+        assert result["preview"] == "result  done"
+
+    def test_forwards_configured_api_key(self, monkeypatch, tmp_path):
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            emit({"api_key_seen": api_key, "event": "done", "took": 0.0,
+                  "ttft": 0.0, "tokens": 0, "tokensEstimated": False})
+
+        app = create_app()
+        monkeypatch.setattr(
+            routes,
+            "load_endpoints_config",
+            lambda: (
+                EndpointsConfig(
+                    serverUrl="http://localhost:8080/v1",
+                    apiKey="sk-42",
+                    endpoint="model-a",
+                ),
+                None,
+            ),
+        )
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        with TestClient(app) as test_client:
+            response = test_client.post(
+                "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            )
+        assert '"api_key_seen": "sk-42"' in response.text
+
+    def test_agent_instructions_reach_the_chat_call(
+        self, client, monkeypatch, tmp_path: Path
+    ):
+        # The working location's AGENTS.md is injected on every request, so a
+        # conversation starts knowing the project's conventions.
+        (tmp_path / "AGENTS.md").write_text("# rules\n\nrun pytest first\n", encoding="utf-8")
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["instructions"] = agent_instructions
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert seen["instructions"].endswith("run pytest first")
+        assert f"project root is {tmp_path}" in seen["instructions"]
+
+    def test_agent_instructions_empty_without_the_file(
+        self, client, monkeypatch, tmp_path: Path
+    ):
+        # No AGENTS.md at the location: the configured prompt stands alone.
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["instructions"] = agent_instructions
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert seen["instructions"] == ""
+
+    def test_error_event_terminates_stream(self, client, monkeypatch):
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            emit({"event": "error", "message": "boom"})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        frames = _events(response.text)
+        assert [name for name, _ in frames] == ["error"]
+
+    def test_truncation_flag_survives_the_sse_frame(self, client, monkeypatch):
+        # The whole event dict is JSON-serialized into the frame, so the flag
+        # the WorkBench view needs to mark the bubble reaches the browser.
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            emit({"event": "error", "message": "cut short", "truncated": True})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        name, payload = _events(response.text)[0]
+        assert name == "error"
+        assert payload["message"] == "cut short"
+        assert payload["truncated"] is True
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"messages": []},
+            {"messages": [{"role": "user", "content": "   "}]},
+            {"messages": [{"role": "wizard", "content": "abracadabra"}]},
+            {"messages": [{"role": "user"}]},
+        ],
+    )
+    def test_invalid_bodies_return_422(self, client, payload):
+        assert client.post("/api/chat", json=payload).status_code == 422
+
+    def test_no_model_configured_returns_400(self, client, monkeypatch):
+        monkeypatch.setattr(routes, "load_endpoints_config", lambda: (_config(None), None))
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert response.status_code == 400
+
+    def test_running_benchmark_returns_409(self, client, monkeypatch):
+        gate = threading.Event()
+
+        def blocked(questions, config, job, emit, cancel_event=None):
+            gate.wait()
+
+        monkeypatch.setattr(routes, "run_benchmark", blocked)
+        monkeypatch.setattr(routes, "load_questions", lambda: [{"uuid": "q", "question": "q?", "expected": "e"}])
+        try:
+            assert client.post("/api/run").status_code == 202
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if client.get("/api/run").json()["status"] == "running":
+                    break
+                time.sleep(0.02)
+            response = client.post(
+                "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            )
+            assert response.status_code == 409
+        finally:
+            gate.set()
+
+
+class TestChatPauseEndpoint:
+    """``POST /api/chat/pause`` arms the flag of the one in-flight reply."""
+
+    def test_no_reply_streaming_returns_409(self, client):
+        response = client.post("/api/chat/pause")
+        assert response.status_code == 409
+        assert "No chat reply is streaming" in response.json()["detail"]
+
+    def test_pause_arms_the_flag_and_the_stream_ends_on_pause_ack(
+        self, client, monkeypatch
+    ):
+        seen = {}
+        started = threading.Event()
+        released = threading.Event()
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            seen["pause_event"] = pause_event
+            started.set()
+            # The route always hands the stream a flag; the default None only
+            # exists so other fakes can omit it.
+            assert pause_event is not None
+            # Stands in for the core: the flag is what the real loop checks.
+            while not pause_event.is_set():
+                time.sleep(0.01)
+            # Hold the reply open across both pause calls: the second one must
+            # still see the handle, so no ack may go out before it landed.
+            released.wait(timeout=5)
+            emit({"event": "token", "text": "partial"})
+            emit({"event": "usage", "tokens": 3, "decode": 0.2,
+                  "contextTokens": 12, "contextEstimated": False})
+            emit({"event": "pause_ack", "partial": True})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        def arm_pause():
+            # The TestClient buffers a whole SSE body before returning, so the
+            # reply below only ends once the flag is armed: the POST has to come
+            # from another thread, exactly as it does in the browser.
+            started.wait(timeout=5)
+            arm_pause.results["first"] = client.post("/api/chat/pause")
+            arm_pause.results["again"] = client.post("/api/chat/pause")
+            released.set()
+
+        arm_pause.results = {}
+        poster = threading.Thread(target=arm_pause)
+        poster.start()
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        poster.join(timeout=5)
+
+        assert seen["pause_event"] is not None
+        first = arm_pause.results["first"]
+        assert first.status_code == 200
+        assert first.json() == {"paused": "requested"}
+        # Idempotent: a second call while the ack is pending says so.
+        again = arm_pause.results["again"]
+        assert again.status_code == 200
+        assert again.json() == {"paused": "pending"}
+        names = [name for name, _data in _events(response.text)]
+        assert names == ["token", "usage", "pause_ack"]
+
+    def test_handle_is_retired_once_the_reply_ended(self, client, monkeypatch):
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 1,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert response.status_code == 200
+        assert [name for name, _ in _events(response.text)] == ["done"]
+        assert client.post("/api/chat/pause").status_code == 409
+
+
+class TestStreamChatPause:
+    """``pause_event`` interrupts a reply without throwing its context away.
+
+    The ack must be terminal and unambiguous (no ``done``, no ``error``, no
+    truncation frame — the pause itself closed the stream, so no finish_reason
+    was ever expected), and it must carry the exact usage of the partial turn.
+    """
+
+    def _run(self, monkeypatch, generator, **kwargs):
+        monkeypatch.setattr("src.core.chat.stream_completion", lambda **kw: generator)
+        events = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            **kwargs,
+        )
+        return events
+
+    def test_paused_reply_ends_on_pause_ack(self, monkeypatch):
+        pause = threading.Event()
+        pause.set()
+        events = self._run(
+            monkeypatch,
+            FakeStream([content_chunk("half an "), content_chunk("answer")]),
+            pause_event=pause,
+        )
+        names = [e["event"] for e in events]
+        # Nothing streamed (the flag was armed before the first chunk), but the
+        # ack is still terminal and preceded by the usage frame.
+        assert names == ["usage", "pause_ack"]
+        assert events[-1]["partial"] is True
+        assert "done" not in names and "error" not in names
+
+    def test_pause_is_never_reported_as_a_truncation(self, monkeypatch):
+        pause = threading.Event()
+        pause.set()
+        events = self._run(
+            monkeypatch,
+            FakeStream([content_chunk("partial")]),
+            pause_event=pause,
+        )
+        assert not [e for e in events if e["event"] == "error"]
+        assert not [e for e in events if e.get("truncated")]
+
+    def test_pause_closes_the_upstream_stream(self, monkeypatch):
+        pause = threading.Event()
+        pause.set()
+        stream = FakeStream([content_chunk("x")])
+        self._run(monkeypatch, stream, pause_event=pause)
+        assert stream.closed
+
+    def test_pause_mid_stream_keeps_only_the_tokens_so_far(self, monkeypatch):
+        # The check is per chunk: a flag armed after N chunks must stop the
+        # loop there, not at the end of the stream.
+        pause = threading.Event()
+
+        def gen():
+            for i in range(10):
+                if i == 3:
+                    pause.set()
+                yield content_chunk(f"t{i}")
+
+        events = self._run(monkeypatch, gen(), pause_event=pause)
+        tokens = [e["text"] for e in events if e["event"] == "token"]
+        assert tokens == ["t0", "t1", "t2"]
+        assert events[-1]["event"] == "pause_ack"
+
+    def test_partial_tokens_then_usage_then_the_ack(self, monkeypatch):
+        # The flag is armed after the server's usage chunk: what streamed so
+        # far is kept, the usage frame carries the exact cumulative figures,
+        # and the ack terminates the reply (the chunk after the flag is gone).
+        pause = threading.Event()
+
+        def gen():
+            yield content_chunk("par")
+            yield usage_chunk(prompt=40, completion=8, total=48)
+            pause.set()
+            yield content_chunk("tially-streamed-but-skipped")
+
+        events = self._run(monkeypatch, gen(), pause_event=pause)
+        names = [e["event"] for e in events]
+        assert names == ["token", "usage", "pause_ack"]
+        usage = events[1]
+        assert usage["tokens"] == 8
+        assert usage["contextTokens"] == 48
+        assert usage["contextEstimated"] is False
+        assert not [e for e in events if e.get("text", "").startswith("tially")]
+
+    class DrainThenArm:
+        """A stream that arms ``event`` only once its chunks are all delivered.
+
+        ``saw_finish_reason`` is delegated to the double underneath, so the race
+        below is judged on what the stream really carried rather than on an
+        attribute a stub declared up front.
+        """
+
+        def __init__(self, stream, event):
+            self._stream = stream
+            self._event = event
+
+        def __iter__(self):
+            yield from self._stream
+            self._event.set()
+
+        @property
+        def saw_finish_reason(self):
+            return self._stream.saw_finish_reason
+
+        @property
+        def closed(self):
+            return self._stream.closed
+
+        def close(self):
+            self._stream.close()
+
+    def test_flag_armed_after_the_last_chunk_still_ends_on_done(self, monkeypatch):
+        # The race: the round streamed to its end with a real finish_reason and
+        # the flag was armed only after that last chunk. The reply is complete,
+        # so `done` wins — a round that carries its finish_reason was never
+        # interrupted, whatever the flag says afterwards.
+        pause = threading.Event()
+        stream = self.DrainThenArm(
+            FakeStream([content_chunk("whole answer"), finish_chunk("stop")]), pause
+        )
+        events = self._run(monkeypatch, stream, pause_event=pause)
+        names = [e["event"] for e in events]
+        assert names == ["token", "done"]
+
+    def test_cancel_wins_over_a_pause_on_the_same_chunk(self, monkeypatch):
+        # Stop after Pause: the client is gone, so nothing may be emitted —
+        # the cancel check comes first at every pause site.
+        cancel = threading.Event()
+        cancel.set()
+        pause = threading.Event()
+        pause.set()
+        stream = FakeStream([content_chunk("x")])
+        events = self._run(
+            monkeypatch, stream, cancel_event=cancel, pause_event=pause
+        )
+        assert events == []
+        assert stream.closed
+
+    def test_pause_while_tool_calls_stream_never_runs_them(self, monkeypatch):
+        # The dangerous shape: tool-call arguments only half-streamed, so
+        # executing them would feed the model invalid JSON of its own cutting.
+        executed = []
+        pause = threading.Event()
+
+        def gen():
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": "execute_command",
+                                        "arguments": '{"command": "ls',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+            pause.set()
+            yield content_chunk("must not stream")
+
+        events = self._run(
+            monkeypatch,
+            gen(),
+            pause_event=pause,
+            tools=[{"type": "function", "function": {"name": "execute_command"}}],
+            tool_executor=lambda name, args: executed.append(name) or "ok",
+        )
+        assert executed == []
+        assert not [e for e in events if e["event"] == "tool_call"]
+        assert events[-1]["event"] == "pause_ack"
+
+    def test_pause_asked_during_a_tool_run_ends_between_rounds(self, monkeypatch):
+        # A running tool is allowed to finish (its `tool_result` still lands,
+        # so the badge never sticks on "running"), and the next round is never
+        # started. No extra `usage` frame: this round's figures went out as the
+        # pre-tool one.
+        pause = threading.Event()
+
+        def executor(name, args):
+            pause.set()
+            return "done"
+
+        chunks_round_one = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": "execute_command",
+                                        "arguments": '{"command": "ls"}',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            usage_chunk(prompt=10, completion=4, total=14),
+        ]
+
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kw: FakeStream(
+                chunks_round_one + [finish_chunk("tool_calls")]
+            ),
+        )
+        events = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            pause_event=pause,
+            tools=[{"type": "function", "function": {"name": "execute_command"}}],
+            tool_executor=executor,
+        )
+        names = [e["event"] for e in events]
+        # `usage` precedes the tool badges (it is emitted as soon as that
+        # round stops generating), and the ack is the only terminal frame.
+        assert names == ["usage", "tool_call", "tool_result", "pause_ack"]
+
+
+class TestAgentModePromptAssembly:
+    """am-04: the resolved mode's words reach ``POST /chat``'s system message.
+
+    Runs against a ``tmp_path`` workspace whose ``.nojae/agent-modes.json`` the
+    test writes, so the mode the route resolves is a real one read through the
+    real loader (no stand-in: what is under test is the route's use of it). The
+    stub records the ``stream_chat`` kwargs, which is where am-04 does the
+    substitution — the five-part *order* belongs to ``core.chat`` and is pinned
+    in ``TestStreamChat`` above.
+    """
+
+    @staticmethod
+    def _write_modes(root: Path, agents: Dict[str, Any], default: str = "builder"):
+        folder = root / agent_modes.POLICY_DIRNAME
+        folder.mkdir(exist_ok=True)
+        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
+            json.dumps({
+                "version": agent_modes.AGENT_MODES_VERSION,
+                "default": default,
+                "agents": agents,
+            }, indent=2),
+            encoding="utf-8",
+        )
+
+    @pytest.fixture
+    def mode_client(self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """``client`` on a scratch workspace with AGENTS.md, plus the stub's kwargs."""
+        (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+        agent_modes.invalidate_agent_modes_cache()
+        seen: Dict[str, Any] = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None,
+                 agent_instructions=None, mode_instructions=None):
+            seen["sysprompt"] = sysprompt
+            seen["agent_instructions"] = agent_instructions
+            if mode_instructions is not None:
+                seen["mode_instructions"] = mode_instructions
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        try:
+            yield client, tmp_path, seen
+        finally:
+            agent_modes.invalidate_agent_modes_cache()
+
+    @staticmethod
+    def _post(client) -> None:
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert response.status_code == 200
+
+    def test_the_persona_replaces_the_configured_prompt(self, mode_client):
+        client, root, seen = mode_client
+        self._write_modes(root, {
+            "builder": {"label": "Builder", "systemMessage": "PERSONA TEXT"},
+        })
+        self._post(client)
+        assert seen["sysprompt"] == "PERSONA TEXT"
+        # D1: alternatives, never stacked — the configured prompt is gone.
+        assert DEFAULT_LLM_SYSPROMPT not in seen["sysprompt"]
+
+    def test_an_empty_persona_falls_back_to_the_configured_prompt(
+        self, mode_client
+    ):
+        # The escape hatch, as a supported path: `"systemMessage": ""` on the
+        # default mode restores the pre-mode behaviour with no code change.
+        client, root, seen = mode_client
+        self._write_modes(root, {"builder": {"label": "Builder",
+                                             "systemMessage": ""}})
+        self._post(client)
+        assert seen["sysprompt"] == DEFAULT_LLM_SYSPROMPT
+
+    def test_a_missing_persona_key_is_the_same_fallback(self, mode_client):
+        client, root, seen = mode_client
+        self._write_modes(root, {"builder": {"label": "Builder"}})
+        self._post(client)
+        assert seen["sysprompt"] == DEFAULT_LLM_SYSPROMPT
+
+    def test_a_mode_without_blocks_keeps_the_call_shape(self, mode_client):
+        # ``mode_instructions`` is passed only when the mode has blocks (the
+        # conditional shape already used for ``batch_instructions``), so every
+        # chat request that exists today is unaffected.
+        client, root, seen = mode_client
+        self._write_modes(root, {"builder": {"label": "Builder",
+                                             "systemMessage": "PERSONA"}})
+        self._post(client)
+        assert "mode_instructions" not in seen
+
+    def test_the_app_owned_mode_blocks_reach_the_call(self, mode_client,
+                                                      monkeypatch):
+        # Only the reserved Todo builder carries blocks, and it cannot be the
+        # file's ``default`` (D9), so the route's rendering of them is exercised
+        # by handing it that mode directly.
+        client, _root, seen = mode_client
+        monkeypatch.setattr(
+            routes.agent_modes, "resolve_mode",
+            lambda mode_id: (modes_defaults.todo_builder_mode(), []),
+        )
+        self._post(client)
+        assert seen["mode_instructions"] == "\n\n".join(
+            modes_defaults.todo_builder_mode().instructions
+        )
+        assert modes_defaults.lot_conventions_block() in seen["mode_instructions"]
+
+    def test_the_project_instructions_arrive_for_a_tools_off_mode(
+        self, mode_client
+    ):
+        # am-00's invariant as a test: AGENTS.md is unconditional. A mode with
+        # both tool flags false still gets the project block.
+        client, root, seen = mode_client
+        self._write_modes(root, {"builder": {
+            "label": "Builder", "mcptools": False, "lsptools": False,
+            "systemMessage": "PERSONA TEXT",
+        }})
+        self._post(client)
+        assert seen["agent_instructions"].endswith("Use pytest.")
+        assert f"project root is {root}" in seen["agent_instructions"]
+
+    def test_the_modes_file_is_resolved_per_request(self, mode_client):
+        # Hot edit, no second cache layer: the persona of the *next* turn of a
+        # conversation is the one the file says now.
+        client, root, seen = mode_client
+        self._write_modes(root, {"builder": {"label": "Builder",
+                                             "systemMessage": "PERSONA ONE"}})
+        self._post(client)
+        assert seen["sysprompt"] == "PERSONA ONE"
+        self._write_modes(root, {"builder": {"label": "Builder",
+                                             "systemMessage": "PERSONA TWO"}})
+        self._post(client)
+        assert seen["sysprompt"] == "PERSONA TWO"
+
+    def test_a_broken_modes_file_still_chats_on_the_defaults(self, mode_client):
+        # D11 on the request path: a typo costs the user their persona, not the
+        # conversation.
+        client, root, _seen = mode_client
+        folder = root / agent_modes.POLICY_DIRNAME
+        folder.mkdir(exist_ok=True)
+        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
+            "{ not json", encoding="utf-8")
+        self._post(client)
+        assert _seen["sysprompt"] == "\n".join(
+            modes_defaults.CODE_PERSONA)
+
+    def test_a_workspace_with_no_modes_file_chats_on_the_same_defaults(
+        self, mode_client
+    ):
+        # am-04 §9: the behaviour does not depend on whether am-03's seed
+        # happened — a workspace created before it shipped, or one the seeder
+        # could not write, resolves to the same built-in ``code`` persona.
+        client, _root, seen = mode_client
+        self._post(client)
+        assert seen["sysprompt"] == "\n".join(modes_defaults.CODE_PERSONA)
+        assert "mode_instructions" not in seen
+
+    def test_nothing_anywhere_can_suppress_the_project_instructions(self):
+        # am-00's invariant, stated as a test: AGENTS.md is always injected.
+        # Neither the core, the modes vocabulary nor a request body carries a
+        # knob for it, so no caller — a later feature or a hand-edited file —
+        # can ask for a conversation without them.
+        import inspect
+
+        def suppressed_names(names) -> list:
+            """Any name that reads like a switch over the instruction blocks."""
+            out = []
+            for name in names:
+                lowered = name.lower()
+                if "agents_md" in lowered or "agentsmd" in lowered:
+                    out.append(name)
+                elif lowered.startswith(("include_", "without_", "skip_",
+                                         "no_", "suppress_")):
+                    out.append(name)
+            return sorted(out)
+
+        assert suppressed_names(chat_core.stream_chat.__code__.co_varnames) == []
+        assert suppressed_names(routes.ChatIn.model_fields) == []
+        assert suppressed_names(agent_modes.MODE_KEYS) == []
+        assert suppressed_names(agent_modes.TOP_LEVEL_KEYS) == []
+        # The two instruction arguments are the only injection points, and both
+        # are appended to the system message, never allowed to replace it: the
+        # route passes ``agent_instructions=agent_instructions_block()`` with no
+        # condition anywhere around it.
+        params = list(inspect.signature(chat_core.stream_chat).parameters)
+        assert [p for p in params if "instructions" in p] == [
+            "agent_instructions", "mode_instructions", "batch_instructions",
+        ]
+        route_source = inspect.getsource(routes)
+        # Exactly one call site, passed unconditionally — never through the
+        # conditional-kwarg shape the two optional blocks use.
+        assert route_source.count(
+            "agent_instructions=agent_instructions_block(),") == 1
+        assert '"agent_instructions"' not in route_source
+
+    def test_the_five_parts_arrive_in_order_through_the_route(self, mode_client,
+                                                              monkeypatch):
+        """End to end: persona → notice → AGENTS.md → mode blocks → lot.
+
+        The stub above only sees the kwargs; this lets the *real* ``stream_chat``
+        run (with the LLM client seam stubbed) so the assertion is on the system
+        message that would leave the process, with a persona, blocks and
+        ``batchContext`` all in play at once.
+        """
+        client, root, _seen = mode_client
+        # A hub with one live connector, so tools really are passed and the
+        # notice has a place in the message (gating the hubs per mode is
+        # am-05's job, not this task's).
+        class Hub:
+            def status(self):
+                return []
+
+            def active_tool_defs(self, ids):
+                return ([{"type": "function", "function": {"name": "read_file"}}],
+                        {"read_file": "console"})
+
+            def call_tool_sync(self, cid, name, args):
+                return "ok"
+
+        client.app.state.mcp = Hub()
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kwargs: captured.update(kwargs) or iter([]),
+        )
+        # A mode of the same shape as the reserved one — persona plus blocks —
+        # with a persona that does not use the word "tool", so the notice is
+        # expected (its own behaviour is pinned in TestStreamChat above).
+        monkeypatch.setattr(
+            routes.agent_modes, "resolve_mode",
+            lambda mode_id: (agent_modes.AgentMode(
+                id="builder", label="Builder", system_message="PERSONA TEXT",
+                mcptools=True, lsptools=False, editable=False,
+                instructions=("MODE BLOCKS", "SECOND MODE BLOCK"),
+            ), []),
+        )
+        response = client.post("/api/chat", json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "batchContext": "The lot: tasks 1 to 8.",
+        })
+        assert response.status_code == 200
+        content = captured["messages"][0]["content"]
+        parts = [
+            content.index("PERSONA TEXT"),
+            content.index(chat_core.TOOL_NOTICE.strip()),
+            content.index("# rules"),
+            content.index("MODE BLOCKS\n\nSECOND MODE BLOCK"),
+            content.index("The lot: tasks 1 to 8."),
+        ]
+        assert parts == sorted(parts)
+        assert len(set(parts)) == 5
+
+
+class TestChatMcpFilter:
+    """``mcpEnabled`` (Chat tab conversation toggles) intersects the active ids."""
+
+    class RecordingManager:
+        installed = True
+
+        def __init__(self):
+            self.requested_ids = None
+
+        def status(self):
+            return []
+
+        def active_tool_defs(self, ids):
+            self.requested_ids = list(ids)
+            tools = [
+                {"type": "function", "function": {"name": f"use_{cid}"}}
+                for cid in ids
+            ]
+            return tools, {f"use_{cid}": cid for cid in ids}
+
+        def call_tool_sync(self, cid, name, args):
+            return "ok"
+
+    @pytest.fixture
+    def mcp_setup(self, client, monkeypatch):
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["alpha", "beta"])
+        manager = self.RecordingManager()
+        client.app.state.mcp = manager
+
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None,
+                 cancel_event=None, api_key="none", sysprompt=None, **kwargs):
+            seen.update(kwargs)
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        return client, manager, seen
+
+    @staticmethod
+    def _post(client, extra=None):
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        body.update(extra or {})
+        response = client.post("/api/chat", json=body)
+        assert response.status_code == 200
+        return response
+
+    def test_mcp_enabled_intersects_active_ids(self, mcp_setup):
+        client, manager, seen = mcp_setup
+        self._post(client, {"mcpEnabled": ["beta"]})
+        assert manager.requested_ids == ["beta"]
+        assert seen["tool_servers"] == {"use_beta": "beta"}
+
+    def test_mcp_enabled_absent_keeps_all_active(self, mcp_setup):
+        client, manager, seen = mcp_setup
+        self._post(client)
+        assert manager.requested_ids == ["alpha", "beta"]
+        assert set(seen["tool_servers"]) == {"use_alpha", "use_beta"}
+
+    def test_empty_mcp_enabled_disables_all_tools(self, mcp_setup):
+        client, manager, seen = mcp_setup
+        self._post(client, {"mcpEnabled": []})
+        assert manager.requested_ids == []
+        # No tools at all: the no-MCP stream_chat call shape is preserved.
+        assert "tools" not in seen
+
+    def test_unknown_ids_are_dropped_by_the_intersection(self, mcp_setup):
+        client, manager, _seen = mcp_setup
+        self._post(client, {"mcpEnabled": ["beta", "gone_mcp"]})
+        assert manager.requested_ids == ["beta"]
+
+    def test_mcp_enabled_wrong_type_returns_422(self, mcp_setup):
+        client, _manager, _seen = mcp_setup
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "mcpEnabled": "beta"},
+        )
+        assert response.status_code == 422
+
+
+class TestAgentModeToolGate:
+    """am-05: the mode's two booleans decide whether a hub reaches the *model*.
+
+    Three levels gate the tool loop and they only ever **intersect** (D4):
+    Settings (``_active_connector_ids`` / ``_active_server_ids``), the mode
+    (``mcptools`` / ``lsptools``) and the conversation (``mcpEnabled`` /
+    ``lspEnabled``). ``_chat_tool_kwargs`` is where they meet, so most of what
+    is asserted here is the kwargs dict the route hands ``stream_chat`` —
+    including the one assertion that is the requirement rather than a detail:
+    a gated request has **no ``tools`` key at all**, never ``tools=[]``, which
+    is a different request to an OpenAI-compatible server.
+    """
+
+    class RequestStub:
+        """Just enough ``Request`` for the two hub lookups (``app.state``)."""
+
+        def __init__(self, app):
+            self.app = app
+
+    @staticmethod
+    def _request(app):
+        return TestAgentModeToolGate.RequestStub(app)
+
+    class Hub:
+        """Answers ``active_tool_defs`` from the ids it was *given*, as MCP does."""
+
+        installed = True
+
+        def __init__(self):
+            self.requested_ids: List[List[str]] = []
+
+        def status(self):
+            return []
+
+        def active_tool_defs(self, ids):
+            self.requested_ids.append(list(ids))
+            tools = [
+                {"type": "function", "function": {"name": f"use_{cid}"}}
+                for cid in ids
+            ]
+            return tools, {f"use_{cid}": cid for cid in ids}
+
+        def call_tool_sync(self, cid, name, args, timeout=30.0):
+            return "ok"
+
+    @staticmethod
+    def _mode(mcptools: bool, lsptools: bool) -> agent_modes.AgentMode:
+        return agent_modes.AgentMode(
+            id="gated", label="Gated", system_message="PERSONA",
+            mcptools=mcptools, lsptools=lsptools,
+        )
+
+    @pytest.fixture
+    def hubs(self, client, monkeypatch):
+        """Both hubs live and Settings-activated; nothing is mode-gated yet."""
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
+        mcp, lsp = self.Hub(), self.Hub()
+        client.app.state.mcp = mcp
+        client.app.state.lsp = lsp
+        return client, mcp, lsp
+
+    @staticmethod
+    def _names(kwargs) -> List[str]:
+        return [d["function"]["name"] for d in kwargs.get("tools", [])]
+
+    def test_both_flags_false_leaves_no_tools_key_at_all(self, hubs):
+        client, mcp, lsp = hubs
+        # The connector is Settings-activated *and* ticked in the conversation;
+        # the mode still takes it away, and it does so by emptying the list the
+        # hub is asked for — no tool definition is ever serialised.
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), ["console"], ["pyright"],
+            mode=self._mode(False, False),
+        )
+        assert kwargs == {}
+        assert mcp.requested_ids == [[]] and lsp.requested_ids == [[]]
+        # The requirement, stated as the assertion: no ``tools`` **key**, never
+        # ``tools == []`` — the LLM client forwards what it is handed, and an
+        # empty array is a different request to an OpenAI-compatible server.
+        assert "tools" not in kwargs
+        assert "tool_executor" not in kwargs
+        assert "tool_servers" not in kwargs
+        # The iteration cap belongs to the tool loop, so gating the only hub
+        # that had tools must not leave one behind (the LSP-only branch of the
+        # merge is where it would leak from).
+        assert "max_tool_iterations" not in kwargs
+
+    def test_gating_the_only_hub_with_tools_drops_the_iteration_cap(self, hubs,
+                                                                   monkeypatch):
+        # Only MCP has tools here, and the mode closes it. The merge's LSP-only
+        # branch (``{**lsp_kwargs, "max_tool_iterations": …}``) must not fire for
+        # an empty ``lsp_kwargs``: the request has no tool loop at all, so a cap
+        # alone would be a ``stream_chat`` call shape no hub asked for.
+        client, mcp, lsp = hubs
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), ["console"], mode=self._mode(False, True)
+        )
+        assert kwargs == {}
+        assert mcp.requested_ids == [[]]
+        assert lsp.requested_ids == [[]]
+        for key in ("tools", "tool_executor", "tool_servers",
+                    "max_tool_iterations"):
+            assert key not in kwargs
+
+    def test_mcp_gate_leaves_the_lsp_hub_alone(self, hubs):
+        client, mcp, lsp = hubs
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), ["console"], ["pyright"],
+            mode=self._mode(False, True),
+        )
+        assert mcp.requested_ids == [[]]
+        assert lsp.requested_ids == [["pyright"]]
+        # One hub off, the other still whole — the gate is per hub, not global.
+        assert self._names(kwargs) == ["use_pyright"]
+        assert kwargs["tool_servers"] == {"use_pyright": "pyright"}
+
+    def test_lsp_gate_leaves_the_mcp_hub_alone(self, hubs):
+        client, mcp, lsp = hubs
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), ["console"], ["pyright"],
+            mode=self._mode(True, False),
+        )
+        assert lsp.requested_ids == [[]]
+        assert mcp.requested_ids == [["console"]]
+        assert self._names(kwargs) == ["use_console"]
+
+    def test_a_mode_flag_cannot_grant_a_settings_disabled_hub(self, hubs,
+                                                             monkeypatch):
+        # The invariant a future "let the mode pick the connectors" refactor
+        # would break: the mode only ever *narrows*, so both flags being true
+        # hands the model nothing that Settings unticked.
+        client, mcp, lsp = hubs
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), mode=self._mode(True, True)
+        )
+        assert kwargs == {}
+        assert mcp.requested_ids == [[]]
+        assert lsp.requested_ids == [[]]
+
+    def test_a_conversation_toggle_still_narrows_a_mode_open_hub(self, hubs,
+                                                                monkeypatch):
+        # Settings stays the authority at the finest level too: an open mode
+        # does not re-tick a connector this thread switched off.
+        client, mcp, lsp = hubs
+        monkeypatch.setattr(routes, "_active_connector_ids",
+                            lambda: ["alpha", "beta"])
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), ["beta"], [], mode=self._mode(True, False)
+        )
+        assert mcp.requested_ids == [["beta"]]
+        assert lsp.requested_ids == [[]]
+        assert self._names(kwargs) == ["use_beta"]
+        # …and a thread that switches the last one off ends with no tools, even
+        # though its mode opens the hub (the empty list means "nothing in it",
+        # which is what the mode gate relies on too).
+        kwargs = routes._chat_tool_kwargs(
+            self._request(client.app), [], [], mode=self._mode(True, True)
+        )
+        assert kwargs == {}
+
+    def test_mode_none_keeps_the_pre_feature_call_shape(self, hubs, tmp_path, monkeypatch):
+        # The regression guard: every call site that existed before the feature
+        # (and every existing test in this file) sees exactly the kwargs it saw
+        # then — same keys, same merged tool list, same cap.
+        from tests.conftest import neutralise_workspace_settings
+
+        client, _mcp, _lsp = hubs
+        # The cap is the workspace file's ``maxToolIteration`` now, not the env key.
+        neutralise_workspace_settings(monkeypatch, tmp_path, maxToolIteration=7)
+        request = self._request(client.app)
+        without = routes._chat_tool_kwargs(request)
+        with_mode = routes._chat_tool_kwargs(request, mode=self._mode(True, True))
+        assert set(without) == {
+            "tools", "tool_executor", "tool_servers", "max_tool_iterations"
+        }
+        assert without["max_tool_iterations"] == 7
+        assert self._names(without) == ["use_console", "use_pyright"]
+        assert without["tool_servers"] == {
+            "use_console": "console", "use_pyright": "pyright",
+        }
+        assert self._names(with_mode) == self._names(without)
+        assert set(with_mode) == set(without)
+        # Both hubs really did merge, so the cases above are removing something.
+        assert without["tool_executor"]("use_pyright", {}) == "ok"
+
+    # -- the same verdict, through ``POST /api/chat`` --------------------------
+
+    @staticmethod
+    def _write_modes(root: Path, agents: Dict[str, Any], default: str = "builder"):
+        folder = root / agent_modes.POLICY_DIRNAME
+        folder.mkdir(exist_ok=True)
+        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
+            json.dumps({
+                "version": agent_modes.AGENT_MODES_VERSION,
+                "default": default,
+                "agents": agents,
+            }, indent=2),
+            encoding="utf-8",
+        )
+
+    @pytest.fixture
+    def route_client(self, client, tmp_path: Path, monkeypatch):
+        """Real ``stream_chat`` on a scratch workspace; the seam is the spy."""
+        (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+        agent_modes.invalidate_agent_modes_cache()
+        hub = self.Hub()
+        client.app.state.mcp = hub
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
+        captured: Dict[str, Any] = {}
+        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kwargs: captured.update(kwargs) or iter([]),
+        )
+        try:
+            yield client, tmp_path, hub, captured
+        finally:
+            agent_modes.invalidate_agent_modes_cache()
+
+    def test_a_tools_off_mode_reaches_the_llm_client_with_no_tools(
+        self, route_client):
+        client, root, hub, captured = route_client
+        self._write_modes(root, {"builder": {
+            "label": "Builder", "mcptools": False, "lsptools": False,
+            "systemMessage": "PERSONA TEXT",
+        }})
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "mcpEnabled": ["console"]},
+        )
+        assert response.status_code == 200
+        assert hub.requested_ids == [[]]
+        # Nothing reaches the LLM client as tools. The client turns an absent/
+        # empty ``tools`` into a request body with no ``tools`` key at all
+        # (pinned in ``tests/test_llmkit_client.py``), so this is the same
+        # requirement, asserted at the seam the route now feeds.
+        assert not captured.get("tools")
+        # D3: with no tools in play, the notice is not appended either — the
+        # prompt and the affordance cannot disagree.
+        assert chat_core.TOOL_NOTICE.strip() not in captured["messages"][0]["content"]
+        # AGENTS.md is unaffected by the gate (am-00's invariant).
+        assert "# rules" in captured["messages"][0]["content"]
+
+    def test_a_tools_on_mode_keeps_the_tools_and_the_notice(self, route_client):
+        # Same request, same persona, one flipped flag: the tool array and the
+        # notice are both back, which is what makes the test above about the
+        # mode rather than about the persona's wording.
+        client, root, hub, captured = route_client
+        self._write_modes(root, {"builder": {
+            "label": "Builder", "mcptools": True, "lsptools": False,
+            "systemMessage": "PERSONA TEXT",
+        }})
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "mcpEnabled": ["console"]},
+        )
+        assert response.status_code == 200
+        assert hub.requested_ids == [["console"]]
+        assert self._names(captured) == ["use_console"]
+        assert chat_core.TOOL_NOTICE.strip() in captured["messages"][0]["content"]
+
+    def test_the_shipped_chat_mode_is_a_tools_off_mode(self, route_client,
+                                                       monkeypatch):
+        # am-00's two ``chat`` bullets against the defaults users actually get:
+        # the persona's "you have no tools here" is a fact about the request,
+        # not a request, and it comes from the shipped file rather than a
+        # hand-written one.
+        chat = modes_defaults.DEFAULT_AGENTS_DOCUMENT["agents"]["chat"]
+        assert (chat["mcptools"], chat["lsptools"]) == (False, False)
+        client, root, hub, captured = route_client
+        self._write_modes(root, {"chat": dict(chat)}, default="chat")
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
+        client.app.state.lsp = self.Hub()
+        response = client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "mcpEnabled": ["console"], "lspEnabled": ["pyright"]},
+        )
+        assert response.status_code == 200
+        # No tool definition reaches the seam in any shape, and no iteration
+        # cap reaches ``stream_chat`` at all.
+        assert not captured.get("tools")
+        assert "max_tool_iterations" not in captured
+        system = captured["messages"][0]["content"]
+        assert chat_core.TOOL_NOTICE.strip() not in system
+        assert "PERSONA" not in system  # the real persona, not a stub's
