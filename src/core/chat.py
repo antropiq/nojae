@@ -18,7 +18,7 @@ the injected executor, feeds the results back, and repeats — up to
 import json
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.core.llm import (
     Emit,
@@ -177,6 +177,7 @@ def stream_chat(
     tool_executor: Optional[ToolExecutor] = None,
     tool_servers: Optional[Dict[str, str]] = None,
     max_tool_iterations: int = 25,
+    uncapped_tool_names: Optional[Set[str]] = None,
     agent_instructions: Optional[str] = None,
     mode_instructions: Optional[str] = None,
     batch_instructions: Optional[str] = None,
@@ -531,7 +532,20 @@ def stream_chat(
         if not use_tools or tool_executor is None or not tool_calls:
             break
 
-        iteration += 1
+        # The cap counts MCP tool rounds only. A round that used nothing but
+        # uncapped tools (the language-server tools, listed in
+        # ``uncapped_tool_names``) does not advance the counter, so an agent
+        # can chain as many LSP lookups as it needs without ever hitting
+        # ``max_tool_iterations`` — that knob is MCP's. A mixed round (at
+        # least one MCP call) counts once, like any other MCP round; the
+        # iteration gauge is the MCP position, and an all-LSP round leaves it
+        # where it was.
+        uncapped = uncapped_tool_names or set()
+        if any(
+            call["name"] not in uncapped for call in tool_calls.values()
+        ):
+            iteration += 1
+
         # This round's generation is over: report cumulative usage *before*
         # executing the tool(s) (which can take tens of seconds), so the
         # chat token badge ticks as soon as generation stops. Emitted before

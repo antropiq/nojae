@@ -485,9 +485,9 @@ def max_tool_iteration() -> int:
     """Tool-iteration cap for one chat reply; absent or out of range falls
     back to ``DEFAULT_MAX_TOOL_ITERATION`` / ``1``.
 
-    The cap covers the whole tool loop of one chat reply — MCP connectors and
-    LSP language servers share the single counter (and the UI's progress
-    gauge) — so it is one knob, whatever hub a reply is using. Its value is
+    The cap counts **MCP tool rounds only**: a round that used nothing but
+    language-server tools does not advance it, so LSP usage is never bounded
+    here (the Editor's LSP queries aren't a tool loop at all). Its value is
     ``maxToolIteration`` in the workspace's ``.nojae/nojae-settings.json``,
     read through the typed accessor: it left ``.env`` with the rest of group 1,
     and with it went the hand-written-``.env`` escape hatch that used to

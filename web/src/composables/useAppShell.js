@@ -8,6 +8,7 @@ import { loadAgentModes } from './useAgentModes'
 import { usePromptHelpers } from './usePromptHelpers'
 import { loadChatLsp, loadChatMcp } from './useChat'
 import { useWorkspaceTree } from './useWorkspaceTree'
+import { describeTransportError, fetchWithRetry } from '../lib/api-fetch'
 
 // Read handle on "a batch is running", registered by useBatch on import — the
 // same one-way hook useChat uses for its hub guards, so the two hubs' owners
@@ -115,7 +116,7 @@ export function useAppShell() {
   async function loadConfig() {
     state.configError = null
     try {
-      const res = await fetch('/api/config')
+      const res = await fetchWithRetry('/api/config')
       const body = await res.json()
       if (!res.ok) {
         state.configError =
@@ -126,7 +127,7 @@ export function useAppShell() {
       }
       state.config = body
     } catch (exc) {
-      state.configError = `Could not reach the API: ${exc}`
+      state.configError = describeTransportError(exc)
     }
   }
 
@@ -157,7 +158,7 @@ export function useAppShell() {
     state.settingsLoading = true
     state.settingsOpen = true
     try {
-      const res = await fetch('/api/settings')
+      const res = await fetchWithRetry('/api/settings')
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.settingsError = describeError(body, `Could not load settings (${res.status})`)
@@ -184,7 +185,7 @@ export function useAppShell() {
       loadMcp()
       loadLsp()
     } catch (exc) {
-      state.settingsError = `Could not reach the API: ${exc}`
+      state.settingsError = describeTransportError(exc)
     } finally {
       state.settingsLoading = false
     }
@@ -228,7 +229,7 @@ export function useAppShell() {
       let url = `/api/models?serverUrl=${encodeURIComponent(serverUrl)}`
       const apiKey = (fields.apiKey() || '').trim()
       if (apiKey) url += `&apiKey=${encodeURIComponent(apiKey)}`
-      const res = await fetch(url)
+      const res = await fetchWithRetry(url)
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state[fields.error] = describeError(
@@ -246,7 +247,7 @@ export function useAppShell() {
         fields.setCurrent(models[0] || '')
       }
     } catch (exc) {
-      state[fields.error] = `Could not reach the API: ${exc}`
+      state[fields.error] = describeTransportError(exc)
     } finally {
       state[fields.loading] = false
     }
@@ -285,7 +286,7 @@ export function useAppShell() {
     state.lspLoading = true
     state.lspError = null
     try {
-      const res = await fetch('/api/lsp')
+      const res = await fetchWithRetry('/api/lsp')
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.lspError = describeError(body, `Could not load LSP servers (${res.status})`)
@@ -302,7 +303,7 @@ export function useAppShell() {
         .filter((server) => server.active)
         .map((server) => server.id)
     } catch (exc) {
-      state.lspError = `Could not reach the API: ${exc}`
+      state.lspError = describeTransportError(exc)
     } finally {
       state.lspLoading = false
     }
@@ -360,7 +361,7 @@ export function useAppShell() {
     state.mcpLoading = true
     state.mcpError = null
     try {
-      const res = await fetch('/api/mcp')
+      const res = await fetchWithRetry('/api/mcp')
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.mcpError = describeError(body, `Could not load MCP connectors (${res.status})`)
@@ -375,7 +376,7 @@ export function useAppShell() {
         .filter((connector) => connector.active)
         .map((connector) => connector.id)
     } catch (exc) {
-      state.mcpError = `Could not reach the API: ${exc}`
+      state.mcpError = describeTransportError(exc)
     } finally {
       state.mcpLoading = false
     }
@@ -433,7 +434,7 @@ export function useAppShell() {
     state.pathLocationLoading = true
     state.pathLocationError = null
     try {
-      const res = await fetch('/api/path-location')
+      const res = await fetchWithRetry('/api/path-location')
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.pathLocationError = describeError(
@@ -472,7 +473,7 @@ export function useAppShell() {
           ? describedHelpers.text
           : null
     } catch (exc) {
-      state.pathLocationError = `Could not reach the API: ${exc}`
+      state.pathLocationError = describeTransportError(exc)
     } finally {
       state.pathLocationLoading = false
     }

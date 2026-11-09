@@ -920,9 +920,13 @@ def _chat_tool_kwargs(
     if not lsp_kwargs:
         return mcp_kwargs
     if not mcp_kwargs:
-        # _mcp_tool_kwargs owns the shared iteration cap; add it when only
-        # LSP contributes tools.
-        return {**lsp_kwargs, "max_tool_iterations": max_tool_iteration()}
+        # LSP-only: no MCP tool, so nothing the loop counts against the cap
+        # can ever be called. Every LSP tool is listed as uncapped, so an
+        # agent's LSP round-trips are never bounded by ``max_tool_iterations``
+        # (that knob is MCP's). The cap value is still carried so the gauge's
+        # ``maxIterations`` matches the workspace setting whenever it does move.
+        return {**lsp_kwargs, "max_tool_iterations": max_tool_iteration(),
+                "uncapped_tool_names": set(lsp_kwargs["tool_servers"])}
 
     tools = list(mcp_kwargs["tools"])
     tool_to_server = dict(mcp_kwargs["tool_servers"])
@@ -945,6 +949,7 @@ def _chat_tool_kwargs(
         "tools": tools,
         "tool_executor": tool_executor,
         "tool_servers": tool_to_server,
+        "uncapped_tool_names": lsp_tool_names,
         "max_tool_iterations": max_tool_iteration(),
     }
 

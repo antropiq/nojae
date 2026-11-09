@@ -1943,13 +1943,17 @@ class TestAgentModeToolGate:
         without = routes._chat_tool_kwargs(request)
         with_mode = routes._chat_tool_kwargs(request, mode=self._mode(True, True))
         assert set(without) == {
-            "tools", "tool_executor", "tool_servers", "max_tool_iterations"
+            "tools", "tool_executor", "tool_servers", "max_tool_iterations",
+            "uncapped_tool_names",
         }
         assert without["max_tool_iterations"] == 7
         assert self._names(without) == ["use_console", "use_pyright"]
         assert without["tool_servers"] == {
             "use_console": "console", "use_pyright": "pyright",
         }
+        # The merged shape names the LSP tools as the uncapped ones, so the
+        # loop only counts the MCP round against the cap (that knob is MCP's).
+        assert without["uncapped_tool_names"] == {"use_pyright"}
         assert self._names(with_mode) == self._names(without)
         assert set(with_mode) == set(without)
         # Both hubs really did merge, so the cases above are removing something.

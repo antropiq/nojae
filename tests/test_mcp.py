@@ -1331,6 +1331,97 @@ class TestChatToolLoop:
         assert "tool iterations reached" in note["text"]
         assert events[-1]["event"] == "done"
 
+    def _run_mcp_and_lsp(self, monkeypatch, completions, **kwargs):
+        """Drive the loop with one MCP and one LSP tool, the latter uncapped.
+
+        Mirrors ``_run`` but offers both hubs' tools, so a test can mix the
+        two and watch which rounds move the MCP-only iteration gauge.
+        """
+        calls: List[List[Dict[str, Any]]] = []
+        generators = iter(completions)
+
+        def fake_completion(**call_kwargs):
+            calls.append(call_kwargs["messages"])
+            return iter(next(generators))
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake_completion)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "run it"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            tools=[
+                {"type": "function",
+                 "function": {"name": "use_console", "description": "",
+                              "parameters": {}}},
+                {"type": "function",
+                 "function": {"name": "use_lsp", "description": "",
+                              "parameters": {}}},
+            ],
+            tool_executor=lambda name, args: "ok",
+            tool_servers={"use_console": "console", "use_lsp": "pyright"},
+            uncapped_tool_names={"use_lsp"},
+            **kwargs,
+        )
+        return events, calls
+
+    def test_lsp_only_rounds_never_consume_the_cap(self, monkeypatch):
+        # Five all-LSP rounds against a cap of 2: none of them counts, so the
+        # loop runs all five (and the gauge never moves) instead of stopping at
+        # the cap. LSP tool usage is not bounded by the MCP knob.
+        rounds: List[List[Any]] = [
+            [tool_call_chunk(f"c{i}", "use_lsp", "{}")] for i in range(5)
+        ]
+        rounds.append([content_chunk("done")])
+        events, calls = self._run_mcp_and_lsp(monkeypatch, rounds,
+                                              max_tool_iterations=2)
+        tool_calls = [e for e in events if e["event"] == "tool_call"]
+        assert [e["tool"] for e in tool_calls] == ["use_lsp"] * 5
+        assert len(calls) == 6  # 5 LSP rounds + the final answer, cap never hit
+        # The gauge position stays 0 (frontend treats it as "not moving").
+        assert all(e["iteration"] == 0 for e in tool_calls)
+        assert events[-1]["event"] == "done"
+        assert not any(
+            e["event"] == "token" and "tool iterations reached" in e.get("text", "")
+            for e in events
+        )
+
+    def test_mcp_round_still_caps_amid_lsp_rounds(self, monkeypatch):
+        # Interleaved LSP and MCP rounds with a cap of 1: only the MCP round
+        # counts, so the loop runs the first LSP round for free and stops on
+        # the first MCP round — LSP rounds never fill the MCP cap.
+        rounds: List[List[Any]] = [
+            [tool_call_chunk("c0", "use_lsp", "{}")],
+            [tool_call_chunk("c1", "use_console", "{}")],
+            [tool_call_chunk("c2", "use_console", "{}")],
+            [content_chunk("never reached")],
+        ]
+        events, _ = self._run_mcp_and_lsp(monkeypatch, rounds,
+                                          max_tool_iterations=1)
+        tool_calls = [e for e in events if e["event"] == "tool_call"]
+        # The LSP round (iteration 0) plus one MCP round (iteration 1) run,
+        # then the cap fires before the second MCP round.
+        assert [(e["tool"], e["iteration"]) for e in tool_calls] == [
+            ("use_lsp", 0), ("use_console", 1),
+        ]
+        note = next(e for e in events if e["event"] == "token")
+        assert "tool iterations reached" in note["text"]
+
+    def test_mixed_round_counts_once(self, monkeypatch):
+        # A round that calls both an LSP and an MCP tool counts once (it holds
+        # an MCP call), advancing the gauge from its previous position.
+        rounds: List[List[Any]] = [
+            [tool_call_chunk("c0", "use_lsp", "{}", index=0),
+             tool_call_chunk("c1", "use_console", "{}", index=1)],
+            [content_chunk("done")],
+        ]
+        events, _ = self._run_mcp_and_lsp(monkeypatch, rounds,
+                                          max_tool_iterations=2)
+        tool_calls = [e for e in events if e["event"] == "tool_call"]
+        # Both calls in the one mixed round report the same incremented gauge.
+        assert [e["iteration"] for e in tool_calls] == [1, 1]
+
     def test_cancel_between_iterations_stops_silently(self, monkeypatch):
         cancel = threading.Event()
 

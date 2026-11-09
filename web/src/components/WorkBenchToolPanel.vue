@@ -365,7 +365,7 @@ function toolLabel(tool) {
       class="chat-tool-gauge"
       :value="gaugeValue"
       :max="gaugeMax"
-      label="Tool-loop iterations of the current reply vs MAX_TOOL_ITERATION — MCP tools and language servers share the counter; one iteration may run several calls (badges count individual calls)"
+      label="Tool-loop iterations of the current reply vs MAX_TOOL_ITERATION — MCP tool rounds only; language-server tool rounds are not counted. One iteration may run several calls (badges count individual calls)"
     />
   </aside>
 </template>

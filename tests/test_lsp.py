@@ -2763,10 +2763,12 @@ class TestChatLspWiring:
         def fake_stream(messages, model, server_url, emit, sampling=None,
                         cancel_event=None, pause_event=None, api_key="none", sysprompt=None,
                         tools=None, tool_executor=None, tool_servers=None,
-                        max_tool_iterations=25, agent_instructions=None):
+                        max_tool_iterations=25, uncapped_tool_names=None,
+                        agent_instructions=None):
             captured["tools"] = tools
             captured["tool_servers"] = tool_servers
             captured["max"] = max_tool_iterations
+            captured["uncapped"] = uncapped_tool_names
             if tool_executor:
                 for tool_name in probe:
                     captured[f"exec_{tool_name}"] = tool_executor(tool_name, {})
@@ -2776,7 +2778,7 @@ class TestChatLspWiring:
         monkeypatch.setattr(routes, "stream_chat", fake_stream)
         return captured
 
-    def test_lsp_only_keeps_one_shared_iteration_cap(self, lsp_client, tmp_path, monkeypatch):
+    def test_lsp_only_lists_every_tool_as_uncapped(self, lsp_client, tmp_path, monkeypatch):
         from tests.conftest import write_workspace_settings
 
         client, app = lsp_client
@@ -2803,7 +2805,11 @@ class TestChatLspWiring:
         assert app.state.lsp.ids == ["pyright"]
         assert [d["function"]["name"] for d in captured["tools"]] == ["lsp_pyright_hover"]
         assert captured["tool_servers"] == {"lsp_pyright_hover": "pyright"}
+        # The cap value still travels (so the gauge's max matches the setting),
+        # but every LSP tool is marked uncapped, so no LSP round ever counts
+        # against it — the knob is MCP's alone.
         assert captured["max"] == 9
+        assert captured["uncapped"] == {"lsp_pyright_hover"}
         assert captured["exec_lsp_pyright_hover"] == "pyright:lsp_pyright_hover"
 
     def test_mcp_and_lsp_merge_into_one_loop(self, lsp_client, monkeypatch):

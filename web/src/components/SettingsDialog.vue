@@ -323,16 +323,6 @@ const workspaceSettingsNote = computed(() => {
               <p class="caption mcp-description">{{ serverDetail(server) }}</p>
               <p v-if="server.error" class="caption alert-error">{{ server.error }}</p>
             </div>
-            <label class="mcp-iterations">
-              Max tool iterations
-              <input
-                v-model="state.lspMaxIterations"
-                type="number"
-                min="1"
-                max="500"
-                placeholder="25"
-              />
-            </label>
           </section>
         </div>
       </div>
