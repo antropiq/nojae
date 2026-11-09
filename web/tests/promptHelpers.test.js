@@ -1,4 +1,4 @@
-import { flushPromises } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -7,6 +7,7 @@ import {
   usePromptHelpers,
 } from '../src/composables/usePromptHelpers'
 import { useAppShell } from '../src/composables/useAppShell'
+import App from '../src/App.vue'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 
 // Layer 1 (jsdom): the bullet row's own store. What is pinned here is D4's UI
@@ -154,5 +155,44 @@ describe('a working-location switch reloads the bullets', () => {
       ([url]) => String(url) === '/api/prompt-helpers',
     )
     expect(helperFetches).toHaveLength(2)
+  })
+})
+
+// mbl (landing): the chat tab is now the app's default screen, so WorkBenchView's
+// `watch(activeTab)` never fires for the first view — it only answers a *change*,
+// and `activeTab` already starts at 'chat'. Before the Benchmark tab was removed
+// the chat was always reached by a switch, so that watch was the bullets' first
+// fill; now they have to be loaded at boot, the way `loadChatHubs` already is.
+// This pins that `App.vue`'s `onMounted` fetches them without any tab switch.
+describe('the chat tab landing first-fills the bullets', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    resetState()
+    useAppShell().state.activeTab = 'chat'
+  })
+
+  it('fetches the bullets on boot, with no tab switch', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => jsonResponse(slotsBody('boot')))
+
+    // Only the shell is under test, so every child view is stubbed: none of the
+    // bullets' siblings should be needed for the boot-time fetch.
+    const wrapper = mount(App, {
+      global: {
+        stubs: {
+          AppBar: true,
+          SettingsDialog: true,
+          BatchModeDialog: true,
+          WorkBenchView: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(state.loaded).toBe(true)
+    expect(state.slots[0].content).toBe('boot')
+    expect(fetchSpy.mock.calls.some(([url]) => String(url) === '/api/prompt-helpers')).toBe(true)
+    wrapper.unmount()
   })
 })

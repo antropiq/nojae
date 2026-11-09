@@ -8,6 +8,7 @@ import { useAppShell } from './composables/useAppShell'
 import { useTabTitle } from './composables/useTabTitle'
 import { useSessionSound } from './composables/useSessionSound'
 import { loadChatHubs } from './composables/useChat'
+import { usePromptHelpers } from './composables/usePromptHelpers'
 
 // Lazy on purpose: Monaco and xterm are heavy, and the WorkBench tab is the
 // app's default screen — it must never download them. The Editor tab's first
@@ -49,6 +50,11 @@ onMounted(() => {
   // never come. The tab's own watch keeps them fresh on re-entry; this is the
   // first fill.
   loadChatHubs()
+  // Same first-fill rule for the memory bullets: the chat tab is now the
+  // default screen, so WorkBenchView's tab watch fires on a later re-entry but
+  // never for the landing itself. Without this the bullets stay empty until
+  // you leave the tab and come back.
+  usePromptHelpers().loadPromptHelpers()
 })
 </script>
 
