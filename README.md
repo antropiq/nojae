@@ -103,9 +103,10 @@ source .venv/bin/activate
 pip install -e ".[mcp,lsp]"
 ```
 
-**pyenv:** this project ships a `.python-version` naming a `nojae`
-virtualenv, which activates when you `cd` into the project. Create that
-environment once (`pyenv virtualenv 3.12 nojae`, or let `pyenv install` do
+**pyenv:** this repo does **not** ship a `.python-version` — that file only
+exists if you use pyenv, and you create it yourself. Name it after a `nojae`
+virtualenv so it activates when you `cd` into the project; create that
+environment first (`pyenv virtualenv 3.12 nojae`, or let `pyenv install` do
 it), then:
 
 ```bash
