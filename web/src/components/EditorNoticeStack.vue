@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { useBenchmark } from '../composables/useBenchmark'
+import { useAppShell } from '../composables/useAppShell'
 import { useEditorNotices } from '../composables/useEditorNotices'
 
 // The Editor's write-feedback stack: up to three dismissible lines at the
@@ -23,10 +23,10 @@ const { state, dismiss } = useEditorNotices()
 
 // Teleported content is outside App.vue's `v-show` on the Editor view, so the
 // stack answers the same question the pane does: it is Editor feedback, and it
-// has no business floating over the Benchmark table or the WorkBench composer.
+// has no business floating over the WorkBench conversation or its composer.
 // The notices themselves survive the switch (the composable owns them), so
 // coming back to the tab shows exactly what was there.
-const onEditorTab = computed(() => useBenchmark().state.activeTab === 'editor')
+const onEditorTab = computed(() => useAppShell().state.activeTab === 'editor')
 const visible = computed(() => onEditorTab.value && state.notices.length > 0)
 </script>
 

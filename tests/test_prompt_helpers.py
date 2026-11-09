@@ -303,16 +303,6 @@ class TestPathConstruction:
     def test_folder_name_is_not_redeclared_here(self):
         assert prompt_helpers.POLICY_DIRNAME == ".nojae"
 
-    def test_resources_dir_plays_no_part(self, workspace: Path,
-                                         monkeypatch: pytest.MonkeyPatch):
-        from src import config
-
-        monkeypatch.setattr(config, "RESOURCES_DIR", workspace / "elsewhere-resources")
-        assert prompt_helpers.prompt_helpers_path() == os.path.join(
-            str(workspace), prompt_helpers.POLICY_DIRNAME,
-            prompt_helpers.PROMPT_HELPERS_FILENAME,
-        )
-
 
 class TestSelfCheck:
     def test_self_check_passes_at_import(self):

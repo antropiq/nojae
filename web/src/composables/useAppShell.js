@@ -1,5 +1,4 @@
 import { reactive } from 'vue'
-import { renderMarkdown } from '../lib/markdown'
 import {
   describeAgentModes,
   describePolicy,
@@ -22,22 +21,7 @@ export function registerBatchGuard(isRunning) {
 const state = reactive({
   config: null,
   configError: null,
-  startError: null,
-  status: 'idle', // idle | running | finished | failed | cancelled
-  activeTab: 'benchmark', // benchmark | chat | editor
-  runId: null,
-  stopping: false,
-  totalTests: 0,
-  current: 0,
-  successes: 0,
-  answered: 0,
-  tokenRate: 0,
-  failedLabel: 'Failed: none',
-  entries: [], // model | question | finished | error entries in stream order
-  clock: { mode: 'idle', baseMs: 0, startedAt: 0 }, // idle | ticking | checking | frozen
-  totalRunningTime: 0,
-  progress: 0,
-  hasResults: false,
+  activeTab: 'chat', // chat | editor
   settingsOpen: false,
   settings: null,
   settingsLoading: false,
@@ -50,15 +34,9 @@ const state = reactive({
   // and its path, so the dialog shows it and translates nothing. ``path`` is
   // also what the dialog's hint line names as the file it edits.
   workspaceSettings: null,
-  questionSets: [],
-  questionSetsLoading: false,
-  questionSetsError: null,
-  benchmarkModels: [],
-  benchmarkModelsLoading: false,
-  benchmarkModelsError: null,
-  verifierModels: [],
-  verifierModelsLoading: false,
-  verifierModelsError: null,
+  modelConnectionModels: [],
+  modelConnectionModelsLoading: false,
+  modelConnectionModelsError: null,
   mcpInstalled: false,
   mcpConnectors: [],
   mcpEnabled: [], // connector ids ticked in the dialog, saved via saveMcp()
@@ -118,254 +96,6 @@ const state = reactive({
   pathLocationPromptHelpersNote: null,
 })
 
-let eventSource = null
-let lastSeq = -1
-let answeredMsSoFar = 0
-let renderScheduled = false
-let activeQuestion = null
-let cancelNoticeTimer = null
-
-function scheduleMarkdownRender() {
-  if (renderScheduled) return
-  renderScheduled = true
-  requestAnimationFrame(() => {
-    renderScheduled = false
-    if (activeQuestion)
-      activeQuestion.html = renderMarkdown(activeQuestion.raw, { mermaid: true })
-  })
-}
-
-function resetToIdle() {
-  disconnect()
-  resetUi()
-  state.status = 'idle'
-  state.runId = null
-  state.totalTests = 0
-}
-
-function resetUi() {
-  state.entries = []
-  state.current = 0
-  state.successes = 0
-  state.answered = 0
-  state.tokenRate = 0
-  state.failedLabel = 'Failed: none'
-  state.progress = 0
-  state.totalRunningTime = 0
-  state.stopping = false
-  state.clock = { mode: 'idle', baseMs: 0, startedAt: 0 }
-  activeQuestion = null
-  answeredMsSoFar = 0
-}
-
-function applyTiming(entry, event) {
-  entry.took = event.took
-  // `tokens` stays completion-only (the tok/s numerator); `consumed` is the
-  // prompt + completion figure shown to the user. Old servers without the
-  // field: fall back to completion + prompt, exact whenever usage was
-  // reported (and identical to `tokens` when it wasn't, promptTokens = 0).
-  entry.tokens = event.tokens
-  entry.consumed = event.consumed ?? event.tokens + (event.promptTokens ?? 0)
-  entry.ttft = event.ttft ?? 0
-  entry.genTook = event.genTook ?? 0
-  entry.promptTokens = event.promptTokens ?? 0
-  entry.tokensEstimated = !!event.tokensEstimated
-  // The server cut this answer short: the streamed text, its timing and the
-  // verdict below it all describe an unfinished reply.
-  entry.truncated = !!event.truncated
-}
-
-function applyEvent(event) {
-  switch (event.event) {
-    case 'run_started':
-      resetUi()
-      state.status = 'running'
-      state.runId = event.runId
-      state.totalTests = event.totalTests
-      // The server warms the model up first; the clock only starts ticking
-      // when the first question begins.
-      state.clock = { mode: 'starting', baseMs: 0, startedAt: 0 }
-      break
-    case 'model_started':
-      // The tested model lives in the app bar; no stream entry for it.
-      // The backend now warms the model up, so hold the chronometer at
-      // "Starting…" until question_started arrives.
-      state.clock = { mode: 'starting', baseMs: answeredMsSoFar, startedAt: 0 }
-      break
-    case 'question_started':
-      state.current = event.index
-      activeQuestion = {
-        type: 'question',
-        index: event.index,
-        number: event.number,
-        model: event.model,
-        question: event.question,
-        questionHtml: renderMarkdown(event.question),
-        raw: '',
-        html: '',
-        streaming: true,
-        startedAt: Date.now(),
-        succeeded: null,
-        took: 0,
-        tokens: 0,
-        consumed: 0,
-        ttft: 0,
-        genTook: 0,
-        promptTokens: 0,
-        tokensEstimated: false,
-        // Server cut this answer short (see applyTiming): the verdict badge
-        // shows "Cut short" instead of Correct/Incorrect.
-        truncated: false,
-        version: 0,
-      }
-      state.entries.push(activeQuestion)
-      // Keep the reactive proxy, not the raw object, so token mutations re-render.
-      activeQuestion = state.entries[state.entries.length - 1]
-      state.clock = {
-        mode: 'ticking',
-        baseMs: answeredMsSoFar,
-        startedAt: Date.now(),
-      }
-      break
-    case 'token':
-      if (activeQuestion) {
-        activeQuestion.raw += event.text
-        activeQuestion.version += 1
-        scheduleMarkdownRender()
-      }
-      break
-    case 'answer_done':
-      if (activeQuestion) {
-        applyTiming(activeQuestion, event)
-      }
-      answeredMsSoFar += event.took * 1000
-      state.clock = { mode: 'checking', baseMs: answeredMsSoFar, startedAt: 0 }
-      break
-    case 'question_done': {
-      if (activeQuestion) {
-        activeQuestion.streaming = false
-        activeQuestion.succeeded = event.succeeded
-        applyTiming(activeQuestion, event)
-        activeQuestion.html = renderMarkdown(activeQuestion.raw, {
-          mermaid: true,
-        })
-        activeQuestion = null
-      }
-      state.failedLabel = event.failedLabel
-      if (event.stats) {
-        state.current = event.stats.current
-        state.successes = event.stats.successes
-        state.answered = event.stats.answered
-        state.tokenRate = event.stats.tokenRate
-      }
-      state.progress = state.totalTests ? event.index / state.totalTests : 0
-      state.clock = { mode: 'frozen', baseMs: answeredMsSoFar, startedAt: 0 }
-      break
-    }
-    case 'run_finished': {
-      state.stopping = false
-      if (event.cancelled) {
-        // Revert the whole UI to its initial state; the cancelled notice
-        // fades out on its own after a few seconds.
-        resetUi()
-        state.status = 'cancelled'
-        state.entries.push({ type: 'cancelled' })
-        clearTimeout(cancelNoticeTimer)
-        cancelNoticeTimer = setTimeout(() => {
-          const i = state.entries.findIndex((e) => e.type === 'cancelled')
-          if (i !== -1) state.entries.splice(i, 1)
-        }, 5000)
-      } else {
-        state.status = 'finished'
-        state.totalRunningTime = event.totalRunningTime ?? answeredMsSoFar / 1000
-        state.progress = 1
-        state.entries.push({ type: 'finished' })
-        state.hasResults = true
-        state.clock = { mode: 'frozen', baseMs: answeredMsSoFar, startedAt: 0 }
-      }
-      disconnect()
-      break
-    }
-    case 'run_error':
-      state.entries.push({ type: 'error', message: event.message })
-      break
-    default:
-      break
-  }
-}
-
-function trackSeq(eventSourceEvent) {
-  if (eventSourceEvent && eventSourceEvent.lastEventId) {
-    const seq = parseInt(eventSourceEvent.lastEventId, 10)
-    if (!Number.isNaN(seq)) lastSeq = seq
-  }
-}
-
-const EVENT_NAMES = [
-  'run_started',
-  'model_started',
-  'question_started',
-  'token',
-  'answer_done',
-  'question_done',
-  'run_finished',
-  'run_error',
-  'stream_end',
-]
-
-function disconnect() {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
-  }
-}
-
-function connect(since = -1) {
-  disconnect()
-  lastSeq = since
-  eventSource = new EventSource(`/api/run/events?since=${since}`)
-  for (const name of EVENT_NAMES) {
-    eventSource.addEventListener(name, (e) => {
-      trackSeq(e)
-      if (name === 'stream_end') {
-        // Server closed the stream; reconnect if the run is still going.
-        if (state.status === 'running') {
-          eventSource.close()
-          eventSource = null
-          reconnectViaSnapshot()
-        }
-        return
-      }
-      applyEvent(JSON.parse(e.data))
-    })
-  }
-  eventSource.onerror = () => {
-    if (state.status !== 'running') {
-      disconnect()
-      return
-    }
-    eventSource.close()
-    eventSource = null
-    setTimeout(reconnectViaSnapshot, 2000)
-  }
-}
-
-async function reconnectViaSnapshot() {
-  try {
-    const res = await fetch('/api/run')
-    if (!res.ok) return
-    const snapshot = await res.json()
-    resetUi()
-    lastSeq = snapshot.lastSeq ?? -1
-    for (const item of snapshot.events || []) applyEvent(item.event)
-    state.status = snapshot.status
-    if (snapshot.status === 'running') connect(lastSeq)
-  } catch {
-    // Server unreachable; keep the retry loop alive while a run is active.
-    if (state.status === 'running') setTimeout(reconnectViaSnapshot, 2000)
-  }
-}
-
 function describeError(body, fallback) {
   const detail = body?.detail
   if (typeof detail === 'string' && detail) return detail
@@ -381,7 +111,7 @@ function describeError(body, fallback) {
   return fallback
 }
 
-export function useBenchmark() {
+export function useAppShell() {
   async function loadConfig() {
     state.configError = null
     try {
@@ -395,79 +125,18 @@ export function useBenchmark() {
         return
       }
       state.config = body
-      state.hasResults = body.hasResults
-      state.status = body.runStatus
-      // A cancelled run must not replay its partial stream on load: the UI
-      // stays in its initial state, like after the stop button was used.
-      if (['running', 'finished', 'failed'].includes(body.runStatus)) {
-        await reconnectViaSnapshot()
-      }
     } catch (exc) {
       state.configError = `Could not reach the API: ${exc}`
     }
   }
 
-  async function start() {
-    state.startError = null
-    try {
-      const res = await fetch('/api/run', { method: 'POST' })
-      const body = await res.json().catch(() => ({}))
-      if (res.status === 409) {
-        // Another run is active (e.g. started in another tab) — follow it.
-        await reconnectViaSnapshot()
-        return
-      }
-      if (!res.ok) {
-        state.startError =
-          typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-        return
-      }
-      connect()
-    } catch (exc) {
-      state.startError = `Could not reach the API: ${exc}`
-    }
-  }
-
-  async function stop() {
-    state.startError = null
-    // Finished/failed runs keep the stop button enabled as a reset: clicking
-    // it returns the UI to its initial state so a new run can start clean.
-    if (state.status === 'finished' || state.status === 'failed') {
-      resetToIdle()
-      return
-    }
-    if (state.status !== 'running') return
-    state.stopping = true
-    try {
-      const res = await fetch('/api/run/stop', { method: 'POST' })
-      if (res.status === 409) {
-        // Run already ended between the click and the request.
-        await reconnectViaSnapshot()
-        return
-      }
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        state.startError =
-          typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      }
-      // On success keep running until the run_finished(cancelled) event arrives.
-    } catch (exc) {
-      state.stopping = false
-      state.startError = `Could not reach the API: ${exc}`
-    }
-  }
-
-  function running() {
-    return state.status === 'running'
-  }
-
   // A running batch pins the app to WorkBench: the tab buttons are disabled,
   // but the refusal lives here too so a keyboard path cannot escape mid-lot
-  // (the same rule `status === 'running'` already enforces). Switching *to* the
-  // tab the batch is on stays allowed, which is what lets BatchModeDialog's
+  // (the same rule the composer's launch guard already enforces). Switching *to*
+  // the tab the batch is on stays allowed, which is what lets BatchModeDialog's
   // Launch perform its own setTab('chat') — the flag is set only afterwards.
   //
-  // The predicate is registered by useBatch rather than imported: useBenchmark
+  // The predicate is registered by useBatch rather than imported: useAppShell
   // already imports useChat, and useBatch imports both, so importing useBatch
   // here would close a cycle. The flag itself stays single-owner
   // (useBatch.state.active) — this only hands a read handle down.
@@ -476,20 +145,14 @@ export function useBenchmark() {
   }
 
   function setTab(tab) {
-    // Keyed on 'chat' on purpose: a running run needs the conversation to stay
-    // put, but the Editor tab is reachable during a run — reading files harms
-    // nothing the run is doing.
-    if (tab === 'chat' && state.status === 'running') return
+    // A running batch pins the app to the tab it is on; the refusal lives here
+    // too so a keyboard path cannot escape mid-lot.
     if (batchRunning() && tab !== state.activeTab) return
     state.activeTab = tab
   }
 
-  function canStop() {
-    return ['running', 'finished', 'failed'].includes(state.status)
-  }
-
   async function openSettings() {
-    if (state.status === 'running' || state.settingsLoading || batchRunning()) return
+    if (state.settingsLoading || batchRunning()) return
     state.settingsError = null
     state.settingsLoading = true
     state.settingsOpen = true
@@ -502,13 +165,8 @@ export function useBenchmark() {
       }
       state.settings = body
       state.workspaceSettings = body.workspaceSettings || null
-      state.benchmarkModels = []
-      state.verifierModels = []
-      state.benchmarkModelsError = null
-      state.verifierModelsError = null
-      state.questionSets = []
-      state.questionSetsLoading = false
-      state.questionSetsError = null
+      state.modelConnectionModels = []
+      state.modelConnectionModelsError = null
       state.mcpConnectors = []
       state.mcpEnabled = []
       state.mcpError = null
@@ -522,8 +180,7 @@ export function useBenchmark() {
       // must not clear (a seed warning the user has not read yet would vanish
       // on an unrelated visit to the dialog). ``loadPathLocation()`` runs at
       // boot and after every switch.
-      refreshModelLists()
-      loadQuestionSets()
+      fetchModels('modelConnection')
       loadMcp()
       loadLsp()
     } catch (exc) {
@@ -539,30 +196,16 @@ export function useBenchmark() {
   }
 
   const MODEL_FIELDS = {
-    benchmark: {
+    modelConnection: {
       serverUrl: () => state.settings?.serverUrl,
       apiKey: () => state.settings?.apiKey,
       current: () => state.settings?.endpoint,
       setCurrent: (value) => {
         state.settings.endpoint = value
       },
-      models: 'benchmarkModels',
-      loading: 'benchmarkModelsLoading',
-      error: 'benchmarkModelsError',
-    },
-    verifier: {
-      // Same fallback as the backend: an unset verifier URL reuses the
-      // benchmark server URL.
-      serverUrl: () =>
-        state.settings?.verifier?.serverUrl || state.settings?.serverUrl,
-      apiKey: () => state.settings?.verifier?.apiKey,
-      current: () => state.settings?.verifier?.endpoint,
-      setCurrent: (value) => {
-        state.settings.verifier.endpoint = value
-      },
-      models: 'verifierModels',
-      loading: 'verifierModelsLoading',
-      error: 'verifierModelsError',
+      models: 'modelConnectionModels',
+      loading: 'modelConnectionModelsLoading',
+      error: 'modelConnectionModelsError',
     },
   }
 
@@ -609,11 +252,6 @@ export function useBenchmark() {
     }
   }
 
-  function refreshModelLists() {
-    fetchModels('benchmark')
-    fetchModels('verifier')
-  }
-
   async function saveSettings() {
     if (!state.settings || state.settingsSaving) return
     state.settingsError = null
@@ -640,30 +278,6 @@ export function useBenchmark() {
       state.settingsError = `Could not reach the API: ${exc}`
     } finally {
       state.settingsSaving = false
-    }
-  }
-
-  async function loadQuestionSets() {
-    state.questionSetsLoading = true
-    state.questionSetsError = null
-    try {
-      const res = await fetch('/api/question-sets')
-      const body = await res.json().catch(() => null)
-      if (!res.ok) {
-        state.questionSetsError = describeError(
-          body,
-          `Could not load question sets (${res.status})`,
-        )
-        return
-      }
-      state.questionSets = body.questionSets || []
-      if (!state.settings?.questionSet && body.current) {
-        state.settings.questionSet = body.current
-      }
-    } catch (exc) {
-      state.questionSetsError = `Could not reach the API: ${exc}`
-    } finally {
-      state.questionSetsLoading = false
     }
   }
 
@@ -983,16 +597,11 @@ export function useBenchmark() {
   return {
     state,
     loadConfig,
-    start,
-    stop,
-    running,
     batchRunning,
     setTab,
-    canStop,
     openSettings,
     closeSettings,
     saveSettings,
-    loadQuestionSets,
     fetchModels,
     loadMcp,
     toggleMcp,

@@ -959,7 +959,7 @@ class TestTheWriterIsStillCoreOnly:
             name for name in imported
             if name.split(".")[0] in {"fastapi", "src.api", "litellm", "llmkit"}
             or name.split(".")[-1] in {"editorfs", "mcphub", "lsphub", "termhub",
-                                        "chat", "bench", "batch"}
+                                        "chat", "batch"}
         ]
         assert offenders == [], source
 

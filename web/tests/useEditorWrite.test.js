@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorNotices } from '../src/composables/useEditorNotices'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 
 // The freshness half of the buffer records: what a `GET /api/fs/stat` answer
@@ -14,7 +14,7 @@ import { useChat } from '../src/composables/useChat'
 
 const files = useEditorFiles()
 const notices = useEditorNotices()
-const bench = useBenchmark()
+const appShell = useAppShell()
 const chat = useChat()
 
 // The one refusal line a path carries in the write-feedback stack — the shape
@@ -64,7 +64,7 @@ function resetState() {
   files.stopFreshnessProbe()
   // The probe asks only for a visible pane and an idle WorkBench; tests that
   // want a request flip these, the two gate tests leave them alone.
-  bench.state.activeTab = 'editor'
+  appShell.state.activeTab = 'editor'
   chat.state.phase = 'idle'
 }
 
@@ -209,10 +209,10 @@ describe('useEditorFiles: the freshness probe', () => {
     await openRecord()
     const fetchMock = stubProbe([{ path: 'src/a.py', exists: true, mtime: 2000, size: 6 }])
 
-    bench.state.activeTab = 'benchmark'
+    appShell.state.activeTab = 'chat'
     await files.probeOpenFiles()
     chat.state.phase = 'answering'
-    bench.state.activeTab = 'editor'
+    appShell.state.activeTab = 'editor'
     await files.probeOpenFiles()
 
     // Two gates, one assertion: no stat request at all, and no record moved.

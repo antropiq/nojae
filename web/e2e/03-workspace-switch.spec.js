@@ -417,9 +417,8 @@ test('the settings dialog follows the workspace it is opened in', async ({
   // The path the dialog's own note is expected to name, per root — the **test**
   // file, which is the one in use while the switch is on, in the host's spelling.
   const settingsFile = (root) => path.join(root, '.nojae', 'nojae-test-settings.json')
-  // The LLM section's own fields: the verifier section has a 'Server URL' of
-  // its own, and `v-show` keeps it in the DOM, so an unscoped label is two
-  // elements.
+  // The LLM section's own fields, scoped to the section: other sections keep
+  // their fields in the DOM through `v-show`, so an unscoped label can match two.
   const llmSection = page.locator('.settings-editor > section').first()
   const serverField = llmSection.getByLabel('Server URL')
   // The LLM section's own note (the workspace file's report), not the dialog's
@@ -487,10 +486,11 @@ test('the boot root streams a reply from the test settings file', async ({
   await page.locator('.chat-send').click()
 
   // Both scoped to the WorkBench output column: tab views stay mounted through
-  // `v-show`, and the Benchmark tab renders `.question-card`s of its own.
+  // `v-show`, so an unscoped `.chat-answer-card` counts every card the document
+  // holds, not just this panel's replies.
   const output = page.locator('.chat-output')
   const error = output.locator('.error-line')
-  const replies = output.locator('.question-card')
+  const replies = output.locator('.chat-answer-card')
   await expect(replies).toHaveCount(1)
   // Wait for the reply to **finish**: the composer swaps Send for Stop while one
   // streams, so Send being back is the stream's own end. Leaving it in flight

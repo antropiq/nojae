@@ -9,7 +9,7 @@ import {
   describePolicy,
   describePromptHelpers,
 } from '../src/lib/path-location-policy'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 import { useBatch } from '../src/composables/useBatch'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
@@ -31,7 +31,7 @@ import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 // server's read half reports `absent` without writing into a browsed project —
 // so the client has to carry that state rather than invent one.
 
-const { state, loadPathLocation, setPathLocation } = useBenchmark()
+const { state, loadPathLocation, setPathLocation } = useAppShell()
 
 function jsonResponse(body) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) })
@@ -437,8 +437,8 @@ describe('a switch carries the prompt-helpers seed too', () => {
 })
 
 // The Set button is the one gesture that moves the root, so it is inert
-// whenever a session is live: the route answers 409 to a switch during a run or
-// a reply, and a batch would find its lot folder re-rooted mid-task.
+// whenever a session is live: the route answers 409 to a switch during a reply,
+// and a batch would find its lot folder re-rooted mid-task.
 describe('Set is inert while a session runs', () => {
   beforeEach(() => {
     reset()
@@ -457,7 +457,6 @@ describe('Set is inert while a session runs', () => {
   })
 
   it.each([
-    ['a benchmark run', () => (state.status = 'running')],
     ['a chat reply', () => (useChat().state.phase = 'answering')],
     ['a batch', () => (useBatch().state.active = true)],
   ])('is inert during %s, and says why', async (_label, arm) => {
@@ -467,19 +466,18 @@ describe('Set is inert while a session runs', () => {
     expect(button.attributes('disabled')).toBeDefined()
     expect(button.attributes('title')).toContain('while a session is running')
     wrapper.unmount()
-    state.status = 'idle'
     useChat().state.phase = 'idle'
     useBatch().state.active = false
   })
 
   it('refuses Enter in the field while a session runs', async () => {
     const fetchSpy = stub({ postPolicy: { state: 'created', path: '/x', error: null } })
-    state.status = 'running'
+    useChat().state.phase = 'answering'
     const wrapper = mount(AppBar)
     await wrapper.find('.appbar-location-input').trigger('keydown.enter')
     const calls = fetchSpy.mock.calls.map(([url]) => String(url))
     expect(calls.some((url) => url === '/api/path-location')).toBe(false)
-    state.status = 'idle'
+    useChat().state.phase = 'idle'
     wrapper.unmount()
   })
 
@@ -492,5 +490,58 @@ describe('Set is inert while a session runs', () => {
     )
     expect(posts).toHaveLength(1)
     wrapper.unmount()
+  })
+})
+
+// The app bar's two remaining session indicators, pinned here because this is
+// the file that mounts AppBar: the settings button is the other control locked
+// against a live session (it reloads the model connection a reply is using), so
+// it reads the same two states Set does — never a third busy flag.
+// And the pill has nothing left to defer to: batch, then the reply's phase,
+// then idle.
+describe('the app bar reads only the WorkBench reply and the batch lot', () => {
+  beforeEach(() => {
+    reset()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps the settings button inert during a reply or a lot, and only those', async () => {
+    const settings = (wrapper) => wrapper.find('.appbar-settings')
+
+    const idle = mount(AppBar)
+    expect(settings(idle).attributes('disabled')).toBeUndefined()
+    idle.unmount()
+
+    useChat().state.phase = 'answering'
+    const busy = mount(AppBar)
+    expect(settings(busy).attributes('disabled')).toBeDefined()
+    busy.unmount()
+    useChat().state.phase = 'idle'
+
+    useBatch().state.active = true
+    const lot = mount(AppBar)
+    expect(settings(lot).attributes('disabled')).toBeDefined()
+    lot.unmount()
+    useBatch().state.active = false
+  })
+
+  it('the status pill reads batch, then the reply, then idle', async () => {
+    const pill = (wrapper) => wrapper.find('.status-pill')
+    const idle = mount(AppBar)
+    expect(pill(idle).text()).toBe('idle')
+    idle.unmount()
+
+    useChat().state.phase = 'reasoning'
+    const thinking = mount(AppBar)
+    expect(pill(thinking).text()).toBe('reasoning...')
+    expect(pill(thinking).attributes('class')).toContain('status-reasoning')
+    thinking.unmount()
+    useChat().state.phase = 'idle'
+
+    useBatch().state.active = true
+    const lot = mount(AppBar)
+    expect(pill(lot).text()).toBe('Batch')
+    lot.unmount()
+    useBatch().state.active = false
   })
 })

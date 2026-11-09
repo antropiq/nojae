@@ -19,7 +19,7 @@ The three things a later contributor must not lose:
 * **The canonical form is ``/``-joined workspace-relative text on every
   platform** (roadmap §9 rule 1). A backslash is accepted *only at the inbound
   lock* (``editorfs.policy.normalise_rel``, win-03) and is **never emitted**: not
-  into a payload, the tree, ``results.json`` or the browser. So the Windows user
+  into a payload, the tree or the browser. So the Windows user
   typing ``src\config.py`` and the Linux test writing ``src/config.py`` mean one
   path, and one path string still means the same thing in a report from either box.
 * **This module answers what a path text is, never whether it is allowed.** The

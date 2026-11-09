@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorNotices } from '../src/composables/useEditorNotices'
@@ -23,7 +23,7 @@ const files = useEditorFiles()
 const notices = useEditorNotices()
 const git = useGitStatus()
 const tree = useWorkspaceTree()
-const bench = useBenchmark()
+const appShell = useAppShell()
 const chat = useChat()
 
 // The freshness probe's own request, counted separately from the reads this file
@@ -204,7 +204,7 @@ describe('useEditorFiles: a preview tab in the same strip', () => {
   it('is not a buffer the freshness probe asks about', async () => {
     // Every other gate open, so the *records* are the only thing that can make
     // this probe worth a request.
-    bench.state.activeTab = 'editor'
+    appShell.state.activeTab = 'editor'
     chat.state.phase = 'idle'
     stubFile(DOC)
     await files.openPreview('docs/a.md')
@@ -217,7 +217,7 @@ describe('useEditorFiles: a preview tab in the same strip', () => {
     await files.probeOpenFiles()
     expect(statCalls()).toHaveLength(1)
     expect(String(fetchUrlOfLastStat())).toContain('docs%2Fa.md')
-    bench.state.activeTab = 'benchmark'
+    appShell.state.activeTab = 'chat'
   })
 
   it('re-keys and re-names on rename — the tab follows the moved file', async () => {

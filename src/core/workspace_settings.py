@@ -36,7 +36,7 @@ handing the mapping to ``EndpointsConfig`` and trusting it:
 * **a malformed file is a named state, never a silent default** (D9) — broken
   JSON, an unknown member or a member of the wrong JSON type answers ``failed``
   with a sentence naming the path and the member. ``extra="ignore"`` would
-  swallow ``"temperture"`` and benchmark a workspace at the default temperature;
+  swallow ``"temperture"`` and run a workspace at the default temperature;
 * **a value that is still the template's instruction sentence is reported, not
   dialled** (D8) — a freshly seeded workspace is valid JSON and unusable, so the
   reader answers ``ok`` but *not configured*, and the caller says "not
@@ -47,8 +47,8 @@ One switch decides **which file of this shape a process reads**: with
 ``NOJAE_TEST_SETTINGS`` truthy, the file in use is the e2e suite's own
 ``.nojae/nojae-test-settings.json`` — hand-authored, never seeded, never written
 (the writer refuses first thing in that mode), and with **no fallback** to the
-workspace file in either direction. That is what stops a spec benchmarking,
-chatting and grading against the developer's live server and key. Everything
+workspace file in either direction. That is what stops a spec chatting and
+running its turns against the developer's live server and key. Everything
 else — the seed, the reader, the state vocabulary — is the same code for both
 names: the read side resolves its path through :func:`workspace_settings_path`,
 so one seam moves every caller, and the sentences interpolate that path, so a
@@ -170,8 +170,8 @@ class WorkspaceSettingsFileError(Exception):
     unusable file behind must not report success. The **reader** does not raise:
     it answers the same sentence as the ``error`` of
     :func:`workspace_settings_state`, because a broken file is something the
-    dialog displays and a chat or benchmark request refuses with — not an
-    exception to unwind.
+    dialog displays and a chat request refuses with — not an exception to
+    unwind.
     """
 
 
@@ -536,8 +536,8 @@ def load_workspace_settings() -> Dict[str, Any]:
     * **absent** — ``{}``, state ``absent``, and nothing written;
     * **not valid JSON, not an object, an unknown member, or a member of the
       wrong JSON type** — ``{}``, state ``failed``, the sentence naming the path
-      and the member. Never a silent default (D9): a caller that benchmarked on
-      defaults here would measure the defaults, not the model.
+      and the member. Never a silent default (D9): a caller that ran on defaults
+      here would measure the defaults, not the model.
 
     A member being absent here means "absent", which is not the same as "off" or
     "empty": the spec's key map documents what each member absent means, and the

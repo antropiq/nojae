@@ -30,7 +30,7 @@ vi.mock('../src/components/MonacoDiffViewer.vue', () => ({
 }))
 
 import EditorArea from '../src/components/EditorArea.vue'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useWorkspaceSearch } from '../src/composables/useWorkspaceSearch'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
@@ -48,7 +48,7 @@ import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 const files = useEditorFiles()
 const tree = useWorkspaceTree()
 const search = useWorkspaceSearch()
-const bench = useBenchmark()
+const appShell = useAppShell()
 
 function fileRecord(path, text) {
   return {
@@ -110,7 +110,7 @@ beforeEach(() => {
   tree.state.selected = null
   // The freshness tick is off for these tests (it would poll), and it only
   // starts on the Editor tab.
-  bench.state.activeTab = 'benchmark'
+  appShell.state.activeTab = 'chat'
   vi.spyOn(globalThis, 'fetch').mockImplementation((url) =>
     Promise.resolve({
       ok: true,

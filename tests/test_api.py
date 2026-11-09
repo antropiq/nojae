@@ -1,16 +1,15 @@
 import json
 import os
 import threading
-import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.server import create_app
-from src.core.models import EndpointsConfig, VerifierAgent
+from src.core.models import EndpointsConfig
 from src.api import routes
 from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
@@ -23,7 +22,6 @@ def _config() -> EndpointsConfig:
     return EndpointsConfig(
         serverUrl="http://localhost:8080/v1",
         endpoint="model-a",
-        verifierAgent=VerifierAgent(endpoint="judge"),
     )
 
 
@@ -36,52 +34,32 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         "load_endpoints_config",
         lambda: (_config(), None),
     )
-    monkeypatch.setattr(
-        routes,
-        "load_questions",
-        lambda: [
-            {"uuid": "q1", "question": "one?", "expected": "yes"},
-            {"uuid": "q2", "question": "two?", "expected": "no"},
-        ],
-    )
-    results = tmp_path / "results.json"
-    monkeypatch.setattr(routes, "RESULTS_PATH", results)
-    monkeypatch.setattr("src.core.utils.RESULTS_PATH", results)
     # The context-window probe hits the configured LLM server: keep the
     # suite hermetic; the real function is unit-tested directly.
     monkeypatch.setattr(
         routes, "_context_window", lambda server_url, api_key, model: None
     )
-    # Context-managed so the app event loop lives across requests and
-    # background run tasks can progress between polls.
+    # Context-managed so the app event loop lives across requests, which the
+    # streaming chat routes need.
     with TestClient(app) as test_client:
         yield test_client
-
-
-def _wait_until(
-    client: TestClient, predicate: Callable[[Dict[str, Any]], bool], timeout: float = 5.0
-) -> Dict[str, Any]:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        snapshot = client.get("/api/run").json()
-        if predicate(snapshot):
-            return snapshot
-        time.sleep(0.02)
-    raise AssertionError(f"condition not met in {timeout}s: {snapshot}")
 
 
 class TestConfigEndpoint:
     def test_returns_expected_shape(self, client: TestClient):
         body = client.get("/api/config").json()
         assert body["models"] == ["model-a"]
-        assert body["questionCount"] == 2
-        assert body["totalTests"] == 2
-        assert body["verifierConfigured"] is True
-        assert body["runStatus"] == "idle"
         assert body["samplingSummary"] == "defaults"
         assert body["supportsVision"] is False
         # Hermetic fixture stubs the probe: the key must always be present.
         assert body["contextWindow"] is None
+        assert set(body) == {
+            "models",
+            "serverUrl",
+            "supportsVision",
+            "samplingSummary",
+            "contextWindow",
+        }
 
     def test_supports_vision_reflects_config(self, client, monkeypatch):
         monkeypatch.setattr(
@@ -185,122 +163,6 @@ class TestContextWindow:
         assert routes._context_window("", "none", "model-a") is None
 
 
-def patch_bench(monkeypatch, run_fn=None, block: Optional[threading.Event] = None):
-    def fake(questions, config, job, emit, cancel_event=None):
-        if block is not None:
-            block.wait()
-        for text in ("Hel", "lo"):
-            emit({"event": "token", "text": text})
-        job.add_result("model-a", "q1", True, "Hello", 1.0, 10)
-        job.add_result("model-a", "q2", False, "nope", 2.0, 20)
-        job.current_index = 2
-        emit({"event": "run_finished", "totalRunningTime": 3.0, "totalTests": 2})
-
-    monkeypatch.setattr(routes, "run_benchmark", run_fn or fake)
-
-
-class TestRunLifecycle:
-    def test_start_streams_events_and_finishes(self, client, monkeypatch):
-        patch_bench(monkeypatch)
-        started = client.post("/api/run")
-        assert started.status_code == 202
-        run_id = started.json()["runId"]
-
-        snapshot = _wait_until(client, lambda s: s["status"] != "running")
-        assert snapshot["status"] == "finished"
-        assert snapshot["runId"] == run_id
-        names = [item["event"]["event"] for item in snapshot["events"]]
-        assert names[0] == "run_started"
-        assert "token" in names
-        assert names[-1] == "run_finished"
-
-    def test_second_run_while_running_returns_409(self, client, monkeypatch):
-        gate = threading.Event()
-        patch_bench(monkeypatch, block=gate)
-        try:
-            assert client.post("/api/run").status_code == 202
-            _wait_until(client, lambda s: s["status"] == "running")
-            assert client.post("/api/run").status_code == 409
-        finally:
-            gate.set()
-        _wait_until(client, lambda s: s["status"] != "running")
-
-    def test_run_failure_emits_run_error(self, client, monkeypatch):
-        def boom(questions, config, job, emit, cancel_event=None):
-            raise RuntimeError("kaboom")
-
-        patch_bench(monkeypatch, run_fn=boom)
-        client.post("/api/run")
-        snapshot = _wait_until(client, lambda s: s["status"] != "running")
-        assert snapshot["status"] == "failed"
-        assert snapshot["error"] == "kaboom"
-        names = [item["event"]["event"] for item in snapshot["events"]]
-        assert "run_error" in names
-
-    def test_stop_cancels_running_run(self, client, monkeypatch):
-        from src.core.llm import RunCancelled
-
-        entered = threading.Event()
-
-        def slow(questions, config, job, emit, cancel_event=None):
-            entered.set()
-            deadline = time.time() + 5
-            while time.time() < deadline:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RunCancelled()
-                time.sleep(0.02)
-            raise AssertionError("run was not cancelled in time")
-
-        patch_bench(monkeypatch, run_fn=slow)
-        assert client.post("/api/run").status_code == 202
-        assert entered.wait(5)
-        assert client.post("/api/run/stop").status_code == 202
-
-        snapshot = _wait_until(client, lambda s: s["status"] != "running")
-        assert snapshot["status"] == "cancelled"
-        last = snapshot["events"][-1]["event"]
-        assert last["event"] == "run_finished"
-        assert last.get("cancelled") is True
-
-    def test_stop_without_run_returns_409(self, client: TestClient):
-        assert client.post("/api/run/stop").status_code == 409
-
-    def test_missing_models_returns_400(self, client, monkeypatch):
-        empty = EndpointsConfig(serverUrl="http://x/v1")
-        monkeypatch.setattr(routes, "load_endpoints_config", lambda: (empty, None))
-        response = client.post("/api/run")
-        assert response.status_code == 400
-
-
-class TestResultsEndpoint:
-    def test_missing_results_returns_404(self, client: TestClient):
-        assert client.get("/api/results").status_code == 404
-
-    def test_downloads_results(self, client: TestClient):
-        # The fixture patched routes.RESULTS_PATH; write through the same path.
-        routes.RESULTS_PATH.write_text('{"results": []}', encoding="utf-8")
-        response = client.get("/api/results")
-        assert response.status_code == 200
-        assert response.headers["content-type"] == "application/json"
-
-
-class TestEventsEndpoint:
-    def test_events_replay_after_finished_run(self, client, monkeypatch):
-        patch_bench(monkeypatch)
-        client.post("/api/run")
-        _wait_until(client, lambda s: s["status"] != "running")
-
-        with client.stream("GET", "/api/run/events") as response:
-            assert response.status_code == 200
-            body = response.read().decode("utf-8")
-        assert "event: run_started" in body
-        assert "event: run_finished" in body
-        assert "event: stream_end" in body
-
-    def test_events_without_run_returns_404(self, client: TestClient):
-        assert client.get("/api/run/events").status_code == 404
-
-
 class TestSettingsEndpoint:
     @pytest.fixture(autouse=True)
     def isolated_settings_env(self, monkeypatch, tmp_path):
@@ -331,20 +193,12 @@ class TestSettingsEndpoint:
             "repeatPenalty": "",
             "presencePenalty": "",
             "reasoning": "low",
-            "verifier": {
-                "serverUrl": "http://judge:8080/v1",
-                "apiKey": "judge-key",
-                "endpoint": "judge",
-                "sysprompt": 'Say "true" or "false" only.',
-            },
         }
         payload.update(overrides)
         return payload
 
-    def test_get_returns_values_from_both_stores(self, client, monkeypatch):
-        """Group 1 answers from the workspace file, groups 2/3 from ``.env``."""
-        monkeypatch.setenv("VERIFIER_AGENT_SYSPROMPT", "verify!")
-        monkeypatch.setenv("VERIFIER_AGENT_SERVERURL_API_KEY", "sk-judge")
+    def test_get_returns_the_values_of_the_workspace_file(self, client):
+        """The dialog's payload is the workspace file's, plus its state block."""
         body = client.get("/api/settings").json()
         # The fixture's own workspace file (conftest helper), not the env.
         assert body["serverUrl"] == "http://test-server:8080/v1"
@@ -355,8 +209,6 @@ class TestSettingsEndpoint:
         assert set(state) == {"state", "path", "error", "configured", "message"}
         assert state["state"] == "ok"
         assert state["configured"] is True
-        assert body["verifier"]["sysprompt"] == "verify!"
-        assert body["verifier"]["apiKey"] == "sk-judge"
 
     def test_get_answers_native_json_types_for_group_one(self, client):
         """The payload types ws-05 reads: numbers are numbers, never strings.
@@ -369,7 +221,6 @@ class TestSettingsEndpoint:
         assert not isinstance(body["temp"], str)
         assert body["topK"] == 20
         assert body["supportsVision"] is False
-        assert body["questionSet"] == "legacy"
 
     def test_get_empty_when_nothing_set(self, client):
         from src.core import workspace_settings
@@ -387,18 +238,11 @@ class TestSettingsEndpoint:
         assert body["supportsVision"] is False
         assert body["sysprompt"] == DEFAULT_LLM_SYSPROMPT
         assert body["workspaceSettings"]["state"] == "absent"
-        assert body["verifier"] == {
-            "serverUrl": "",
-            "apiKey": "",
-            "endpoint": "",
-            "sysprompt": "",
-        }
 
-    def test_save_writes_group_one_to_the_workspace_file_and_two_to_env(
+    def test_save_writes_the_model_connection_to_the_workspace_file_only(
         self, client
     ):
-        from dotenv import dotenv_values
-
+        """The dialog owns one store: the workspace file. ``.env`` keeps what it has."""
         from src import config as config_module
         from src.core import workspace_settings
 
@@ -408,7 +252,7 @@ class TestSettingsEndpoint:
         assert response.json()["temp"] == 0.2
         assert response.json()["topP"] is None
 
-        # The workspace file holds group 1 and nothing of the verifier's.
+        # The workspace file holds the model connection.
         path = workspace_settings.workspace_settings_path()
         with open(path, encoding="utf-8") as handle:
             stored = json.load(handle)
@@ -423,25 +267,18 @@ class TestSettingsEndpoint:
         assert "topP" not in stored
         assert "topK" not in stored
         assert "SUPPORTS_VISION" not in stored
-        with open(path, encoding="utf-8") as handle:
-            assert "judge" not in handle.read()
 
-        # .env holds the verifier and nothing of group 1's.
-        file_values = dotenv_values(config_module.ENV_PATH)
-        assert file_values["VERIFIER_AGENT_SERVERURL_API_KEY"] == "judge-key"
-        # The quoted sysprompt must survive the .env round-trip verbatim.
-        assert file_values["VERIFIER_AGENT_SYSPROMPT"] == 'Say "true" or "false" only.'
+        # ...and nothing of it reaches ``.env``, whose managed keys the dialog
+        # does not own at all.
         text = config_module.ENV_PATH.read_text(encoding="utf-8")
         assert "target:8080" not in text
         assert "secret-key" not in text
         assert "TEMPERATURE" not in text
         assert "SUPPORTS_VISION" not in text
 
-        # The live environment carries the verifier half as its only managed
-        # names: ``load_settings`` — the managed ``.env`` view — cannot even
-        # answer a group-1 key any more (a leftover in the ambient environment
-        # is dead bytes, D2, and reading it is the config suite's test).
-        assert os.environ["VERIFIER_AGENT_SERVERURL_API_KEY"] == "judge-key"
+        # ``load_settings`` — the managed ``.env`` view — cannot even answer a
+        # group-1 key (a leftover in the ambient environment is dead bytes, D2,
+        # and reading it is the config suite's test).
         assert "SERVER_URL" not in config_module.load_settings()
         assert "REASONING" not in config_module.load_settings()
         assert "TOP_P" not in config_module.load_settings()
@@ -494,10 +331,10 @@ class TestSettingsEndpoint:
         """The dialog no longer carries ``LLM_DEBUG`` (spec section 7) — and a
         save must not switch it off.
 
-        The trap this pins: ``_settings_env_values`` once *always* emitted the
-        key, and the ``{**load_settings(), **env_values}`` merge let the
-        emitted ``""`` win over the stored value — so every settings save
-        commented ``LLM_DEBUG`` out and popped it from the environment. The key
+        The trap this pins: the dialog's ``.env`` mapping once *always* emitted
+        the key, and the merge beside the write let the emitted ``""`` win over
+        the stored value — so every settings save commented ``LLM_DEBUG`` out
+        and popped it from the environment. The key
         is hand-edited like ``NOJAE_PYTHON_ROOT`` now; a save that never
         mentions it re-applies the value the file still has.
         """
@@ -590,12 +427,6 @@ class TestSettingsEndpoint:
         with open(path, encoding="utf-8") as handle:
             assert handle.read() == before
 
-    def test_save_while_running_returns_409(self, client):
-        client.app.state.run_state.status = "running"
-        response = client.post("/api/settings", json=self._payload())
-        assert response.status_code == 409
-        client.app.state.run_state.status = "idle"
-
     def test_saved_settings_are_used_by_config_endpoint(self, client, monkeypatch):
         """Read-your-write across the split: the POST writes what the model
         call reads (spec section 5, the acceptance this whole task exists for)."""
@@ -608,7 +439,7 @@ class TestSettingsEndpoint:
         body = client.get("/api/config").json()
         assert body["models"] == ["model-a"]
         assert "temperature=0.2" in body["samplingSummary"]
-        assert body["verifierConfigured"] is True
+        assert body["serverUrl"] == "http://target:8080/v1"
 
     def test_save_accepts_json_numbers_and_nulls(self, client):
         from src.core import workspace_settings
@@ -619,7 +450,6 @@ class TestSettingsEndpoint:
             "temp": 0.2,
             "topK": 20,
             "topP": None,
-            "verifier": None,
             "unknownKey": "ignored",
         }
         response = client.post("/api/settings", json=payload)
@@ -1121,15 +951,23 @@ class TestPathLocationEndpoint:
         assert len(hub_client.app.state.mcp.restarts) == 1
 
 
-    def test_refused_during_a_run_leaves_env_untouched(self, hub_client, tmp_path):
+    def test_refused_while_a_chat_reply_streams_leaves_env_untouched(
+        self, hub_client, tmp_path
+    ):
+        # The switch restarts both hubs, so it must not land on a reply whose
+        # tool calls are waiting on the sessions being torn down.
         before = os.environ.get("NOJAE_PATH_LOCATION")
-        hub_client.app.state.run_state.status = "running"
+        guard = object()
+        routes._CHAT_TASKS.add(guard)
         try:
             response = hub_client.post("/api/path-location", json={"path": str(tmp_path)})
         finally:
-            hub_client.app.state.run_state.status = "idle"
+            routes._CHAT_TASKS.discard(guard)
         assert response.status_code == 409
+        assert "while a chat reply is streaming" in response.json()["detail"]
         assert os.environ.get("NOJAE_PATH_LOCATION") == before
+        assert hub_client.app.state.mcp.restarts == []
+        assert hub_client.app.state.lsp.restarts == []
 
 
 class TestHubListingsAreModeBlind:
@@ -1729,31 +1567,6 @@ class TestAgentModesSaveEndpoint:
         finally:
             routes._clear_chat_handle(cancel_event)
         assert _modes_file(mode_root).read_text(encoding="utf-8") == before
-
-    def test_a_save_is_not_gated_during_a_benchmark_run(
-        self, client, mode_root, mode_backups
-    ):
-        # Pinned so nobody adds the settings routes' run-check here by analogy: a
-        # run never consults a mode, so gating it would be a rule with no race
-        # behind it.
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        token = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        client.app.state.run_state.status = "running"
-        try:
-            response = client.post("/api/agent-modes/save", json={
-                "document": {
-                    "default": "code",
-                    "agents": {"code": {"label": "Code"},
-                               "reviewer": {"label": "Reviewer"}},
-                },
-                "mtime": token,
-            })
-        finally:
-            client.app.state.run_state.status = "idle"
-        assert response.status_code == 200
-        assert [mode["id"] for mode in response.json()["modes"]] == [
-            "code", "reviewer", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
 
     def test_the_document_read_leaves_nothing_behind(self, client, mode_root):
         before = sorted(p.name for p in mode_root.iterdir())

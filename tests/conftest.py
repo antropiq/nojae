@@ -24,7 +24,6 @@ from typing import Tuple
 import pytest
 
 from src.core import editorfs
-from src.core.job import RunJob
 from src.core.termhub import drivers as termhub_drivers
 from src.core.termhub import pty_conpty as termhub_conpty
 from src.core.termhub import shells as termhub_shells
@@ -654,9 +653,3 @@ def _pane_shell_is_the_apps_default(_hermetic: pytest.MonkeyPatch) -> None:
     # The probe caches its verdict for the session, and the markers consult it;
     # a verdict taken from the ambient shell is the machine's, not this test's.
     shell_probe.clear_verdict()
-
-
-@pytest.fixture
-def job() -> Iterator[RunJob]:
-    """Provide a fresh, empty benchmark run job."""
-    yield RunJob()

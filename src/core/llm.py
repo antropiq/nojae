@@ -1,18 +1,18 @@
-import json
-import threading
-import time
+"""Reading the chunks of a streamed completion, and knowing when one was cut.
+
+The WorkBench chat stream (:mod:`core.chat`) is the only caller: it speaks no
+HTTP of its own, so what it needs from here is how to read the chunk dicts
+:mod:`core.llmkit` hands over, and what a stream that never carried a finish
+reason means. The chat loop times its reply with these helpers, so they stay a
+module of their own instead of folding into that loop.
+
+Nothing here speaks HTTP and nothing here judges an answer's quality: the only
+judgement made is whether a stream ended honestly.
+"""
+
 from typing import Any, Callable, Dict, Optional
 
-from src.core.llmkit import chat_completion, stream_completion
-
-from src.core.models import DEFAULT_LLM_SYSPROMPT, VerifierAgent
-from src.core.utils import LLMResult, estimate_completion_tokens
-
 Emit = Callable[[Dict[str, Any]], None]
-
-
-class RunCancelled(Exception):
-    """Raised inside the streaming loop when a stop has been requested."""
 
 
 # --- chunk reading ------------------------------------------------------------
@@ -83,15 +83,9 @@ def _extract_usage(chunk: Any) -> Optional[Dict[str, Optional[int]]]:
     }
 
 
-def _extract_total_tokens(chunk: Any) -> Optional[int]:
-    """Read total token usage from a streamed chunk, when the server sent one."""
-    usage = _extract_usage(chunk)
-    return usage["total_tokens"] if usage else None
-
-
-# Shared by both streaming loops (chat imports it from here). One sentence,
-# deliberately free of provider jargon: it becomes the visible message in the
-# WorkBench error line and in the run's error entry.
+# The chat stream's truncation sentence, imported by chat together with the
+# event flag below. One sentence, deliberately free of provider jargon: it
+# becomes the visible message in the WorkBench error line.
 TRUNCATION_MESSAGE = (
     "The answer was cut short by the server before it finished "
     "(the stream ended without a finish reason). The reply above is "
@@ -134,214 +128,3 @@ def close_llm_stream(response_generator: Any) -> None:
         close()
     except Exception:  # noqa: BLE001 — closing on cancel is best-effort
         pass
-
-
-def call_llm_and_stream(
-    model_name: str,
-    server_url: str,
-    question: Dict,
-    emit: Emit,
-    sampling: Optional[Dict] = None,
-    cancel_event: Optional[threading.Event] = None,
-    api_key: str = "none",
-    sysprompt: Optional[str] = None,
-) -> LLMResult:
-    """Make LLM call, stream the answer as ``token`` events, return results.
-
-    Timing uses ``time.monotonic()`` and is anchored to *generated* chunks —
-    content or reasoning deltas (the trailing usage-only chunk is not timed):
-    ``took`` runs from request start to the last generated chunk, ``ttft`` to
-    the first generated chunk, and ``gen_duration`` covers first-to-last
-    generated chunk — the window matching llama.cpp's generation (decode)
-    speed, since reasoning deltas are part of ``completion_tokens``.
-    """
-    messages = [
-        {"role": "system", "content": sysprompt or DEFAULT_LLM_SYSPROMPT},
-        {"role": "user", "content": question["question"]},
-    ]
-    t0 = time.monotonic()
-    buffer = ""
-    response_generator: Optional[Any] = None
-
-    try:
-        sampling_kwargs: Dict[str, Any] = dict(sampling or {})
-        response_generator = stream_completion(
-            model=model_name,
-            server_url=server_url,
-            messages=messages,
-            api_key=api_key,
-            sampling=sampling_kwargs,
-        )
-    except Exception as exc:
-        emit({"event": "run_error", "message": f"LLM call failed: {exc}"})
-        return LLMResult(took=time.monotonic() - t0)
-
-    completion_tokens: Optional[int] = None
-    last_usage: Optional[Dict[str, Optional[int]]] = None
-    prompt_tokens = 0
-    t_first: Optional[float] = None
-    t_last: Optional[float] = None
-    # Any generated text at all — answer OR reasoning. A thinking model cut
-    # mid-reasoning streams an empty answer, so gating the truncation check on
-    # ``buffer`` alone would leave that turn looking like a clean empty answer.
-    generated_any = False
-    try:
-        for chunk in response_generator:
-            if cancel_event is not None and cancel_event.is_set():
-                close_llm_stream(response_generator)
-                raise RunCancelled()
-            usage = _extract_usage(chunk)
-            if usage is not None:
-                last_usage = usage
-                if usage["completion_tokens"] is not None:
-                    completion_tokens = usage["completion_tokens"]
-                if usage["prompt_tokens"]:
-                    prompt_tokens = usage["prompt_tokens"]
-            content = safe_get_choice_content(chunk)
-            reasoning = _extract_reasoning(chunk)
-
-            if not content and not reasoning:
-                continue
-
-            generated_any = True
-            # Time the last generated chunk, not the stream drain: with
-            # include_usage the server appends a usage-only chunk afterwards.
-            # Reasoning deltas open/extend the window (they are decoded
-            # tokens counted in completion_tokens) but are not answer text.
-            arrival = time.monotonic()
-            if t_first is None:
-                t_first = arrival
-            t_last = arrival
-            if not content:
-                continue
-            buffer += content
-            emit({"event": "token", "text": content})
-    except RunCancelled:
-        raise
-    except Exception as exc:
-        emit({"event": "run_error", "message": f"Stream error: {exc}"})
-        buffer = ""
-
-    # A stream that ends with no chunk ever carrying a finish_reason is a cut
-    # generation, not a finished answer, and nothing downstream would notice:
-    # the fragment would be scored as if it were a final answer and its timing
-    # and token rate would enter the run aggregates. Checked after the loop
-    # because the stream records the reason while iterating (see
-    # ``saw_finish_reason``). Only judged when something was actually generated:
-    # an empty stream (or a stream that died before any chunk) has nothing to
-    # call incomplete, and a hard transport error already went down the
-    # ``except`` path above.
-    truncated = generated_any and not saw_finish_reason(response_generator)
-    if truncated:
-        emit({"event": "run_error", "message": TRUNCATION_MESSAGE})
-
-    t_end = time.monotonic()
-    # t_last is set whenever t_first is, but narrow both for the type checker.
-    if t_first is None or t_last is None:
-        took, ttft, gen_duration = t_end - t0, 0.0, 0.0
-    else:
-        took = t_last - t0
-        ttft = t_first - t0
-        # Single-chunk answers have no measurable decode window.
-        gen_duration = t_last - t_first
-
-    tokens_estimated = False
-    if not completion_tokens:
-        # Some servers ignore include_usage or omit completion_tokens; derive
-        # it from total - prompt when possible, else fall back to an estimate.
-        if completion_tokens is None and last_usage is not None:
-            total = last_usage.get("total_tokens")
-            prompt = last_usage.get("prompt_tokens")
-            if total and prompt:
-                completion_tokens = max(total - prompt, 0)
-        if not completion_tokens:
-            completion_tokens = estimate_completion_tokens(buffer)
-            tokens_estimated = completion_tokens > 0
-
-    return LLMResult(
-        text=buffer,
-        took=took,
-        ttft=ttft,
-        gen_duration=gen_duration,
-        completion_tokens=completion_tokens,
-        tokens_estimated=tokens_estimated,
-        prompt_tokens=prompt_tokens,
-        truncated=truncated,
-    )
-
-
-def warmup_model(
-    model_name: str,
-    server_url: str,
-    cancel_event: Optional[threading.Event] = None,
-    api_key: str = "none",
-) -> None:
-    """Best-effort request that forces the server to load ``model_name``.
-
-    The answer is discarded; a failure is ignored so real errors still
-    surface on the actual questions. Keeps elapsed time (and the first
-    question's ``took``) free of model-loading wait.
-    """
-    if cancel_event is not None and cancel_event.is_set():
-        return
-    try:
-        chat_completion(
-            model=model_name,
-            server_url=server_url,
-            messages=[{"role": "user", "content": "ping"}],
-            api_key=api_key,
-            max_tokens=1,
-        )
-    except Exception:  # noqa: BLE001 — warm-up is best-effort
-        pass
-
-
-def verify_response(
-    verifier: Optional[VerifierAgent],
-    question: Dict,
-    response_text: str,
-    emit: Emit,
-) -> bool:
-    """Verify LLM response against expected answer."""
-    if not verifier or not verifier.endpoint:
-        emit(
-            {
-                "event": "run_error",
-                "message": "No verifier agent configured in the endpoints config",
-            }
-        )
-        return False
-    try:
-        messages = [
-            {"role": "system", "content": verifier.sysprompt},
-            {
-                "role": "user",
-                "content": json.dumps({
-                    "question": question["question"],
-                    "response": response_text,
-                    "expected": question.get("expected"),
-                }),
-            },
-        ]
-        v_resp = chat_completion(
-            model=verifier.endpoint,
-            server_url=verifier.serverUrl,
-            messages=messages,
-            api_key=verifier.apiKey or "none",
-        )
-
-        # ``choices[0].message.content`` can be ``null`` — a reasoning-only
-        # judge answer cut by ``max_tokens`` really does come back that way —
-        # so the verdict of a judge that says nothing is ``False``, never a
-        # crash. Normalised to "" rather than relied on as falsy.
-        content = (
-            (v_resp.get("choices") or [{}])[0]
-            .get("message", {})
-            .get("content")
-            or ""
-        )
-
-        return content.strip().lower() == "true"
-    except Exception as exc:
-        emit({"event": "run_error", "message": f"Verifier failed: {exc}"})
-        return False

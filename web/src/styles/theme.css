@@ -204,10 +204,9 @@ body {
 /* -- session meters in the app bar ----------------------------------------- */
 
 /* The shared elapsed clock (SessionClock.vue): one readout for the whole app,
-   because a Benchmark run and a WorkBench reply cannot run at the same time —
-   so it sits immediately left of the status pill and reads whichever is live.
-   Compact on purpose: the app bar is `--bi-appbar-height` tall, so the digits
-   stay at the pill's own size instead of the Benchmark panel's 1.75rem.
+   because the app has one session at a time — so it sits immediately left of
+   the status pill and reads whichever is live. Compact on purpose: the app bar
+   is `--bi-appbar-height` tall, so the digits stay at the pill's own size.
    `min-width` is fixed to the width of `00:00:00` (tabular digits) so the
    actions row never shifts sideways as the clock ticks past a minute or an
    hour. */
@@ -290,15 +289,6 @@ body {
   background-color: currentColor;
 }
 
-.status-running {
-  color: var(--bi-info);
-  border-color: color-mix(in srgb, var(--bi-info) 40%, transparent);
-}
-
-.status-running .status-dot {
-  animation: bi-pulse 1.2s ease-in-out infinite;
-}
-
 .status-finished {
   color: var(--bi-success);
   border-color: color-mix(in srgb, var(--bi-success) 40%, transparent);
@@ -314,7 +304,8 @@ body {
   border-color: color-mix(in srgb, var(--bi-warning) 40%, transparent);
 }
 
-/* Chat reply in flight (app-bar pill reuses the run-status styles). */
+/* Chat reply in flight: the pulse says "the model is working", the violet is
+   the same one the batch pill uses for it. */
 .status-thinking,
 .status-reasoning {
   color: var(--bi-violet);
@@ -329,8 +320,8 @@ body {
 /* A batch lot is running (app-bar pill, B10). Same violet as a chat reply —
    the pill is reading the same violet family for "the model is working" — but
    with its own branch so the label can stay literal. The post-lot outcome
-   reuses the run-status tones already defined above (status-cancelled /
-   status-failed / status-finished), so no new colour is introduced. */
+   reuses the tones above (status-cancelled / status-failed / status-finished),
+   so no new colour is introduced. */
 .status-batch {
   color: var(--bi-violet);
   border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
@@ -343,68 +334,6 @@ body {
 @keyframes bi-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.8); }
-}
-
-/* -- run controls ----------------------------------------------------------- */
-
-/* Both buttons are plain .icon-btn circles — the same shape the WorkBench
-   composer uses for Send / Stop — so only the accent color differs here. */
-.run-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-/* The rules below carry the `.run-controls` ancestor on purpose: it lifts them
-   above the generic `.icon-btn` (and `.icon-btn:disabled`) rules, which would
-   otherwise flatten the accent. */
-.run-controls .run-btn-play {
-  background-color: var(--pico-primary);
-  border-color: var(--pico-primary);
-  color: #ffffff;
-  box-shadow: var(--bi-shadow-sm);
-}
-
-.run-controls .run-btn-play:hover:not(:disabled) {
-  background-color: var(--pico-primary-hover);
-  border-color: var(--pico-primary-hover);
-}
-
-/* Running: the button is inert (one run at a time) but keeps its accent and
-   the pulse ring, so it still reads as the control that owns the run. */
-.run-controls .run-btn-play.is-running {
-  animation: bi-glow 1.6s ease-in-out infinite;
-  background-color: var(--pico-primary);
-  border-color: var(--pico-primary);
-  opacity: 1;
-}
-
-.run-controls .run-btn-stop {
-  background-color: var(--bi-surface);
-  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
-  color: var(--bi-danger);
-}
-
-.run-controls .run-btn-stop:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--bi-danger) 12%, var(--bi-surface));
-}
-
-/* `.icon-btn:disabled` would flatten both of them to the neutral surface, so
-   each keeps its own accent while inert (only the opacity dimming applies). */
-.run-controls .run-btn-play:disabled {
-  background-color: var(--pico-primary);
-  border-color: var(--pico-primary);
-  box-shadow: var(--bi-shadow-sm);
-}
-
-.run-controls .run-btn-stop:disabled {
-  background-color: var(--bi-surface);
-  border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
-}
-
-@keyframes bi-glow {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--pico-primary) 45%, transparent); }
-  50% { box-shadow: 0 0 0 6px transparent; }
 }
 
 .icon-btn {
@@ -437,126 +366,6 @@ body {
   stroke: var(--bi-icon);
 }
 
-/* Icons, now that both run buttons are .icon-btn: the generic rule above gives
-   every icon button's glyph the muted stroke, so the two accents are restated
-   here (and the solid play triangle gets no outline at all). */
-.run-controls .run-btn-play svg {
-  fill: #ffffff;
-  stroke: none;
-}
-
-.run-controls .run-btn-stop svg {
-  stroke: var(--bi-danger);
-}
-
-.run-controls .run-btn-stop rect {
-  fill: var(--bi-danger);
-}
-
-/* -- layout ------------------------------------------------------------------ */
-
-.app-shell {
-  display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  gap: var(--bi-space-3);
-  align-items: stretch;
-  box-sizing: border-box;
-  height: calc(100vh - var(--bi-appbar-height));
-  padding: var(--bi-space-3) clamp(1rem, 3vw, 2rem) var(--bi-space-4);
-}
-
-.stats-col {
-  display: flex;
-  flex-direction: column;
-  gap: var(--bi-space-2);
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.stream-col {
-  display: flex;
-  flex-direction: column;
-  gap: var(--bi-space-2);
-  min-width: 0;
-  min-height: 0;
-}
-
-.stream-col .stream-panel {
-  flex: 1 1 0;
-  height: auto;
-  min-height: 0;
-}
-
-@media (max-width: 960px) {
-  .app-shell {
-    grid-template-columns: minmax(0, 1fr);
-    height: auto;
-  }
-
-  .stats-col {
-    order: 2;
-    overflow: visible;
-  }
-
-  .stream-col .stream-panel {
-    height: calc(100vh - var(--bi-appbar-height) - 8.5rem);
-  }
-}
-
-/* -- panels & metric cards ---------------------------------------------------- */
-
-.panel {
-  background-color: var(--bi-surface);
-  border: 1px solid var(--bi-border);
-  border-radius: var(--bi-radius-lg);
-  padding: var(--bi-space-2) 1.1rem;
-  box-shadow: var(--bi-shadow-sm);
-}
-
-.run-summary {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.35rem;
-  text-align: center;
-}
-
-.run-meta {
-  word-break: break-word;
-}
-
-.metric-card {
-  background-color: var(--bi-surface);
-  border: 1px solid var(--bi-border);
-  border-radius: var(--bi-radius-lg);
-  padding: 0.8rem 1.1rem;
-  box-shadow: var(--bi-shadow-sm);
-}
-
-.metric-card .metric-label {
-  font-size: 0.75rem;
-  color: var(--pico-muted-color);
-  margin: 0;
-}
-
-.metric-card .metric-value {
-  font-size: 1.375rem;
-  font-weight: 600;
-  line-height: 1.25;
-  margin: 0.15rem 0 0;
-  font-variant-numeric: tabular-nums;
-}
-
-.metric-card .metric-delta {
-  font-size: 0.75rem;
-  color: var(--pico-muted-color);
-  margin: 0;
-}
-
-.failed-label {
-  margin-top: 0.15rem;
-}
-
 /* -- captions, errors, links --------------------------------------------------- */
 
 .caption {
@@ -583,29 +392,6 @@ body {
   padding: 0.6rem 0.85rem;
   font-size: 0.8rem;
   margin: 0;
-}
-
-.download-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  width: 100%;
-  padding: 0.55rem 0.85rem;
-  border: 1px solid var(--bi-border);
-  border-radius: var(--bi-radius-lg);
-  background-color: var(--bi-surface);
-  color: var(--pico-primary);
-  font-size: 0.85rem;
-  font-weight: 500;
-  text-decoration: none;
-  box-shadow: var(--bi-shadow-sm);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.download-link:hover {
-  background-color: var(--bi-surface-2);
-  border-color: var(--pico-primary);
 }
 
 /* -- stream panel ----------------------------------------------------------------- */
@@ -644,24 +430,14 @@ body {
   margin: 0;
 }
 
-.question-card {
+/* One assistant reply: the card the reply's markdown, its copy chip and its
+   truncation marker all hang off. */
+.chat-answer-card {
+  position: relative;
   background-color: var(--bi-surface);
   border: 1px solid var(--bi-border);
   border-radius: var(--bi-radius-lg);
   padding: 0.85rem 1.1rem;
-}
-
-.question-card .question-meta {
-  margin-bottom: 0.15rem;
-}
-
-.question-card .question-text {
-  font-weight: 600;
-  margin: 0.25rem 0 0.5rem;
-}
-
-.question-card .question-verdict {
-  margin: 0.6rem 0 0.25rem;
 }
 
 .answer {
@@ -801,7 +577,7 @@ body {
   margin: 0.5rem 0;
 }
 
-.question-card .katex-display {
+.chat-answer-card .katex-display {
   overflow-x: auto;
   overflow-y: hidden;
   margin: 0.5rem 0;
@@ -828,32 +604,11 @@ body {
 .badge.info { color: var(--bi-info); }
 .badge.gray { color: var(--pico-muted-color); }
 
-/* -- run result banners -------------------------------------------------------------- */
-
-.result-banner {
-  border-radius: var(--bi-radius-lg);
-  padding: 0.6rem 0.9rem;
-  font-weight: 500;
-  font-size: 0.9rem;
-  border: 1px solid;
-  animation: bi-fade-in 0.25s ease;
-}
+/* -- shared animation --------------------------------------------------------- */
 
 @keyframes bi-fade-in {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
-}
-
-.result-banner.success {
-  border-color: color-mix(in srgb, var(--bi-success) 45%, transparent);
-  color: var(--bi-success);
-  background-color: color-mix(in srgb, var(--bi-success) 8%, var(--bi-surface));
-}
-
-.result-banner.warning {
-  border-color: color-mix(in srgb, var(--bi-warning) 45%, transparent);
-  color: var(--bi-warning);
-  background-color: color-mix(in srgb, var(--bi-warning) 8%, var(--bi-surface));
 }
 
 /* -- progress -------------------------------------------------------------------------- */
@@ -2192,12 +1947,7 @@ input.appbar-location-input {
 
 /* The assistant card's copy chip: the same punched-over-corner chip as a user
    turn's, hung off the card's top-right corner. The card is the containing
-   block, so this class — not the shared `.question-card`, which the benchmark's
-   cards also use — is what makes it positioned. */
-.chat-answer-card {
-  position: relative;
-}
-
+   block (its own rule above makes it positioned). */
 .chat-msg-copy {
   right: -0.8rem;
   /* Half visible at rest: the affordance is there to be found, not to be read.

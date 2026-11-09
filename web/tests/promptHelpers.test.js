@@ -6,7 +6,7 @@ import {
   PROMPT_HELPER_SLOT_COUNT,
   usePromptHelpers,
 } from '../src/composables/usePromptHelpers'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 
 // Layer 1 (jsdom): the bullet row's own store. What is pinned here is D4's UI
@@ -86,8 +86,8 @@ describe('loadPromptHelpers', () => {
 // and `App.vue` keeps every view mounted, so a switch used to leave the old
 // workspace's prompts on screen.
 describe('a working-location switch reloads the bullets', () => {
-  const { setPathLocation } = useBenchmark()
-  const benchmark = useBenchmark().state
+  const { setPathLocation } = useAppShell()
+  const appShell = useAppShell().state
 
   function slotsNamed(name) {
     return {
@@ -101,10 +101,10 @@ describe('a working-location switch reloads the bullets', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     resetState()
-    benchmark.pathLocation = '/srv/new'
-    benchmark.pathLocationCurrent = '/srv/old'
-    benchmark.pathLocationSaving = false
-    benchmark.pathLocationError = null
+    appShell.pathLocation = '/srv/new'
+    appShell.pathLocationCurrent = '/srv/old'
+    appShell.pathLocationSaving = false
+    appShell.pathLocationError = null
     const tree = useWorkspaceTree()
     tree.state.nodes = {}
     tree.state.expanded = { '': true }
@@ -146,8 +146,8 @@ describe('a working-location switch reloads the bullets', () => {
     await flushPromises()
 
     expect(state.slots[0].content).toBe('new workspace')
-    expect(benchmark.pathLocationCurrent).toBe('/srv/new')
-    expect(benchmark.pathLocationError).toBeNull()
+    expect(appShell.pathLocationCurrent).toBe('/srv/new')
+    expect(appShell.pathLocationError).toBeNull()
     expect(state.slots).toHaveLength(PROMPT_HELPER_SLOT_COUNT)
     expect(state.error).toBeNull()
     const helperFetches = fetchSpy.mock.calls.filter(

@@ -1,6 +1,6 @@
 import { computed, reactive, watch } from 'vue'
 import { registerChatBusyGuard, useChat } from './useChat'
-import { registerBatchGuard, useBenchmark } from './useBenchmark'
+import { registerBatchGuard, useAppShell } from './useAppShell'
 import { agentModesLoaded, modeById, useAgentModes } from './useAgentModes'
 
 // ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ const state = reactive({
 // importing this module: the dependency direction stays acyclic
 // (useBatch -> useChat -> nothing new).
 registerChatBusyGuard(() => state.active)
-// ... and the same for the tab/settings guards owned by useBenchmark.
+// ... and the same for the tab/settings guards owned by useAppShell.
 registerBatchGuard(() => state.active)
 
 // Which turn outcomes count as a completed task for the bar. `stopped` and
@@ -202,7 +202,7 @@ export function useBatch() {
   // `reset: resetChat` — `reset` is already a local name inside closeDialog's
   // options, and the between-task wipe below must not read like a dialog reset.
   const { state: chat, sendBatchTurn, stop, reset: resetChat } = useChat()
-  const { state: benchmark, setTab } = useBenchmark()
+  const { setTab } = useAppShell()
   const { state: modes } = useAgentModes()
 
   // A refusal about the conversation lands on the WorkBench error line: the
@@ -600,11 +600,6 @@ export function useBatch() {
       return
     }
     await validate()
-    if (benchmark.status === 'running') {
-      state.error =
-        'A benchmark run is in progress — stop it before launching a batch.'
-      return
-    }
     if (!canLaunch.value) return
     setTab('chat')
     state.open = false
@@ -662,7 +657,7 @@ export function useBatch() {
   }
 
   function openDialog() {
-    if (state.active || benchmark.status === 'running') return
+    if (state.active) return
     state.error = null
     state.open = true
     // A lot that just ran left its tasks in `done/`, so both the option list and

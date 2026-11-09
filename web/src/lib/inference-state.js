@@ -1,6 +1,5 @@
 // The one bit that answers "is an inference in flight right now?", derived from
-// the three states that can own one:
-//   * benchmark run — 'running' covers warm-up through the last verifier call;
+// the two states that can own one:
 //   * WorkBench reply — waiting, reasoning or answering (a batch turn too);
 //   * batch lot — stays busy across the gap between two task turns, which is
 //     when the chat phase is back to 'idle' but a task is still owed.
@@ -9,11 +8,10 @@
 // (useSessionSound) read it, so the two indicators can never disagree about
 // which turn just ended.
 //
-// It stays a pure function of the three reactive states rather than importing
+// It stays a pure function of the two reactive states rather than importing
 // the composables: the dependency graph remains acyclic (useBatch already
-// imports useChat and useBenchmark) and the rule is testable on its own.
-export function inferenceRunning({ benchmark, chat, batch }) {
-  if (benchmark.status === 'running') return true
+// imports useChat) and the rule is testable on its own.
+export function inferenceRunning({ chat, batch }) {
   if (batch.active) return true
   return ['waiting', 'reasoning', 'answering'].includes(chat.phase)
 }

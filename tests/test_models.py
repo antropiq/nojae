@@ -5,27 +5,7 @@ from src.core.models import (
     DEFAULT_LLM_SYSPROMPT,
     EndpointsConfig,
     SamplingParams,
-    VerifierAgent,
 )
-
-
-class TestVerifierAgent:
-    def test_parses_full_block(self):
-        v = VerifierAgent.model_validate({
-            "sysprompt": "be strict",
-            "serverUrl": "http://verifier:8080/v1",
-            "endpoint": "strata",
-        })
-        assert v.sysprompt == "be strict"
-        assert v.serverUrl == "http://verifier:8080/v1"
-        assert v.endpoint == "strata"
-
-    def test_defaults_are_empty_strings(self):
-        v = VerifierAgent.model_validate({})
-        assert v.sysprompt == ""
-        assert v.serverUrl == ""
-        assert v.endpoint == ""
-        assert v.apiKey == ""
 
 
 class TestSamplingParams:
@@ -101,11 +81,6 @@ class TestEndpointsConfig:
             "repeat-penalty": "1.0",
             "presence-penalty": "0",
             "reasoning": "low",
-            "verifierAgent": {
-                "sysprompt": "analyse",
-                "serverUrl": "http://192.168.1.4:8080/v1",
-                "endpoint": "strata",
-            },
         })
         assert cfg.serverUrl == "http://127.0.0.1:8080/v1"
         assert cfg.model_list() == ["qwen3.8-flash-next-iq3_xxs"]
@@ -118,16 +93,11 @@ class TestEndpointsConfig:
             "presence_penalty": 0.0,
             "reasoning_effort": "low",
         }
-        # The validated document carries a verifierAgent entry.
-        assert cfg.verifierAgent is not None
-        assert cfg.verifierAgent.endpoint == "strata"
-        assert cfg.verifierAgent.serverUrl == "http://192.168.1.4:8080/v1"
 
     def test_to_kwargs_excludes_config_fields(self):
         cfg = EndpointsConfig.model_validate({
             "serverUrl": "http://x",
             "endpoint": "m",
-            "verifierAgent": {"endpoint": "v"},
         })
         assert cfg.to_kwargs() == {}
 
@@ -144,7 +114,6 @@ class TestEndpointsConfig:
         cfg = EndpointsConfig.model_validate({})
         assert cfg.serverUrl == ""
         assert cfg.model_list() == []
-        assert cfg.verifierAgent is None
 
     def test_unknown_keys_ignored(self):
         cfg = EndpointsConfig.model_validate({"serverUrl": "u", "bogus": 1})
@@ -155,77 +124,8 @@ class TestEndpointsConfig:
             EndpointsConfig.model_validate({"temp": "hot"})
 
 
-class TestFromEnv:
-    """``from_env`` after group 1 moved to the workspace file: ``.env``'s half only.
-
-    The class is the D2 guard as much as it is a builder test — a group-1 name
-    set here must make **no** difference to the config, because the fallback that
-    would have honoured it was rejected on purpose (spec D2). So the cases that
-    used to feed ``SERVER_URL`` / ``TEMPERATURE`` / ``SUPPORTS_VISION`` through
-    the env are gone rather than translated: the file's own builder is
-    :class:`TestFromWorkspace`, and the pair belongs in this one file.
-    """
-
-    def test_the_verifier_block_is_read_from_the_env(self):
-        cfg = EndpointsConfig.from_env({
-            "SERVER_URL": "http://host:8080/v1",  # group 1: read by nothing
-            "ENDPOINT": "model-a",                # group 1: read by nothing
-            "TEMPERATURE": "0.2",                 # group 1: read by nothing
-            "VERIFIER_AGENT_SYSPROMPT": "verify",
-            "VERIFIER_AGENT_SERVERURL": "http://verif:8080/v1",
-            "VERIFIER_AGENT_SERVERURL_API_KEY": "sk-judge",
-            "VERIFIER_AGENT_ENDPOINT": "strata",
-        })
-        assert cfg.verifierAgent is not None
-        assert cfg.verifierAgent.endpoint == "strata"
-        assert cfg.verifierAgent.serverUrl == "http://verif:8080/v1"
-        assert cfg.verifierAgent.sysprompt == "verify"
-        assert cfg.verifierAgent.apiKey == "sk-judge"
-        # …and the group-1 names above left every group-1 field at its default.
-        assert cfg.serverUrl == ""
-        assert cfg.model_list() == []
-        assert cfg.temperature is None
-
-    def test_blank_and_missing_keys(self):
-        cfg = EndpointsConfig.from_env({"ENDPOINT": "  ", "SERVER_URL": ""})
-        assert cfg.model_list() == []
-        assert cfg.serverUrl == ""
-        assert cfg.verifierAgent is None
-
-    def test_verifier_created_from_key_only(self):
-        cfg = EndpointsConfig.from_env({"VERIFIER_AGENT_SERVERURL_API_KEY": "sk"})
-        assert cfg.verifierAgent is not None
-        assert cfg.verifierAgent.apiKey == "sk"
-
-    def test_the_group_one_names_it_does_not_read(self):
-        """The one sentence D2 is about, pinned as a fact about this builder."""
-        cfg = EndpointsConfig.from_env({
-            "SERVER_URL": "http://left-over:9/v1",
-            "SERVER_URL_API_KEY": "sk-left-over",
-            "ENDPOINT": "left-over-model",
-            "LLM_SYSPROMPT": "left-over prompt",
-            "TEMPERATURE": "0.9",
-            "TOP_P": "0.5",
-            "TOP_K": "5",
-            "MIN_P": "0.1",
-            "REPEAT_PENALTY": "1.2",
-            "PRESENCE_PENALTY": "0.3",
-            "REASONING": "sideways",  # would raise if this builder read it
-            "SUPPORTS_VISION": "1",
-            "LSP_ENABLED": "pyright",
-            "MAX_TOOL_ITERATION": "9",
-        })
-        assert cfg.serverUrl == ""
-        assert cfg.apiKey == ""
-        assert cfg.endpoint is None
-        assert cfg.model_list() == []
-        assert cfg.sysprompt == DEFAULT_LLM_SYSPROMPT
-        assert cfg.to_kwargs() == {}
-        assert cfg.supports_vision is False
-
-
 class TestFromWorkspace:
-    """``from_workspace``: group 1 from the JSON mapping, verifier from the env."""
+    """``from_workspace``: the whole configuration comes from the JSON mapping."""
 
     def test_full_document(self):
         cfg = EndpointsConfig.from_workspace(
@@ -245,11 +145,6 @@ class TestFromWorkspace:
                 "lspEnabled": ["pyright"],
                 "maxToolIteration": 300,
             },
-            {
-                "VERIFIER_AGENT_SYSPROMPT": "verify",
-                "VERIFIER_AGENT_SERVERURL": "http://verif:8080/v1",
-                "VERIFIER_AGENT_ENDPOINT": "strata",
-            },
         )
         assert cfg.serverUrl == "http://host:8080/v1"
         assert cfg.apiKey == "sk-target"
@@ -265,10 +160,6 @@ class TestFromWorkspace:
             "presence_penalty": 0.0,
             "reasoning_effort": "low",
         }
-        assert cfg.verifierAgent is not None
-        assert cfg.verifierAgent.endpoint == "strata"
-        assert cfg.verifierAgent.serverUrl == "http://verif:8080/v1"
-        assert cfg.verifierAgent.sysprompt == "verify"
 
     def test_native_types_pass_straight_through(self):
         """D6: ``True`` / ``0.7`` / ``40`` need no coercion, and no string parser."""
@@ -291,17 +182,13 @@ class TestFromWorkspace:
         assert cfg.to_kwargs() == {}
 
     def test_absent_members_mean_the_documented_default(self):
-        # The verifier half comes from the *env* mapping, so it is passed empty
-        # here: the ambient environment is the developer's own and group 2 stays
-        # in ``.env``, which is a fact about the machine, not about this builder.
-        cfg = EndpointsConfig.from_workspace({}, {})
+        cfg = EndpointsConfig.from_workspace({})
         assert cfg.serverUrl == ""
         assert cfg.apiKey == ""
         assert cfg.endpoint is None
         assert cfg.model_list() == []
         assert cfg.sysprompt == DEFAULT_LLM_SYSPROMPT
         assert cfg.supports_vision is False
-        assert cfg.verifierAgent is None
 
     def test_a_blank_string_member_is_absent_not_a_value(self):
         cfg = EndpointsConfig.from_workspace(
@@ -324,13 +211,3 @@ class TestFromWorkspace:
     def test_a_bad_reasoning_still_raises(self):
         with pytest.raises(ValidationError):
             EndpointsConfig.from_workspace({"reasoning": "sideways"})
-
-    def test_the_verifier_half_comes_from_the_env_mapping(self):
-        cfg = EndpointsConfig.from_workspace(
-            {"serverUrl": "http://x/v1"},
-            {"VERIFIER_AGENT_SERVERURL_API_KEY": "sk-judge"},
-        )
-        assert cfg.verifierAgent is not None
-        assert cfg.verifierAgent.apiKey == "sk-judge"
-        # The model connection is unaffected by the env mapping's verifier keys.
-        assert cfg.apiKey == ""

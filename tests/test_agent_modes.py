@@ -1226,7 +1226,7 @@ class TestTheReaderIsAlone:
         """Pure core: FastAPI, the LLM transport and the hubs belong elsewhere."""
         tree = ast.parse(Path(agent_modes.__file__).read_text(encoding="utf-8"))
         forbidden = ("fastapi", "litellm", "src.api", "mcphub", "lsphub", "termhub",
-                     "editorfs", "chat", "bench", "batch", "llmkit")
+                     "editorfs", "chat", "batch", "llmkit")
         offenders: List[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -1292,23 +1292,6 @@ class TestTheReaderIsAlone:
                 if isinstance(node, ast.FunctionDef) and node.name == name
             )
             assert "ensure_agent_modes" not in ast.dump(body)
-
-    def test_the_benchmark_never_consults_a_mode(self):
-        """The invariant that survives every later task in this lot.
-
-        A benchmark run has ``LLM_SYSPROMPT`` and that is enough (am-00): modes
-        are a WorkBench concern. ``core/chat.py`` will take a *string* from the
-        mode (am-04) without learning what a mode is, so it too stays off this
-        list — the seam is ``routes.py``, and no core module reaches the loader.
-        """
-        core = Path(agent_modes.__file__).resolve().parent
-        for name in ("bench.py", "llm.py", "chat.py", "job.py", "batch.py"):
-            # One scan, shared with am-08's poisoned case: an inline copy of it
-            # here once missed ``from src.core import agent_modes`` (the loader
-            # is in the alias, not the module), which is exactly the import this
-            # test exists to refuse.
-            found = _mode_imports((core / name).read_text(encoding="utf-8"))
-            assert found == [], f"{name} reaches the modes loader: {found}"
 
 
 class TestConstantsAreSane:
@@ -1782,40 +1765,6 @@ class TestDefaultsModuleIsStillCoreOnly:
 # -- am-08: the sweep — what only the assembled feature can show ---------------
 
 
-def _mode_imports(source: str) -> List[str]:
-    """Every import of the modes loader in one source text.
-
-    An ``ast`` scan in the style of ``tests/test_write_surface_isolation.py``,
-    pulled out as a function because the sweep runs it twice: on the real
-    modules, which must be clean, and on a poisoned copy, which must **not** be.
-    A guard nobody has watched fail is a sentence, not a check.
-
-    Both spellings count. ``from src.core import agent_modes`` names the loader
-    in the *alias*, not the module, so a scan that only inspects
-    ``ImportFrom.module`` waves it through — the poison case below is what found
-    that, and it is the spelling a contributor is most likely to write.
-    """
-    found: List[str] = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith(
-            "agent_modes"
-        ):
-            found.append(node.module or "")
-        elif isinstance(node, ast.ImportFrom) and any(
-            (alias.name == "agent_modes" or alias.name.startswith("agent_modes."))
-            for alias in node.names
-        ):
-            found.extend(
-                alias.name for alias in node.names
-                if alias.name == "agent_modes" or alias.name.startswith("agent_modes.")
-            )
-        elif isinstance(node, ast.Import) and any(
-            alias.name.endswith("agent_modes") for alias in node.names
-        ):
-            found.extend(alias.name for alias in node.names)
-    return found
-
-
 class _HubDouble:
     """A live hub answering ``active_tool_defs`` from the ids it was *given*."""
 
@@ -1876,7 +1825,6 @@ def swept_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             None,
         ),
     )
-    monkeypatch.setattr(routes, "RESULTS_PATH", tmp_path / "results.json")
     # Settings-level activation: *every* hub on, so the only thing that can
     # take tools away in the requests below is the mode (am-00's flagship).
     monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
@@ -2017,23 +1965,3 @@ class TestTheWholeFeatureInOneRequest:
         # It reaches the workspace like ``code`` does, because it says so.
         assert "tools" in captured
 
-    def test_the_benchmark_guard_fails_when_poisoned(self):
-        """The scan above is a guard, so it has to be shown to bite.
-
-        ``test_the_benchmark_never_consults_a_mode`` in ``TestTheReaderIsAlone``
-        reads the same AST; here the same reader is handed an import that *does*
-        reach the loader, and refuses it. An ``ast`` check that never fails on
-        anything is indistinguishable from a check that never runs.
-        """
-        core = Path(agent_modes.__file__).resolve().parent
-        for name in ("bench.py", "llm.py"):
-            clean = (core / name).read_text(encoding="utf-8")
-            assert _mode_imports(clean) == []
-            for poison in (
-                "from src.core import agent_modes\n",
-                "from src.core.agent_modes import resolve_mode\n",
-                "import src.core.agent_modes\n",
-            ):
-                assert _mode_imports(poison + clean) != [], (
-                    f"{name} accepts {poison.strip()!r} unnoticed"
-                )

@@ -12,7 +12,7 @@ import {
   useChat,
 } from '../composables/useChat'
 import { copyText } from '../lib/clipboard'
-import { useBenchmark } from '../composables/useBenchmark'
+import { useAppShell } from '../composables/useAppShell'
 import { useBatch } from '../composables/useBatch'
 import {
   findingsLine,
@@ -35,7 +35,7 @@ const {
   attachImage,
   loadSession,
 } = useChat()
-const { state: benchmarkState } = useBenchmark()
+const { state: appShellState } = useAppShell()
 const {
   state: batch,
   stopBatch,
@@ -161,7 +161,7 @@ function closeModesDialog() {
 // Only usable when the configured endpoint is declared vision-capable
 // (SUPPORTS_VISION in .env, via /api/config).
 const supportsVision = computed(
-  () => benchmarkState.config?.supportsVision === true,
+  () => appShellState.config?.supportsVision === true,
 )
 
 const fileInput = ref(null)
@@ -181,18 +181,12 @@ function onFilePicked(event) {
 // --- Batch mode (the dialog itself lives in App.vue, like every modal) ---
 
 // Active only while this tab's state is IDLE: `locked` covers a reply streaming
-// and the whole of a running lot (including the gap between two task turns),
-// and a benchmark run keeps the shared chat endpoint busy, so a launch there
-// would be refused anyway.
-const canOpenBatch = computed(
-  () => !locked.value && benchmarkState.status !== 'running',
-)
+// and the whole of a running lot (including the gap between two task turns).
+const canOpenBatch = computed(() => !locked.value)
 
 const batchDisabledReason = computed(() => {
   if (batch.active) return 'A batch is already running'
   if (streaming.value) return 'Available when no reply is streaming'
-  if (benchmarkState.status === 'running')
-    return 'Available when the benchmark is idle'
   return ''
 })
 

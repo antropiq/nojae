@@ -1,7 +1,7 @@
 """Batch mode: enumerate a ``todos/``-style lot of numbered task files.
 
-Core-only (no FastAPI, no browser concerns), a sibling of :mod:`core.job`:
-this is the *whole* file surface batch mode has. It lists a folder -- names,
+Core-only (no FastAPI, no browser concerns): this is the *whole* file surface
+batch mode has. It lists a folder -- names,
 sizes and the first heading -- and hands over the one body the client must be
 able to send (the ``NN == 0`` big picture, which ``core.chat`` injects into
 the system prompt). **Task bodies are never read here**: a task is named by

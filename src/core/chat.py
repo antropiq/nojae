@@ -1,7 +1,7 @@
-"""Streaming chat with the benchmark-configured LLM.
+"""Streaming chat with the configured LLM.
 
-Pure loop + event emission, like ``core/llm.py``: takes an ``emit``
-callable, no FastAPI or browser concerns. Reasoning/thinking deltas are
+Pure loop + event emission: takes an ``emit`` callable, no FastAPI or browser
+concerns. Reasoning/thinking deltas are
 streamed as ``reasoning_delta`` text (the Chat tab's left panel shows the
 thinking timeline) while a single ``reasoning`` event flags that the model
 started thinking (the app-bar status pill). Reasoning text is never answer
@@ -56,10 +56,10 @@ TOOL_NOTICE = (
 # delimiter characters instead of reproducing one. A recorded break showed
 # where the model slips: prose follows the rule, then a fenced code block
 # "showing the real thing" emits one -- so the notice names code fences
-# and examples explicitly. Chat-only by design: the benchmark must keep
-# measuring the model's raw behaviour, and it builds its prompts in
-# core/llm.py, never here. The notice must never contain a raw run itself
-# -- a test guards that with the sanitizer.
+# and examples explicitly. This loop's own addition by design: the notice is
+# appended here and nowhere else, so a prompt built anywhere else carries
+# none. The notice must never contain a raw run itself -- a test guards that
+# with the sanitizer.
 CONTROL_TOKEN_NOTICE = (
     "\n\nWhen discussing chat-template control tokens (im_start, im_end "
     "and their like), never write one in its raw delimiter-wrapped form: "
@@ -394,10 +394,9 @@ def stream_chat(
                     if shown:
                         emit({"event": "reasoning_delta", "text": shown})
                 # Content, reasoning and tool-call argument deltas all open
-                # and extend the decode window (like the benchmark loop in
-                # core/llm.py): they are all generated tokens counted in
-                # completion_tokens, so neither the thinking phase nor a
-                # tool-call-only round may look free to the tok/s maths.
+                # and extend the decode window: they are all generated tokens
+                # counted in completion_tokens, so neither the thinking phase
+                # nor a tool-call-only round may look free to the tok/s maths.
                 if not content and not reasoning and not tool_args_text:
                     continue
                 arrival = time.monotonic()

@@ -10,7 +10,7 @@ import { useEditorMove } from '../composables/useEditorMove'
 import { useGitStatus } from '../composables/useGitStatus'
 import SearchDialog from './SearchDialog.vue'
 import { useWorkspaceSearch } from '../composables/useWorkspaceSearch'
-import { useBenchmark } from '../composables/useBenchmark'
+import { useAppShell } from '../composables/useAppShell'
 import { useEditorMode } from '../composables/useEditorMode'
 import { treeMenuItems } from '../lib/tree-menu'
 import { fileIcon } from '../lib/file-icons'
@@ -96,9 +96,9 @@ registerRefreshChord((path) => refreshFolder(path))
 // It is skipped while the inline name input is open: re-listing the folder a
 // half-typed name is sitting in would rebuild the rows around the caret. The
 // marks still re-read, because they cost one query and change no row.
-const bench = useBenchmark()
+const appShell = useAppShell()
 watch(
-  () => bench.state.activeTab,
+  () => appShell.state.activeTab,
   (tab) => {
     if (tab !== 'editor') return
     if (state.editing) git.load({ force: true })

@@ -13,7 +13,7 @@ Three invariants hold here and nowhere else may they bend (spec §2.1):
 * the ``sampling`` dict is merged into the request body **verbatim** --
   ``top_k``, ``min_p`` and ``repeat_penalty`` are llama.cpp sampler names,
   and a client that whitelisted OpenAI's own list would silently change the
-  model's sampling, and every score of every run;
+  model's sampling;
 * the model name travels **bare** -- no provider prefix is ever prepended,
   because ``openai/qwen3.8-...`` reaches llama-swap as a 404;
 * the ``messages`` are **sanitized** on the way out
@@ -312,10 +312,11 @@ def chat_completion(
 ) -> Dict[str, Any]:
     """One non-streaming chat completion; returns the parsed body.
 
-    Used by warm-up (``max_tokens=1``) and the verifier call. The
-    ``messages`` are sanitized on the way out exactly as the streaming
-    shape does (:mod:`llmkit.sanitize`). Any non-2xx raises
-    :class:`LLMRequestError` naming the status and the upstream message.
+    The other shape of the same seam: no ``stream`` keys in the body, and
+    ``max_tokens`` is a direct argument. The ``messages`` are sanitized on the
+    way out exactly as the streaming shape does (:mod:`llmkit.sanitize`). Any
+    non-2xx raises :class:`LLMRequestError` naming the status and the upstream
+    message.
     """
     url = chat_completions_url(server_url)
     body: Dict[str, Any] = {"messages": sanitize_messages(messages), "model": model}

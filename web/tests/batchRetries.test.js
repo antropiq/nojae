@@ -11,7 +11,7 @@ import {
   taskInstructionForAttempt,
   useBatch,
 } from '../src/composables/useBatch'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 import { loadAgentModes, setAgentMode, useAgentModes } from '../src/composables/useAgentModes'
 
@@ -25,7 +25,7 @@ import { loadAgentModes, setAgentMode, useAgentModes } from '../src/composables/
 const batch = useBatch().state
 const { launch, stopBatch } = useBatch()
 const chat = useChat().state
-const benchmark = useBenchmark().state
+const appShell = useAppShell().state
 
 // ---------------------------------------------------------------------------
 // The pure rules first: the decision table, and the message a retry carries.
@@ -299,8 +299,7 @@ function reset() {
   chat.mcp.locked = false
   chat.lsp.loaded = false
   chat.lsp.locked = false
-  benchmark.status = 'idle'
-  benchmark.activeTab = 'chat'
+  appShell.activeTab = 'chat'
   batch.active = false
   batch.status = 'idle'
   batch.total = 0

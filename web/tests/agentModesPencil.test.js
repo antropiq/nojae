@@ -4,7 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import WorkBenchInput from '../src/components/WorkBenchInput.vue'
 import { loadAgentModes, setAgentMode, useAgentModes } from '../src/composables/useAgentModes'
 import { useBatch } from '../src/composables/useBatch'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 
 // ---------------------------------------------------------------------------
@@ -23,7 +23,7 @@ import { useChat } from '../src/composables/useChat'
 const agentModes = useAgentModes().state
 const chat = useChat().state
 const batch = useBatch().state
-const benchmark = useBenchmark().state
+const appShell = useAppShell().state
 
 const DOCUMENT_BODY = {
   entries: [
@@ -97,8 +97,7 @@ function resetAll() {
   chat.lsp = { servers: [], enabled: {}, loaded: false, locked: false, restarting: false }
   batch.active = false
   batch.status = 'idle'
-  benchmark.status = 'idle'
-  benchmark.activeTab = 'chat'
+  appShell.activeTab = 'chat'
   agentModes.modes = []
   agentModes.current = null
   agentModes.default = null

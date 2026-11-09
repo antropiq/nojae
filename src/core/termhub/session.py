@@ -1,7 +1,7 @@
 """One shell on one PTY: spawn, pump, resize, tear down.
 
 ``TerminalSession`` is the core behind ``WS /api/terminal``. It knows
-nothing about WebSockets: like the benchmark and chat cores it takes an
+nothing about WebSockets: like the chat core it takes an
 injected ``emit`` (an async callable publishing plain dicts) and is handed a
 ``receive_frame`` callable that yields the next client frame. Everything else —
 the pty, the child, the escalation — is process work.

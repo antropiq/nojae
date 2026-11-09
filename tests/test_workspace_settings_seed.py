@@ -34,8 +34,8 @@ and never this checkout's own ``.nojae``.
 Two cases ws-02 could not write are here, added by ws-06 once the app really read
 the file: the D10 ordering asserted end to end (a switch into a workspace whose
 two LSP gates both name ``pyright`` has the hub asked to start it), and the D9
-refusal — a malformed file answers a chat and a benchmark request with the
-sentence naming the path, never a 200 with a guessed model.
+refusal — a malformed file answers a chat request with the sentence naming the
+path, never a 200 with a guessed model.
 """
 
 import json
@@ -585,7 +585,7 @@ class TestTheTwoEntryPoints:
         assert client.app.state.lsp.settings_exists[-1] is False
 
 
-# -- a malformed file refuses a chat and a benchmark request (D9) -----------------
+# -- a malformed file refuses a chat request (D9) ---------------------------------
 
 
 class TestAMalformedFileRefusesEveryModelRequest:
@@ -593,7 +593,7 @@ class TestAMalformedFileRefusesEveryModelRequest:
 
     The app boots on a broken file (a workspace is still browsable), so the
     question is what a model request does with it. Three answers were possible
-    and two of them are wrong: a 200 that benchmarked on invented defaults would
+    and two of them are wrong: a 200 that ran on invented defaults would
     measure the defaults rather than the model, and a transport error quoting the
     template's instruction sentence would put a sentence in the user's face where
     a path belongs. The one the app gives is the server's own sentence — the same
@@ -625,16 +625,6 @@ class TestAMalformedFileRefusesEveryModelRequest:
         # Not a transport error quoting a template sentence: the instruction text
         # never leaves the file.
         assert "Put here the url" not in detail
-
-    def test_a_benchmark_request_refuses_with_the_same_sentence(self, seed_client):
-        client, root = seed_client
-        path = self._write(root, malformed_document())
-
-        response = client.post("/api/run")
-        assert response.status_code == 422
-        detail = response.json()["detail"]
-        assert "not valid JSON" in detail
-        assert str(path) in detail
 
     def test_a_seeded_file_refuses_a_chat_request_too(self, seed_client):
         """D8's turn at the same seam: valid JSON, unusable values, no call."""

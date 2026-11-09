@@ -402,7 +402,7 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         "src/config.py",
         "src/core/editorfs/policy.py",
         "tests/test_api.py",
-        "resources/122qcm.json",
+        "src/core/models.py",
     ]
 
     @pytest.mark.parametrize("rel", ORDINARY)

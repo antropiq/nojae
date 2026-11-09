@@ -1031,18 +1031,20 @@ class TestTheTwoGatesThatMustNotApply:
         finally:
             agent_modes.invalidate_agent_modes_cache()
 
-    def test_a_busy_app_leaves_the_pane_answering(self, editor_client, tmp_path):
+    def test_a_busy_app_leaves_the_pane_answering(self, editor_client, tmp_path, monkeypatch):
         """The route consults no busy flag: reading code is not a write.
 
         The *lot* lock itself is browser state (``useBatch.state.active``), so
         its proof is ``useEditorLsp.test.js``'s — the composable reads no batch
         flag. What this row pins is the backend half: the app's own "something
-        is running" state, which every write route refuses on, does not reach
-        this route.
+        is running" state — the streaming reply every write route refuses on —
+        does not reach this route.
         """
-        client, app, _manager = editor_client
+        from src.api import routes
+
+        client, _app, _manager = editor_client
         (tmp_path / "workspace" / "a.py").write_text("x = 1\n", encoding="utf-8")
-        app.state.run_state.status = "running"
+        monkeypatch.setattr(routes, "_CHAT_TASKS", {"a-streaming-reply"})
 
         response = client.post(
             "/api/lsp/query",

@@ -170,8 +170,8 @@ class TestRequestBodyIsTheMeasuredWire:
     def test_the_llama_cpp_samplers_are_in_the_body(self):
         # top_k, min_p and repeat_penalty are llama.cpp sampler names, not
         # OpenAI ones. A client that whitelisted OpenAI's own list would
-        # silently change the model's sampling -- and every score of every
-        # run -- with nothing on screen to say so.
+        # silently change the model's sampling, with nothing on screen to
+        # say so.
         for key in ("top_k", "min_p", "repeat_penalty", "reasoning_effort"):
             assert key in EXPECTED_STREAM_BODY
 

@@ -1,233 +1,65 @@
-import threading
 from types import SimpleNamespace
-from typing import Optional
-
-import pytest
 
 from src.core.llm import (
-    RunCancelled,
-    TRUNCATION_MESSAGE,
     _extract_reasoning,
-    _extract_total_tokens,
     _extract_usage,
-    call_llm_and_stream,
     close_llm_stream,
     safe_get_choice_content,
     saw_finish_reason,
-    warmup_model,
 )
 # The chunk builders come from the shared double (``tests/llmkit_fakes``) so the
 # stubs and ``llmkit.client.ChatStream`` are held to one interface.
-from tests.llmkit_fakes import (
-    FakeStream,
-    content_chunk,
-    finish_chunk,
-    reasoning_chunk,
-    usage_chunk,
-)
+from tests.llmkit_fakes import FakeStream, content_chunk, finish_chunk
 
 
-class TestCallLlmAndStreamTiming:
-    def _run(self, monkeypatch, chunks, clock_values):
-        clock = list(clock_values)
+class TestSawFinishReason:
+    """The one signal a cut stream and a finished one differ on.
 
-        def fake_monotonic():
-            return clock.pop(0)
-
-        monkeypatch.setattr("src.core.llm.time.monotonic", fake_monotonic)
-        monkeypatch.setattr(
-            "src.core.llm.stream_completion", lambda **kwargs: iter(chunks)
-        )
-        events = []
-        result = call_llm_and_stream(
-            "m", "http://server:8080/v1",
-            {"uuid": "u", "question": "q", "expected": "e"}, events.append,
-        )
-        assert clock == []  # every monotonic() call consumed a tick
-        return result, events
-
-    def test_usage_chunk_arrival_does_not_extend_timing(self, monkeypatch):
-        # t0, first content, last content, stream-end (never used as took).
-        chunks = [content_chunk("a"), content_chunk("bc"),
-                  usage_chunk(prompt=20, completion=5, total=25)]
-        result, _ = self._run(monkeypatch, chunks, [0.0, 1.0, 3.0, 100.0])
-
-        assert result.text == "abc"
-        assert result.took == 3.0   # t_last - t0, ignoring the 100.0 drain
-        assert result.ttft == 1.0
-        assert result.gen_duration == 2.0
-        assert result.completion_tokens == 5
-        assert result.prompt_tokens == 20
-        assert result.tokens_estimated is False
-
-    def test_missing_usage_estimates_tokens(self, monkeypatch):
-        chunks = [content_chunk("hello world!!!")]  # 14 chars -> 4 tokens
-        result, _ = self._run(monkeypatch, chunks, [0.0, 0.5, 2.0])
-
-        assert result.completion_tokens == 4
-        assert result.tokens_estimated is True
-        assert result.prompt_tokens == 0
-
-    def test_completion_derived_from_total_minus_prompt(self, monkeypatch):
-        chunks = [content_chunk("x"),
-                  usage_chunk(prompt=10, total=18)]
-        result, _ = self._run(monkeypatch, chunks, [0.0, 0.2, 1.0])
-
-        assert result.completion_tokens == 8
-        assert result.tokens_estimated is False
-
-    def test_empty_stream_has_zero_generation_window(self, monkeypatch):
-        result, _ = self._run(monkeypatch, [], [0.0, 5.0])
-
-        assert result.text == ""
-        assert result.took == 5.0
-        assert result.ttft == 0.0
-        assert result.gen_duration == 0.0
-        assert result.completion_tokens == 0
-        assert result.tokens_estimated is False
-
-    def test_call_failure_returns_zeroed_result(self, monkeypatch):
-        def boom(**kwargs):
-            raise RuntimeError("connect failed")
-
-        clock = [0.0, 0.25]
-        monkeypatch.setattr("src.core.llm.time.monotonic", lambda: clock.pop(0))
-        monkeypatch.setattr("src.core.llm.stream_completion", boom)
-        events = []
-        result = call_llm_and_stream(
-            "m", "http://server:8080/v1",
-            {"uuid": "u", "question": "q", "expected": "e"}, events.append,
-        )
-
-        assert result.text == ""
-        assert result.took == 0.25
-        assert result.gen_duration == 0.0
-        assert events[0]["event"] == "run_error"
-
-    def test_emits_token_events_in_order(self, monkeypatch):
-        chunks = [content_chunk("he"), content_chunk("llo")]
-        result, events = self._run(monkeypatch, chunks, [0.0, 0.1, 0.2, 0.3])
-
-        assert [e["text"] for e in events if e["event"] == "token"] == ["he", "llo"]
-
-    def test_reasoning_deltas_anchor_the_generation_window(self, monkeypatch):
-        # Prefill ends, reasoning streams first, then the answer: the decode
-        # window must start at the first reasoning token, not the first
-        # content token, or the rate is inflated by the reasoning wait.
-        chunks = [
-            reasoning_chunk("thinking…"),
-            reasoning_chunk("more…"),
-            content_chunk("4"),
-            content_chunk("2"),
-            usage_chunk(prompt=20, completion=40, total=60),
-        ]
-        result, events = self._run(
-            monkeypatch, chunks, [0.0, 9.9, 11.0, 12.04, 16.5, 100.0]
-        )
-
-        assert result.text == "42"
-        assert result.ttft == 9.9
-        assert result.took == 16.5
-        assert result.gen_duration == 16.5 - 9.9
-        assert result.completion_tokens == 40
-        assert [e["text"] for e in events if e["event"] == "token"] == ["4", "2"]
-
-    def test_reasoning_only_stream_has_zero_answer_text(self, monkeypatch):
-        chunks = [reasoning_chunk("only "), reasoning_chunk("thinking")]
-        result, events = self._run(monkeypatch, chunks, [0.0, 1.0, 2.0, 3.0])
-
-        assert result.text == ""
-        assert result.gen_duration == 1.0
-        assert [e["event"] for e in events if e["event"] == "token"] == []
-
-
-class TestStreamTruncationDetection:
-    """A stream the server cut short must not look like a finished answer.
-
-    The chunks of a cut answer and of a finished one are indistinguishable, so
-    the only honest signal is the stream's own ``saw_finish_reason``, which the
-    client sets while iterating (``llmkit.client.ChatStream``).
+    Their chunks are indistinguishable, so the reader asks the stream itself:
+    ``saw_finish_reason`` is what ``llmkit.client.ChatStream`` records while it
+    is iterated. The chat loop reads it after draining the stream and ends the
+    reply on ``error`` when it is false (``tests/test_chat.py``, and the
+    end-to-end case in ``tests/test_llmkit_client.py``).
     """
 
-    def _run(self, monkeypatch, generator):
-        monkeypatch.setattr(
-            "src.core.llm.stream_completion", lambda **kwargs: generator
-        )
-        events = []
-        result = call_llm_and_stream(
-            "m", "http://server:8080/v1",
-            {"uuid": "u", "question": "q", "expected": "e"}, events.append,
-        )
-        return result, events
-
-    def test_plain_iterable_without_the_attributes_is_not_flagged(self, monkeypatch):
-        # Fails open: a stream shape we do not recognise must never raise a
-        # false alarm on a complete answer (this is what every other test in
-        # this file feeds the loop).
-        result, events = self._run(
-            monkeypatch, iter([content_chunk("whole answer")])
-        )
-        assert result.truncated is False
-        assert [e["event"] for e in events] == ["token"]
-
-    def test_no_finish_reason_ever_received_flags_the_answer(self, monkeypatch):
-        result, events = self._run(
-            monkeypatch,
-            FakeStream([content_chunk("half an "), content_chunk("answer")]),
-        )
-        assert result.truncated is True
-        # The fragment is still returned (it is what the user should read), but
-        # the run is told it is not a completed answer.
-        assert result.text == "half an answer"
-        errors = [e for e in events if e["event"] == "run_error"]
-        assert [e["message"] for e in errors] == [TRUNCATION_MESSAGE]
-
-    def test_received_finish_reason_leaves_the_answer_alone(self, monkeypatch):
-        result, events = self._run(
-            monkeypatch,
-            FakeStream([content_chunk("done"), finish_chunk("stop")]),
-        )
-        assert result.truncated is False
-        assert [e["event"] for e in events] == ["token"]
-
-    def test_a_late_finish_reason_counts_as_received(self, monkeypatch):
-        # The reason may arrive on any chunk, not the first: the flag is a
-        # whole-stream fact, settled only once the loop has drained it.
-        result, _ = self._run(
-            monkeypatch,
-            FakeStream([
-                content_chunk("ok"),
-                content_chunk(" still going"),
-                finish_chunk("length"),
-            ]),
-        )
-        assert result.truncated is False
-
-    def test_reasoning_only_cut_is_flagged(self, monkeypatch):
-        # A thinking model cut mid-reasoning streams an empty answer: gating on
-        # the answer buffer would let that turn pass as a clean empty answer.
-        result, events = self._run(
-            monkeypatch, FakeStream([reasoning_chunk("thinking hard")])
-        )
-        assert result.truncated is True
-        assert any(e["event"] == "run_error" for e in events)
-
-    def test_empty_stream_is_not_flagged(self, monkeypatch):
-        # Nothing was generated, so there is nothing to call incomplete.
-        result, events = self._run(monkeypatch, FakeStream([]))
-        assert result.truncated is False
-        assert events == []
-
-    def test_saw_finish_reason_directly(self):
+    def test_a_stream_shape_without_the_attribute_fails_open(self):
+        # A false alarm on a complete answer would be its own bug, so an
+        # unrecognised shape (a bare iterable, ``None``, a stub) reads as
+        # finished.
         assert saw_finish_reason(object()) is True  # attribute absent
         assert saw_finish_reason(None) is True
-        # Drained streams only: the flag is set while iterating.
-        drained = FakeStream([finish_chunk("tool_calls")])
-        list(drained)
-        assert saw_finish_reason(drained) is True
-        cut = FakeStream([content_chunk("half")])
+        assert saw_finish_reason(iter([content_chunk("whole answer")])) is True
+
+    def test_a_stream_that_never_carried_a_reason_is_cut(self):
+        cut = FakeStream([content_chunk("half an "), content_chunk("answer")])
         list(cut)
         assert saw_finish_reason(cut) is False
+
+    def test_a_received_reason_leaves_the_stream_alone(self):
+        finished = FakeStream([content_chunk("done"), finish_chunk("stop")])
+        list(finished)
+        assert saw_finish_reason(finished) is True
+
+    def test_a_late_finish_reason_counts_as_received(self):
+        # The reason may arrive on any chunk, not the first: the flag is a
+        # whole-stream fact, settled only once the loop has drained it.
+        late = FakeStream([
+            content_chunk("ok"),
+            content_chunk(" still going"),
+            finish_chunk("length"),
+        ])
+        list(late)
+        assert saw_finish_reason(late) is True
+
+    def test_the_flag_is_only_settled_once_the_stream_is_drained(self):
+        # Reading it before the loop has pulled the finish chunk would answer
+        # about the part seen so far, not about the stream.
+        stream = FakeStream([content_chunk("x"), finish_chunk("tool_calls")])
+        it = iter(stream)
+        next(it)
+        assert saw_finish_reason(stream) is False
+        next(it)
+        assert saw_finish_reason(stream) is True
 
 
 class TestCloseLlmStream:
@@ -246,33 +78,6 @@ class TestCloseLlmStream:
 
     def test_missing_close_is_noop(self):
         close_llm_stream(iter([]))
-
-
-class TestCallLlmCancellation:
-    def _run_cancelled(self, monkeypatch, gen):
-        cancel = threading.Event()
-        cancel.set()
-        monkeypatch.setattr("src.core.llm.stream_completion", lambda **kwargs: gen)
-        events = []
-        with pytest.raises(RunCancelled):
-            call_llm_and_stream(
-                "m", "http://server:8080/v1",
-                {"uuid": "u", "question": "q", "expected": "e"}, events.append,
-                cancel_event=cancel,
-            )
-        return events
-
-    def test_cancel_closes_the_stream(self, monkeypatch):
-        stream = FakeStream([content_chunk("x")])
-        events = self._run_cancelled(monkeypatch, stream)
-        assert events == []
-        assert stream.closed
-
-    def test_cancel_with_a_stream_that_has_no_close_is_not_an_error(self, monkeypatch):
-        # A stub-shaped stream (a bare iterable) has no socket to close; the
-        # cancel must still surface as RunCancelled, not as an AttributeError.
-        events = self._run_cancelled(monkeypatch, iter([content_chunk("x")]))
-        assert events == []
 
 
 class TestSafeGetChoiceContent:
@@ -295,22 +100,6 @@ class TestSafeGetChoiceContent:
     def test_dict_with_empty_choices_returns_empty(self):
         chunk = {"choices": [], "usage": {"total_tokens": 12}}
         assert safe_get_choice_content(chunk) == ""
-
-
-class TestExtractTotalTokens:
-    def test_dict_chunk_with_usage(self):
-        chunk = {"choices": [], "usage": {"total_tokens": 42}}
-        assert _extract_total_tokens(chunk) == 42
-
-    def test_non_dict_chunk_returns_none(self):
-        assert _extract_total_tokens("not a chunk") is None
-
-    def test_chunk_without_usage_returns_none(self):
-        chunk = {"choices": [{"delta": {"content": "hi"}}]}
-        assert _extract_total_tokens(chunk) is None
-
-    def test_zero_total_returns_none(self):
-        assert _extract_total_tokens({"usage": {"total_tokens": 0}}) is None
 
 
 class TestExtractUsage:
@@ -378,7 +167,9 @@ class TestChunksAreReadAsMappings:
         # a server's nested block arrives: the read is a ``.get``, not a type.
         usage = self.MappingChunk(
             {"usage": self.MappingChunk({"total_tokens": 9, "prompt_tokens": 4})})
-        assert _extract_total_tokens(usage) == 9
+        assert _extract_usage(usage) == {
+            "prompt_tokens": 4, "completion_tokens": None, "total_tokens": 9,
+        }
         reasoning = self.MappingChunk(
             {"choices": [{"delta": {"reasoning_content": "deep"}}]}
         )
@@ -389,132 +180,5 @@ class TestChunksAreReadAsMappings:
         # reaches chunk.choices[0].delta.content any more.
         chunk = self.AttributeChunk()
         assert safe_get_choice_content(chunk) == ""
-        assert _extract_total_tokens(chunk) is None
-
-
-class TestCallLlmApiKey:
-    def _captured_kwargs(self, monkeypatch, **call_kwargs):
-        calls = []
-        monkeypatch.setattr(
-            "src.core.llm.stream_completion",
-            lambda **kwargs: calls.append(kwargs) or iter([]),
-        )
-        events = []
-        call_llm_and_stream(
-            "m", "http://server:8080/v1",
-            {"uuid": "u", "question": "q", "expected": "e"}, events.append,
-            **call_kwargs,
-        )
-        assert len(calls) == 1
-        return calls[0]
-
-    def test_defaults_to_none_api_key(self, monkeypatch):
-        assert self._captured_kwargs(monkeypatch)["api_key"] == "none"
-
-    def test_uses_configured_api_key(self, monkeypatch):
-        kwargs = self._captured_kwargs(monkeypatch, api_key="sk-42")
-        assert kwargs["api_key"] == "sk-42"
-
-    def test_passes_the_bare_model_and_server_url_to_the_seam(self, monkeypatch):
-        # The lot's second invariant: no ``openai/`` prefix ever reaches the
-        # request body. The URL-building and header rules are asserted once in
-        # ``tests/test_llmkit_client.py``, not here.
-        kwargs = self._captured_kwargs(monkeypatch)
-        assert kwargs["model"] == "m"
-        assert kwargs["server_url"] == "http://server:8080/v1"
-        assert "api_base" not in kwargs
-
-
-class TestVerifyResponseApiKey:
-    def _verify(self, monkeypatch, api_key, content: Optional[str] = "true"):
-        from src.core.llm import verify_response
-        from src.core.models import VerifierAgent
-
-        calls = []
-
-        def fake_chat_completion(**kwargs):
-            calls.append(kwargs)
-            return {"choices": [{"message": {"content": content}}]}
-
-        monkeypatch.setattr("src.core.llm.chat_completion", fake_chat_completion)
-        verifier = VerifierAgent(endpoint="judge", serverUrl="http://v:8080/v1",
-                                 apiKey=api_key)
-        events = []
-        ok = verify_response(verifier, {"question": "q", "expected": "e"}, "a",
-                             events.append)
-        return ok, calls[0], events
-
-    def test_uses_verifier_api_key(self, monkeypatch):
-        ok, kwargs, _ = self._verify(monkeypatch, "sk-judge")
-        assert ok is True
-        assert kwargs["api_key"] == "sk-judge"
-
-    def test_falls_back_to_none_api_key(self, monkeypatch):
-        _, kwargs, _ = self._verify(monkeypatch, "")
-        assert kwargs["api_key"] == "none"
-
-    def test_judge_model_and_server_url_reach_the_seam_bare(self, monkeypatch):
-        _, kwargs, _ = self._verify(monkeypatch, "sk-judge")
-        assert kwargs["model"] == "judge"
-        assert kwargs["server_url"] == "http://v:8080/v1"
-
-    def test_null_content_is_a_false_verdict_not_a_crash(self, monkeypatch):
-        # A reasoning-only judge answer cut by max_tokens comes back with
-        # ``content: null`` (spec §2.2): the answer is not graded, and the run
-        # is not told anything went wrong with the transport.
-        ok, _, events = self._verify(monkeypatch, "sk-judge", content=None)
-        assert ok is False
-        assert [e["event"] for e in events] == []
-
-
-class TestWarmupModel:
-    def test_sends_minimal_non_streaming_request(self, monkeypatch):
-        calls = []
-
-        def fake_chat_completion(**kwargs):
-            calls.append(kwargs)
-            return {"choices": [{"message": {"content": ""}}]}
-
-        monkeypatch.setattr("src.core.llm.chat_completion", fake_chat_completion)
-        warmup_model("my-model", "http://server:8080/v1")
-
-        assert len(calls) == 1
-        kwargs = calls[0]
-        assert kwargs["model"] == "my-model"
-        assert kwargs["server_url"] == "http://server:8080/v1"
-        assert kwargs["max_tokens"] == 1
-        assert "stream" not in kwargs
-        assert "stream_options" not in kwargs
-
-    def test_uses_none_api_key_by_default(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(
-            "src.core.llm.chat_completion", lambda **kwargs: calls.append(kwargs)
-        )
-        warmup_model("my-model", "http://server:8080/v1")
-        assert calls[0]["api_key"] == "none"
-
-    def test_passes_configured_api_key(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(
-            "src.core.llm.chat_completion", lambda **kwargs: calls.append(kwargs)
-        )
-        warmup_model("my-model", "http://server:8080/v1", api_key="sk-42")
-        assert calls[0]["api_key"] == "sk-42"
-
-    def test_swallows_errors(self, monkeypatch):
-        def boom(**kwargs):
-            raise RuntimeError("model not found")
-
-        monkeypatch.setattr("src.core.llm.chat_completion", boom)
-        warmup_model("missing", "http://server:8080/v1")
-
-    def test_cancelled_before_call_skips_request(self, monkeypatch):
-        called = []
-        monkeypatch.setattr(
-            "src.core.llm.chat_completion", lambda **kwargs: called.append(kwargs)
-        )
-        cancel = threading.Event()
-        cancel.set()
-        warmup_model("my-model", "http://server:8080/v1", cancel)
-        assert called == []
+        assert _extract_usage(chunk) is None
+        assert _extract_reasoning(chunk) == ""

@@ -47,7 +47,7 @@ import {
   useChat,
 } from '../src/composables/useChat'
 import { useBatch } from '../src/composables/useBatch'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 
 // Layer 1 (jsdom): the mode dropdown's state machine. What is asserted here is
 // the composable's decisions — the default it seeds, the payload key it adds,
@@ -59,7 +59,7 @@ import { useBenchmark } from '../src/composables/useBenchmark'
 const agentModes = useAgentModes().state
 const chat = useChat().state
 const batch = useBatch().state
-const benchmark = useBenchmark().state
+const appShell = useAppShell().state
 
 // The app-owned mode is recognised only by `editable: false` (D9), so this file
 // calls it "the reserved mode" and never names it — the same rule the client
@@ -138,8 +138,7 @@ function resetAll() {
   chat.lsp = { servers: [], enabled: {}, loaded: false, locked: false, restarting: false }
   batch.active = false
   batch.status = 'idle'
-  benchmark.status = 'idle'
-  benchmark.activeTab = 'chat'
+  appShell.activeTab = 'chat'
   agentModes.modes = []
   agentModes.current = null
   agentModes.default = null

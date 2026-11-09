@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import WorkspaceNavigator from '../src/components/WorkspaceNavigator.vue'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useGitStatus } from '../src/composables/useGitStatus'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 
@@ -23,7 +23,7 @@ import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 
 const tree = useWorkspaceTree()
 const git = useGitStatus()
-const bench = useBenchmark()
+const appShell = useAppShell()
 
 // The disk, mutable: `agent.py` appears between the two listings, which is the
 // whole story the first test tells.
@@ -94,7 +94,7 @@ beforeEach(() => {
   git.state.loadedAt = 0
   // The tab the user is *on* when the navigator mounts: the watch must answer
   // the switch back to the Editor, not the state it started in.
-  bench.state.activeTab = 'editor'
+  appShell.state.activeTab = 'editor'
   vi.restoreAllMocks()
   document.body.querySelectorAll('.tree-context-menu, dialog').forEach((el) => el.remove())
 })
@@ -108,12 +108,12 @@ describe('entering the Editor tab', () => {
     // The user leaves for the WorkBench — flushed, because a watcher that
     // never saw the away edge has nothing to answer on the way back — and the
     // agent writes a file there.
-    bench.state.activeTab = 'chat'
+    appShell.state.activeTab = 'chat'
     await flushPromises()
     disk.extra = true
 
     // …and comes back. No click on the refresh button anywhere in this test.
-    bench.state.activeTab = 'editor'
+    appShell.state.activeTab = 'editor'
     await flushPromises()
 
     expect(wrapper.find('.tree-row[data-path="agent.py"]').exists()).toBe(true)
@@ -128,9 +128,9 @@ describe('entering the Editor tab', () => {
   it('keeps the opened branches open across that re-list', async () => {
     stubDisk()
     const wrapper = await mountedNavigator()
-    bench.state.activeTab = 'chat'
+    appShell.state.activeTab = 'chat'
     await flushPromises()
-    bench.state.activeTab = 'editor'
+    appShell.state.activeTab = 'editor'
     await flushPromises()
 
     // A refresh is not a collapse: the rows the user had opened are still open.
@@ -149,9 +149,9 @@ describe('entering the Editor tab', () => {
     await flushPromises()
 
     const before = fetchCalls('/api/fs/tree')
-    bench.state.activeTab = 'chat'
+    appShell.state.activeTab = 'chat'
     await flushPromises()
-    bench.state.activeTab = 'editor'
+    appShell.state.activeTab = 'editor'
     await flushPromises()
 
     expect(fetchCalls('/api/fs/tree')).toBe(before)
@@ -166,7 +166,7 @@ describe('entering the Editor tab', () => {
     const wrapper = await mountedNavigator()
     const before = globalThis.fetch.mock.calls.length
 
-    bench.state.activeTab = 'chat'
+    appShell.state.activeTab = 'chat'
     await flushPromises()
 
     expect(globalThis.fetch.mock.calls.length).toBe(before)

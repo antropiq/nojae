@@ -22,10 +22,10 @@ DATA_PREFIX = "data:"
 API_KEY_PLACEHOLDER = "none"
 
 # A dead endpoint fails fast; a live stream is never given a read deadline.
-# A stalled prefill or a model load (warm-up exists precisely because that wait
-# is long) must stay what it is -- a slow first token -- and must not surface as
-# a *truncated answer*, which is the confusion this client exists to remove
-# (D10). ``None`` means "no read timeout" to httpx.
+# A stalled prefill or a model load -- a wait that can be long -- must stay
+# what it is: a slow first token. It must not surface as a *truncated answer*,
+# which is the confusion this client exists to remove (D10). ``None`` means
+# "no read timeout" to httpx.
 CONNECT_TIMEOUT = 10.0
 READ_TIMEOUT: Optional[float] = None
 WRITE_TIMEOUT = 30.0

@@ -23,11 +23,11 @@ the real path. Nothing here reads the values of, or writes to, this checkout's
 own ``.nojae``.
 
 The group-2/3 half of the story is asserted too, and it is what keeps this file
-honest through **ws-04**: that task shrinks ``SETTING_KEYS`` to the verifier
-block, ``QUESTION_SET``, ``LLM_DEBUG`` and ``NOJAE_PYTHON_ROOT``, and the
-wipe loops must keep protecting exactly those, because those keys *stay* in the
-environment. Drop one from the tuple over there and the ambient environment
-answers it here, which turns one of the cases below red.
+honest: ``SETTING_KEYS`` is the two technical keys — ``LLM_DEBUG`` and
+``NOJAE_PYTHON_ROOT`` — and the wipe loops must keep protecting exactly those,
+because those keys *stay* in the environment. Drop one from the tuple over
+there and the ambient environment answers it here, which turns one of the cases
+below red.
 """
 
 import os
@@ -187,43 +187,35 @@ class TestTheWorkspaceSourcedHelpersAreNeutralToo:
 
 
 class TestTheEnvWipeLoopsStillCoverWhatStaysInTheEnv:
-    """Group 2/3 is still the environment's, so the loops must keep its keys."""
+    """The two technical keys are still the environment's, so the loops keep them."""
 
-    def test_the_verifier_block_answers_nothing_after_the_wipe_loop(
+    def test_the_managed_keys_answer_nothing_after_the_wipe_loop(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """The six fixtures' loop, run here: group 2 stays neutralised.
+        """The six fixtures' loop, run here: the managed keys stay neutralised.
 
-        Group 1 is neutralised by the *location*; group 2 (the verifier) is
-        still an environment store, so it is neutralised by wiping
-        ``SETTING_KEYS`` — which is why ws-04 must keep the four
-        ``VERIFIER_AGENT_*`` names inside that tuple while it shrinks it.
+        The model connection is neutralised by the *location*; the keys that
+        stayed in ``.env`` are neutralised by wiping ``SETTING_KEYS`` — which
+        is why that tuple must keep naming them.
         """
         for key in config_module.SETTING_KEYS:
             monkeypatch.delenv(key, raising=False)
             assert key not in os.environ
 
         # A file of this test's own, so the config is built at all: with the env
-        # wiped, the verifier half must be absent rather than ambient.
+        # wiped, nothing ambient reaches it.
         neutralise_workspace_settings(monkeypatch, tmp_path)
         config, error = load_endpoints_config()
         assert error is None
         assert config is not None
-        assert config.verifierAgent is None
 
     def test_the_still_env_sourced_keys_are_named_by_the_tuple(self):
-        """ws-04 shrinks ``SETTING_KEYS`` to these; it may not drop them.
+        """The tuple is exactly these; it may not drop them.
 
-        Groups 2 and 3 as the spec names them: the verifier block, the question
-        set and the two technical keys. They stay in ``.env``, so they stay
-        wiped by the loops this file's first class is about.
+        The two technical keys stay in ``.env``, so they stay wiped by the
+        loops this file's first class is about.
         """
         for key in (
-            "VERIFIER_AGENT_SYSPROMPT",
-            "VERIFIER_AGENT_SERVERURL",
-            "VERIFIER_AGENT_SERVERURL_API_KEY",
-            "VERIFIER_AGENT_ENDPOINT",
-            "QUESTION_SET",
             config_module.LLM_DEBUG_KEY,
             "NOJAE_PYTHON_ROOT",
         ):

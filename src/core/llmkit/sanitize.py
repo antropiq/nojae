@@ -1,13 +1,13 @@
 """Neutralising delimiter-wrapped control tokens in outgoing message content.
 
-Every benchmark answer, tool result and user message rides back into the
+Every chat-history turn, tool result and batch turn rides back into the
 next prompt as message content, and a chat-template control token is plain
 text at the HTTP surface: whoever gets one into a message can close the
 current turn early or forge a block the server's template will honour.
 This module is the single place that says such a run never leaves the app.
 Both call shapes in :mod:`llmkit.client` pass their ``messages`` through
-:func:`sanitize_messages` before the request body is built, so benchmark,
-verifier, warm-up, chat and batch are all covered at the one HTTP seam --
+:func:`sanitize_messages` before the request body is built, so every path
+that reaches a model is covered at the one HTTP seam --
 no caller can forget it, because no caller can skip it.
 
 The neutralisation is removal of every token-shaped run -- a name wrapped
@@ -29,7 +29,7 @@ does; guarding content alone guards only the obvious door.
 
 Removal, not escaping: an escaped run is still a shape a template's own
 re-sanitiser might undo, and the app has no use for token-shaped text in
-content -- a benchmark question or a verifier payload carrying one is an
+content -- a user message or a tool result carrying one is an
 attack, not an accident. The delimiters here are assembled from single
 characters through ``re.escape``, so this source file never carries a
 complete delimiter pair: the run this module exists to remove must not

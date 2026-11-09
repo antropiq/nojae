@@ -1,18 +1,17 @@
 import { reactive, watch } from 'vue'
-import { useBenchmark } from './useBenchmark'
 import { useBatch } from './useBatch'
 import { useChat } from './useChat'
 import { inferenceRunning } from '../lib/inference-state'
 // The clip is a build asset, not a server route: Vite hashes it into
 // `web/dist/assets/` (like the fonts in `src/fonts/`), so nothing on the
-// backend plays or serves audio and `resources/` stays question sets only.
+// backend plays or serves audio.
 import sessionEndedUrl from '../assets/sounds/session_ended.mp3'
 
 // Audible twin of the tab-title glyph: the same edge, heard instead of seen.
 // When the app goes back to "no inference in flight" — the moment the tab
 // switches from ⚡ to ✨ — the browser tab is usually the only thing still on
 // screen, so a short chime is what actually tells the user their conversation
-// is over (and a benchmark run finished).
+// is over.
 //
 // Deliberately one edge on `inferenceRunning()` rather than a watch on
 // useChat.state.phase: the shared predicate keeps ⚡/✨ and the chime telling
@@ -100,7 +99,6 @@ export function playSessionEnded() {
 }
 
 export function useSessionSound() {
-  const { state: benchmark } = useBenchmark()
   const { state: chat } = useChat()
   const { state: batch } = useBatch()
 
@@ -112,7 +110,7 @@ export function useSessionSound() {
   if (!watcherArmed) {
     watcherArmed = true
     watch(
-      () => inferenceRunning({ benchmark, chat, batch }),
+      () => inferenceRunning({ chat, batch }),
       (running, wasRunning) => {
         if (!wasRunning || running) return
         playSessionEnded()

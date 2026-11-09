@@ -11,7 +11,7 @@ import { useTheme } from './useTheme'
 // socket behind the user's back.
 //
 // The xterm classes (Terminal, FitAddon, WebLinksAddon) are imported *lazily*,
-// inside `attach()`, never at module top and never in main.js: the Benchmark
+// inside `attach()`, never at module top and never in main.js: the WorkBench
 // tab must not download the terminal. Their base CSS is imported statically by
 // the component (EditorTerminal.vue), which keeps it in the same lazy Editor
 // chunk as the classes.
@@ -274,7 +274,7 @@ async function attach(host) {
   if (disposed) return
   hostEl = host
 
-  // The xterm classes are lazy so the Benchmark tab never downloads them; their
+  // The xterm classes are lazy so the WorkBench tab never downloads them; their
   // CSS is imported statically at the component's module top (see the file
   // header), which bundles it into the same Editor chunk.
   const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([

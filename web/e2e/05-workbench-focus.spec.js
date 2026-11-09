@@ -12,7 +12,7 @@ import { expect, test } from '@playwright/test'
 // of one — which is the regression the last case below pins, on the face the
 // marks are generated against (tools/nerd_icons.py, `UI_GLYPHS`).
 //
-// No LLM call, no benchmark run, no streamed answer: the reasoning panel is
+// No LLM call and no streamed answer: the reasoning panel is
 // rendered unconditionally, so every box below is measurable on a cold, empty
 // WorkBench screen. A spec that waited for an answer would depend on
 // `.env.test` and turn flaky for reasons that have nothing to do with layout.

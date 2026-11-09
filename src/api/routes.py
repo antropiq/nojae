@@ -1,4 +1,4 @@
-"""REST + SSE endpoints for the benchmark run."""
+"""REST + SSE endpoints for the WorkBench and the Editor."""
 
 import asyncio
 import base64
@@ -6,7 +6,6 @@ import binascii
 import json
 import re
 import threading
-import uuid
 from contextlib import suppress
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Union
 
@@ -14,25 +13,21 @@ import os
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from src.api.events import EventBus, sse_format
+from src.api.events import sse_format
 from src.config import (
-    QUESTION_SET_DEFAULT,
     PATH_LOCATION_KEY,
     TRUTHY_VALUES,
     agent_instructions_block,
-    list_question_sets,
     load_endpoints_config,
-    load_questions,
     load_settings,
     max_tool_iteration,
     lsp_enabled_ids,
     path_location,
     default_path_location,
     save_settings,
-    questions_path,
 )
 from src.core.mcphub import (
     ensure_mcp_settings_file,
@@ -58,15 +53,11 @@ from src.core import termhub
 from src.core.termhub import policy as term_policy
 from src.core.termhub import drivers as term_drivers
 from src.core import workspace_settings
-from src.core.bench import run_benchmark
 from src.core import batch as batch_core
 from src.core.chat import stream_chat
-from src.core.job import RunJob
-from src.core.llm import RunCancelled
 from src.core.llmkit.client import models_url
 from src.core.llmkit.sanitize import sanitize_content
 from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
-from src.core.utils import RESULTS_PATH
 
 
 class SettingsFieldsMixin(BaseModel):
@@ -90,17 +81,8 @@ class SettingsFieldsMixin(BaseModel):
         raise ValueError("expected a string or number")
 
 
-class VerifierSettingsIn(SettingsFieldsMixin):
-    """Verifier agent settings as sent by the settings dialog."""
-
-    serverUrl: str = ""
-    apiKey: str = ""
-    endpoint: str = ""
-    sysprompt: str = ""
-
-
 class SettingsIn(SettingsFieldsMixin):
-    """Benchmark settings as sent by the settings dialog (raw strings)."""
+    """Model settings as sent by the settings dialog (raw strings)."""
 
     serverUrl: str = ""
     apiKey: str = ""
@@ -118,20 +100,6 @@ class SettingsIn(SettingsFieldsMixin):
     # ``_stringify_scalars`` passes a bool through untouched — a plain ``str``
     # field would reject it before that pass meant anything.
     supportsVision: Union[bool, str] = ""
-    questionSet: str = ""
-    verifier: VerifierSettingsIn = VerifierSettingsIn()
-
-    @field_validator("verifier", mode="before")
-    @classmethod
-    def _empty_verifier(cls, value: Any) -> Any:
-        # Accept "verifier": null / "" / {} as "all verifier fields unset".
-        return value or VerifierSettingsIn()
-
-
-class QuestionSetIn(SettingsFieldsMixin):
-    """Question set selection as sent by the settings dialog."""
-
-    questionSet: str = ""
 
 
 class PathLocationIn(SettingsFieldsMixin):
@@ -544,9 +512,8 @@ class ChatHandle:
     """The one in-flight chat reply, so another request can pause it.
 
     ``POST /api/chat/pause`` is a separate HTTP request from the reply's own
-    stream, so the pause flag has to live in a process-wide slot — the same
-    shape ``RunState`` uses for the run. Mono-user app, one tab: one handle,
-    no chat id.
+    stream, so the pause flag has to live in a process-wide slot. Mono-user
+    app, one tab: one handle, no chat id.
     """
 
     def __init__(self, pause_event: threading.Event, cancel_event: threading.Event) -> None:
@@ -597,8 +564,9 @@ def _refuse_if_chat_streaming(what: str) -> None:
 # used for both directions of the settings API. Spec D7: the file keeps the
 # approved member names (``serverApiKey``, ``temperature``), the dialog keeps
 # its field names (``apiKey``, ``temp``), and this table is the only bridge.
-# The sibling of ``VERIFIER_ENV_KEYS`` below: group 1 reaches
-# ``core.workspace_settings``, the verifier block still reaches ``.env``.
+# It is the only table translating dialog fields at all: the model connection
+# is the whole of what the dialog sends, and it reaches
+# ``core.workspace_settings`` — nothing of it reaches ``.env``.
 WORKSPACE_SETTING_KEYS: Dict[str, str] = {
     "serverUrl": "serverUrl",
     "apiKey": "serverApiKey",
@@ -620,22 +588,14 @@ WORKSPACE_SETTING_KEYS: Dict[str, str] = {
 # ``null`` so the dialog shows an unset field and the request body omits it.
 _WORKSPACE_ABSENT: Dict[type, Any] = {str: "", bool: False, float: None, int: None}
 
-VERIFIER_ENV_KEYS: Dict[str, str] = {
-    "serverUrl": "VERIFIER_AGENT_SERVERURL",
-    "apiKey": "VERIFIER_AGENT_SERVERURL_API_KEY",
-    "endpoint": "VERIFIER_AGENT_ENDPOINT",
-    "sysprompt": "VERIFIER_AGENT_SYSPROMPT",
-}
 
+def _settings_json() -> Dict[str, Any]:
+    """Shape the workspace's settings file into the settings dialog's payload.
 
-def _settings_json(values: Dict[str, str]) -> Dict[str, Any]:
-    """Shape both stores into the settings dialog's payload.
-
-    The types ws-05 reads: group 1 answers with the workspace file's **native
+    The types the dialog reads: every field answers with the file's **native
     JSON values** — ``supportsVision`` is ``true``/``false``, the sampling
     fields are numbers (``0.2``, ``20``) or ``null`` when the member is absent
-    (the file never holds ``"0.2"`` or ``"1"``, the dotenv wart D6 ends) —
-    while the verifier block and ``questionSet`` stay ``.env``'s strings. A
+    (the file never holds ``"0.2"`` or ``"1"``, the dotenv wart D6 ends). A
     stored template instruction sentence reaches the dialog verbatim; the
     ``workspaceSettings`` block beside it says the file is not configured
     (D8) or malformed (D9) with the one sentence that names the path. An
@@ -652,10 +612,6 @@ def _settings_json(values: Dict[str, str]) -> Dict[str, Any]:
             ]
         data[field] = value
     data["sysprompt"] = workspace.get("sysprompt") or DEFAULT_LLM_SYSPROMPT
-    data["questionSet"] = values.get("QUESTION_SET", "")
-    data["verifier"] = {
-        field: values.get(key, "") for field, key in VERIFIER_ENV_KEYS.items()
-    }
     data["workspaceSettings"] = workspace_settings.workspace_settings_state()
     return data
 
@@ -797,47 +753,6 @@ def _context_window(server_url: str, api_key: str, model: str) -> Optional[int]:
     except (httpx.HTTPError, ValueError):
         pass
     return _CTX_WINDOW_CACHE.get(key)
-
-
-def _settings_env_values(settings: SettingsIn) -> Dict[str, str]:
-    """Convert a settings payload into the managed ``.env`` key/value mapping.
-
-    Only what ``.env`` still owns: the verifier block and the question-set
-    choice. Group 1 translates through :data:`WORKSPACE_SETTING_KEYS`, and
-    ``LLM_DEBUG`` is **not emitted at all** (spec section 7): the key is
-    hand-edited like ``NOJAE_PYTHON_ROOT``, and an always-emitted ``""``
-    here would win over the stored value in ``post_settings``'
-    ``{**load_settings(), ...}`` merge and switch the debug logging off on
-    every save. A field the dialog does not own keeps whatever the merge
-    beside the write carries forward.
-    """
-    payload = settings.model_dump()
-    values: Dict[str, str] = {}
-    verifier = payload.get("verifier") or {}
-    for field, key in VERIFIER_ENV_KEYS.items():
-        values[key] = (verifier.get(field) or "").strip()
-    question_set = (payload.get("questionSet") or "").strip()
-    if question_set:
-        values["QUESTION_SET"] = question_set
-    return values
-
-
-class RunState:
-    """Process-wide state for the single active (or last) benchmark run."""
-
-    def __init__(self) -> None:
-        self.status: str = "idle"  # idle | running | finished | failed | cancelled
-        self.run_id: Optional[str] = None
-        self.job: Optional[RunJob] = None
-        self.bus: Optional[EventBus] = None
-        self.error: Optional[str] = None
-        self.cancel_event: Optional[threading.Event] = None
-
-    def reset(self) -> None:
-        self.job = RunJob()
-        self.bus = EventBus()
-        self.error = None
-        self.cancel_event = threading.Event()
 
 
 def _active_connector_ids() -> List[str]:
@@ -1034,8 +949,8 @@ def _chat_tool_kwargs(
     }
 
 
-def build_router(state: RunState) -> APIRouter:
-    """Create the API router bound to a run-state instance."""
+def build_router() -> APIRouter:
+    """Create the API router."""
     router = APIRouter(prefix="/api")
 
     def _load_config() -> EndpointsConfig:
@@ -1046,9 +961,8 @@ def build_router(state: RunState) -> APIRouter:
         422 field list, and the workspace settings file being absent, broken or
         still the template's instruction text answers 422 with the one sentence
         that names the file and its path (spec D8, D9). The second is why no
-        chat or benchmark request can dial a sentence as a URL or benchmark on
-        invented defaults: there is nothing to call until that file says what
-        to call.
+        chat request can dial a sentence as a URL or answer on invented
+        defaults: there is nothing to call until that file says what to call.
         """
         config, error = load_endpoints_config()
         if isinstance(error, str):
@@ -1063,13 +977,8 @@ def build_router(state: RunState) -> APIRouter:
 
     @router.get("/config")
     def get_config() -> Dict[str, Any]:
+        """What the two remaining views read about the configured model."""
         config = _load_config()
-        try:
-            questions = load_questions()
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500, detail=f"Could not load {questions_path()}: {exc}"
-            ) from exc
         models = config.model_list()
         sampling = config.to_kwargs()
         sampling_summary = (
@@ -1085,47 +994,24 @@ def build_router(state: RunState) -> APIRouter:
             "contextWindow": _context_window(
                 config.serverUrl, config.apiKey or "none", models[0] if models else ""
             ),
-            "questionCount": len(questions),
-            "totalTests": len(questions) * len(models),
-            "verifierConfigured": bool(config.verifierAgent and config.verifierAgent.endpoint),
-            "runStatus": state.status,
-            "hasResults": RESULTS_PATH.is_file(),
         }
 
     @router.get("/settings")
     def get_settings() -> Dict[str, Any]:
-        """The dialog's payload: group 1 from the workspace file, groups 2/3
-        from ``.env``, plus the file's own state block (see
-        :func:`_settings_json` for the payload types)."""
-        return _settings_json(load_settings())
+        """The dialog's payload: the model connection, plus the file's own
+        state block (see :func:`_settings_json` for the payload types)."""
+        return _settings_json()
 
     @router.post("/settings")
     def post_settings(settings: SettingsIn) -> Dict[str, Any]:
-        # The .env is process-wide configuration; changing it mid-run would
-        # silently mix two configurations into one result set.
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot change settings while a benchmark run is in progress",
-            )
         workspace_values = _workspace_values(settings.model_dump())
-        # Settings keys not covered by this dialog (question set when unset,
-        # LLM_DEBUG, NOJAE_PYTHON_ROOT) are merged from the current
-        # values so saving here never drops them.
-        env_values = {**load_settings(), **_settings_env_values(settings)}
-        merged_env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in env_values or env_values[key]
-        }
-        merged_env.update({k: v for k, v in env_values.items() if v})
         current_workspace = workspace_settings.load_workspace_settings()
         try:
-            # One gate before **either** write: the merged future state of
-            # both stores is validated exactly the way every later model call
-            # builds it, so a bad sampler value cannot reach either disk.
+            # One gate before **either** write: the merged future state of the
+            # file is validated exactly the way every later model call builds
+            # it, so a bad sampler value cannot reach either disk.
             EndpointsConfig.from_workspace(
-                {**current_workspace, **workspace_values}, merged_env
+                {**current_workspace, **workspace_values}
             )
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=json.loads(exc.json())) from exc
@@ -1134,49 +1020,11 @@ def build_router(state: RunState) -> APIRouter:
         # is still updated. The file itself is regenerated from a fixed
         # template, so custom comments in .env are not preserved.
         _save_workspace_group_one(current_workspace, workspace_values)
-        save_settings(env_values)
-        return _settings_json(load_settings())
-
-    @router.get("/question-sets")
-    def get_question_sets() -> Dict[str, Any]:
-        """List available question sets and the currently selected one."""
-        return {
-            "questionSets": list_question_sets(),
-            "current": os.environ.get("QUESTION_SET", QUESTION_SET_DEFAULT),
-        }
-
-    @router.post("/question-sets")
-    def post_question_set(body: QuestionSetIn) -> Dict[str, Any]:
-        """Select the active question set source.
-
-        Persists the choice to ``.env`` via ``save_settings`` so the next run
-        uses the selected file. Rejected with 409 while a run is in progress
-        and 422 for an unknown question set id.
-        """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot change question set while a benchmark run is in progress",
-            )
-        selected = (body.questionSet or "").strip()
-        available = [s["id"] for s in list_question_sets()]
-        if not selected:
-            raise HTTPException(
-                status_code=422, detail="No question set selected"
-            )
-        if selected not in available:
-            raise HTTPException(
-                status_code=422, detail=f"Unknown question set: {selected}"
-            )
-        # Merge with current settings so unrelated keys are preserved.
-        current = load_settings()
-        merged = dict(current)
-        merged["QUESTION_SET"] = selected
-        save_settings(merged)
-        return {
-            "questionSets": list_question_sets(),
-            "current": os.environ.get("QUESTION_SET", QUESTION_SET_DEFAULT),
-        }
+        # The dialog owns no ``.env`` key, so the managed keys it never names
+        # (``LLM_DEBUG``, ``NOJAE_PYTHON_ROOT``) are written back as they stand:
+        # a save here re-renders the file, it never changes what it holds.
+        save_settings(load_settings())
+        return _settings_json()
 
     @router.get("/prompt-helpers")
     def get_prompt_helpers() -> Dict[str, Any]:
@@ -1199,11 +1047,9 @@ def build_router(state: RunState) -> APIRouter:
     def post_prompt_helpers(body: PromptHelperSlotIn) -> Dict[str, Any]:
         """Persist one prompt-helper slot and return the full set of nine.
 
-        Chat-adjacent configuration, so (unlike settings/question sets) it is
-        not gated while a benchmark run is in progress. Invalid index, color
-        or oversized content are rejected with 422 by the request model; an
-        unusable file on disk is a 422 of its own, never a 500, and the bytes
-        stay as they were.
+        Invalid index, color or oversized content are rejected with 422 by the
+        request model; an unusable file on disk is a 422 of its own, never a
+        500, and the bytes stay as they were.
         """
         try:
             slots = prompt_helpers.save_prompt_helper(
@@ -1263,11 +1109,6 @@ def build_router(state: RunState) -> APIRouter:
         is ``maxToolIteration`` in the workspace's ``.nojae/nojae-settings.json``
         — written as a real integer, the form the reader reads.
         """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot change MCP settings while a benchmark run is in progress",
-            )
         requested = [item.strip() for item in body.enabled if item.strip()]
         connectors, _errors = load_externals()
         connector_ids = {connector["id"] for connector in connectors}
@@ -1307,11 +1148,6 @@ def build_router(state: RunState) -> APIRouter:
         changed ``${NOJAE_PATH_LOCATION}`` only takes effect once every
         connector is relaunched with the new argv.
         """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot restart the MCP hub while a benchmark run is in progress",
-            )
         if _CHAT_TASKS:
             raise HTTPException(
                 status_code=409,
@@ -1403,11 +1239,6 @@ def build_router(state: RunState) -> APIRouter:
         MCP+LSP tool-loop cap, which travels in the same file and so is written
         by the same call.
         """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot change LSP settings while a benchmark run is in progress",
-            )
         requested = [item.strip() for item in body.enabled if item.strip()]
         servers, _errors = all_servers()
         known_ids = {server["id"] for server in servers}
@@ -1458,11 +1289,6 @@ def build_router(state: RunState) -> APIRouter:
         changed ``${NOJAE_PATH_LOCATION}`` only takes effect once every
         language server is respawned on the new ``workspaceRoot``.
         """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot restart the LSP hub while a benchmark run is in progress",
-            )
         if _CHAT_TASKS:
             raise HTTPException(
                 status_code=409,
@@ -1634,8 +1460,8 @@ def build_router(state: RunState) -> APIRouter:
         unusable-but-not-broken cases (no file yet, still the template's
         instruction text) come through ``message`` with the file's path.
         ``GET /api/settings`` is where the same sentence reaches the dialog, and
-        a chat or benchmark request refuses with it — both belong to the task that
-        cuts the reads over, so nothing here reads the file's values yet.
+        a chat request refuses with it — both belong to the task that cuts the
+        reads over, so nothing here reads the file's values yet.
         """
         return workspace_settings.workspace_settings_state()
 
@@ -1678,11 +1504,6 @@ def build_router(state: RunState) -> APIRouter:
         a secret tree would hand its contents to the model); in that case the
         environment is left untouched and nothing is restarted.
         """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot change the working location while a benchmark run is in progress",
-            )
         # Every precondition of the two restarts is checked *before* the
         # environment is touched: an env value the hubs never picked up is the
         # worst possible outcome (the panel would disagree with the tools).
@@ -2442,9 +2263,7 @@ def build_router(state: RunState) -> APIRouter:
         nothing about the file.
 
         Refused while a chat reply streams: that reply is the only other writer of
-        the workspace, so this is the same gate every Editor write asks. It is
-        deliberately **not** gated during a benchmark run — a run never consults a
-        mode, so gating it would be a rule with no race behind it.
+        the workspace, so this is the same gate every Editor write asks.
 
         The answer is the **new** verdict in the shape ``GET /api/agent-modes``
         publishes, plus the new ``mtime``, so the dropdown reloads from this response
@@ -2472,7 +2291,7 @@ def build_router(state: RunState) -> APIRouter:
 
     @router.post("/chat")
     async def post_chat(body: ChatIn, request: Request) -> StreamingResponse:
-        """Stream one chat reply from the benchmark-configured LLM as SSE.
+        """Stream one chat reply from the workspace's configured model as SSE.
 
         The sync LLM client runs in a worker thread feeding an ``asyncio.Queue``
         (project convention: sync client in a thread + ``emit``); the SSE
@@ -2483,11 +2302,6 @@ def build_router(state: RunState) -> APIRouter:
         registered here lets ``POST /api/chat/pause`` arm ``pause_event``, which
         ``core.chat.stream_chat`` checks at its next message boundary.
         """
-        if state.status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot chat while a benchmark run is in progress",
-            )
         config = _load_config()
         models = config.model_list()
         if not models:
@@ -2555,8 +2369,7 @@ def build_router(state: RunState) -> APIRouter:
                     api_key=config.apiKey or "none",
                     # The mode's persona, or the configured prompt when the mode
                     # declares none (D1: the two are alternatives, never
-                    # stacked). Everything not WorkBench — the benchmark — keeps
-                    # reading ``LLM_SYSPROMPT`` through ``core/models.py``.
+                    # stacked).
                     sysprompt=persona,
                     # Keywords from here on: the flag pair is optional on
                     # ``stream_chat``, so a stub may omit it (tests do).
@@ -2627,10 +2440,10 @@ def build_router(state: RunState) -> APIRouter:
     async def post_chat_pause() -> Dict[str, Any]:
         """Ask the one in-flight chat reply to stop at its next boundary.
 
-        Non-destructive twin of ``/run/stop``: the worker closes the upstream
-        stream, reports its exact usage and terminates the reply with
-        ``pause_ack``, so the client keeps the partial turn in its history.
-        Idempotent — a second call while the first is pending says so.
+        The worker closes the upstream stream, reports its exact usage and
+        terminates the reply with ``pause_ack``, so the client keeps the
+        partial turn in its history. Idempotent — a second call while the
+        first is pending says so.
         """
         handle = _CHAT_HANDLE
         if handle is None:
@@ -2640,138 +2453,4 @@ def build_router(state: RunState) -> APIRouter:
         handle.pause_event.set()
         return {"paused": "requested"}
 
-    @router.post("/run", status_code=202)
-    async def start_run() -> Dict[str, Any]:
-        # Exclusion in the direction ``POST /chat`` already enforces the other
-        # way (409 while a run is in progress): a benchmark must not start
-        # under a streaming chat reply, or two generations fight over the
-        # single _CHAT_HANDLE and the endpoint's own sampling configuration.
-        # Enforced here rather than only by a disabled button, because batch
-        # mode keeps a chat turn streaming for minutes at a time.
-        if _CHAT_TASKS:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot start a run while a chat reply is streaming",
-            )
-        config = _load_config()
-        questions = load_questions()
-        models = config.model_list()
-        if not models:
-            raise HTTPException(status_code=400, detail="No models configured (ENDPOINT)")
-        if not questions:
-            raise HTTPException(status_code=400, detail="No questions loaded")
-        if state.status == "running":
-            raise HTTPException(status_code=409, detail="A benchmark run is already in progress")
-
-        state.reset()
-        assert state.job is not None and state.bus is not None
-        state.run_id = uuid.uuid4().hex
-        state.status = "running"
-        state.bus.bind_loop(asyncio.get_running_loop())
-
-        sampling = config.to_kwargs()
-        state.bus.publish({
-            "event": "run_started",
-            "runId": state.run_id,
-            "models": models,
-            "totalTests": len(questions) * len(models),
-            "samplingSummary": ", ".join(f"{k}={v}" for k, v in sampling.items())
-            or "defaults",
-        })
-        asyncio.create_task(_execute_run(state, questions, config))
-        return {"runId": state.run_id}
-
-    @router.post("/run/stop", status_code=202)
-    async def stop_run() -> Dict[str, Any]:
-        if state.status != "running" or state.cancel_event is None:
-            raise HTTPException(status_code=409, detail="No benchmark run in progress")
-        state.cancel_event.set()
-        return {"runId": state.run_id, "cancelling": True}
-
-    @router.get("/run")
-    def get_run() -> Dict[str, Any]:
-        events: List[Any] = []
-        if state.bus is not None:
-            events = [
-                {"seq": seq, "event": event} for seq, event in state.bus.snapshot()
-            ]
-        return {
-            "status": state.status,
-            "runId": state.run_id,
-            "error": state.error,
-            "lastSeq": state.bus.last_seq if state.bus else -1,
-            "events": events,
-        }
-
-    @router.get("/run/events")
-    async def run_events(request: Request, since: int = -1) -> StreamingResponse:
-        last_event_id = request.headers.get("last-event-id")
-        if last_event_id and last_event_id.isdigit():
-            since = max(since, int(last_event_id))
-        if state.bus is None:
-            raise HTTPException(status_code=404, detail="No benchmark run started yet")
-
-        # Local alias: pyright does not keep `state.bus` narrowed inside the
-        # closure below (it could be reassigned between the check and the call).
-        bus = state.bus
-        async def event_stream() -> AsyncIterator[str]:
-            async for seq, event in bus.subscribe(since):
-                if await request.is_disconnected():
-                    return
-                yield sse_format(seq, event)
-            # Bus closed — let the EventSource client know the stream is over.
-            yield (
-                "event: stream_end\n"
-                + f"data: {json.dumps({'status': state.status})}\n\n"
-            )
-
-        return StreamingResponse(
-            event_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-                "Connection": "keep-alive",
-            },
-        )
-
-    @router.get("/results")
-    def get_results() -> FileResponse:
-        if not RESULTS_PATH.is_file():
-            raise HTTPException(status_code=404, detail="No results.json yet")
-        return FileResponse(
-            RESULTS_PATH, filename="results.json", media_type="application/json"
-        )
-
     return router
-
-
-async def _execute_run(
-    state: RunState, questions: List[Dict], config: EndpointsConfig
-) -> None:
-    """Run the benchmark in a worker thread, publishing events to the bus."""
-    assert state.job is not None and state.bus is not None
-    bus = state.bus
-
-    def emit(event: Dict[str, Any]) -> None:
-        bus.publish(event)
-
-    try:
-        await asyncio.to_thread(
-            run_benchmark, questions, config, state.job, emit, state.cancel_event
-        )
-        state.status = "finished"
-    except RunCancelled:
-        state.status = "cancelled"
-        bus.publish({
-            "event": "run_finished",
-            "cancelled": True,
-            "totalRunningTime": state.job.total_running_time,
-            "totalTests": len(questions) * len(config.model_list()),
-        })
-    except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
-        state.error = str(exc)
-        state.status = "failed"
-        bus.publish({"event": "run_error", "message": str(exc)})
-    finally:
-        bus.close()

@@ -2640,12 +2640,6 @@ class TestLspEndpoints:
         assert client.post("/api/lsp", json={"maxIterations": 0}).status_code == 422
         assert client.post("/api/lsp", json={"maxIterations": 9999}).status_code == 422
 
-    def test_post_during_a_run_returns_409(self, lsp_client):
-        client, app = lsp_client
-        app.state.run_state.status = "running"
-        response = client.post("/api/lsp", json={"enabled": ["pyright"]})
-        assert response.status_code == 409
-
     def test_post_reconciles_running_servers(self, lsp_client):
         client, app = lsp_client
         hub = FakeLspManager(
@@ -2721,16 +2715,6 @@ class TestLspEndpoints:
         servers, enabled_ids = hub.restarts[0]
         assert servers == []
         assert enabled_ids == []
-
-    def test_restart_during_a_run_returns_409(self, lsp_client):
-        client, app = lsp_client
-        hub = FakeLspManager()
-        app.state.lsp = hub
-        app.state.run_state.status = "running"
-        response = client.post("/api/lsp/restart")
-        assert response.status_code == 409
-        assert hub.restarts == []
-        app.state.run_state.status = "idle"
 
     def test_restart_without_a_hub_returns_503(self, lsp_client):
         client, app = lsp_client

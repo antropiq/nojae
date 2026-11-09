@@ -9,14 +9,13 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import RunState, build_router
+from src.api.routes import build_router
 from src.config import (
     apply_llm_debug,
     ENV_PATH,
     load_dotenv_once,
     PROJECT_ROOT,
     path_location,
-    questions_path,
     setup_path_location,
 )
 from src.core.mcphub import (
@@ -347,15 +346,13 @@ def create_app() -> FastAPI:
             await manager.stop_all()
 
     app = FastAPI(title="nojae", version="0.2.0", lifespan=lifespan)
-    app.state.run_state = RunState()
-    app.include_router(build_router(app.state.run_state))
+    app.include_router(build_router())
 
     @app.get("/api/health")
     def health() -> dict:
         return {
             "status": "ok",
             "env": ENV_PATH.is_file(),
-            "questions": questions_path().is_file(),
         }
 
     if WEB_DIST.is_dir():

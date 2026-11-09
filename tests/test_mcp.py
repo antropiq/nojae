@@ -1058,17 +1058,6 @@ class TestMcpEndpoints:
         app.state.mcp = None
         assert client.post("/api/mcp/restart").status_code == 503
 
-    def test_restart_during_a_run_returns_409(self, mcp_client, tmp_path):
-        self._externals_file(tmp_path)
-        client, app = mcp_client
-        hub = RecordingManager({"context7": "running"})
-        app.state.mcp = hub
-        app.state.run_state.status = "running"
-        response = client.post("/api/mcp/restart")
-        assert response.status_code == 409
-        assert hub.restarts == []
-        app.state.run_state.status = "idle"
-
     def test_restart_during_a_streaming_chat_returns_409(self, mcp_client, tmp_path):
         # A hub restart closes the client sessions a tool call is waiting on,
         # so it must not race an in-flight chat reply.

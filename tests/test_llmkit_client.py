@@ -20,10 +20,8 @@ from typing import Any, Dict, List
 import httpx
 import pytest
 
-from src.core.bench import process_question
-from src.core.job import RunJob
-from src.core.llm import TRUNCATION_MESSAGE, call_llm_and_stream
-from src.core.models import EndpointsConfig
+from src.core import chat as chat_core
+from src.core.llm import TRUNCATION_EVENT_FLAG, TRUNCATION_MESSAGE
 from src.core.llmkit import client as client_module
 from src.core.llmkit import constants
 from src.core.llmkit.client import (
@@ -41,6 +39,7 @@ from tests.llmkit_fakes import (
     content_chunk,
     finish_chunk,
     special_token,
+    tool_call_chunk,
     usage_chunk,
 )
 from tests.test_llmkit_contract import (
@@ -249,8 +248,8 @@ class TestMessageContentIsSanitizedAtTheSeam:
     """No delimiter-wrapped control-token run leaves the app in a body.
 
     Both call shapes pass their ``messages`` through ``llmkit.sanitize``
-    before the body is built, so benchmark, verifier, warm-up, chat and
-    batch are covered here and nowhere else.
+    before the body is built, so every caller of the seam — chat and the
+    batch turns that ride it — is covered here and nowhere else.
     """
 
     def test_a_control_token_never_reaches_the_stream_request_body(
@@ -270,8 +269,8 @@ class TestMessageContentIsSanitizedAtTheSeam:
         assert wire.json_body()["messages"][0]["content"] == "ab"
 
     def test_the_non_streaming_shape_sanitizes_too(self, wire: _Wire):
-        # The verifier and warm-up ride this shape; the pass is not the
-        # streaming shape's private favour.
+        # The pass is not the streaming shape's private favour: every
+        # call shape of the seam makes it.
         wire.serve_json({})
         chat_completion(model=MODEL, server_url=SERVER,
                         messages=[{"role": "user",
@@ -292,7 +291,7 @@ class TestMessageContentIsSanitizedAtTheSeam:
         # Sanitizing must not become stripping: a pipe inside the name is
         # not what any template tokenises as one control token, and an
         # unterminated half of a pair is not a run either. Such text --
-        # and a benchmark question carrying it -- reaches the server
+        # and a user message carrying it -- reaches the server
         # byte for byte.
         wire.serve_stream([])
         text = (
@@ -643,39 +642,41 @@ class TestDebugPayloadLogging:
 
 # --- truncation end-to-end through the real transport (llmh-10, spec §6.3.6) ----
 #
-# The AGENTS.md invariant -- *a truncated benchmark answer is failed and never
-# sent to the verifier* -- is usually asserted per layer: a fake stream that
-# raises, a stub that reports no finish reason. Asserted below is the whole
-# chain with no stub in the middle: the bytes a cut server would have written
-# go through the real SSE parse, the real stream recording, the real benchmark
-# answer loop and the real bench decision about the verifier. Only the socket
-# is a handler, and the verifier is a spy that records whether it was reached.
+# The AGENTS.md invariant -- *a stream cut by the server looks like a finished
+# answer at the chunk level, and a truncated chat reply ends as an error, which
+# also stops a half-streamed tool call from being executed* -- is usually
+# asserted per layer: a fake stream that raises, a stub that reports no finish
+# reason. Asserted below is the whole chain with no stub in the middle: the
+# bytes a cut server would have written go through the real SSE parse, the real
+# stream recording and the real chat loop. Only the socket is a handler, and
+# the tool executor is a spy that records whether it was reached.
 # Spec §6.3.6 names this the one check that must be repeated after any change
 # to ``sse.py``.
 
 
-class TestTruncationReachesTheVerdictThroughTheRealParse:
-    QUESTION = {"uuid": "u1", "question": "q1", "expected": "a1"}
+class TestTruncationReachesTheTerminalFrameThroughTheRealParse:
+    MESSAGES = [{"role": "user", "content": "What is the capital of France?"}]
 
-    def serve_cut_answer(self, wire: _Wire, done: bool) -> None:
+    def serve_cut_reply(self, wire: _Wire, done: bool) -> None:
         """Answer chunks, then the stream dies: never a finish_reason frame."""
         wire.serve_stream(
             [content_chunk("Paris is "), content_chunk("the capital")],
             done=done,
         )
 
-    def ask(self):
-        """One benchmark answer over whatever the wire serves."""
+    def ask(self, **overrides: Any) -> List[Dict[str, Any]]:
+        """One chat reply over whatever the wire serves."""
         events: List[Dict[str, Any]] = []
-        result = call_llm_and_stream(
+        chat_core.stream_chat(
+            list(self.MESSAGES),
             MODEL,
             SERVER,
-            dict(self.QUESTION),
             events.append,
-            dict(SAMPLING, max_tokens=MAX_TOKENS),
+            dict(SAMPLING),
             api_key="none",
+            **overrides,
         )
-        return result, events
+        return events
 
     @pytest.mark.parametrize("done", [False, True], ids=["cut socket", "done frame"])
     def test_a_cut_stream_is_truncated_and_its_error_is_emitted(
@@ -684,42 +685,46 @@ class TestTruncationReachesTheVerdictThroughTheRealParse:
         # D3 earns its keep here: whether the server got as far as writing
         # ``data: [DONE]`` changes nothing -- framing is not a finish reason,
         # so both shapes of the cut stream are truncation.
-        self.serve_cut_answer(wire, done)
-        result, events = self.ask()
+        self.serve_cut_reply(wire, done)
+        events = self.ask()
 
-        assert result.truncated is True
-        assert result.text == "Paris is the capital"  # the fragment is kept
-        errors = [e for e in events if e["event"] == "run_error"]
-        assert [e["message"] for e in errors] == [TRUNCATION_MESSAGE]
-        # The fragment still streamed as tokens: the card shows what arrived,
+        terminal = events[-1]
+        assert terminal["event"] == "error"
+        assert terminal["message"] == TRUNCATION_MESSAGE
+        assert terminal[TRUNCATION_EVENT_FLAG] is True
+        # Exactly one terminal frame: the cut reply does not also get a tidy
+        # ``done`` the client could settle to idle on.
+        assert [e["event"] for e in events if e["event"] in ("done", "pause_ack")] == []
+        # The fragment still streamed as tokens: the pane shows what arrived,
         # and the error that follows it is what marks it incomplete.
         streamed = "".join(e["text"] for e in events if e["event"] == "token")
-        assert streamed == result.text
+        assert streamed == "Paris is the capital"
 
     @pytest.mark.parametrize("done", [False, True], ids=["cut socket", "done frame"])
-    def test_the_fragment_never_reaches_the_verifier_and_the_question_fails(
-        self, wire: _Wire, done: bool, monkeypatch: pytest.MonkeyPatch
+    def test_a_cut_tool_call_is_never_executed(
+        self, wire: _Wire, done: bool
     ):
-        # The bench's own decision, taken on the answer the real parse
-        # produced: no verifier call at all, and the question in the failed list.
-        self.serve_cut_answer(wire, done)
-        judged: List[str] = []
+        # The dangerous case, through the real parse: the arguments stopped
+        # streaming mid-JSON, so running them would execute a command the
+        # model never finished writing.
+        wire.serve_stream(
+            [
+                tool_call_chunk(index=0, call_id="call-1",
+                                name="execute_command",
+                                arguments='{"command": "ls -l'),
+            ],
+            done=done,
+        )
+        executed: List[str] = []
+        events = self.ask(
+            tools=[{"type": "function",
+                    "function": {"name": "execute_command"}}],
+            tool_executor=lambda name, args: executed.append(name) or "ok",
+        )
 
-        def spy(verifier, question, response_text, emit):
-            judged.append(response_text)
-            return True
-
-        monkeypatch.setattr("src.core.bench.verify_response", spy)
-        config = EndpointsConfig(serverUrl=SERVER, endpoint=MODEL, **SAMPLING)
-        job = RunJob()
-        events: List[Dict[str, Any]] = []
-
-        process_question(MODEL, dict(self.QUESTION), 1, 0, config, job, events.append)
-
-        assert judged == []
-        assert job.get_failed_questions() == [1]
-        answer_done = next(e for e in events if e["event"] == "answer_done")
-        assert answer_done["truncated"] is True
+        assert executed == []
+        assert not [e for e in events if e["event"] == "tool_call"]
+        assert events[-1]["event"] == "error"
 
     def test_a_stream_that_did_finish_is_not_truncated(self, wire: _Wire):
         # The same chain, one frame different: a chunk that carries a
@@ -731,15 +736,17 @@ class TestTruncationReachesTheVerdictThroughTheRealParse:
                                         "completion_tokens": 4,
                                         "total_tokens": 14}),
         ])
-        result, events = self.ask()
+        events = self.ask()
 
-        assert result.truncated is False
-        assert [e for e in events if e["event"] == "run_error"] == []
-        # And the measurement that rides on a finished answer is still the
+        terminal = events[-1]
+        assert terminal["event"] == "done"
+        assert [e for e in events if e["event"] == "error"] == []
+        # And the measurement that rides on a finished reply is still the
         # server's, not a re-count (the timing/token rules this lot must not
-        # move): completion tokens only, prompt tokens carried separately.
-        assert result.completion_tokens == 4
-        assert result.prompt_tokens == 10
-        assert result.tokens_estimated is False
-        assert result.ttft >= 0.0
-        assert result.took >= result.ttft
+        # move): completion tokens only, and the occupancy figure is the
+        # round's server-reported total.
+        assert terminal["tokens"] == 4
+        assert terminal["tokensEstimated"] is False
+        assert terminal["contextTokens"] == 14
+        assert terminal["contextEstimated"] is False
+        assert terminal["took"] >= terminal["ttft"] >= 0.0

@@ -2,11 +2,10 @@
 
 ## What it is
 
-A self-hosted FastAPI + Vue 3 app that benchmarks LLM inference endpoints
-(llama.cpp or any OpenAI-compatible server): it streams a question set to the
-configured model, measures speed and quality, and grades each answer with a
-secondary **verifier LLM**. Everything reaches the browser live over Server-Sent
-Events. Desktop browsers only.
+A self-hosted FastAPI + Vue 3 workspace where a coding agent works on a real
+checkout: a streaming chat with the configured model, an editor over the same
+folder, and everything reaching the browser live over Server-Sent Events.
+Desktop browsers only.
 
 ## Rules
 
@@ -32,11 +31,9 @@ build, install or launch something on this machine.
 
 The tabs share one LLM configuration and one streaming layer:
 
-- **Benchmark** — runs a question set against the configured model, showing
-  answers, scores, timings and token/s as they arrive.
-- **WorkBench** — interactive streaming chat with that same model, optionally
-  augmented with MCP connectors and language servers, plus a batch mode that
-  works through a folder of task files.
+- **WorkBench** — interactive streaming chat with the configured model,
+  optionally augmented with MCP connectors and language servers, plus a batch
+  mode that works through a folder of task files.
 - **Editor** — the working location as a file tree, a code pane and a terminal.
   Its writes form one bounded surface, reachable from the browser only, never
   from a hub or a tool. The code pane is served by the same language servers,
@@ -52,13 +49,13 @@ A UI-free **core** and the **API** in front of it. Core functions never touch
 FastAPI — they take an injected `emit(event: dict)` callable and report progress
 through it.
 
-- `config` — run configuration loading, question-set discovery, and the
-  project-instructions block injected into chat.
-- `api` — the REST and SSE endpoints under one route prefix, plus the event bus
-  that numbers events so a reconnecting client can replay what it missed.
-- `core` — the streamed LLM call with warm-up and the verifier call; the
-  benchmark loop; the streamed chat reply with its shared tool-call loop; run
-  results and their aggregates; the batch-mode lot listing; the agent modes.
+- `config` — `.env` and the workspace's model connection loaded into one
+  configuration, and the project-instructions block injected into chat.
+- `api` — the REST and SSE endpoints under one route prefix, and the chat
+  stream's own SSE channel: one worker thread feeding it, one terminal frame
+  closing it.
+- `core` — the streamed chat reply with its shared tool-call loop; the
+  batch-mode lot listing; the agent modes.
 - `core/mcphub/` and `core/lsphub/` — the MCP and language-server hubs. They
   mirror each other (discovery, manager, seed) — keep that symmetry when
   touching either one. Both read their declarations from the **working
@@ -75,8 +72,8 @@ through it.
 
 Vite + Vue 3, plain JavaScript, Pico.css.
 
-- `composables/` hold run and stream state and own each EventSource and its
-  reconnect; components use them directly.
+- `composables/` hold app-shell and stream state and own each live stream and
+  its abort; components use them directly.
 - `lib/` holds the single markdown renderer — all rendered HTML goes through it,
   never raw `v-html`.
 - `components/` and `styles/` are the widgets and the theme.
@@ -84,35 +81,31 @@ Vite + Vue 3, plain JavaScript, Pico.css.
   regenerate, never hand-edit the artifacts.
 
 Configuration is edited from the UI and takes effect hot — except a hand-edit of
-the run configuration or of the workspace's model connection, which waits for a
-restart.
+`.env` or of the workspace's model connection, which waits for a restart.
 
 ## How a request flows
 
 The exact route list belongs to the API module; what matters architecturally:
 
-- **Run**: the benchmark starts in a worker thread and is watched live over SSE.
-  Only one run at a time (a chat request is refused while one runs), and
-  cancellation is honoured both between questions and mid-stream.
 - **Chat**: one request per reply, streamed back over SSE. The client re-posts
   the whole history each time; the server keeps no conversation state.
-- **Every WorkBench turn runs in an agent mode** — a workspace-owned persona that
-  replaces the configured system prompt for chat (never for the benchmark) and
-  may switch a whole hub off. A mode only ever narrows what settings and the
-  conversation already allow; it never grants anything. This file is injected
-  into every chat turn whatever the mode.
+- **Every WorkBench turn runs in an agent mode** — a workspace-owned persona
+  that replaces the configured system prompt and may switch a whole hub off.
+  A mode only ever narrows what settings and the conversation already allow;
+  it never grants anything. This file is injected into every chat turn
+  whatever the mode.
 
 ### SSE is the UI's only source of truth
 
-Core emits plain dicts into the event bus, which numbers them so a reconnecting
-client replays what it missed. Each stream has its own channel and closes with
-exactly one terminal event; a reply the user paused still ends on its own ack,
-keeping its partial turn.
+Core emits plain dicts; the streaming endpoint is the only thing that turns
+them into frames. Each stream has its own channel and closes with exactly one
+terminal event; a reply the user paused still ends on its own ack, keeping its
+partial turn.
 
 Measurement rules hold across every stream:
 
-- **Timing is app-side**, anchored to content-chunk arrivals — warm-up and
-  verifier time never enter the numbers.
+- **Timing is app-side**, anchored to content-chunk arrivals — tool execution
+  never enters the numbers.
 - **Cost and rate are different numbers**: token/s uses completion tokens only,
   the displayed cost is prompt + completion.
 
@@ -120,20 +113,17 @@ Measurement rules hold across every stream:
 
 | File | Role |
 |---|---|
-| `.env` | Install-scoped run configuration: verifier, question set, technical keys. |
+| `.env` | Install-scoped technical keys. |
 | `.nojae/nojae-settings.json` | This workspace's model connection and which language servers it activates. |
 | `.env.test`, `.nojae/nojae-test-settings.json` | The e2e suite's own configuration and model connection, read only under the test switch. |
-| `resources/*.json` | Question sets — every file there is one selectable set. |
-| `results.json` | Run output, written once when a run ends. |
 | Connector and language-server declarations | Which ones exist and how to reach them — files in the workspace's reserved folder. |
 | Reserved workspace folder | This workspace's read/write policy, its hub declarations, and the stores the app writes. |
 
 Those files may hold secrets, so they are gitignored, and each has a committed
 template. These rules tie them together:
 
-- **The run configuration is regenerated from a fixed template on every save** —
-  a new or renamed key means changing the template and its committed example
-  together.
+- **`.env` is regenerated from a fixed template on every save** — a new or
+  renamed key means changing the template and its committed example together.
 - **The declaration files are the only source of truth for what runs.** Their
   `enable` flag is the switch; their secrets never leave the server. A value may
   reference an environment variable so one declaration works on every machine;
@@ -161,14 +151,13 @@ template. These rules tie them together:
 
 ## Key patterns
 
-- **One LLM layer.** Every model call — benchmark answer, verifier, chat — goes
-  through `core/llmkit`, the only seam that speaks HTTP to an OpenAI-compatible
-  endpoint, so adding a model is configuration, never new code. Without a
-  verifier endpoint an answer cannot be graded, and is failed rather than
-  guessed.
-- **Core owns logic, the API owns transport.** Blocking work runs in a worker
-  thread publishing to the event bus; the streaming endpoint consumes it. Run and
-  chat share that worker-plus-cancellation pattern, and nothing under `core` may
+- **One LLM layer.** Every model call — every chat reply, a batch task's turns
+  included — goes through `core/llmkit`, the only seam that speaks HTTP to an
+  OpenAI-compatible endpoint, so adding a model is configuration, never new
+  code.
+- **Core owns logic, the API owns transport.** The blocking model call runs in a
+  worker thread publishing events; the streaming endpoint consumes them. That
+  worker-plus-cancellation pattern is the chat's, and nothing under `core` may
   import the API layer.
 - **Hubs are long-lived singletons.** A restart rebuilds a hub's internals but
   never replaces the object the app holds, because worker threads keep the
@@ -232,10 +221,8 @@ chains, redirections or backgrounding, and no variable, glob or home expansion.
 
 - **A stream cut by the server looks like a finished answer** at the chunk level.
   The honest signal is whether a real finish marker was ever seen, read after the
-  loop is drained. A truncated benchmark answer is failed and never sent to the
-  verifier (grading a fragment measures the transport, not the model), and a
-  truncated chat reply ends as an error, which also stops a half-streamed tool call
-  from being executed.
+  loop is drained. A truncated chat reply ends as an error, which also stops a
+  half-streamed tool call from being executed.
 - **Token counts can look server-reported when they are not**: a stream that dies
   before any usage chunk gets a re-counted back-fill, so a reported figure is not
   evidence of where it came from. Keep the estimated flag honest.

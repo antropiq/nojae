@@ -2,7 +2,7 @@ import { computed, reactive } from 'vue'
 // The one renderer the app owns (marked + KaTeX + hljs + DOMPurify). A preview
 // tab renders through it exactly as the chat does — one renderer, one owner.
 import { renderMarkdown } from '../lib/markdown'
-import { useBenchmark } from './useBenchmark'
+import { useAppShell } from './useAppShell'
 import { useChat } from './useChat'
 import { useEditorNotices } from './useEditorNotices'
 import { useGitStatus } from './useGitStatus'
@@ -1029,7 +1029,7 @@ export function useEditorFiles() {
   // cannot act on is noise. And with only diff tabs open there is no buffer
   // that can be stale.
   function probeIsUseful() {
-    if (useBenchmark().state.activeTab !== 'editor') return false
+    if (useAppShell().state.activeTab !== 'editor') return false
     if (useChat().state.phase !== 'idle') return false
     return state.open.some((item) => item.kind === 'file')
   }

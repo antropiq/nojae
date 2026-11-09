@@ -558,7 +558,7 @@ class TestReservedFolderIsAbsentEverywhere:
             assert tree(client, rel).status_code == 404, rel
             assert read(client, rel).status_code == 404, rel
 
-    def test_absent_in_benchmarks_own_workspace_too(
+    def test_absent_in_the_apps_own_workspace_too(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """The mixed state is the normal one: the default location is the app."""
@@ -646,7 +646,7 @@ class TestReservedFolderIsAbsentEverywhere:
         with TestClient(create_app()) as exact_client:
             assert read(exact_client, ".NOJAE/x.md").status_code == 200
 
-class TestBenchmarksOwnWorkspaceAtTheRoutes:
+class TestAppsOwnWorkspaceAtTheRoutes:
     """Level A through the read surface: the app's own ``.env`` is not there.
 
     The mirror of ``test_a_foreign_workspaces_dotenv_is_an_ordinary_file``. Both

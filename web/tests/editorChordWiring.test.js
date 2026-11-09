@@ -31,7 +31,7 @@ vi.mock('../src/components/MonacoDiffViewer.vue', () => ({
 }))
 
 import EditorArea from '../src/components/EditorArea.vue'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useQuickOpen } from '../src/composables/useQuickOpen'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
@@ -39,7 +39,7 @@ import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 const files = useEditorFiles()
 const tree = useWorkspaceTree()
 const quick = useQuickOpen()
-const bench = useBenchmark()
+const appShell = useAppShell()
 
 function fileRecord(path, text) {
   return {
@@ -108,7 +108,7 @@ beforeEach(() => {
   quick.state.selected = 0
   quick.state.truncated = false
   quick.state.error = null
-  bench.state.activeTab = 'editor'
+  appShell.state.activeTab = 'editor'
   vi.restoreAllMocks()
   vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
     if (String(url).startsWith('/api/fs/files')) {
@@ -156,7 +156,7 @@ describe('the window chord reaches the dialog through the pane', () => {
 
   it('Ctrl+P on another tab is neither consumed nor answered', async () => {
     await mountPane()
-    bench.state.activeTab = 'workbench'
+    appShell.state.activeTab = 'workbench'
     const event = new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, cancelable: true })
     window.dispatchEvent(event)
 

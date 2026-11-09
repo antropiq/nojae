@@ -1,5 +1,4 @@
 import { watchEffect } from 'vue'
-import { useBenchmark } from './useBenchmark'
 import { useChat } from './useChat'
 import { useBatch } from './useBatch'
 import { inferenceRunning } from '../lib/inference-state'
@@ -15,14 +14,13 @@ import { inferenceRunning } from '../lib/inference-state'
 const BASE_TITLE = document.title.replace(/^(?:[⚡✨]\s*)*/, '')
 
 export function useTabTitle() {
-  const { state: benchmark } = useBenchmark()
   const { state: chat } = useChat()
   const { state: batch } = useBatch()
 
-  // Mirrors the app bar's status pill (AppBar.vue reads the same three flags);
+  // Mirrors the app bar's status pill (AppBar.vue reads the same two flags);
   // deliberately only two states, since a background tab is read at a glance.
   watchEffect(() => {
-    document.title = inferenceRunning({ benchmark, chat, batch })
+    document.title = inferenceRunning({ chat, batch })
       ? `⚡ ${BASE_TITLE}`
       : `✨ ${BASE_TITLE}`
   })

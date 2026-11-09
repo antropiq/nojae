@@ -12,7 +12,7 @@ import {
 } from '../composables/useChat.js'
 import { usePromptHelpers } from '../composables/usePromptHelpers.js'
 import { useAutoScroll } from '../composables/useAutoScroll.js'
-import { useBenchmark } from '../composables/useBenchmark.js'
+import { useAppShell } from '../composables/useAppShell.js'
 import { FOCUS_REASONING, useChatLayout } from '../composables/useChatLayout.js'
 import { useBatch } from '../composables/useBatch.js'
 import { anyHub, bothHubs } from '../lib/chat-hubs.js'
@@ -21,7 +21,7 @@ import WorkBenchFocusGutter from './WorkBenchFocusGutter.vue'
 
 const { state, editLast, clearImage, loadChatHubs, chatBusy } = useChat()
 const { state: batch } = useBatch()
-const { state: benchmarkState, loadConfig } = useBenchmark()
+const { state: appShellState, loadConfig } = useAppShell()
 const { loadPromptHelpers } = usePromptHelpers()
 
 // Keep config.supportsVision (which gates the attach button) and the
@@ -31,7 +31,7 @@ const { loadPromptHelpers } = usePromptHelpers()
 // keeps its frozen list — loadChatMcp ignores locked state. The prompt helper
 // bullets refresh the same way (they may have been edited meanwhile).
 watch(
-  () => benchmarkState.activeTab,
+  () => appShellState.activeTab,
   (tab) => {
     if (tab === 'chat') {
       loadConfig()
@@ -188,7 +188,7 @@ const {
               <MarkdownStream v-if="message.html" :html="message.html" />
             </div>
           </div>
-          <article v-else class="question-card chat-answer-card">
+          <article v-else class="chat-answer-card">
             <!-- The reply's own copy affordance, on the card's top-right corner
                  (the composer's button above the textarea is the one that copies
                  the whole conversation). -->
@@ -271,7 +271,7 @@ const {
           </svg>
           <p class="stream-empty-title">Chat with the model</p>
           <p class="caption">
-            Ask anything — answers stream from the endpoint configured for the benchmark.
+            Ask anything — answers stream from the endpoint configured for this workspace.
           </p>
         </div>
       </div>

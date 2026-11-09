@@ -1,10 +1,10 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useBenchmark } from '../composables/useBenchmark'
+import { useAppShell } from '../composables/useAppShell'
 import { useTerminal } from '../composables/useTerminal'
 
 // Bundled with this component only, never in main.js — xterm is heavy and the
-// Benchmark tab is the default screen. The xterm classes load lazily inside
+// WorkBench tab is the default screen. The xterm classes load lazily inside
 // useTerminal.attach(); the emulator's base CSS rides this static import so it
 // still lands in the Editor chunk, not the entry one.
 import '@xterm/xterm/css/xterm.css'
@@ -28,7 +28,7 @@ import '../fonts/nerd-fonts.css'
 const host = ref(null)
 const terminal = useTerminal()
 const state = terminal.state
-const bench = useBenchmark()
+const appShell = useAppShell()
 
 // The header meta, only while a session is live: pid + cwd from the `open`
 // frame, so a second tab or a lost session is diagnosable.
@@ -86,7 +86,7 @@ onMounted(async () => {
 // would also fire, but the activeTab watch makes the intent explicit and the
 // two collapse via the debounce / zero-size guards.)
 watch(
-  () => bench.state.activeTab,
+  () => appShell.state.activeTab,
   (tab) => {
     if (tab === 'editor') nextTick(() => terminal.fitVisible())
   },

@@ -1,10 +1,9 @@
 # Workspace policy / stores (hidden folder, read-write-policy.json governs it)
 .nojae/
 
-# Secrets & run output (each secret file has a committed .example template)
+# Secrets (each secret file has a committed .example template)
 .env
 .env.test
-results.json
 
 # Logs
 logs/

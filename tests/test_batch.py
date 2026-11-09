@@ -544,16 +544,6 @@ def chat_client(batch_client, tmp_path, monkeypatch):
     config = EndpointsConfig(serverUrl="http://localhost:8080/v1",
                              endpoint="model-a", sysprompt="Base prompt.")
     monkeypatch.setattr(routes, "load_endpoints_config", lambda: (config, None))
-    # The run endpoint reads the real question set; keep it hermetic.
-    monkeypatch.setattr(
-        routes,
-        "load_questions",
-        lambda: [{"uuid": "q1", "question": "one?", "expected": "yes"}],
-    )
-    # A finished run writes results.json: redirect it away from the repo.
-    results = tmp_path / "results.json"
-    monkeypatch.setattr(routes, "RESULTS_PATH", results)
-    monkeypatch.setattr("src.core.utils.RESULTS_PATH", results)
     return batch_client
 
 
@@ -645,48 +635,18 @@ class TestSystemPromptOrdering:
         assert "big-picture" not in plain
 
 
-class TestRunRefusedWhileChatStreams:
-    """``POST /run`` must refuse under a streaming reply (spec §1.5).
+class TestChatStreamSlotIsFreed:
+    """The streaming guard every mutation route asks is cleared when a reply ends.
 
-    ``POST /chat`` already refuses a running benchmark; without the twin guard
-    a batch turn (streaming for minutes) and a benchmark run would generate at
-    the same time on one endpoint, with a single _CHAT_HANDLE to pause either.
+    A reply that left a task in ``_CHAT_TASKS`` behind would refuse every hub
+    restart and every Editor write for the rest of the process.
     """
 
-    def test_run_returns_409_while_a_reply_streams(
+    def test_the_slot_is_free_again_once_the_reply_has_ended(
         self, chat_client, monkeypatch
     ):
-        routes._CHAT_TASKS.add(object())
-        try:
-            response = chat_client.post("/api/run")
-        finally:
-            routes._CHAT_TASKS.clear()
-        assert response.status_code == 409
-        assert response.json()["detail"] == (
-            "Cannot start a run while a chat reply is streaming"
-        )
-
-    def test_run_still_starts_when_no_reply_streams(
-        self, chat_client, monkeypatch
-    ):
-        from tests.test_api import patch_bench
-
-        patch_bench(monkeypatch)
-        assert chat_client.post("/api/run").status_code == 202
-
-    def test_409_while_a_real_reply_is_streaming(self, chat_client, monkeypatch):
-        """Same race, driven through an actual streaming reply.
-
-        The TestClient buffers an SSE body before returning, so the second
-        request has to come from another thread — exactly as a second browser
-        tab or a ``curl`` would do it.
-        """
-        from tests.test_api import patch_bench
-
-        patch_bench(monkeypatch)
         streaming = threading.Event()
         release = threading.Event()
-        results: Dict[str, Any] = {}
 
         def fake(messages, model, server_url, emit, sampling=None, **kwargs):
             streaming.set()
@@ -696,24 +656,24 @@ class TestRunRefusedWhileChatStreams:
 
         monkeypatch.setattr(routes, "stream_chat", fake)
 
-        def try_run():
+        def release_reply():
             streaming.wait(timeout=5)
-            results["run"] = chat_client.post("/api/run")
-            results["chat_still_running"] = bool(routes._CHAT_TASKS)
+            still_streaming = bool(routes._CHAT_TASKS)
             release.set()
+            results["still_streaming"] = still_streaming
 
-        poster = threading.Thread(target=try_run)
-        poster.start()
+        results: Dict[str, Any] = {}
+        reader = threading.Thread(target=release_reply)
+        reader.start()
         chat = chat_client.post("/api/chat",
                                 json={"messages": [{"role": "user",
                                                     "content": "task 1"}]})
-        poster.join(timeout=5)
+        reader.join(timeout=5)
 
         assert chat.status_code == 200
-        assert results["run"].status_code == 409
-        assert results["chat_still_running"] is True
-        # The reply ended normally, and the slot is free again for a run.
         assert "event: done" in chat.text
+        # The reply was still guarded while it held the upstream stream open.
+        assert results["still_streaming"] is True
         # Polled, not asserted inline: the slot is freed by the pump task's own
         # done callback, which lands a beat after the stream's terminal event —
         # the SSE generator returns as soon as ``done`` arrives, while the pump
@@ -725,4 +685,3 @@ class TestRunRefusedWhileChatStreams:
         while routes._CHAT_TASKS and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not routes._CHAT_TASKS
-        assert chat_client.post("/api/run").status_code == 202

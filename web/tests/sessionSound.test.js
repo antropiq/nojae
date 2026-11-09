@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
 import { inferenceRunning } from '../src/lib/inference-state'
-import { useBenchmark } from '../src/composables/useBenchmark'
 import { useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
 import { playSessionEnded, useSessionSound } from '../src/composables/useSessionSound'
@@ -34,13 +33,11 @@ class FakeAudio {
 
 vi.stubGlobal('Audio', FakeAudio)
 
-const benchmark = useBenchmark().state
 const chat = useChat().state
 const batch = useBatch().state
 const sound = useSessionSound()
 
 function reset() {
-  benchmark.status = 'idle'
   chat.phase = 'idle'
   batch.active = false
   sound.state.enabled = true
@@ -53,21 +50,15 @@ async function settle() {
 }
 
 describe('inferenceRunning: one predicate, two indicators', () => {
-  it('is idle only when no run, no lot and no reply is in flight', () => {
+  it('is idle only when no lot and no reply is in flight', () => {
     expect(
-      inferenceRunning({ benchmark: { status: 'idle' }, chat: { phase: 'idle' }, batch: { active: false } }),
+      inferenceRunning({ chat: { phase: 'idle' }, batch: { active: false } }),
     ).toBe(false)
-  })
-
-  it('is busy for a running benchmark even with an idle WorkBench', () => {
-    expect(
-      inferenceRunning({ benchmark: { status: 'running' }, chat: { phase: 'idle' }, batch: { active: false } }),
-    ).toBe(true)
   })
 
   it('stays busy across a batch turn gap', () => {
     expect(
-      inferenceRunning({ benchmark: { status: 'idle' }, chat: { phase: 'idle' }, batch: { active: true } }),
+      inferenceRunning({ chat: { phase: 'idle' }, batch: { active: true } }),
     ).toBe(true)
   })
 })
@@ -85,14 +76,6 @@ describe('useSessionSound: rings on the busy -> idle edge only', () => {
     expect(played).toHaveLength(1)
     expect(played[0].muted).toBe(false)
     expect(played[0].src).toContain('session_ended')
-  })
-
-  it('chimes once for a whole benchmark run', async () => {
-    benchmark.status = 'running'
-    await settle()
-    benchmark.status = 'finished'
-    await settle()
-    expect(played).toHaveLength(1)
   })
 
   it('does not chime between two batch task turns', async () => {

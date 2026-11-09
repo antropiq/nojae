@@ -22,7 +22,6 @@ from src.config import (
     max_tool_iteration,
     default_path_location,
     load_endpoints_config,
-    load_questions,
     path_location,
     setup_path_location,
     workspace_settings_refusal,
@@ -33,7 +32,7 @@ from tests.conftest import neutralise_workspace_settings, write_workspace_settin
 
 
 class TestLoadEndpointsConfig:
-    """The seam where the two stores meet: group 1 from the file, verifier from ``.env``.
+    """The one reader of the workspace's model connection.
 
     Every case here points the workspace settings lookup at its own ``tmp_path``
     (the ``conftest`` helper) and writes its own file, because the alternative —
@@ -41,21 +40,9 @@ class TestLoadEndpointsConfig:
     connection rather than about the function.
     """
 
-    @pytest.fixture(autouse=True)
-    def clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No ambient group-2 keys: the verifier half comes from the env."""
-        for key in (
-            "VERIFIER_AGENT_SYSPROMPT",
-            "VERIFIER_AGENT_SERVERURL",
-            "VERIFIER_AGENT_SERVERURL_API_KEY",
-            "VERIFIER_AGENT_ENDPOINT",
-        ):
-            monkeypatch.delenv(key, raising=False)
-
-    def test_reads_group_one_from_the_file_and_the_verifier_from_the_env(
+    def test_reads_the_model_connection_from_the_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """One test, both halves: this is the whole point of the split."""
         neutralise_workspace_settings(
             monkeypatch,
             tmp_path,
@@ -67,8 +54,6 @@ class TestLoadEndpointsConfig:
             temperature=0.7,
             reasoning="low",
         )
-        monkeypatch.setenv("VERIFIER_AGENT_ENDPOINT", "judge")
-        monkeypatch.setenv("VERIFIER_AGENT_SERVERURL_API_KEY", "sk-judge")
 
         config, error = load_endpoints_config()
         assert error is None
@@ -80,9 +65,6 @@ class TestLoadEndpointsConfig:
         assert config.supports_vision is True
         assert config.temperature == 0.7
         assert config.reasoning_effort == "low"
-        assert config.verifierAgent is not None
-        assert config.verifierAgent.endpoint == "judge"
-        assert config.verifierAgent.apiKey == "sk-judge"
 
     def test_a_group_one_value_only_in_the_env_is_not_picked_up(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -142,9 +124,9 @@ class TestLoadEndpointsConfig:
     ):
         """D9 (malformed) and D8 (still the seed text) both refuse, never default.
 
-        A caller that benchmarked on defaults would measure the defaults, and one
-        that dialled the template's sentence would report a transport error
-        quoting prose — so both states come back as ``(None, sentence)``.
+        A caller that ran on defaults would measure the defaults, and one that
+        dialled the template's sentence would report a transport error quoting
+        prose — so both states come back as ``(None, sentence)``.
         """
         neutralise_workspace_settings(monkeypatch, tmp_path, absent=True)
         path = (
@@ -254,22 +236,6 @@ class TestWorkspaceSourcedConfigHelpers:
         monkeypatch.setenv("MAX_TOOL_ITERATION", "7")
         monkeypatch.setenv("MAX_MCP_ITERATION", "7")
         assert max_tool_iteration() == 4
-
-
-class TestLoadQuestions:
-    def test_reads_questions_key(self, tmp_path: Path):
-        path = tmp_path / "questions.json"
-        path.write_text(
-            json.dumps({"questions": [{"uuid": "1", "question": "q", "expected": "e"}]}),
-            encoding="utf-8",
-        )
-        assert load_questions(path) == [
-            {"uuid": "1", "question": "q", "expected": "e"}
-        ]
-
-    def test_missing_file_raises(self, tmp_path: Path):
-        with pytest.raises(FileNotFoundError):
-            load_questions(tmp_path / "nope.json")
 
 
 class TestPathLocation:

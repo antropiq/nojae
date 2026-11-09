@@ -1,28 +1,25 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import ApiKeyField from './ApiKeyField.vue'
-import { useBenchmark } from '../composables/useBenchmark'
+import { useAppShell } from '../composables/useAppShell'
 
 const {
   state,
   closeSettings,
   saveSettings,
   fetchModels,
-  loadQuestionSets,
   toggleMcp,
   saveMcp,
   toggleLsp,
   saveLsp,
-} = useBenchmark()
+} = useAppShell()
 
 const dialogEl = ref(null)
 const activeSection = ref('llm')
 
 const SECTIONS = [
   { id: 'llm', label: 'LLM' },
-  { id: 'question-set', label: 'Question set' },
   { id: 'sampling', label: 'Sampling params' },
-  { id: 'verifier', label: 'Verifier LLM' },
   { id: 'mcp', label: 'MCP' },
   { id: 'lsp', label: 'LSP' },
 ]
@@ -125,10 +122,6 @@ const workspaceSettingsNote = computed(() => {
       {{ state.settingsError }}
     </p>
 
-    <p v-if="state.questionSetsError" class="alert-error" role="alert">
-      {{ state.questionSetsError }}
-    </p>
-
     <form class="settings-form" @submit.prevent>
       <div class="settings-body">
         <nav class="settings-nav" aria-label="Settings sections">
@@ -158,29 +151,29 @@ const workspaceSettingsNote = computed(() => {
                 v-model="state.settings.serverUrl"
                 type="url"
                 placeholder="http://127.0.0.1:8080/v1"
-                @change="fetchModels('benchmark', true)"
+                @change="fetchModels('modelConnection', true)"
               />
             </label>
             <label>
               API key
               <ApiKeyField
                 v-model="state.settings.apiKey"
-                @change="fetchModels('benchmark', true)"
+                @change="fetchModels('modelConnection', true)"
               />
             </label>
             <label>
               Model
               <select v-model="state.settings.endpoint">
-                <option v-if="!state.benchmarkModels.length" value="" disabled>
-                  {{ state.benchmarkModelsLoading ? 'Loading models…' : 'No models available' }}
+                <option v-if="!state.modelConnectionModels.length" value="" disabled>
+                  {{ state.modelConnectionModelsLoading ? 'Loading models…' : 'No models available' }}
                 </option>
-                <option v-for="model in state.benchmarkModels" :key="model" :value="model">
+                <option v-for="model in state.modelConnectionModels" :key="model" :value="model">
                   {{ model }}
                 </option>
               </select>
             </label>
-            <p v-if="state.benchmarkModelsError" class="caption alert-error" role="alert">
-              {{ state.benchmarkModelsError }}
+            <p v-if="state.modelConnectionModelsError" class="caption alert-error" role="alert">
+              {{ state.modelConnectionModelsError }}
             </p>
             <label>
               System prompt
@@ -196,28 +189,6 @@ const workspaceSettingsNote = computed(() => {
                 v-model="state.settings.supportsVision"
               />
               Endpoint supports image input (vision)
-            </label>
-          </section>
-
-          <section v-show="activeSection === 'question-set'">
-            <h3 class="settings-section-title">Question set</h3>
-            <label>
-              Source
-              <select
-                v-model="state.settings.questionSet"
-                :disabled="state.questionSetsLoading"
-              >
-                <option
-                  v-for="set in state.questionSets"
-                  :key="set.id"
-                  :value="set.id"
-                >
-                  {{ set.label }} ({{ set.count }} questions)
-                </option>
-                <option v-if="!state.questionSets.length" value="" disabled>
-                  {{ state.questionSetsLoading ? 'Loading question sets…' : 'No question sets available' }}
-                </option>
-              </select>
             </label>
           </section>
 
@@ -256,48 +227,6 @@ const workspaceSettingsNote = computed(() => {
                   {{ option.label }}
                 </option>
               </select>
-            </label>
-          </section>
-
-          <section v-show="activeSection === 'verifier'">
-            <h3 class="settings-section-title">Verifier LLM</h3>
-            <label>
-              Server URL
-              <input
-                v-model="state.settings.verifier.serverUrl"
-                type="url"
-                placeholder="http://127.0.0.1:8080/v1"
-                @change="fetchModels('verifier', true)"
-              />
-            </label>
-            <label>
-              API key
-              <ApiKeyField
-                v-model="state.settings.verifier.apiKey"
-                @change="fetchModels('verifier', true)"
-              />
-            </label>
-            <label>
-              Model
-              <select v-model="state.settings.verifier.endpoint">
-                <option v-if="!state.verifierModels.length" value="" disabled>
-                  {{ state.verifierModelsLoading ? 'Loading models…' : 'No models available' }}
-                </option>
-                <option v-for="model in state.verifierModels" :key="model" :value="model">
-                  {{ model }}
-                </option>
-              </select>
-            </label>
-            <p v-if="state.verifierModelsError" class="caption alert-error" role="alert">
-              {{ state.verifierModelsError }}
-            </p>
-            <label>
-              System prompt
-              <textarea
-                v-model="state.settings.verifier.sysprompt"
-                rows="4"
-                placeholder="You are a response expert analyser…"
-              ></textarea>
             </label>
           </section>
 

@@ -18,7 +18,7 @@ import { join } from 'node:path'
 // texts in it are exactly the ones the clipboard is compared against.
 
 const CHAT_OUTPUT = '.chat-output'
-const REPLY_CARD = '.question-card'
+const REPLY_CARD = '.chat-answer-card'
 const CHIP = '.chat-msg-copy'
 
 // Two replies, so "copies only this one" is a comparison and not an assumption:
@@ -44,8 +44,9 @@ async function sessionFile() {
   return path
 }
 
-// The loaded conversation, with the reply cards of the *chat* panel only: the
-// Benchmark tab renders `.question-card`s of its own and stays mounted.
+// The loaded conversation, with the reply cards of the *chat* panel only: tab
+// views stay mounted through `v-show`, so `.chat-answer-card` is scoped to the
+// output column instead of the whole document.
 async function openConversation(page) {
   await page.goto('/')
   await page.getByRole('tab', { name: 'WorkBench' }).click()

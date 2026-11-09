@@ -2,8 +2,8 @@ import { expect, test } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
 
-// Task am-07 — level: UI state. The mode dropdown needs no LLM call and no run:
-// read the workspace's own list from GET /api/agent-modes, and check that the
+// Task am-07 — level: UI state. The mode dropdown needs no LLM call: read the
+// workspace's own list from GET /api/agent-modes, and check that the
 // composer offers it and that a mode whose flag is false turns the matching tool
 // panel inert. As in 01-app-boot, every expected label is read from the endpoint
 // rather than written here, so the spec follows the modes file it measures.

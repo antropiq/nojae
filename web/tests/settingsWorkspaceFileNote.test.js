@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import SettingsDialog from '../src/components/SettingsDialog.vue'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 
 // Which settings file the dialog edits is the **server's** answer, never a name
 // the dialog knows: with the e2e switch on the file in use is
@@ -13,7 +13,7 @@ import { useBenchmark } from '../src/composables/useBenchmark'
 // the app never seeds anything, so empty fields with no explanation would read
 // as an app bug.
 
-const { state } = useBenchmark()
+const { state } = useAppShell()
 
 function settings() {
   return {
@@ -23,8 +23,6 @@ function settings() {
     sysprompt: '',
     temp: null, topP: null, topK: null, minP: null, repeatPenalty: null,
     presencePenalty: null, reasoning: '', supportsVision: false,
-    questionSet: 'legacy',
-    verifier: { serverUrl: '', apiKey: '', endpoint: '', sysprompt: '' },
   }
 }
 
@@ -36,7 +34,6 @@ describe('the dialog names the file the server reported', () => {
   beforeEach(() => {
     state.settings = settings()
     state.settingsError = null
-    state.questionSetsError = null
   })
 
   it('names no file of its own when the server reported one', () => {

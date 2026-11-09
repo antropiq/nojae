@@ -3,8 +3,8 @@
 The cases ``tests/test_memory.py`` used to assert, re-homed onto the new routes
 and the new store: ``<workspace>/.nojae/prompt-helpers.json``, pointed at per
 test by ``NOJAE_PATH_LOCATION`` (the ``tests/test_agent_modes.py`` way)
-rather than by ``config.RESOURCES_DIR`` — the working location is process state,
-so a test that moves it has to move it for itself alone.
+— the working location is process state, so a test that moves it has to move it
+for itself alone.
 
 Three of the old file's assertions are **not** carried over, because the
 behaviour they pinned was deleted on purpose (spec D4/D5):
@@ -31,7 +31,6 @@ from typing import Any, Dict, Iterator, List
 import pytest
 from fastapi.testclient import TestClient
 
-from src import config
 from src.api.server import create_app
 from src.core import prompt_helpers
 
@@ -442,33 +441,3 @@ class TestTheSwitchPayload:
             assert len(client.app.state.mcp.restarts) == 1
         finally:
             locked.chmod(0o755)
-
-
-# -- the question-set guard ----------------------------------------------------
-
-class TestQuestionSetsHaveNoExemption:
-    """D3: with the helpers file gone from ``resources/``, nothing is skipped.
-
-    This is the one place in the suite still patching ``config.RESOURCES_DIR``:
-    a question set is a file of the *app*, not of the workspace, so the folder
-    the discovery reads is the one to move. The assertion is on a scratch folder
-    only — never on this checkout's real ``resources/``.
-    """
-
-    def test_a_file_named_like_the_old_one_is_listed_when_it_has_questions(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
-        resources = tmp_path / "resources"
-        resources.mkdir()
-        questions = {"questions": [{"uuid": "1", "question": "q?", "expected": "a"}]}
-        (resources / "other.json").write_text(json.dumps(questions), encoding="utf-8")
-        (resources / "memory_registration.json").write_text(
-            json.dumps(questions), encoding="utf-8"
-        )
-        monkeypatch.setattr(config, "RESOURCES_DIR", resources)
-
-        # The name no longer means anything: what decides is the content, so a
-        # file keeping the old name and carrying a ``questions`` list is a
-        # question set like any other.
-        listed = client.get("/api/question-sets").json()["questionSets"]
-        assert [entry["id"] for entry in listed] == ["memory_registration", "other"]

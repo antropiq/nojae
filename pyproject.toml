@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nojae"
 version = "0.1.0"
-description = "Benchmark LLM endpoints with streaming responses and LLM-based verification"
+description = "Self-hosted workspace where a coding agent works in front of you"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -69,7 +69,7 @@ class TestStreamChatTruncation:
         assert events[-1]["event"] == "done"
 
     def test_plain_iterable_is_left_alone(self, monkeypatch):
-        # Fails open, exactly as in the benchmark loop.
+        # Fails open: a stream shape that records nothing reads as finished.
         events = self._run(monkeypatch, iter([content_chunk("hi")]))
         assert events[-1]["event"] == "done"
 
@@ -205,8 +205,8 @@ class TestStreamChat:
 
     def test_reasoning_deltas_open_and_extend_decode_window(self, monkeypatch):
         # t0, reasoning, reasoning, content — the usage-only chunk is not
-        # timed. The window must start at the first reasoning delta, like in
-        # the benchmark loop, so tok/s does not pretend thinking was free.
+        # timed. The window must start at the first reasoning delta, so tok/s
+        # does not pretend thinking was free.
         clock = [0.0, 1.0, 2.0, 6.0]  # t0 + one arrival per generated chunk
         monkeypatch.setattr(
             "src.core.chat.time.monotonic", lambda: clock.pop(0)
@@ -433,7 +433,7 @@ class TestStreamChat:
         assert len(set(order)) == 5
 
     def test_stream_chat_never_learns_what_a_mode_is(self):
-        """The seam: this module takes text, so the benchmark path is untouched."""
+        """The seam: this module takes text, so its callers stay mode-blind."""
         import inspect
 
         source = inspect.getsource(chat_core)
@@ -553,12 +553,9 @@ def _config(endpoint: Optional[str] = "model-a") -> EndpointsConfig:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def client(monkeypatch: pytest.MonkeyPatch):
     app = create_app()
     monkeypatch.setattr(routes, "load_endpoints_config", lambda: (_config(), None))
-    results = tmp_path / "results.json"
-    monkeypatch.setattr(routes, "RESULTS_PATH", results)
-    monkeypatch.setattr("src.core.utils.RESULTS_PATH", results)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -829,8 +826,8 @@ class TestControlTokenNotice:
     the model generates a raw run, the serving runtime tokenizes it as a
     single end-of-turn token, and the reply dies mid-sentence reading as
     a clean stop. The prevention that works is a standing chat-turn
-    instruction -- chat only: the benchmark measures raw behaviour and
-    builds its prompts in core/llm.py.
+    instruction -- this loop's own, appended in core/chat.py and nowhere
+    else, so no other prompt carries it.
     """
 
     def _capture_system(self, monkeypatch, messages, **kwargs):
@@ -1113,28 +1110,6 @@ class TestStreamedDisplayIsSanitized:
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
         assert response.status_code == 400
-
-    def test_running_benchmark_returns_409(self, client, monkeypatch):
-        gate = threading.Event()
-
-        def blocked(questions, config, job, emit, cancel_event=None):
-            gate.wait()
-
-        monkeypatch.setattr(routes, "run_benchmark", blocked)
-        monkeypatch.setattr(routes, "load_questions", lambda: [{"uuid": "q", "question": "q?", "expected": "e"}])
-        try:
-            assert client.post("/api/run").status_code == 202
-            deadline = time.time() + 5
-            while time.time() < deadline:
-                if client.get("/api/run").json()["status"] == "running":
-                    break
-                time.sleep(0.02)
-            response = client.post(
-                "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
-            )
-            assert response.status_code == 409
-        finally:
-            gate.set()
 
 
 class TestChatPauseEndpoint:

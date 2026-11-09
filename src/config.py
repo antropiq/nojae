@@ -1,10 +1,9 @@
-"""Application configuration: .env loading, questions, and endpoint config."""
+"""Application configuration: .env loading and endpoint config."""
 
-import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -13,9 +12,6 @@ from src.core.models import EndpointsConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
-RESOURCES_DIR = PROJECT_ROOT / "resources"
-
-QUESTION_SET_DEFAULT = "legacy"
 
 # Cap on tool-calling iterations for one chat reply; shared by MCP connectors
 # and LSP language servers alike (one knob, no split-brain).
@@ -23,16 +19,10 @@ DEFAULT_MAX_TOOL_ITERATION = 25
 
 # Managed .env keys, in the order they are written to the file. The model
 # connection left this list for the workspace's ``.nojae/nojae-settings.json``:
-# what is left is the install's own scope — the verifier agent, the question
-# set, the debug switch and the connector interpreter, the last two hand-edited
-# like ``NOJAE_PYTHON_ROOT`` itself.
+# what is left is the install's own scope — the debug switch and the connector
+# interpreter, both hand-edited like ``NOJAE_PYTHON_ROOT`` itself.
 SETTING_KEYS: Tuple[str, ...] = (
-    "QUESTION_SET",
     "LLM_DEBUG",
-    "VERIFIER_AGENT_SYSPROMPT",
-    "VERIFIER_AGENT_SERVERURL",
-    "VERIFIER_AGENT_SERVERURL_API_KEY",
-    "VERIFIER_AGENT_ENDPOINT",
     "NOJAE_PYTHON_ROOT",
 )
 
@@ -321,8 +311,8 @@ def agent_instructions_block(text: Optional[str] = None) -> str:
     The framing tells the model these are the project's own instructions —
     they win over generic wording for anything project-specific — and pins
     the project root to the working location, which is what makes the paths
-    the instructions mention (``src/``, ``resources/``, ``tests/``) and the
-    tool UIDs they describe resolve to the real project.
+    the instructions mention (``src/``, ``tests/``, ``web/``) and the tool
+    UIDs they describe resolve to the real project.
     """
     body = load_agent_instructions() if text is None else (text or "").strip()
     if not body:
@@ -335,49 +325,6 @@ def agent_instructions_block(text: Optional[str] = None) -> str:
     ).format(root=path_location(), body=body)
 
 
-def questions_path() -> Path:
-    """Resolve the questions file path from the QUESTION_SET env var.
-
-    Defaults to ``legacy`` which reads ``resources/legacy.json``.
-    Resolved at call time so ``.env`` (loaded at app startup) takes effect.
-    """
-    name = os.environ.get("QUESTION_SET", QUESTION_SET_DEFAULT)
-    return RESOURCES_DIR / f"{name}.json"
-
-
-def list_question_sets() -> List[Dict[str, Any]]:
-    """Discover available question sets in ``resources/``.
-
-    Each ``*.json`` file must contain a ``"questions"`` key. Returns a list of
-    ``{id, label, count}`` dicts sorted by filename.
-    """
-    sets: List[Dict[str, Any]] = []
-    for path in sorted(RESOURCES_DIR.glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            questions = data.get("questions", [])
-            if not isinstance(questions, list):
-                continue
-        except (json.JSONDecodeError, OSError, ValueError):
-            continue
-        sets.append(
-            {
-                "id": path.stem,
-                "label": path.stem.capitalize(),
-                "count": len(questions),
-            }
-        )
-    return sets
-
-
-def load_questions(path: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """Load the benchmark questions from the configured question set."""
-    if path is None:
-        path = questions_path()
-    data: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-    return data.get("questions", [])
-
-
 def workspace_settings_refusal() -> Optional[str]:
     """The one sentence naming why this workspace's model connection is unusable.
 
@@ -388,10 +335,10 @@ def workspace_settings_refusal() -> Optional[str]:
     unusable-but-not-broken ones.
 
     This is the single builder of that sentence (spec D9). ``routes._load_config``
-    turns it into the refusal a chat or benchmark request answers with, and
-    **ws-04's ``GET /api/settings`` must reuse this function** rather than write
-    a second sentence, so the dialog and the refusal can never disagree about
-    what is wrong with the file.
+    turns it into the refusal a chat request answers with, and **ws-04's
+    ``GET /api/settings`` must reuse this function** rather than write a second
+    sentence, so the dialog and the refusal can never disagree about what is
+    wrong with the file.
     """
     # Local import: ``workspace_settings`` reads ``path_location`` *from* this
     # module, so a module-level import here would be a cycle — the same
@@ -414,23 +361,21 @@ def workspace_settings_refusal() -> Optional[str]:
 def load_endpoints_config() -> Tuple[
     Optional[EndpointsConfig], Optional[Union[ValidationError, str]]
 ]:
-    """Build and validate the endpoints config from the two stores it lives in.
+    """Build and validate the endpoints config from the workspace's settings file.
 
-    Group 1 (the model connection) comes from the workspace's
-    ``.nojae/nojae-settings.json``, the verifier block from the environment —
-    the one place the two meet, which is why the file's *state* is decided here
-    too:
+    The model connection comes from the workspace's
+    ``.nojae/nojae-settings.json``, which is why the file's *state* is decided
+    here too:
 
     * ``(config, None)`` — the file parsed and the sampler values validated;
     * ``(None, ValidationError)`` — a value pydantic rejects;
     * ``(None, sentence)`` — the file is **absent**, **malformed** or still
       holds the template's instruction text (spec D8, D9). The sentence names
       the file and its path, and it is the one the Settings dialog shows: it
-      comes from :func:`workspace_settings_refusal` above, so a chat or
-      benchmark refusal and ws-04's ``GET /api/settings`` cannot disagree about
-      what is wrong.
+      comes from :func:`workspace_settings_refusal` above, so a chat refusal and
+      ws-04's ``GET /api/settings`` cannot disagree about what is wrong.
 
-    Never a silent default. A caller that benchmarked on defaults here would
+    Never a silent default. A caller that answered on defaults here would
     measure the defaults, not the model — and the alternative, dialling the
     template's instruction sentence as a URL, makes a transport error quote a
     sentence back at the user.
@@ -445,9 +390,7 @@ def load_endpoints_config() -> Tuple[
         return None, refusal
     try:
         return (
-            EndpointsConfig.from_workspace(
-                workspace_settings.load_workspace_settings(), os.environ
-            ),
+            EndpointsConfig.from_workspace(workspace_settings.load_workspace_settings()),
             None,
         )
     except ValidationError as exc:
@@ -459,17 +402,9 @@ def load_settings() -> Dict[str, str]:
 
     ``os.environ`` already reflects the .env file loaded at startup (real
     environment variables keep precedence) and is refreshed on every save.
-    ``QUESTION_SET`` resolves to its default when unset; every other managed
-    key answers empty, because the two values that used to default here moved
-    to the workspace's settings file, which defaults them itself.
+    Every managed key answers empty when unset — no managed key defaults.
     """
-    defaults = {
-        "QUESTION_SET": QUESTION_SET_DEFAULT,
-    }
-    return {
-        key: os.environ.get(key) or defaults.get(key, "")
-        for key in SETTING_KEYS
-    }
+    return {key: os.environ.get(key) or "" for key in SETTING_KEYS}
 
 
 def save_settings(values: Dict[str, str]) -> None:
@@ -477,17 +412,12 @@ def save_settings(values: Dict[str, str]) -> None:
 
     Empty optional values are written as commented-out lines and removed from
     the environment (``REQUIRED_SETTING_KEYS`` is empty, so no key is
-    always-written). The file is regenerated
-    from a fixed template mirroring ``.env.example``. ``QUESTION_SET`` always
-    resolves to ``QUESTION_SET_DEFAULT`` when unset, so it is never written
-    as a commented-out line.
+    always-written). The file is regenerated from a fixed template mirroring
+    ``.env.example``.
     """
     clean: Dict[str, str] = {
         key: (values.get(key) or "").strip() for key in SETTING_KEYS
     }
-    # QUESTION_SET always has a value; default to "legacy" when unset.
-    if not clean["QUESTION_SET"]:
-        clean["QUESTION_SET"] = QUESTION_SET_DEFAULT
     ENV_PATH.write_text(_render_env(clean), encoding="utf-8")
     for key in SETTING_KEYS:
         if clean[key]:
@@ -521,21 +451,12 @@ def _render_env(values: Dict[str, str]) -> str:
         "# Nojaé configuration (managed by the settings dialog).",
         "# Real environment variables take precedence over the values defined here.",
         "",
-        "# Benchmark question set (resources/<name>.json)",
-        line("QUESTION_SET"),
-        "",
         "# LLM_DEBUG=1 logs every request's payload (URL, model, body) to the",
         "# server console at DEBUG, so a failed call can be read off it. The",
         "# refused call's status and upstream body reach the UI's error line",
         "# whether or not this is on; what the flag adds is the payload.",
         "# Verbose, so switch it back off once the failure has been read.",
         line("LLM_DEBUG"),
-        "",
-        "# Verifier agent (optional)",
-        line("VERIFIER_AGENT_SYSPROMPT"),
-        line("VERIFIER_AGENT_SERVERURL"),
-        line("VERIFIER_AGENT_SERVERURL_API_KEY"),
-        line("VERIFIER_AGENT_ENDPOINT"),
         "",
         "# MCP connectors (Chat tab only) are declared only in",
         "# .nojae/mcp-settings.json at the working location: seeded from",

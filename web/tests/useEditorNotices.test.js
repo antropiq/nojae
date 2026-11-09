@@ -7,7 +7,7 @@ import {
   useEditorNotices,
 } from '../src/composables/useEditorNotices'
 import { useEditorFiles } from '../src/composables/useEditorFiles'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 
 // Layer 1 (jsdom): the write-feedback channel. The routes' rules (which status
@@ -18,7 +18,7 @@ import { useChat } from '../src/composables/useChat'
 
 const notices = useEditorNotices()
 const files = useEditorFiles()
-const bench = useBenchmark()
+const appShell = useAppShell()
 const chat = useChat()
 
 const texts = () => notices.state.notices.map((item) => item.text)
@@ -42,7 +42,7 @@ function reset() {
   files.state.probeError = null
   files.state.conflict = null
   // The probe asks only for a visible pane and an idle WorkBench.
-  bench.state.activeTab = 'editor'
+  appShell.state.activeTab = 'editor'
   chat.state.phase = 'idle'
 }
 
@@ -217,7 +217,7 @@ describe('conflicts: which copy of the news the stack carries', () => {
     vi.useRealTimers()
     reset()
     vi.restoreAllMocks()
-    bench.state.activeTab = 'editor'
+    appShell.state.activeTab = 'editor'
     chat.state.phase = 'idle'
   })
 

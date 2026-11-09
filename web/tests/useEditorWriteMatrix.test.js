@@ -10,7 +10,7 @@ import {
   registerRenameChord,
   useWorkspaceTree,
 } from '../src/composables/useWorkspaceTree'
-import { useBenchmark } from '../src/composables/useBenchmark'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 import { useEditorCreate } from '../src/composables/useEditorCreate'
 import { useEditorFiles } from '../src/composables/useEditorFiles'
@@ -40,7 +40,7 @@ const renamer = useEditorRename()
 const creator = useEditorCreate()
 const notices = useEditorNotices()
 const git = useGitStatus()
-const bench = useBenchmark()
+const appShell = useAppShell()
 const chat = useChat()
 
 function jsonResponse(body, ok = true, status = 200) {
@@ -182,7 +182,7 @@ function resetState() {
   git.state.loadedAt = 0
   files.stopFreshnessProbe()
   // The probe asks only for a visible pane and an idle WorkBench.
-  bench.state.activeTab = 'editor'
+  appShell.state.activeTab = 'editor'
   chat.state.phase = 'idle'
 }
 

@@ -2673,7 +2673,7 @@ class TestPolicyFileIsBroken:
         assert save(client, "README.md", "blocked by nothing\n").status_code == 200
 
 
-class TestBuiltInRulesInBenchmarksOwnWorkspace:
+class TestBuiltInRulesInAppsOwnWorkspace:
     """Level A at the routes: live only while the workspace *is* the install dir.
 
     The same paths, the same routes, two workspaces: nojae editing itself

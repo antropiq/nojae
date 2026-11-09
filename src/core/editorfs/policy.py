@@ -303,8 +303,8 @@ def normalise_rel(rel: Optional[str]) -> str:
     """The textual lock: the canonical root-relative path, or a 422.
 
     The one inbound lock (A-D1): everything downstream — the matcher, the
-    ancestor walk, every ``path`` payload echoed to the browser, ``results.json``
-    — sees ``/``-joined workspace-relative text **on every platform**. A backslash
+    ancestor walk, every ``path`` payload echoed to the browser — sees
+    ``/``-joined workspace-relative text **on every platform**. A backslash
     is accepted here and never emitted, so Windows ``src\\config.py`` and Linux
     ``src/config.py`` name one file, and a path string still means the same thing
     in a report from either box.

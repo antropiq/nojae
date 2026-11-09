@@ -2,8 +2,8 @@
 
 The invariant: no token-shaped run -- the pipe-delimited name a chat
 template tokenises as one control token -- reaches a request body through
-any conversation path (benchmark answer, verifier payload, chat history,
-tool result). Delimiters here are assembled from the pieces in
+any conversation path (chat history, tool result). Delimiters here are
+assembled from the pieces in
 :mod:`tests.llmkit_fakes` so this file, like the sanitizer itself, never
 spells a complete run as literal text.
 

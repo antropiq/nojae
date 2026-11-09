@@ -3,7 +3,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 // The code pane's editor surface. Bundled with the Editor tab's lazy chunk
 // (App.vue's defineAsyncComponent), never with the entry chunk — Monaco and
-// its workers are heavy and the Benchmark tab is the default screen.
+// its workers are heavy and the WorkBench tab is the default screen.
 //
 // Two things about this component are load-bearing and easy to break:
 //

@@ -13,8 +13,8 @@ import { useSplitter } from '../composables/useSplitter.js'
 //
 // The navigator keeps its own state in useWorkspaceTree, so the whole view
 // staying mounted (App.vue's v-show) is what preserves open files and, later,
-// the terminal session across a peek at the Benchmark tab. A changed working
-// location re-roots that tree from the save path itself (useBenchmark's
+// the terminal session across a peek at the WorkBench tab. A changed working
+// location re-roots that tree from the save path itself (useAppShell's
 // setPathLocation), so this view owns no cross-tab wiring.
 const shell = ref(null)
 const nav = ref(null)

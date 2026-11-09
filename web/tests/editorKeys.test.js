@@ -76,7 +76,7 @@ describe('applyEditorChord', () => {
     const event = key({ key: 's', ctrlKey: true })
     event.preventDefault = vi.fn()
     const handlers = { save: vi.fn(), 'save-all': vi.fn(), close: vi.fn() }
-    expect(applyEditorChord(event, { activeTab: 'benchmark', active: 'a' }, handlers)).toBe(false)
+    expect(applyEditorChord(event, { activeTab: 'chat', active: 'a' }, handlers)).toBe(false)
     expect(event.preventDefault).not.toHaveBeenCalled()
     for (const handler of Object.values(handlers)) expect(handler).not.toHaveBeenCalled()
   })

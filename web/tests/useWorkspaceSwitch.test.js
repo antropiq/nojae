@@ -16,8 +16,9 @@ import { useGitStatus } from '../src/composables/useGitStatus'
 // — a switch is therefore *not* a refresh. `refresh()` re-fetches the paths it
 // already knows; `reRoot()` forgets them, and the tabs built on them close.
 //
-// The server's own rules for the switch (the deny-list, the 409 while a run is
-// streaming, the realpath canonicalisation) are asserted in tests/test_api.py.
+// The server's own rules for the switch (the deny-list, the 409 while a chat
+// reply streams, the realpath canonicalisation) are asserted in
+// tests/test_api.py.
 // ---------------------------------------------------------------------------
 
 const tree = useWorkspaceTree()

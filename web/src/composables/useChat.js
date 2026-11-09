@@ -183,8 +183,8 @@ export async function loadChatHubs() {
 // disable connectors the user never got to toggle. Toggle choices survive
 // the refresh (restart, tab re-entry and MCP settings saves): previously
 // switched-off connectors come back off, freshly appearing ones default to
-// ON. Exported for useBenchmark's saveMcp() so saving the MCP settings
-// refreshes the panel right away (no cycle: useChat imports useBenchmark
+// ON. Exported for useAppShell's saveMcp() so saving the MCP settings
+// refreshes the panel right away (no cycle: useChat imports useAppShell
 // nowhere).
 export async function loadChatMcp() {
   if (state.mcp.locked) return
@@ -250,7 +250,7 @@ function setChatMcp(id, on) {
 // (GET /api/lsp). Same rules: never touches a locked conversation, a failed
 // load hides the panel and send() omits the lspEnabled filter (chat keeps
 // working with every Settings-activated server), and previous on/off
-// choices survive the refresh. Exported for useBenchmark's saveLsp().
+// choices survive the refresh. Exported for useAppShell's saveLsp().
 export async function loadChatLsp() {
   if (state.lsp.locked) return
   try {

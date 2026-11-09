@@ -8,9 +8,9 @@ import { defineConfig, devices } from '@playwright/test'
 // what is exercised is what `nojae` actually serves.
 //
 // Not 8000: that is where the developer's own `nojae` usually sits, and
-// sharing it would make a run reuse a server pointed at the *run* endpoint and
-// whatever build happened to be on disk — passing specs proving nothing. A
-// dedicated port also means e2e and a manually-run app can coexist.
+// sharing it would make the suite reuse whatever server and whatever build
+// happened to be on disk — passing specs proving nothing. A dedicated port
+// also means e2e and a manually-run app can coexist.
 const PORT = Number(process.env.E2E_PORT ?? 8123)
 const BASE_URL = `http://127.0.0.1:${PORT}`
 
@@ -36,7 +36,7 @@ const EXECUTABLE_PATH =
   (process.platform === 'win32' ? undefined : '/usr/bin/chromium')
 
 // The env file holding the **app-level** keys for the server under test — the
-// question set, the debug switch and the verifier block, i.e. what `.env` holds
+// debug switch and the connector interpreter, i.e. what `.env` holds
 // (`.env.test` is gitignored, copied from `.env.test.example`). It is *not* the
 // endpoint's home any more: the model connection lives in the workspace's
 // settings file, and the suite has its own one of those (below), so a spec can
@@ -135,12 +135,12 @@ export default defineConfig({
   // The app streams for as long as a model takes to answer, so the defaults
   // (5 s) are far too tight: an assertion here waits for a *stream*, not for a
   // DOM mutation. Timeouts only bound the wait — what makes a spec *deterministic*
-  // is asserting on app state the composables own (an event count, a run state),
-  // never on a sleep.
+  // is asserting on app state the composables own (an event count, a stream
+  // phase), never on a sleep.
   timeout: 120_000,
   expect: { timeout: 30_000 },
-  // A run touches one global server and one active benchmark run at a time,
-  // so specs must not fight over it.
+  // Specs share one global server, which answers one streamed reply at a time
+  // and holds one working location, so they must not fight over either.
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),

@@ -9,7 +9,7 @@ import QuickOpenDialog from './QuickOpenDialog.vue'
 import { useEditorFiles } from '../composables/useEditorFiles'
 import { useWorkspaceTree } from '../composables/useWorkspaceTree'
 import { useWorkspaceSearch } from '../composables/useWorkspaceSearch'
-import { useBenchmark } from '../composables/useBenchmark'
+import { useAppShell } from '../composables/useAppShell'
 import { useChat } from '../composables/useChat'
 import { useEditorMode } from '../composables/useEditorMode'
 import { useEditorLsp } from '../composables/useEditorLsp'
@@ -31,7 +31,7 @@ import { applyEditorChord } from '../lib/editor-keys'
 const files = useEditorFiles()
 const tree = useWorkspaceTree()
 const search = useWorkspaceSearch()
-const bench = useBenchmark()
+const appShell = useAppShell()
 const chat = useChat()
 const { paneReadonly } = useEditorMode()
 // The Editor pane's language-server state (lspe-08). The pane renders its status
@@ -61,7 +61,7 @@ function probeShouldRun() {
   // A streaming reply is a known writer, the pane is read-only meanwhile, and
   // a conflict the user cannot act on is noise — so the tick stops with it.
   return (
-    bench.state.activeTab === 'editor' &&
+    appShell.state.activeTab === 'editor' &&
     state.open.length > 0 &&
     chat.state.phase === 'idle'
   )
@@ -330,7 +330,7 @@ async function onTabsKeydown(event) {
 // listener. (A browser that consumes Ctrl+W itself cannot be overridden from the
 // page; the chip's × is the path that always works.)
 function onKeydown(event) {
-  applyEditorChord(event, { activeTab: bench.state.activeTab, active: state.active }, {
+  applyEditorChord(event, { activeTab: appShell.state.activeTab, active: state.active }, {
     save: saveActive,
     'save-all': saveAll,
     close: () => files.requestCloseTab(state.active),
@@ -345,7 +345,7 @@ function onKeydown(event) {
 // the strip or leaving it stops it. A background poll of a pane nobody is
 // looking at is a request cost with no reader.
 watch(
-  () => [bench.state.activeTab, state.open.length, chat.state.phase],
+  () => [appShell.state.activeTab, state.open.length, chat.state.phase],
   syncProbe,
   { immediate: true },
 )

@@ -1,18 +1,15 @@
 # Nojaé
 
-**Nojaé started as a tool for measuring LLM endpoints, and it has grown
-into the workspace those measurements were only ever meant to feed: a place
-where a model writes your code, in front of you.**
+**Nojaé is a workspace where a coding agent works in front of you: a place
+where a model writes your code and you decide what to keep.**
 
 It is a self-hosted web app — FastAPI behind, Vue 3 in front, one browser tab
-in between — that puts a coding agent to work on a real checkout. The WorkBench
-tab drives the conversation: a model of your choice, the file tools, the
-language servers and the shell commands it is allowed to use, and a workspace
-whose read/write policy you set. The Editor tab shows the same tree the agent
-changes, with a Monaco pane and a real terminal, so you watch each edit land and
-commit it when you agree. The Benchmark tab, where the project began, is still
-there and still useful — it is now one tool among the others rather than the
-reason for the app.
+in between — that puts that agent to work on a real checkout, in two pages. The
+WorkBench tab drives the conversation: a model of your choice, the file tools,
+the language servers and the shell commands it is allowed to use, and a
+workspace whose read/write policy you set. The Editor tab shows the same tree
+the agent changes, with a Monaco pane and a real terminal, so you watch each
+edit land and commit it when you agree.
 
 Everything streams: answers, reasoning, tool calls and timings reach the browser
 over Server-Sent Events, and nothing about your code or your endpoint leaves the
@@ -55,8 +52,8 @@ py -3.12 -m venv .venv
 pip install -e ".[mcp,lsp,windows]"
 ```
 
-`pip install -e .` alone gives you the benchmark, the chat and the Editor; the
-extras are what add the rest, and none of them is mandatory:
+`pip install -e .` alone gives you the chat and the Editor; the extras are what
+add the rest, and none of them is mandatory:
 
 | Extra | What it adds |
 |---|---|
@@ -171,7 +168,7 @@ with. Two files, one switch:
 
 | File | Holds |
 |---|---|
-| `.env.test` (from `.env.test.example`) | The **app-level** keys — `QUESTION_SET`, `LLM_DEBUG`, the four `VERIFIER_AGENT_*`, `NOJAE_PYTHON_ROOT`: the same set `.env` holds. |
+| `.env.test` (from `.env.test.example`) | The **app-level** keys — `LLM_DEBUG` and `NOJAE_PYTHON_ROOT`: the same set `.env` holds. |
 | `.nojae/nojae-test-settings.json` | The suite's **model connection** — the same members as the workspace's `nojae-settings.json`: server, key, model id, prompt, sampling, the vision flag, `lspEnabled`, `maxToolIteration`. |
 
 `web/playwright.config.js` parses `.env.test` into the environment of the server
@@ -240,7 +237,7 @@ live at once, a hand-edit needs a server restart.
 
 | File | Declares |
 |---|---|
-| `.env` (from `.env.example`) | The verifier, the question set, and `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on). |
+| `.env` (from `.env.example`) | The two install-scoped technical keys: `LLM_DEBUG` (log every request payload) and `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on). |
 | `.nojae/nojae-settings.json` (seeded from `nojae-settings.default.json`) | The model connection, sampling and LSP activation for this workspace. |
 | `.nojae/mcp-settings.json` (seeded from `mcp_connectors/mcp-settings.default.json`) | The MCP connectors the agent may call. |
 | `.nojae/lsp-settings.json` (written from the seeded `.nojae/lsp-settings.template.json`) | The language servers. |
@@ -508,9 +505,9 @@ resurrect a stale value.
 
 The **app bar** holds that value as an editable field: type another folder and
 press **Set** to repoint the MCP and LSP tools, the Editor's tree and new
-terminal sessions at it in one step. Set is inert while a benchmark run, a
-WorkBench reply or a batch is running — a session must not have its root moved
-out from under it. The change is process-local, and the next start is back at
+terminal sessions at it in one step. Set is inert while a WorkBench reply or a
+batch is running — a session must not have its root moved out from under it.
+The change is process-local, and the next start is back at
 the install directory. Export the variable (or set it in `.env`) to pin it
 permanently. The folder must exist and must not sit under a restricted path. In
 a declaration, reference it as `${NOJAE_PATH_LOCATION}` — the app defines
@@ -525,21 +522,18 @@ read-only) and edited outside the app — see
 
 ### LLM configuration — `.env`
 
-Copy `.env.example` to `.env` when you want a verifier or a different question
-set. This file holds only what is scoped to **this nojae install**: the
-model connection — server, key, model id, system prompt, sampling, the vision
-flag, the LSP ids to activate and the cap on one chat reply's tool loop — lives
-in the workspace's `.nojae/nojae-settings.json`, which the Settings dialog
-writes and which travels with the folder (see the table at the top of this
-section). What is left here is the verifier, the question set and two technical
-keys, and the dialog edits the first two but not those two:
+Copy `.env.example` to `.env` when you want to turn the request logging on or to
+name the interpreter your connectors run on. This file holds only what is scoped
+to **this nojae install**: the model connection — server, key, model id, system
+prompt, sampling, the vision flag, the LSP ids to activate and the cap on one
+chat reply's tool loop — lives in the workspace's `.nojae/nojae-settings.json`,
+which the Settings dialog writes and which travels with the folder (see the
+table at the top of this section). What is left here are the two technical keys
+below, and nothing in the dialog edits them:
 
 ```bash
-#QUESTION_SET=legacy                # resources/<name>.json
-#LLM_DEBUG=1                        # logs every request payload to the console
-#VERIFIER_AGENT_SERVERURL=http://127.0.0.1:8080/v1   # second model, Benchmark tab
-#VERIFIER_AGENT_ENDPOINT=verifier-model
-#NOJAE_PYTHON_ROOT=           # the python the stdio connectors run on
+#LLM_DEBUG=1                # logs every request payload to the console
+#NOJAE_PYTHON_ROOT=         # the python the stdio connectors run on
 ```
 
 `LLM_DEBUG` and `NOJAE_PYTHON_ROOT` are **hand-edited**: they are managed
@@ -648,26 +642,12 @@ The Editor's writes are the browser's own surface — never reachable from a
 connector, a tool or a chat path — and they are refused while a reply streams.
 That is asserted by a test rather than trusted.
 
-### Benchmark — the original tool ⏱
-
-![The Benchmark tab](docs/benchmark-tab.png)
-
-Run a question set against the configured model and watch answers, scores,
-timings and token/s arrive live. Sets are JSON files in `resources/` —
-`legacy`, `78qcm`, `122qcm`, `30hardmath` — and an optional **verifier LLM**
-judges each answer against the expected one, so wording differences do not cost
-a point. Timing is measured app-side from chunk arrivals, anchored after a model
-warm-up, so loading and verification never enter the numbers; token/s counts
-completion tokens only. One run at a time, cancellation honoured between
-questions and mid-stream, and an answer the server cut short is failed rather
-than graded.
-
 ### One configuration, one streaming layer
 
-All three tabs call the model through the same client against an
+Both tabs call the model through the same client against an
 OpenAI-compatible endpoint — llama.cpp, vLLM, or a hosted one — so adding a model
-is configuration, never code. Every event the server emits is numbered, so a
-reconnecting browser replays what it missed and a refresh loses nothing.
+is configuration, never code. Every reply is one stream that closes with exactly
+one terminal event, so a paused answer still ends as a kept partial turn.
 Configuration changes are live the moment the Settings dialog saves them; a
 hand-edit of a hub declaration file is picked up by its **Refresh**, and only a
 hand-edit of `.env` or of the workspace settings file waits for a server restart.
