@@ -12,8 +12,6 @@ import { h } from 'vue'
 //
 //   * the active buffer's path reaches the surface (without it no provider can
 //     say which file a Ctrl+click is about);
-//   * a file buffer becoming active asks the composable for its status, and the
-//     caption renders the answer — a diff or a preview tab has no status line;
 //   * a definition target in another file opens that buffer and then reveals the
 //     position through the surface's existing queue; a target in the same file
 //     reveals directly; a refused open reveals nothing.
@@ -114,12 +112,13 @@ function envelope({
   return { status, server, reason, action, result }
 }
 
-// The routes this pane touches: the status query, a buffer read, and the tree's
-// listing (the active-tab watcher reveals the row). Anything else answers empty.
-function stubRoutes({ statusAnswer = envelope(), fileAnswer = null } = {}) {
+// The routes this pane touches: the language-server query, a buffer read, and
+// the tree's listing (the active-tab watcher reveals the row). Anything else
+// answers empty.
+function stubRoutes({ queryAnswer = envelope(), fileAnswer = null } = {}) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
     const key = String(url)
-    if (key.startsWith('/api/lsp/query')) return jsonResponse(statusAnswer)
+    if (key.startsWith('/api/lsp/query')) return jsonResponse(queryAnswer)
     if (key.startsWith('/api/fs/file?')) {
       const path = decodeURIComponent(key.slice('/api/fs/file?path='.length))
       if (fileAnswer) return fileAnswer(path)
@@ -184,93 +183,6 @@ describe('the surface is told which buffer it shows', () => {
     await flushPromises()
 
     expect(wrapper.findComponent({ name: 'MonacoEditorStub' }).props('path')).toBe('src/other.py')
-    wrapper.unmount()
-  })
-})
-
-describe('the pane\'s status line', () => {
-  it('asks for the active buffer\'s status and renders the answer', async () => {
-    const fetchMock = stubRoutes({ statusAnswer: envelope({ server: 'pyright' }) })
-    const wrapper = await mountPane([fileRecord('src/app.py', 'x = 1\n')], 'src/app.py')
-
-    const asked = fetchMock.mock.calls
-      .filter(([url]) => String(url).startsWith('/api/lsp/query'))
-      .map(([, init]) => JSON.parse(init.body))
-    expect(asked).toEqual([{ action: 'status', path: 'src/app.py' }])
-    expect(wrapper.find('.editor-lsp-status').text()).toBe('Served by pyright')
-    wrapper.unmount()
-  })
-
-  // §4.10: the one place the absence is *said*. A quiet shape, not an alert.
-  it('says so quietly when no server claims the file', async () => {
-    stubRoutes({
-      statusAnswer: envelope({
-        status: 'no_server',
-        server: null,
-        reason: 'no active language server handles .md',
-      }),
-    })
-    const wrapper = await mountPane([fileRecord('notes.md', 'one\n')], 'notes.md')
-
-    const line = wrapper.find('.editor-lsp-status')
-    expect(line.text()).toContain('No language server serves this file')
-    expect(line.text()).toContain('no active language server handles .md')
-    // A caption, not a control: nothing to click, and no alert role.
-    expect(line.element.tagName).toBe('P')
-    expect(line.attributes('role')).toBeUndefined()
-    expect(line.find('button').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('says the server is starting', async () => {
-    stubRoutes({
-      statusAnswer: envelope({
-        status: 'starting',
-        server: 'pyright',
-        reason: 'pyright is starting',
-      }),
-    })
-    const wrapper = await mountPane([fileRecord('src/app.py', 'x = 1\n')], 'src/app.py')
-
-    expect(wrapper.find('.editor-lsp-status').text()).toBe('pyright is starting')
-    wrapper.unmount()
-  })
-
-  // A diff is a reader: no buffer, no status line — and the previous file's
-  // answer must not be left standing over it.
-  it('shows no status line for a diff tab, and clears the previous one', async () => {
-    stubRoutes({ statusAnswer: envelope({ server: 'pyright' }) })
-    const wrapper = await mountPane(
-      [fileRecord('src/app.py', 'x = 1\n'), diffRecord('src/app.py')],
-      'src/app.py',
-    )
-    expect(wrapper.find('.editor-lsp-status').exists()).toBe(true)
-
-    files.state.active = 'diff:src/app.py'
-    await flushPromises()
-
-    expect(wrapper.find('.editor-lsp-status').exists()).toBe(false)
-    expect(lsp.state.statusLine).toBe('')
-    wrapper.unmount()
-  })
-
-  it('asks again when another buffer becomes active', async () => {
-    const fetchMock = stubRoutes({ statusAnswer: envelope({ server: 'pyright' }) })
-    const wrapper = await mountPane(
-      [fileRecord('src/app.py', 'x = 1\n'), fileRecord('src/other.py', 'y = 2\n')],
-      'src/app.py',
-    )
-
-    files.state.active = 'src/other.py'
-    await flushPromises()
-
-    const asked = fetchMock.mock.calls
-      .filter(([url]) => String(url).startsWith('/api/lsp/query'))
-      .map(([, init]) => JSON.parse(init.body))
-    expect(asked).toEqual([
-      { action: 'status', path: 'src/app.py' },
-      { action: 'status', path: 'src/other.py' },
-    ])
     wrapper.unmount()
   })
 })

@@ -29,16 +29,15 @@ import path from 'node:path'
 //   4. `POST /api/lsp/restart`, then switch that server on in the WorkBench Tools
 //      panel — the browser's half of the gate.
 //   5. Open a `.txt` file in the Editor and Ctrl+click a name. The caret lands on
-//      line 3 (the fake server answers a definition at 0-based line 2) and the
-//      pane's status line reads `Served by <id>`.
+//      line 3 (the fake server answers a definition at 0-based line 2).
 // A stub is deliberately not used in place of this: a spec that asserts a stub
 // proves nothing about the feature.
 //
 // Scenario 1 is the one that must never regress (§4.10). Under the flag above
 // there is no language server at all, so *every* buffer is unclaimed — which is
 // the degradation path in its purest form: the caret stays where the click put
-// it, no notice is raised, and the absence is said in one place only, the pane's
-// status line. The feature degrades to the status quo, never to an error.
+// it and no notice is raised. The feature degrades to the status quo, never to
+// an error.
 //
 // The scratch is a **fixture workspace** of its own, and switching into it is
 // what makes the assertions facts about a file this spec owns rather than about
@@ -247,19 +246,13 @@ function definitionAnswered(page) {
 //
 // The suite's server runs with `nojae_DISABLE_LSP=1`, so no language
 // server exists and this `.txt` buffer is claimed by nobody. Ctrl+click must
-// then change nothing: the caret stays where the click put it, no notice is
-// raised, and the only place the absence is *said* is the pane's status line.
-test('Ctrl+click in a file no server claims changes nothing and says so in the status line', async ({
+// then change nothing: the caret stays where the click put it and no notice is
+// raised.
+test('Ctrl+click in a file no server claims changes nothing', async ({
   page,
 }) => {
   await openEditor(page)
   await openFile(page, FILE)
-
-  // The pane's status line is the one place the absence is said (§4.10), and it
-  // is filled when the buffer becomes the active tab — before any gesture.
-  const status = page.locator('.editor-lsp-status')
-  await expect(status).toBeVisible()
-  await expect(status).toContainText('No language server serves this file')
 
   // The buffer on screen is the fixture's, so the gesture below is about a file
   // this spec seeded and not about whatever the pane happened to open.
@@ -300,9 +293,4 @@ test('Ctrl+click in a file no server claims changes nothing and says so in the s
   // "No definition found" bubble never appears.
   await expect(page.locator('.editor-notice')).toHaveCount(0)
   await expect(page.locator('.monaco-editor-overlaymessage')).toHaveCount(0)
-
-  // And the absence is still said in the one place it belongs, unchanged by the
-  // gesture: the pane's status line.
-  await expect(status).toBeVisible()
-  await expect(status).toContainText('No language server serves this file')
 })

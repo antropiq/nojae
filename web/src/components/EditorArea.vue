@@ -12,7 +12,6 @@ import { useWorkspaceSearch } from '../composables/useWorkspaceSearch'
 import { useAppShell } from '../composables/useAppShell'
 import { useChat } from '../composables/useChat'
 import { useEditorMode } from '../composables/useEditorMode'
-import { useEditorLsp } from '../composables/useEditorLsp'
 import { useQuickOpen, registerPaneFocus } from '../composables/useQuickOpen'
 import { scrollStripWithWheel } from '../lib/tab-strip-wheel'
 import { applyEditorChord } from '../lib/editor-keys'
@@ -34,9 +33,6 @@ const search = useWorkspaceSearch()
 const appShell = useAppShell()
 const chat = useChat()
 const { paneReadonly } = useEditorMode()
-// The Editor pane's language-server state (lspe-08). The pane renders its status
-// line and answers its cross-file definition targets; it owns no copy of either.
-const lsp = useEditorLsp()
 // The quick-open finder (qop-07): the composable owns the dialog's state, this
 // pane only raises it (the two chord sources below) and answers the focus
 // question after a pick — the composable must not import the pane, so the
@@ -195,26 +191,6 @@ watch(
     search.state.pendingReveal = null
   },
   { flush: 'post' },
-)
-
-// The pane's status line (spec §6): which language server serves the buffer on
-// screen, or that none does. It follows the *active buffer* and nothing else —
-// not a keystroke, not a timer — because that is the moment the answer changes.
-//
-// A diff or a preview tab has no buffer and no status line: those are readers,
-// and a language server has nothing to say about them. Asking with an empty path
-// is what clears the caption, so the pane never shows the previous file's answer
-// over a tab that has none.
-//
-// The text is the composable's (`useEditorLsp`'s `statusLine`); this pane only
-// renders it. A working-location switch clears it there, with the buffers, so
-// nothing stale can be cached here.
-watch(
-  () => (tab.value?.kind === 'file' ? tab.value.path : ''),
-  (path) => {
-    void lsp.statusFor(path)
-  },
-  { immediate: true },
 )
 
 // A definition answer that names *another* file (spec §6). The surface never
@@ -603,16 +579,6 @@ onBeforeUnmount(() => {
             {{ files.humanSize(tab.truncatedAt) }}
           </p>
           <p v-else-if="deletedNote" class="caption editor-raw-note">{{ deletedNote }}</p>
-          <!-- The pane's status line (spec §6): which language server serves
-               this file, or that none does. A **caption, not a control** —
-               nothing to click, and no second switch to disagree with the Tools
-               panel. It is the one place the absence of a server is *said*,
-               which is why it exists at all: every other surface stays silent
-               and the gesture simply falls through (§4.10). The wording is the
-               composable's; this renders it. -->
-          <p v-if="lsp.state.statusLine" class="caption editor-raw-note editor-lsp-status">
-            {{ lsp.state.statusLine }}
-          </p>
           <!-- The tabpanel wrapper is app-owned: `aria-controls` on the chips
                points here, and Monaco's host inside it stays empty of app
                markup (it is also the scope of the Pico overrides). -->

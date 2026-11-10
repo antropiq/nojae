@@ -207,23 +207,6 @@ describe('the starting retry: exactly once, then stop', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
-
-  // The status line may honestly say "starting", so asking for it is not a
-  // gesture to retry — the caption shows the answer as it is.
-  it('a status query is never retried', async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(() =>
-        jsonResponse(
-          envelope({ status: 'starting', action: 'status', reason: 'pyright is starting' }),
-        ),
-      )
-
-    await lsp.statusFor('a.py')
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(lsp.state.statusLine).toContain('starting')
-  })
 })
 
 describe('no server is a quiet answer', () => {
@@ -237,7 +220,7 @@ describe('no server is a quiet answer', () => {
   })
 
   // §4.10: a toast on every Ctrl+click in a Markdown file would be worse than
-  // the feature is good. The reason goes to the status line, and nowhere else.
+  // the feature is good. The reason is stored on the answer, and raises nothing.
   it('a server: null answer raises no notice and stores the reason', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
       jsonResponse(
@@ -259,7 +242,6 @@ describe('no server is a quiet answer', () => {
     expect(answer.status).toBe('no_server')
     expect(answer.server).toBeNull()
     expect(notices.state.notices).toHaveLength(0)
-    expect(lsp.state.statusLine).toContain('no active language server handles .md')
   })
 
   it('a policy refusal is the same quiet shape, with the policy sentence', async () => {
@@ -270,83 +252,6 @@ describe('no server is a quiet answer', () => {
     await lsp.query({ action: 'definition', path: 'a.py', line: 0, character: 0 })
 
     expect(notices.state.notices).toHaveLength(0)
-    expect(lsp.state.statusLine).toContain('a.py is read-only')
-  })
-})
-
-describe('statusFor: the pane\'s caption', () => {
-  beforeEach(() => {
-    resetLsp()
-    resetChatLsp()
-    resetTree()
-    notices.clear()
-    vi.restoreAllMocks()
-    vi.useRealTimers()
-  })
-
-  it('names the serving server', async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(() => jsonResponse(envelope({ action: 'status', server: 'pyright' })))
-
-    await lsp.statusFor('src/app.py')
-
-    expect(sentBody(fetchMock)).toEqual({ action: 'status', path: 'src/app.py' })
-    expect(lsp.state.statusLine).toBe('Served by pyright')
-  })
-
-  it('says so quietly when no server claims the file', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      jsonResponse(
-        envelope({
-          action: 'status',
-          status: 'no_server',
-          server: null,
-          reason: 'no server handles .md',
-        }),
-      ),
-    )
-
-    await lsp.statusFor('README.md')
-
-    expect(lsp.state.statusLine).toContain('No language server serves this file')
-    expect(lsp.state.statusLine).toContain('no server handles .md')
-    expect(notices.state.notices).toHaveLength(0)
-  })
-
-  it('an empty path clears the caption rather than asking', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-    lsp.state.statusLine = 'Served by pyright'
-
-    await lsp.statusFor('')
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(lsp.state.statusLine).toBe('')
-  })
-
-  // A buffer switch is the ordinary case: the previous file's status answer is
-  // still in flight when the next one is asked, and it must not paint over the
-  // newer caption.
-  it('an answer for the buffer that was just left is dropped', async () => {
-    let release
-    const gate = new Promise((resolve) => {
-      release = resolve
-    })
-    let calls = 0
-    vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
-      calls += 1
-      return calls === 1
-        ? gate
-        : jsonResponse(envelope({ action: 'status', server: 'volar' }))
-    })
-
-    const stale = lsp.statusFor('old.vue')
-    await lsp.statusFor('new.vue')
-    release(jsonResponse(envelope({ action: 'status', server: 'pyright' })))
-    const dropped = await stale
-
-    expect(dropped).toBeNull()
-    expect(lsp.state.statusLine).toBe('Served by volar')
   })
 })
 
@@ -360,15 +265,13 @@ describe('a working-location switch clears the editor\'s LSP state', () => {
     vi.useRealTimers()
   })
 
-  it('drops the last answer and the status line', async () => {
+  it('drops the last answer', async () => {
     stubWorkspaceRoutes()
     lsp.state.answer = envelope()
-    lsp.state.statusLine = 'Served by pyright'
 
     await tree.reRoot('/w/other')
 
     expect(lsp.state.answer).toBeNull()
-    expect(lsp.state.statusLine).toBe('')
   })
 
   it('an answer that lands after the switch is dropped', async () => {
@@ -397,7 +300,6 @@ describe('a working-location switch clears the editor\'s LSP state', () => {
 
     expect(answer).toBeNull()
     expect(lsp.state.answer).toBeNull()
-    expect(lsp.state.statusLine).toBe('')
   })
 })
 
@@ -454,18 +356,6 @@ describe('the allowlist: read from the Tools panel, never owned', () => {
     // Reading the switches is not a write to them.
     expect(chat.state.lsp.enabled).toEqual({ pyright: true, volar: false })
     expect(chat.state.lsp.locked).toBe(true)
-  })
-
-  it('the status query carries the same allowlist', async () => {
-    chat.state.lsp.loaded = true
-    chat.state.lsp.enabled = { pyright: true, volar: false }
-    const fetchMock = vi
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(() => jsonResponse(envelope({ action: 'status' })))
-
-    await lsp.statusFor('a.py')
-
-    expect(sentBody(fetchMock).lspEnabled).toEqual(['pyright'])
   })
 })
 
