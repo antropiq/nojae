@@ -11,7 +11,7 @@ import path from 'node:path'
 // spec's own escape hatch (§8: "If that proves too heavy for the suite, it stays
 // a manual check and the e2e keeps only the first"), and here it is not a
 // judgement call but a fact about this harness: `playwright.config.js` starts the
-// server under test with `nojae_DISABLE_LSP=1`, and that flag is read from
+// server under test with `NOJAE_DISABLE_LSP=1`, and that flag is read from
 // the *server process's* environment by both the app lifespan and
 // `POST /api/lsp/restart`. A spec cannot change another process's environment,
 // and it may not touch the config — so no declaration written into a scratch
@@ -25,7 +25,7 @@ import path from 'node:path'
 //      that working location, and `"command": ["<the Python that runs the app>",
 //      "tests/fake_langserver.py"]`.
 //   2. Put its id in `lspEnabled` in `.nojae/nojae-settings.json`.
-//   3. Start the app **without** `nojae_DISABLE_LSP` in its environment.
+//   3. Start the app **without** `NOJAE_DISABLE_LSP` in its environment.
 //   4. `POST /api/lsp/restart`, then switch that server on in the WorkBench Tools
 //      panel — the browser's half of the gate.
 //   5. Open a `.txt` file in the Editor and Ctrl+click a name. The caret lands on
@@ -244,7 +244,7 @@ function definitionAnswered(page) {
 
 // 1. The degradation path, which is the one that must never regress (§4.10).
 //
-// The suite's server runs with `nojae_DISABLE_LSP=1`, so no language
+// The suite's server runs with `NOJAE_DISABLE_LSP=1`, so no language
 // server exists and this `.txt` buffer is claimed by nobody. Ctrl+click must
 // then change nothing: the caret stays where the click put it and no notice is
 // raised.

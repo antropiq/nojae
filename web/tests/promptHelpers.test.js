@@ -120,7 +120,7 @@ describe('a working-location switch reloads the bullets', () => {
       const key = String(url)
       if (key === '/api/path-location' && options?.method === 'POST') {
         return jsonResponse({
-          key: 'nojae_PATH_LOCATION',
+          key: 'NOJAE_PATH_LOCATION',
           path: '/srv/new',
           default: '/srv/app',
           mcp: { installed: true, connectors: [], externalsError: null },

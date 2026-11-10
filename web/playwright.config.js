@@ -67,13 +67,13 @@ if (!existsSync(ENV_FILE)) {
 // workspace file: a missing fixture must stop the suite here rather than look
 // like an app bug — or, worse, silently reach the developer's own server and key.
 //
-// Resolved the way the app resolves it: `nojae_PATH_LOCATION` when set,
+// Resolved the way the app resolves it: `NOJAE_PATH_LOCATION` when set,
 // else the repo root (the boot default), plus the reserved folder's file name.
 // `E2E_ENV_FILE` has no sibling override on purpose — a settings file named by
 // an env var could live outside the reserved folder, where the workspace policy
 // and the `.nojae` invisibility rules do not apply.
 const TEST_SETTINGS_FILE = join(
-  process.env.nojae_PATH_LOCATION?.trim() ||
+  process.env.NOJAE_PATH_LOCATION?.trim() ||
     join(dirname(fileURLToPath(import.meta.url)), '..'),
   '.nojae',
   'nojae-test-settings.json',
@@ -195,15 +195,15 @@ export default defineConfig({
     // next step if any spec needs an exactly-known token count.
     env: {
       ...TEST_ENV,
-      nojae_DISABLE_MCP: '1',
-      nojae_DISABLE_LSP: '1',
+      NOJAE_DISABLE_MCP: '1',
+      NOJAE_DISABLE_LSP: '1',
       // The switch that makes the server under test read
       // `.nojae/nojae-test-settings.json` instead of the workspace's own
       // settings file — so no spec can reach the developer's live server and
       // key. Applied last when the server is spawned, exactly like the two
       // flags above, which is what beats an ambient value inherited from a
       // running app's process tree.
-      nojae_TEST_SETTINGS: '1',
+      NOJAE_TEST_SETTINGS: '1',
     },
   },
   globalSetup: './e2e/global-setup.js',

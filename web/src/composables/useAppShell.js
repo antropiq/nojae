@@ -54,7 +54,7 @@ const state = reactive({
   lspSaving: false,
   lspError: null,
   lspServersError: null, // .nojae/lsp-settings.json validation errors from the backend
-  // Working location both hubs point at (${nojae_PATH_LOCATION} in
+  // Working location both hubs point at (${NOJAE_PATH_LOCATION} in
   // .nojae/mcp-settings.json and .nojae/lsp-settings.json), shown and set from
   // the app bar. ``pathLocation`` is what its input holds, ``pathLocationCurrent``
   // the value the server confirmed — Set is enabled while the two differ.

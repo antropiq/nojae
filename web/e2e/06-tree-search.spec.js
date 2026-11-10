@@ -8,7 +8,7 @@ import { expect, test } from '@playwright/test'
 //
 // Like `02-editor-write.spec.js`, this is one of the cheapest proofs in the
 // repo: **no LLM call is involved**. The config comes from `.env.test`, no
-// connector and no language server is started (`nojae_DISABLE_MCP/_LSP`
+// connector and no language server is started (`NOJAE_DISABLE_MCP/_LSP`
 // in playwright.config.js), and the whole feature is one blocking GET plus a
 // table of rows.
 //

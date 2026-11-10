@@ -11,7 +11,7 @@ import path from 'node:path'
 // feature is one GET plus a pure matcher in the browser — so nothing here needs
 // a reachable endpoint. The suite's model connection
 // (`.nojae/nojae-test-settings.json`, exported by `playwright.config.js` as
-// `nojae_TEST_SETTINGS`) is what the *server* boots with; no spec in this
+// `NOJAE_TEST_SETTINGS`) is what the *server* boots with; no spec in this
 // file reads it, and none may.
 //
 // The scratch is a **fixture workspace** of its own, and switching into it is

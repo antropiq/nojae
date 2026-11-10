@@ -84,17 +84,17 @@ function expectedPath(root, rel) {
 const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
 
 // The suite's own model connection: the file the server under test is configured
-// from, because `playwright.config.js` exports `nojae_TEST_SETTINGS` and
+// from, because `playwright.config.js` exports `NOJAE_TEST_SETTINGS` and
 // refuses to start the suite without it. Read from disk with `node:fs` — the
 // folder is reserved, so no Editor route can see it — and resolved the way the
-// app resolves it: `nojae_PATH_LOCATION` when set, else the repo root.
+// app resolves it: `NOJAE_PATH_LOCATION` when set, else the repo root.
 //
 // This is the assertion that pins "the suite talks to the fixture, never to
 // wherever the app happens to be pointed": the dialog's `serverUrl` field is
 // compared to *this file's* value, so a spec that started reaching the
 // developer's workspace settings fails instead of passing.
 const TEST_SETTINGS_FILE = path.join(
-  (process.env.nojae_PATH_LOCATION || '').trim() || REPO_ROOT,
+  (process.env.NOJAE_PATH_LOCATION || '').trim() || REPO_ROOT,
   '.nojae',
   'nojae-test-settings.json',
 )
@@ -265,13 +265,16 @@ test('a switch replaces the prompt-helper bullets the composer offers', async ({
   // can see it, which is the point of mbl-06.
   const bootBytes = fs.existsSync(bootHelpers) ? fs.readFileSync(bootHelpers, 'utf8') : null
 
-  // Open WorkBench and wait for the row's own first fetch, so what is read next
-  // is the boot root's file and not the composable's nine-empty fallback.
-  await page.goto('/')
+  // WorkBench is the landing screen and App.vue first-fills the bullets at boot,
+  // so the row's own first fetch races `goto` — arm the wait *before* the
+  // navigation to catch it, so what is read next is the boot root's file and not
+  // the composable's nine-empty fallback. Clicking the tab is not it: the chat
+  // tab is already active on load, so a click would not re-trigger WorkBenchView's
+  // watch and no fetch would follow.
   const firstLoad = page.waitForResponse(
     (response) => new URL(response.url()).pathname === '/api/prompt-helpers',
   )
-  await page.getByRole('tab', { name: 'WorkBench' }).click()
+  await page.goto('/')
   await firstLoad
 
   const bullets = page.locator('.chat-bullet-row .memory-bullet')
@@ -396,7 +399,7 @@ test('unsaved edits are reported when the switch closes their tab', async ({ pag
 // workspace, so it has to answer with a different set of values on either side
 // of a switch — and give the original ones back on the way home.
 //
-// The server under test runs with `nojae_TEST_SETTINGS` exported, so the
+// The server under test runs with `NOJAE_TEST_SETTINGS` exported, so the
 // file in use at **both** roots is `nojae-test-settings.json`, and the boot
 // root's values are compared to that file's own bytes rather than to themselves:
 // the assertion that would have caught a suite silently talking to the
