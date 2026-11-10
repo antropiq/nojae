@@ -10,7 +10,6 @@ one attribute, not an import dance. The deny-list is still an
 
 import importlib.util
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -56,8 +55,6 @@ from src.core.mcphub.validation import (
 
 from . import constants
 
-logger = logging.getLogger("nojae.lsp")
-
 
 def lsp_installed() -> bool:
     """True when the optional LSP deps (the ``[lsp]`` extra) are importable."""
@@ -82,7 +79,7 @@ def restricted_lsp_roots(path: Optional[Path] = None) -> List[str]:
     whatever the running OS states, and a runner that states neither gains
     nothing, which is what keeps the Linux verdicts unchanged.
 
-    A line whose reference does **not** resolve is dropped and reported, not kept
+    A line whose reference does **not** resolve is dropped, not kept
     as written. For a declaration the rule is the opposite (an unresolved
     ``${NAME}`` stays verbatim so the typo is visible in that entry's note), and
     the difference is what makes an un-expanded line dangerous *here*: it is a
@@ -107,44 +104,17 @@ def restricted_lsp_roots(path: Optional[Path] = None) -> List[str]:
         entry = entry.strip()
         # ``missing`` first and on its own: a half-resolved line — ``/home/
         # ${NOPE}/.ssh`` — still has a rooted shape, so testing only the shape
-        # would let the literal reference into the list as a working prefix.
+        # would let the literal reference into the list as a working prefix. A
+        # line that cannot be honoured is simply absent (see the docstring: the
+        # reach seam must not read it as a bound). It is dropped in silence: a
+        # cross-platform list drops its other-platform lines by design, so any
+        # note here would be pure noise — the mechanism is documented, not
+        # logged. Only a resolved, absolute line joins the effective list, and
+        # one guardrail stated twice is noise in a deny-list.
         honoured = not missing and _is_prefix(entry)
-        if not honoured:
-            if missing:
-                names = ", ".join(f"${{{name}}}" for name in dict.fromkeys(missing))
-                reason = f"{names} is not set in the environment"
-            else:
-                reason = f"{text!r} is not an absolute path"
-            _report_dropped(root, text, reason)
-        # Only a resolved, absolute line joins the effective list: see the
-        # docstring — a prefix that cannot be honoured must not even be counted
-        # as one, and one guardrail stated twice is noise in a deny-list.
         if honoured and entry not in entries:
             entries.append(entry)
     return entries
-
-
-# A dropped guardrail is *reported*, and the report is one line per process, not
-# one per read: this list is re-read on every Editor path resolution and every
-# hub scan, and a file written for the other platform drops its other-platform
-# lines by design — three warnings per file read would bury the one line that
-# names a real typo. Keyed by file and line, so a different file (or a test's own
-# tmp copy) still gets its own sentence. Bounded so it cannot grow.
-_REPORTED_DROPS: Set[Tuple[str, str]] = set()
-_REPORTED_DROPS_MAX = 200
-
-
-def _report_dropped(root: Path, text: str, reason: str) -> None:
-    """Say once that a guardrail line is not in force (see ``_REPORTED_DROPS``)."""
-    key = (str(root), text)
-    if key in _REPORTED_DROPS:
-        return
-    if len(_REPORTED_DROPS) >= _REPORTED_DROPS_MAX:
-        _REPORTED_DROPS.clear()
-    _REPORTED_DROPS.add(key)
-    logger.warning(
-        "%s: %s — the guardrail %r is not in force", root.name, reason, text
-    )
 
 
 def _is_prefix(text: str) -> bool:

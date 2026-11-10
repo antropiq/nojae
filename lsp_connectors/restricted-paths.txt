@@ -14,9 +14,11 @@
 # Windows prefixes (G-D8), and a runner that does not state a name gains
 # nothing from that line.
 #
-# A line whose reference does not resolve is *dropped* and logged, not kept as
+# A line whose reference does not resolve is *dropped* in silence, not kept as
 # written — the opposite of the rule for a declaration, where an unset ${NAME}
-# stays visible so the typo is reported. Here an un-expanded line would be a
+# stays visible so the typo is reported. A cross-platform list drops its
+# other-platform lines by design, so logging them would be noise. Here an
+# un-expanded line would be a
 # prefix that speaks this filesystem's path form while protecting nothing: the
 # list would read as a bound that has been honoured. A guardrail that cannot be
 # honoured is absent, not guessed.

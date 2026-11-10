@@ -315,9 +315,13 @@ class TestLoadLspServers:
         keeps a rooted shape, so it answers ``guardrails_speak_here`` True while
         protecting nothing — the reach seam would be lifted on a bound that is not
         in force, and the entries that did resolve would go unenforced. A line with
-        a reference that resolves to nothing is therefore dropped and named: a
-        leading reference leaves relative text, a mid-path one leaves text that
-        still looks rooted, and both are the same absence of a guardrail.
+        a reference that resolves to nothing is therefore dropped: a leading
+        reference leaves relative text, a mid-path one leaves text that still
+        looks rooted, and both are the same absence of a guardrail.
+
+        The drop is silent. A cross-platform list drops its other-platform lines
+        (unset ``${SystemRoot}`` and friends) by design on every Linux runner, so
+        a warning there is pure noise; the mechanism is documented, not logged.
         """
         import logging
 
@@ -339,10 +343,11 @@ class TestLoadLspServers:
         with caplog.at_level(logging.WARNING):
             entries = restricted_lsp_roots()
         assert entries == [f"{tmp_path / 'known'}/.config/gcloud"]
+        # The functional invariant stands: an unresolvable line is absent, not
+        # kept as a guessed prefix — only the resolved one joins the list.
         assert not any("${" in entry for entry in entries)
-        assert "${LSP_TEST_NO_STORE}" in caplog.text
-        assert "not set in the environment" in caplog.text
-        assert "not in force" in caplog.text
+        # And the drop now produces no log line at all.
+        assert caplog.records == []
 
     def test_a_relative_line_is_absent_from_the_list_too(self, tmp_path, monkeypatch):
         """A prefix that is not rooted protects nothing, so it is not a prefix."""
