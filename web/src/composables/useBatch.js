@@ -47,6 +47,23 @@ export const TASK_INSTRUCTION_TEMPLATE =
 // the whole lot.
 export const MAX_TASK_RETRIES = 3
 
+// How long to wait before each relaunch, in milliseconds, indexed by the retry
+// number about to be made (1-based). A task can stay in the lot folder because
+// the agent's own `mv` has not landed yet — a slow move, or a brief network cut
+// to the model — and relaunching straight away would re-open a turn for work
+// that was already finishing. The rising schedule gives the trailing write more
+// time on each try: a cut of under 5s is absorbed by the first relaunch, one of
+// under 20s by the second, and under 50s by the third.
+export const RELAUNCH_DELAYS_MS = [5000, 15000, 30000]
+
+// The wait before the retry number `attempt` (1-based). Past the schedule
+// (which cannot happen, the retry budget bounds it) the last entry repeats.
+export function relaunchDelayMs(attempt) {
+  if (attempt <= 0) return 0
+  const index = Math.min(attempt, RELAUNCH_DELAYS_MS.length) - 1
+  return RELAUNCH_DELAYS_MS[index]
+}
+
 // Appended to the instruction of a relaunched task, so the model is told *why*
 // it is being asked again — the file not having left the lot folder is the only
 // evidence the app has that the task is unfinished (the usual causes are context
@@ -442,6 +459,36 @@ export function useBatch() {
     })
   }
 
+  // The pause before a relaunch, long enough for a task's trailing `mv` (or a
+  // brief network blip) to land before the loop re-judges the lot. It wakes on
+  // the timer, but a Stop must not have to wait out the remaining seconds: it
+  // also resolves the moment `state.active` drops, and the loop's own guard then
+  // stops it from launching the retry.
+  function waitBeforeRelaunch(attempt) {
+    const ms = relaunchDelayMs(attempt)
+    return new Promise((resolve) => {
+      if (!state.active || ms <= 0) {
+        resolve()
+        return
+      }
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        stopWatching()
+        resolve()
+      }
+      const timer = setTimeout(finish, ms)
+      const stopWatching = watch(
+        () => state.active,
+        (active) => {
+          if (!active) finish()
+        },
+      )
+    })
+  }
+
   // One task turn: hand the instruction to useChat, wait for the terminal
   // frame, then read the outcome off the message the placeholder became and off
   // the chat error line. No new event, no new frame, nothing in core/.
@@ -555,6 +602,15 @@ export function useBatch() {
           })
           if (action === 'retry') {
             attempt += 1
+            // Pause before re-judging the lot, so the task's own trailing `mv`
+            // — or a brief network blip that left the file in place — has time
+            // to land rather than costing a wasted turn: a cut under 5s is
+            // absorbed by the first relaunch's wait. Stop cuts the wait short
+            // (see `waitBeforeRelaunch`); because a stopped lot must keep its
+            // transcript rather than wipe it, `active` is re-checked *before*
+            // the fresh slate below, not just at the next turn.
+            await waitBeforeRelaunch(attempt)
+            if (!state.active) return
             // A retry is a fresh turn on a fresh context, exactly like the step
             // to the next task: the model gets a clean conversation carrying one
             // more piece of information — the note that the move never happened.

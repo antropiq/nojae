@@ -596,8 +596,11 @@ body, it only hands the model the path and lets its own connectors open it. A
 task counts as finished when its **file has left the folder** — the agent moves
 it into `todos/done`, which is its own acknowledgement — so a file still in place
 is relaunched with a note saying why, up to three times, after which the lot
-aborts. The mode is pinned when the lot launches, the conversation is reset
-between tasks, and continuity comes from disk: git and the files that moved.
+aborts. Each relaunch first waits a rising interval (5s, then 15s, then 30s), so
+a slow trailing move or a brief network cut is absorbed rather than costing a
+wasted turn; Stop cuts the wait short. The mode is pinned when the lot launches,
+the conversation is reset between tasks, and continuity comes from disk: git and
+the files that moved.
 Batch mode refuses to start unless the connectors it depends on are on.
 
 Around the composer: the reasoning and tool panel (every tool call, its result

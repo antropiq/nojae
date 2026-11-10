@@ -6,6 +6,7 @@ import {
   RETRY_NOTE_TEMPLATE,
   TASK_INSTRUCTION_TEMPLATE,
   nextBatchAction,
+  relaunchDelayMs,
   taskCountedForProgress,
   taskInstruction,
   taskInstructionForAttempt,
@@ -59,6 +60,22 @@ describe('the retry note', () => {
       )
     }
     expect(RETRY_NOTE_TEMPLATE).toContain('<retry_number>')
+  })
+})
+
+// The relaunch wait: a rising schedule so a brief network cut (under 5s) is
+// absorbed by the first relaunch instead of costing a wasted turn.
+describe('relaunchDelayMs', () => {
+  it('waits 5s, then 15s, then 30s before each relaunch', () => {
+    expect([relaunchDelayMs(1), relaunchDelayMs(2), relaunchDelayMs(3)]).toEqual([
+      5000, 15000, 30000,
+    ])
+  })
+
+  it('never waits for the first try, nor past the schedule', () => {
+    expect(relaunchDelayMs(0)).toBe(0)
+    expect(relaunchDelayMs(-1)).toBe(0)
+    expect(relaunchDelayMs(4)).toBe(30000) // last entry repeats (unreachable)
   })
 })
 
@@ -290,6 +307,13 @@ function seededModesBody({ codeMcpTools = true, withoutCodeMode = false } = {}) 
 }
 
 function reset() {
+  // The relaunch wait uses a real timer; the loop tests exercise the retry
+  // *path*, not wall-clock seconds, so make the timer fire on the next
+  // microtask. `restoreMocks` (vitest config) undoes this after each test.
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation((cb) => {
+    queueMicrotask(cb)
+    return 0
+  })
   chat.phase = 'idle'
   chat.messages = []
   chat.error = null
