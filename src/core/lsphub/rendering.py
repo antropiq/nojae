@@ -210,29 +210,39 @@ def render_symbols(root: Path, symbols: Any, limit: int = 40) -> str:
 def apply_whole_line_edits(text: str, edits: List[Any]) -> str:
     """Apply TextEdits to a copy of ``text`` (for the formatting diff preview).
 
-    Applied bottom-up so the offsets of the not-yet-applied edits stay valid.
-    Never touches the file on disk.
+    Each position becomes an absolute offset and the edits are applied
+    bottom-up, so the offsets of the not-yet-applied edits stay valid. Both
+    ends are clamped into the text: a whole-document format edit routinely
+    ends at ``(line_count, 0)`` — one line past the last — and an insertion
+    may start there too. Never touches the file on disk.
     """
-    lines = text.splitlines(keepends=True)
     ordered = sorted(
         edits,
         key=lambda edit: (edit.range.start.line, edit.range.start.character),
         reverse=True,
     )
     for edit in ordered:
-        start, end = edit.range.start, edit.range.end
-        replacement = edit.new_text if isinstance(edit.new_text, str) else str(edit.new_text)
-        if start.line >= len(lines):
-            lines.append("\n")
-        end_line = min(end.line, len(lines) - 1)
-        prefix = "".join(lines[: start.line]) + (
-            lines[start.line][: start.character] if start.line < len(lines) else ""
+        # starts[i] is the offset of line i; starts[-1] is len(text).
+        starts = [0]
+        for line in text.splitlines(keepends=True):
+            starts.append(starts[-1] + len(line))
+
+        def offset(position: Any) -> int:
+            if position.line >= len(starts) - 1:
+                # Past the last line: the end of the text, not the start of
+                # a line that does not exist.
+                return len(text)
+            line_start = starts[position.line]
+            return min(line_start + position.character, starts[position.line + 1])
+
+        start = offset(edit.range.start)
+        end = max(offset(edit.range.end), start)
+        replacement = (
+            edit.new_text
+            if isinstance(edit.new_text, str)
+            else str(edit.new_text)
         )
-        suffix = (lines[end_line][end.character :] if end_line < len(lines) else "") + "".join(
-            lines[end_line + 1 :]
-        )
-        text = prefix + replacement + suffix
-        lines = text.splitlines(keepends=True)
+        text = text[:start] + replacement + text[end:]
     return text
 
 
@@ -268,6 +278,12 @@ def language_id_for_suffix(suffix: str) -> str:
     return {
         ".py": "python",
         ".pyi": "python",
+        ".css": "css",
+        ".scss": "scss",
+        ".sass": "sass",
+        ".less": "less",
+        ".html": "html",
+        ".htm": "html",
         ".ts": "typescript",
         ".tsx": "typescriptreact",
         ".js": "javascript",

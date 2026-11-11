@@ -127,6 +127,38 @@ TSSERVER_PROJECT_INFO = "_vue:projectInfo"
 # which still resolves Vue semantics for a standalone workspace.
 PROJECT_CONFIG_NAMES = ("tsconfig.json", "jsconfig.json")
 
+# ``workspace/configuration`` sections the vscode-langservers-extracted family
+# (css/html/json) asks for, and then feeds straight into
+# ``languageService.configure(settings[languageId])``. Those services treat the
+# answer as a settings object: ``vscode-css-languageservice`` builds
+# ``new LintConfigurationSettings(settings && settings.lint)``, and that
+# constructor's ``conf = {}`` default fires only for ``undefined`` — a ``null``
+# answer therefore reaches ``this.conf[setting.id]`` and throws
+# "Cannot read properties of null (reading 'validProperties')", which the server
+# swallows into a log line while publishing NO diagnostics at all. Answering
+# ``{}`` for these sections lands each service on its own defaults.
+#
+# Dotted sections (Volar's ``html.customData``) are deliberately NOT here: a
+# consumer doing ``getConfiguration('html.customData') ?? []`` iterates the
+# answer, so ``{}`` is fatal there and only ``null`` is correct.
+#
+# ``js/ts`` is NOT here either, for the mirror-image reason. The html server's
+# embedded-JS mode does
+# ``settings?.['js/ts']?.implicitProjectConfig.strictNullChecks`` — the chain
+# stops at ``['js/ts']`` but the ``.implicitProjectConfig`` deref is NOT
+# optional-chained. ``{}`` is truthy, so it survives the two guards and then
+# ``undefined.strictNullChecks`` throws "Cannot read properties of undefined
+# (reading 'strictNullChecks')", which the server swallows while publishing NO
+# diagnostics for the whole document. ``null`` short-circuits the chain and
+# lands the host on its own default. Every other consumer of these sections
+# guards with ``settings && settings.X``, so only this one is load-bearing.
+OBJECT_SETTINGS_SECTIONS = frozenset(
+    {
+        "css", "scss", "sass", "less",
+        "html", "javascript", "json",
+    }
+)
+
 LSP_MISSING_HINT = (
     'The "pygls" package is not installed — run: pip install -e ".[lsp]"'
 )

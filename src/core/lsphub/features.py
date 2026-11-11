@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .constants import (
+    OBJECT_SETTINGS_SECTIONS,
     PROJECT_CONFIG_NAMES,
     TSSERVER_PROJECT_INFO,
     TSSERVER_REQUEST,
@@ -113,6 +114,11 @@ def register_features(
             )
             if section in info.get("settings", {}):
                 answers.append(info["settings"][section])
+            elif section in OBJECT_SETTINGS_SECTIONS:
+                # The language-settings sections the css/html/json servers
+                # hand to ``configure()`` want an object, not null: see
+                # OBJECT_SETTINGS_SECTIONS for the crash a null answer causes.
+                answers.append({})
             else:
                 answers.append(None)
         return answers
