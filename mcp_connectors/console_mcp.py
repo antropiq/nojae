@@ -268,6 +268,7 @@ ALLOWED_COMMANDS = {
 
     # --- dev tooling ---
     "python3", "python", "node", "npm", "pip", "git",
+    "cargo",
     "jq", "sqlite3", "openssl",
 
     # --- dev tooling an agent reaches for by name (C-2) ---

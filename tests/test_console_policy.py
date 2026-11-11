@@ -96,6 +96,28 @@ def test_bare_dev_commands_are_not_refused_for_a_tokenisation_accident():
         assert ok, f"{command!r} should be allowed: {msg}"
 
 
+def test_cargo_is_allowed_as_dev_tooling():
+    # The Rust toolchain is a dev tool like `npm` or `pytest`: a bare `cargo`
+    # names no path, so it never takes the in-root bypass and has to be on the
+    # list to run at all. Its subcommands are arguments, not programs, so one
+    # name covers `cargo build`, `cargo test`, `cargo clippy` and the rest.
+    for command in (
+        "cargo check",
+        "cargo build --release",
+        "cargo test",
+        "cargo run --bin server",
+        "cargo fmt --check",
+        "cargo clippy -- -D warnings",
+    ):
+        ok, msg = c.validate_command(command)
+        assert ok, f"{command!r} should be allowed: {msg}"
+    # Being on the list is never a licence on *which* file a command may touch:
+    # a path outside the root is still judged by the deny-lists.
+    assert "off-limits" in refused(
+        "cargo build --manifest-path " + str(Path.home() / ".ssh" / "Cargo.toml")
+    )
+
+
 def test_shell_builtins_are_not_pretended_to_be_available():
     # `cd` was in the issue's wish list, but with no shell it can never exec:
     # allow-listing it would trade a clear refusal for "Command not found".
