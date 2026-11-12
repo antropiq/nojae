@@ -23,6 +23,7 @@ import {
   setAgentMode,
   useAgentModes,
 } from '../composables/useAgentModes'
+import { useComposerKeys } from '../composables/useComposerKeys'
 
 const {
   state,
@@ -43,6 +44,7 @@ const {
   openDialog: openBatchDialog,
 } = useBatch()
 const agentModes = useAgentModes().state
+const { state: composerKeys, toggleEnterSends } = useComposerKeys()
 
 // Let draft insertions (memory bullets) focus the textarea after appending.
 const draftEl = ref(null)
@@ -76,12 +78,18 @@ function submit() {
   send()
 }
 
+// Which Enter sends, and which writes a newline: the composer's toggle inverts
+// the pair (see useComposerKeys). One predicate decides both, so the two keys
+// can never be read the same way — and the toggle is a keyboard habit, so it
+// changes nothing about the turn in flight: flipping it mid-reply is allowed.
 function onKeydown(event) {
-  // Enter sends; Shift+Enter inserts a carriage return.
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-    event.preventDefault()
-    submit()
-  }
+  if (event.key !== 'Enter' || event.isComposing) return
+  const sends = composerKeys.enterSends ? !event.shiftKey : event.shiftKey
+  if (!sends) return
+  // The newline is what the textarea would have done on its own, so only the
+  // sending branch has to prevent anything.
+  event.preventDefault()
+  submit()
 }
 
 // Restart stays live during a batch and means Stop + wipe (B15): the only way
@@ -549,6 +557,48 @@ onBeforeUnmount(() => {
               <rect x="14" y="5" width="4" height="14" rx="1" />
             </svg>
           </button>
+          <!-- Which Enter does what (see useComposerKeys): immediately left of
+               Send, because it is that button's keyboard twin — the same gesture
+               one key away. Off (the default) Enter sends; on, Enter writes a
+               newline and Shift+Enter sends, so a draft can be finished — and
+               reread — before it is handed to the model.
+
+               Always live: flipping it cannot touch a reply already in flight,
+               and a textarea disabled for a lot is no reason to hide a
+               preference. Its accessible names deliberately do not contain
+               "Send message", the label the pinned e2e spec queries here. -->
+          <button
+            class="icon-btn chat-enter-mode"
+            type="button"
+            :aria-pressed="!composerKeys.enterSends"
+            :aria-label="
+              composerKeys.enterSends
+                ? 'Enter sends the message'
+                : 'Enter starts a new line'
+            "
+            :title="
+              composerKeys.enterSends
+                ? 'Enter sends, Shift+Enter for a new line — click to make Enter write a new line'
+                : 'Enter writes a new line, Shift+Enter sends — click to make Enter send'
+            "
+            @click="toggleEnterSends"
+          >
+            <!-- One glyph per state: the Enter arrow alone while that key sends,
+                 the same arrow over the line it starts once it does not. -->
+            <svg v-if="composerKeys.enterSends" width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              aria-hidden="true">
+              <path d="M20 5v7a4 4 0 0 1-4 4H4" />
+              <path d="m9 12-5 4 5 4" />
+            </svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              aria-hidden="true">
+              <path d="M20 4v6a3 3 0 0 1-3 3H4" />
+              <path d="m8 10-4 3 4 3" />
+              <path d="M4 20h16" />
+            </svg>
+          </button>
           <!-- Send and Stop swap on `streaming`, except during a batch: the lot
                keeps Stop live across the microsecond its own loop spends between
                two task turns, and Send is inert for the whole lot anyway. -->
@@ -591,7 +641,9 @@ onBeforeUnmount(() => {
         :placeholder="
           batch.active
             ? 'A batch is running — only Stop and Restart are live.'
-            : 'Ask the model something… (Enter to send, Shift+Enter for a new line)'
+            : composerKeys.enterSends
+              ? 'Ask the model something… (Enter to send, Shift+Enter for a new line)'
+              : 'Ask the model something… (Shift+Enter to send, Enter for a new line)'
         "
         :aria-label="
           batch.active

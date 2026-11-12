@@ -1455,6 +1455,21 @@ input.appbar-location-input {
   cursor: default;
 }
 
+/* The Enter-key toggle, in its "on" state (Enter writes a newline instead of
+   sending). `.icon-btn` draws the button; all that is left is to say which of
+   its two states is the non-default one, and the theme already has one word
+   for that — the violet every other live switch here is lit with. The glyph
+   changes too (see WorkBenchInput.vue), so the state is never carried by the
+   colour alone. */
+.chat-enter-mode[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
+  background-color: color-mix(in srgb, var(--bi-violet) 16%, var(--bi-surface));
+}
+
+.chat-enter-mode[aria-pressed='true'] svg {
+  stroke: var(--bi-violet);
+}
+
 /* Container holding the composer row (memory bullets + the session icon
    buttons) and the textarea below it, so that row stays centered over the
    textarea itself rather than the whole input row. Vertical spacing is

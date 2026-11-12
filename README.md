@@ -609,6 +609,10 @@ workspace-scoped prompt helpers, a session stopwatch and context-size badge, and
 Save / Load of a conversation as a plain JSON file. Markdown renders with KaTeX,
 highlighted code and Mermaid diagrams, always through the sanitizer.
 
+`Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Send
+button swaps the two, so a long message can be finished — and reread — before it
+is sent. It is a preference of this browser, remembered between sessions.
+
 Every reply carries its own copy button, on the top-right corner of its panel:
 half-visible until the pointer enters the card, it puts that one answer on the
 clipboard as the model wrote it. The composer's own button above the textarea is
