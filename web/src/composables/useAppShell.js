@@ -555,6 +555,18 @@ export function useAppShell() {
           .map((server) => server.id)
         loadChatLsp()
       }
+      // The model connection is the workspace's own file too, so the brand's
+      // connection line follows the root: `state.config` is what AppBar renders
+      // as the models and the server URL, and what the occupancy gauge reads for
+      // the context-window cap. Nothing else reloads it on a switch —
+      // `loadConfig()` runs at boot, after a settings save and on chat-tab
+      // re-entry — so without this the bar keeps naming the workspace that was
+      // just left. Cleared first: the new root's file may be absent or still the
+      // template, in which case the read answers 422 and the previous root's
+      // models must not stay on screen as if they were the new one's.
+      state.config = null
+      state.configError = null
+      loadConfig()
       // The agent modes belong to the workspace just activated, so the list
       // follows the root (am-07). `reseed: true`: an id that existed in the old
       // root's `.nojae/agent-modes.json` probably does not exist in the new

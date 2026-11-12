@@ -86,6 +86,7 @@ LANGUAGE_BY_EXTENSION: Dict[str, str] = {
     ".yaml": "yaml",
     ".yml": "yaml",
     ".sh": "shell",
+    ".rs": "rust",
 }
 
 

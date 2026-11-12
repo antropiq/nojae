@@ -122,6 +122,7 @@ class TestLanguageIdForSuffix:
             (".json", "json"),
             (".vue", "vue"),
             (".py", "python"),
+            (".rs", "rust"),
             (".txt", ""),
         ],
     )

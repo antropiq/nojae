@@ -800,6 +800,7 @@ class TestReadEndpoint:
             ("a.md", "markdown"), ("a.html", "html"), ("a.css", "css"),
             ("a.scss", "scss"), ("a.toml", "toml"), ("a.yaml", "yaml"),
             ("a.yml", "yaml"), ("a.sh", "shell"),
+            ("a.rs", "rust"),
             # Unknown extensions and dotfiles never get a guessed grammar.
             ("Dockerfile", "plaintext"), ("Makefile", "plaintext"),
             (".gitignore", "plaintext"), ("a.xyz", "plaintext"),

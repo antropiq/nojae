@@ -292,4 +292,5 @@ def language_id_for_suffix(suffix: str) -> str:
         ".jsx": "javascriptreact",
         ".json": "json",
         ".vue": "vue",
+        ".rs": "rust",
     }.get(suffix.lower(), "")

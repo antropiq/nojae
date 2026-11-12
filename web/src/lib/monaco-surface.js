@@ -105,6 +105,7 @@ const LANGUAGE_BY_SERVER_ID = {
   scss: 'scss',
   yaml: 'yaml',
   shell: 'shell',
+  rust: 'rust',
 }
 
 export function monacoLanguageId(id) {
