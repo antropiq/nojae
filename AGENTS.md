@@ -29,17 +29,17 @@ build, install or launch something on this machine.
 
 ## Shape of the app
 
-The tabs share one LLM configuration and one streaming layer:
+The tabs share one settings store and one streaming layer:
 
 - **WorkBench** — interactive streaming chat with the configured model,
   optionally augmented with MCP connectors and language servers, plus a batch
   mode that works through a folder of task files.
 - **Editor** — the working location as a file tree, a code pane and a terminal.
   Its writes form one bounded surface, reachable from the browser only, never
-  from a hub or a tool. The code pane is served by the same language servers,
-  the same declaration and the same path policy as the WorkBench tools, and
-  answers queries only — never file bytes. The terminal is a human surface,
-  never an agent tool.
+  from a hub or a tool. The code pane is served by the same language servers, the
+  same declaration and the same path policy as the WorkBench tools, and answers
+  queries only — never file bytes. The terminal is a human surface, never an
+  agent tool.
 
 ## Code layout
 
@@ -49,13 +49,13 @@ A UI-free **core** and the **API** in front of it. Core functions never touch
 FastAPI — they take an injected `emit(event: dict)` callable and report progress
 through it.
 
-- `config` — `.env` and the workspace's model connection loaded into one
-  configuration, and the project-instructions block injected into chat.
+- `config` — `.env`, the connection one agent resolves from the settings store,
+  and the project-instructions block injected into chat.
 - `api` — the REST and SSE endpoints under one route prefix, and the chat
   stream's own SSE channel: one worker thread feeding it, one terminal frame
   closing it.
 - `core` — the streamed chat reply with its shared tool-call loop; the
-  batch-mode lot listing; the agent modes.
+  batch-mode lot listing; the agent modes; `appdb`, the store's only opener.
 - `core/mcphub/` and `core/lsphub/` — the MCP and language-server hubs. They
   mirror each other (discovery, manager, seed) — keep that symmetry when
   touching either one. Both read their declarations from the **working
@@ -81,7 +81,7 @@ Vite + Vue 3, plain JavaScript, Pico.css.
   regenerate, never hand-edit the artifacts.
 
 Configuration is edited from the UI and takes effect hot — except a hand-edit of
-`.env` or of the workspace's model connection, which waits for a restart.
+`.env`, which waits for a restart.
 
 ## How a request flows
 
@@ -89,11 +89,10 @@ The exact route list belongs to the API module; what matters architecturally:
 
 - **Chat**: one request per reply, streamed back over SSE. The client re-posts
   the whole history each time; the server keeps no conversation state.
-- **Every WorkBench turn runs in an agent mode** — a workspace-owned persona
-  that replaces the configured system prompt and may switch a whole hub off.
-  A mode only ever narrows what settings and the conversation already allow;
-  it never grants anything. This file is injected into every chat turn
-  whatever the mode.
+- **Every WorkBench turn runs in an agent mode** — an install-owned persona that
+  replaces the configured system prompt, names the model the turn runs on, and may
+  switch a whole hub off. It only ever narrows what settings and the conversation
+  already allow. This file is injected into every chat turn whatever the mode.
 
 ### SSE is the UI's only source of truth
 
@@ -114,13 +113,13 @@ Measurement rules hold across every stream:
 | File | Role |
 |---|---|
 | `.env` | Install-scoped technical keys. |
-| `.nojae/nojae-settings.json` | This workspace's model connection and which language servers it activates. |
+| `nojae.db` | The install's settings store: its model connections, its agents and its prompt helpers. Written only through its own routes, never through a path; never hand-edited, so it has no committed template. |
 | `.env.test`, `.nojae/nojae-test-settings.json` | The e2e suite's own configuration and model connection, read only under the test switch. |
 | Connector and language-server declarations | Which ones exist and how to reach them — files in the workspace's reserved folder. |
-| Reserved workspace folder | This workspace's read/write policy, its hub declarations, and the stores the app writes. |
+| Reserved workspace folder | This workspace's read/write policy and its hub declarations. |
 
-Those files may hold secrets, so they are gitignored, and each has a committed
-template. These rules tie them together:
+Those files may hold secrets, so they are gitignored. These rules tie them
+together:
 
 - **`.env` is regenerated from a fixed template on every save** — a new or
   renamed key means changing the template and its committed example together.
@@ -130,14 +129,14 @@ template. These rules tie them together:
   an unresolved name is kept verbatim with a note, never blanked.
 - **A test run takes its endpoint from the test files, never from a developer's.**
 - **One setting defines the working location** that every file-touching part of
-  the app roots itself at, and it is held outside the settings file. Every path
-  the app holds is relative to it, so moving it invalidates them all at once:
-  cached views are discarded, unsaved work is reported rather than dropped.
-- **Inside the reserved folder, declarations and stores differ**: a declaration
-  is created only when absent and changed only outside the app; a store is
-  written by the app through its own route, never through a path. The folder is
-  hidden from the tree, from reads and from git status. No write destroys bytes:
-  a save backs up what it replaces, a delete moves the file into a dated batch.
+  the app roots itself at, and it is held outside the settings store. Every path
+  the app holds is relative to it, so moving it invalidates what is genuinely
+  workspace-scoped — hubs, policy, cached views, unsaved work reported rather
+  than dropped — and never the settings store, which is the install's.
+- **Inside the reserved folder a declaration is created only when absent and
+  changed only outside the app.** The folder is hidden from the tree, from reads
+  and from git status. No write destroys bytes: a save backs up what it replaces,
+  a delete moves the file into a dated batch.
 - **Path rules come from two levels, one verdict: the strictest match wins.** The
   app's own rules apply only while the working location is the app's directory;
   the workspace's file is always active and can tighten them but never loosen
@@ -154,7 +153,8 @@ template. These rules tie them together:
 - **One LLM layer.** Every model call — every chat reply, a batch task's turns
   included — goes through `core/llmkit`, the only seam that speaks HTTP to an
   OpenAI-compatible endpoint, so adding a model is configuration, never new
-  code.
+  code. The connection comes from the settings store, resolved per agent **once,
+  at a turn's start**, so a mid-turn save cannot split a streaming turn.
 - **Core owns logic, the API owns transport.** The blocking model call runs in a
   worker thread publishing events; the streaming endpoint consumes them. That
   worker-plus-cancellation pattern is the chat's, and nothing under `core` may
@@ -175,22 +175,22 @@ template. These rules tie them together:
   trusting this sentence: no connector, tool or chat path reaches a write route,
   and the terminal is never a tool.
 - **Every write surface is the browser's alone** — the Editor's file routes and
-  the routes that write a reserved-folder store — and each is refused while a
-  chat reply streams. Batch mode lists its lot through the shared path policy but
-  never reads or writes its contents — only the connectors do.
-- **A lot runs every task in one mode, pinned at launch** — the workspace's coding
-  mode, so moving the composer's choice mid-lot reaches no task. A workspace with
-  no such mode falls back to the server's default and says so rather than being
-  refused.
+  the settings-store routes — and the file ones are refused while a chat reply
+  streams. Batch mode lists its lot through the shared path policy but never
+  reads or writes its contents — only the connectors do.
+- **A lot runs every task in one mode, pinned at launch** — the coding agent, so
+  moving the composer's choice mid-lot reaches no task. A store with no such
+  agent, or with no model on it, stops the lot rather than running it under a
+  stranger.
 - **A task is finished when its file leaves the lot folder**; that move is the
   agent's own acknowledgement, and re-listing is the only way the loop can see it.
   A file still there is relaunched up to the loop's budget, then the lot aborts.
 - **This file feeds the chat**: when the working location carries it, it is
   injected into every chat turn and re-read per request. The model acts on it, so
   accuracy matters more than volume.
-- **Tests stay hermetic**: no test reads a real model connection or reaches a
-  live hub — the hubs are disabled by an environment flag and their declared
-  file locations are patched per test.
+- **Tests stay hermetic**: no test reads a real model connection, reaches a live
+  hub or opens the install's settings store — the hubs are disabled by an
+  environment flag and each test runs on a temporary store of its own.
 
 ## Tool use
 

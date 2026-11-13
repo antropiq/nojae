@@ -1,5 +1,16 @@
 # Workspace-scoped LLM settings — `.nojae/nojae-settings.json`
 
+> **Superseded by [`app-settings-db-spec.md`](app-settings-db-spec.md)** (the
+> `appdb` lot). This spec's central decision — that the model connection belongs
+> to the **workspace**, so a folder travels with its own server, model, prompt and
+> sampling — is reversed: the connection is the **install's** now, held in
+> `nojae.db` beside the agent personas and the prompt helpers, and
+> `.nojae/nojae-settings.json` is deleted along with its template, its seeders and
+> its per-workspace state blocks. Two of its members die rather than move:
+> `lspEnabled` (the declaration's `enable` flag is the only LSP gate) and
+> `maxToolIteration` (a per-agent number). Everything below stays the record of
+> the decisions this document made, and is not to be revised.
+
 **Status**: **landed** by lot `wss` (`todos/done/wss-01_workspace_settings_module.md`
 … `todos/done/wss-07_docs_readme_agents_spec.md`) — §5's module is
 `src/core/workspace_settings.py` and its template `nojae-settings.default.json`

@@ -6,36 +6,45 @@ import { useAppShell } from '../src/composables/useAppShell'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
 
 // ---------------------------------------------------------------------------
-// The connection line under the brand, across a working-location switch.
+// The connection line under the brand, now a **store-level** answer (§5.4).
 //
-// The bug this suite exists for: switching workspace moved the tree, both hub
-// panels, the agent modes and the memory bullets to the new root, but the bar
-// kept naming the models and the server URL of the workspace that was just
-// left. Those two lines come from `state.config` -- the `GET /api/config`
-// payload -- and nothing reloaded it on a switch: `loadConfig()` ran at boot,
-// after a settings save and on chat-tab re-entry, so the bar only caught up on
-// the next tab click.
+// The model connection is install-scoped (D11): servers, models and agents live
+// in the settings store, so switching workspace changes none of them and the
+// bar has nothing to re-read. What it shows is the store-level question — *is
+// the store usable, and does it hold at least one model?* — and the sentence is
+// the server's, shown verbatim.
 //
-// The model connection is *workspace* state (`.nojae/nojae-settings.json` in
-// the active root), so the read has to follow the root like everything else
-// the switch reloads. Asserted here over a mounted AppBar rather than only on
-// the composable, because the reported symptom is the rendered line.
+// Whether *this* turn can run is deliberately left to the composer: that is
+// where the agent is chosen and where the fix is one click away. One warning in
+// two places would mean two sentences to keep in step.
+//
+// Asserted over a mounted AppBar rather than only on the composable, because the
+// subject is the rendered line.
 // ---------------------------------------------------------------------------
 
 const OLD_ROOT = '/w/oldproj'
 const NEW_ROOT = '/w/newproj'
 
-const OLD_CONFIG = {
-  models: ['llama-3.1-8b'],
-  serverUrl: 'http://old-host:8000/v1',
-  supportsVision: false,
-  contextWindow: 8192,
+// A configured install: one model, so the bar says **nothing** — the model a
+// turn runs on is the composer's answer and is named there.
+const CONFIGURED = {
+  models: [{ id: 1, name: 'llama-3.1-8b', contextWindow: 8192 }],
+  store: { usable: true, sentence: null },
 }
-const NEW_CONFIG = {
-  models: ['qwen2.5-coder', 'gpt-4o-mini'],
-  serverUrl: 'http://new-host:9000/v1',
-  supportsVision: true,
-  contextWindow: 32768,
+
+// An install with no model at all: the bar's one line.
+const EMPTY_STORE = {
+  models: [],
+  store: { usable: true, sentence: null },
+}
+
+// An unusable store: the server's own sentence, naming the path.
+const UNUSABLE_STORE = {
+  models: [],
+  store: {
+    usable: false,
+    sentence: "nojae's settings store at /srv/nojae.db cannot be read.",
+  },
 }
 
 const { state } = useAppShell()
@@ -45,22 +54,19 @@ function jsonResponse(body, ok = true, status = 200) {
   return Promise.resolve({ ok, status, json: () => Promise.resolve(body) })
 }
 
-// The switch answers with the new root's own blocks; `/api/config` answers with
-// the new root's connection, which is the whole point of the assertion.
-function stubApi() {
+// The switch answers with the new root's own blocks. `/api/config` answers the
+// *store's* catalogue, which a switch does not change (D11).
+function stubApi(config = CONFIGURED) {
   const calls = []
   vi.spyOn(globalThis, 'fetch').mockImplementation((url, options) => {
     const key = String(url)
     calls.push([key, options?.method ?? 'GET'])
-    if (key.startsWith('/api/config')) {
-      return jsonResponse(NEW_CONFIG)
-    }
+    if (key.startsWith('/api/config')) return jsonResponse(config)
     if (key.startsWith('/api/path-location')) {
       return jsonResponse({
         path: NEW_ROOT,
         policy: { state: 'existing', path: `${NEW_ROOT}/.nojae/read-write-policy.json` },
         agentModes: { state: 'existing', path: '' },
-        promptHelpers: { state: 'existing', path: '' },
         mcp: { installed: true, connectors: [] },
         lsp: { installed: true, servers: [] },
       })
@@ -80,7 +86,8 @@ function stubApi() {
 }
 
 function resetState() {
-  state.config = OLD_CONFIG
+  state.config = CONFIGURED
+  state.storeState = CONFIGURED.store
   state.configError = null
   // The switch's own shape: the field holds what was typed, `pathLocationCurrent`
   // what the server applied. Set is enabled -- and the request is made -- only
@@ -91,8 +98,6 @@ function resetState() {
   state.pathLocationSaving = false
   state.pathLocationError = null
   state.pathLocationPolicyNote = null
-  state.pathLocationAgentModesNote = null
-  state.pathLocationPromptHelpersNote = null
   state.activeTab = 'chat'
   tree.state.nodes = {}
   tree.state.workspace = OLD_ROOT
@@ -102,7 +107,7 @@ function brandLines(wrapper) {
   return wrapper.findAll('.brand-sub').map((node) => node.text())
 }
 
-describe('the brand connection line follows the working location', () => {
+describe('the brand connection line is the store-level answer', () => {
   beforeEach(() => {
     resetState()
     vi.restoreAllMocks()
@@ -111,94 +116,70 @@ describe('the brand connection line follows the working location', () => {
     vi.restoreAllMocks()
   })
 
-  it('names the new workspace models and server once the switch landed', async () => {
+  // A configured install renders **no** connection line: the model a turn runs
+  // on is the composer's answer, so the bar has nothing to add (§5.4).
+  it('a configured store says nothing under the brand', () => {
     stubApi()
     const wrapper = mount(AppBar)
-    expect(brandLines(wrapper)).toEqual([
-      'llama-3.1-8b',
-      'on http://old-host:8000/v1',
-    ])
 
-    await useAppShell().setPathLocation()
-    await wrapper.vm.$nextTick()
-
-    // `waitFor`, not one `nextTick`: the connection is a *second* request the
-    // switch fires, so its answer lands on a later microtask than the switch's
-    // own completion. What is asserted is that the bar ends up naming the new
-    // workspace, which is the reported symptom.
-    await vi.waitFor(() =>
-      expect(brandLines(wrapper)).toEqual([
-        'qwen2.5-coder · gpt-4o-mini',
-        'on http://new-host:9000/v1',
-      ]),
-    )
+    expect(brandLines(wrapper)).toEqual([])
     wrapper.unmount()
   })
 
-  // The reload is a *re-read*, not the switch payload: `/api/config` is the one
-  // route that builds the config the way a chat call will, so the bar must show
-  // what that read answered rather than a guess made from the switch's blocks.
-  it('re-reads /api/config as part of the switch', async () => {
-    const calls = stubApi()
+  // The one app-level notice that replaces the three per-workspace file blocks.
+  it('an install with no model says so', async () => {
+    stubApi(EMPTY_STORE)
     const wrapper = mount(AppBar)
 
-    await useAppShell().setPathLocation()
+    await useAppShell().loadConfig()
     await wrapper.vm.$nextTick()
 
-    expect(calls).toContainEqual(['/api/config', 'GET'])
-    await vi.waitFor(() => expect(state.config).toEqual(NEW_CONFIG))
+    expect(brandLines(wrapper)).toEqual(['no model configured'])
     wrapper.unmount()
   })
 
-  // The other half of the bug: a workspace whose model-connection file is still
-  // the seeded template answers 422, and the previous root's models must not
-  // stay on screen as if they were the new root's. The bar then draws nothing
-  // rather than a lie.
-  it('an unconfigured new workspace shows the old connection no more', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation((url, options) => {
-      const key = String(url)
-      if (key.startsWith('/api/config')) {
-        return jsonResponse(
-          { detail: `${NEW_ROOT}/.nojae/nojae-settings.json is not configured` },
-          false,
-          422,
-        )
-      }
-      if (key.startsWith('/api/path-location')) {
-        return jsonResponse({
-          path: NEW_ROOT,
-          policy: { state: 'existing', path: '' },
-          agentModes: { state: 'existing', path: '' },
-          promptHelpers: { state: 'existing', path: '' },
-          mcp: { installed: true, connectors: [] },
-          lsp: { installed: true, servers: [] },
-        })
-      }
-      if (key.startsWith('/api/fs/tree')) {
-        return jsonResponse({ path: '', workspace: NEW_ROOT, entries: [], truncated: false })
-      }
-      return jsonResponse({}, options?.method !== 'POST')
-    })
-
-    const wrapper = mount(AppBar)
-    expect(brandLines(wrapper)).toHaveLength(2)
-
-    await useAppShell().setPathLocation()
-    await wrapper.vm.$nextTick()
-
-    await vi.waitFor(() => {
-      expect(state.config).toBeNull()
-      expect(brandLines(wrapper)).toEqual([])
-    })
-    wrapper.unmount()
-  })
-
-  // A refused switch moves nothing, so the bar must keep what it had: the
-  // reload belongs to the applied location, not to the attempt.
-  it('a refused switch leaves the connection line alone', async () => {
+  // The sentence is the server's: it names the path, and the bar translates
+  // nothing. `loadConfig` answers 422 when the store cannot be read.
+  it('an unusable store shows the server sentence verbatim', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
       const key = String(url)
-      if (key.startsWith('/api/config')) return jsonResponse(OLD_CONFIG)
+      if (key.startsWith('/api/config')) {
+        return jsonResponse({ detail: UNUSABLE_STORE.store.sentence }, false, 422)
+      }
+      return jsonResponse({})
+    })
+    const wrapper = mount(AppBar)
+
+    await useAppShell().loadConfig()
+    await wrapper.vm.$nextTick()
+
+    expect(brandLines(wrapper)).toEqual([UNUSABLE_STORE.store.sentence])
+    wrapper.unmount()
+  })
+
+  // D11's point, as the rendered answer: the store is install-scoped, so a
+  // workspace switch re-reads nothing and the bar's line does not move.
+  it('a workspace switch does not re-read the connection', async () => {
+    const calls = stubApi()
+    const wrapper = mount(AppBar)
+    const before = calls.filter(([url]) => url.startsWith('/api/config')).length
+
+    await useAppShell().setPathLocation()
+    await wrapper.vm.$nextTick()
+
+    expect(
+      calls.filter(([url]) => url.startsWith('/api/config')).length,
+    ).toBe(before)
+    expect(state.config).toEqual(CONFIGURED)
+    wrapper.unmount()
+  })
+
+  // A refused switch moves nothing at all, and the bar's line is not the
+  // switch's business any more.
+  it('a refused switch leaves the line alone', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const key = String(url)
+      if (key.startsWith('/api/config')) return jsonResponse(EMPTY_STORE)
       if (key.startsWith('/api/path-location')) {
         return jsonResponse(
           { detail: 'Cannot change the working location while a chat reply is streaming' },
@@ -208,16 +189,14 @@ describe('the brand connection line follows the working location', () => {
       }
       return jsonResponse({})
     })
+    state.config = EMPTY_STORE
+    state.storeState = EMPTY_STORE.store
 
     const wrapper = mount(AppBar)
     await useAppShell().setPathLocation()
     await wrapper.vm.$nextTick()
 
-    expect(state.config).toEqual(OLD_CONFIG)
-    expect(brandLines(wrapper)).toEqual([
-      'llama-3.1-8b',
-      'on http://old-host:8000/v1',
-    ])
+    expect(brandLines(wrapper)).toEqual(['no model configured'])
     wrapper.unmount()
   })
 })

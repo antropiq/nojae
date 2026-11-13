@@ -18,7 +18,12 @@ const batch = useBatch().state
 const chat = useChat().state
 
 function reset() {
-  appShell.config = { contextWindow: 8192 }
+  // The cap arrives **per model** now (D5), so the fixture is a model list with
+  // the window on the entry the meters read.
+  appShell.config = {
+    models: [{ id: 1, name: 'm', contextWindow: 8192, supportsVision: false }],
+    store: { usable: true, sentence: null },
+  }
   batch.active = false
   batch.status = 'idle'
   chat.phase = 'idle'

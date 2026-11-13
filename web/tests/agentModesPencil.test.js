@@ -25,43 +25,40 @@ const chat = useChat().state
 const batch = useBatch().state
 const appShell = useAppShell().state
 
-const DOCUMENT_BODY = {
-  entries: [
-    { key: 'code', hasForm: true, fields: { label: 'Code' }, findings: [] },
-  ],
-  default: 'code',
-  findings: [],
-  source: {
-    path: '/work/.nojae/agent-modes.json',
-    exists: true,
-    loaded: true,
-    mtime: '1700000000000000000',
-  },
-  caps: {
-    maxModes: 16,
-    maxIdChars: 32,
-    idPattern: '^[a-z][A-Za-z0-9_-]*$',
-    maxLabelChars: 40,
-    maxPersonaBytes: 16384,
-    maxPersonaLines: 16,
-  },
-  defaults: { version: 1, default: 'code', agents: {} },
-}
-
+//: What `GET /api/agents` answers — the store's rows. The app-owned agent is
+//: spelled with a stand-in id (this file may not name the real one), and it is
+//: the one row the store publishes `readonly` for.
 function modesBody() {
+  const rows = [
+    { id: 'code', label: 'Code', mcpEnable: true, lspEnable: true },
+    { id: 'chat', label: 'Chat', mcpEnable: false, lspEnable: false },
+    { id: 'reserved-agent-under-test', label: 'Reserved', mcpEnable: true, lspEnable: false, readonly: true },
+  ]
   return {
-    modes: [
-      { id: 'chat', label: 'Chat', mcptools: false, lsptools: false, editable: true },
-      { id: 'code', label: 'Code', mcptools: true, lsptools: true, editable: true },
-      // The app-owned mode, recognised only by its flag (never by an id this
-      // file may not contain) — the one state that locks the *select*, which
-      // the pencil must not inherit.
-      { id: 'reserved-mode-under-test', label: 'Reserved', mcptools: true, lsptools: false, editable: false },
-    ],
-    default: 'code',
-    source: { path: '/work/.nojae/agent-modes.json', exists: true, loaded: true },
+    agents: rows.map((row, index) => ({
+      readonly: false,
+      ...row,
+      deletable: false,
+      maxToolIteration: 25,
+      systemMessage: '',
+      modelId: index + 1,
+      modelName: `model-${index + 1}`,
+    })),
+    caps: {
+      minToolIteration: 1,
+      maxIdChars: 32,
+      idPattern: '^[a-z][A-Za-z0-9_-]*$',
+      maxPersonaBytes: 16384,
+    },
     findings: [],
   }
+}
+
+//: The connection catalogue the model dropdown is built from.
+const SERVERS_BODY = {
+  servers: [{ id: 1, name: 'Local', url: 'http://localhost:8080/v1', apiKey: '', models: [{ id: 1, name: 'model-1' }] }],
+  caps: { samplerRanges: {}, reasoningLevels: [] },
+  unassigned: { agentsWithoutModel: 0, agents: 3 },
 }
 
 function jsonResponse(body, ok = true, status = 200) {
@@ -70,17 +67,16 @@ function jsonResponse(body, ok = true, status = 200) {
 
 // `calls` records every route the composer touches, in order. `list: null` makes
 // the dropdown's own fetch fail — the case the pencil must survive.
-// (`documentBody`, not `document`: the global is what the assertions read.)
-function stubRoutes({ list = modesBody(), documentBody = DOCUMENT_BODY, calls = [] } = {}) {
+function stubRoutes({ list = modesBody(), calls = [] } = {}) {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     const key = String(url)
     calls.push({ key, method: init?.method ?? 'GET' })
-    if (key === '/api/agent-modes') {
+    if (key === '/api/agents') {
       return list === null ? jsonResponse({}, false, 500) : jsonResponse(list)
     }
-    if (key === '/api/agent-modes/document') return jsonResponse(documentBody)
-    if (key === '/api/agent-modes/save') {
-      throw new Error('the pencil must not save on its own')
+    if (key === '/api/servers') return jsonResponse(SERVERS_BODY)
+    if (key.startsWith('/api/agents/')) {
+      throw new Error('the pencil must not write on its own')
     }
     throw new Error(`unexpected fetch: ${key}`)
   })
@@ -100,19 +96,17 @@ function resetAll() {
   appShell.activeTab = 'chat'
   agentModes.modes = []
   agentModes.current = null
-  agentModes.default = null
   agentModes.loaded = false
-  agentModes.locked = false
   agentModes.findings = []
-  agentModes.source = null
   agentModes.notice = null
   const editor = useAgentModes().editor
-  editor.open = false
   editor.loading = false
   editor.saving = false
   editor.error = null
-  editor.conflict = null
-  editor.invalidFindings = []
+  editor.serverFindings = []
+  appShell.servers = []
+  appShell.serversCaps = null
+  window.localStorage.clear()
 }
 
 let host = null
@@ -187,10 +181,12 @@ describe('the pencil beside the mode dropdown', () => {
     await flushPromises()
 
     expect(document.querySelector('dialog.agent-modes-dialog')?.open).toBe(true)
-    // Opening *is* the document read; no save happens without pressing Save.
+    // Opening *is* the read — the agent list, and the connection catalogue the
+    // model dropdowns are built from. No save happens without pressing Save.
     expect(calls.map((call) => call.key)).toEqual([
-      '/api/agent-modes',
-      '/api/agent-modes/document',
+      '/api/agents',
+      '/api/servers',
+      '/api/agents',
     ])
     expect(calls.some((call) => call.method === 'POST')).toBe(false)
   })
@@ -239,7 +235,8 @@ describe('the pencil beside the mode dropdown', () => {
     const w = await mountComposer()
 
     // No select (a control that cannot be used is worse than none), but the
-    // editor is there: a broken modes file is exactly the one worth opening.
+    // editor is there: a store whose list could not be read is exactly the one
+    // worth opening.
     expect(w.find('.chat-mode-select').exists()).toBe(false)
     expect(pencil(w).exists()).toBe(true)
     expect(pencil(w).attributes('disabled')).toBeUndefined()
@@ -247,30 +244,29 @@ describe('the pencil beside the mode dropdown', () => {
     await pencil(w).trigger('click')
     await flushPromises()
     expect(document.querySelector('dialog.agent-modes-dialog')?.open).toBe(true)
-    expect(calls.some((call) => call.key === '/api/agent-modes/document')).toBe(true)
+    // The card retries the read itself, so the failure it was opened for is
+    // reported on its own error line rather than inherited from the dropdown.
+    expect(calls.filter((call) => call.key === '/api/agents')).toHaveLength(2)
   })
 
-  it('a locked conversation still lets the file be edited', async () => {
-    // The pencil's window is *streaming* and *lot*, not the select's whole
-    // predicate: the D7 lock is about this conversation's persona, and the
-    // workspace's modes file is not the conversation's. D9's
-    // `resetDecisionAfterSave` exists precisely because a save can land while
-    // the selection is locked — it leaves the selection alone and says so.
+  it('a turned conversation never stops the agent being switched', async () => {
+    // The old case here asserted that a *locked* conversation could still edit
+    // the modes file — a lock that no longer exists (§4.4, D5). What survives
+    // its removal is the invariant behind it, stated positively: after a turn,
+    // the select is live and the pencil is live, so nothing about this
+    // conversation freezes.
     stubRoutes()
     await loadAgentModes()
     const w = await mountComposer()
 
-    const reserved = agentModes.modes.find((mode) => mode.editable === false)
-    expect(reserved, 'the fixture needs the non-editable mode').toBeTruthy()
-    // The lock is a function of the thread (the probe useChat injects), so the
-    // thread itself is what moves here — no hand-set flag.
     chat.messages = [{ role: 'user', raw: 'one turn', html: '', images: [] }]
-    setAgentMode(reserved.id)
+    setAgentMode('chat')
     await flushPromises()
-    expect(agentModes.locked).toBe(true)
+    expect(agentModes.current).toBe('chat')
 
-    // The select is inert (the lock refuses a switch); the pencil is not.
-    expect(w.find('.chat-mode-select').attributes('disabled')).toBeDefined()
+    // Both the select and the pencil stay live: no agent locks, and the agent
+    // list was never part of this conversation's state anyway.
+    expect(w.find('.chat-mode-select').attributes('disabled')).toBeUndefined()
     expect(pencil(w).attributes('disabled')).toBeUndefined()
 
     await pencil(w).trigger('click')
@@ -279,16 +275,16 @@ describe('the pencil beside the mode dropdown', () => {
   })
 
   it('the notice line still renders under the column, pencil included', async () => {
-    // D9's quiet line — a skipped reset arrives through the same notice slot,
-    // so the column must render for a notice with no list behind it.
+    // The quiet line arrives through the notice slot, so the column must render
+    // for a notice with no list behind it.
     stubRoutes({ list: null })
     agentModes.notice =
-      'The agent-modes file was saved — the selection did not move: a running lot picks its mode at launch.'
+      'The saved session asked for agent mode "gone", which this installation does not have — using Code.'
     const w = await mountComposer()
 
     const line = w.find('.chat-mode-findings')
     expect(line.exists()).toBe(true)
-    expect(line.text()).toContain('did not move')
+    expect(line.text()).toContain('does not have')
     expect(pencil(w).exists()).toBe(true)
   })
 })

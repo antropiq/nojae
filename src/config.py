@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -13,14 +13,17 @@ from src.core.models import EndpointsConfig
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
 
-# Cap on tool-calling iterations for one chat reply; shared by MCP connectors
-# and LSP language servers alike (one knob, no split-brain).
+# The tool-loop cap a built-in agent is seeded with (D9). It is a *per-agent
+# column* now, so nothing here reads it as a fallback: it stays as the one
+# number the store's seeder and its tests agree on, which is what keeps a fresh
+# install behaving exactly as it did before the cap moved.
 DEFAULT_MAX_TOOL_ITERATION = 25
 
 # Managed .env keys, in the order they are written to the file. The model
-# connection left this list for the workspace's ``.nojae/nojae-settings.json``:
-# what is left is the install's own scope — the debug switch and the connector
-# interpreter, both hand-edited like ``NOJAE_PYTHON_ROOT`` itself.
+# connection left this list for nojaé's own settings store, and
+# the tool-loop cap left it for a per-agent column: what is left is the
+# install's own scope — the debug switch and the connector interpreter, both
+# hand-edited like ``NOJAE_PYTHON_ROOT`` itself.
 SETTING_KEYS: Tuple[str, ...] = (
     "LLM_DEBUG",
     "NOJAE_PYTHON_ROOT",
@@ -325,74 +328,133 @@ def agent_instructions_block(text: Optional[str] = None) -> str:
     ).format(root=path_location(), body=body)
 
 
-def workspace_settings_refusal() -> Optional[str]:
-    """The one sentence naming why this workspace's model connection is unusable.
+def agent_connection_refusal(agent: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The one sentence naming why this agent cannot reach a model (spec D7).
 
-    ``None`` when the file parsed and holds real values. Otherwise the reader's
-    own sentence for the three unusable states — no file, malformed file, still
-    the template's instruction text — each of which names the file and its path:
-    ``error`` carries it for a **failed** read, ``message`` for the two
-    unusable-but-not-broken ones.
+    ``None`` when the agent can run. Otherwise the sentence, which covers the
+    three states that answer has to name and no others — there is no ladder
+    behind it, because ``agent.model_id`` set means *that* model and *its*
+    server, and null means this sentence:
 
-    This is the single builder of that sentence (spec D9). ``routes._load_config``
-    turns it into the refusal a chat request answers with, and **ws-04's
-    ``GET /api/settings`` must reuse this function** rather than write a second
-    sentence, so the dialog and the refusal can never disagree about what is
-    wrong with the file.
+    1. **the agent has no model** — the sentence **names the agent**, because
+       "which agent" is the part the user can act on; a sentence about a missing
+       *default* would describe a setting that no longer exists (D5);
+    2. **the model's server row is missing** — the same refusal, not a crash.
+       The schema's ``ON DELETE SET NULL`` makes that state unreachable through
+       the app, so reaching it means a hand-edited database, which is exactly
+       when a named state matters most;
+    3. **the store itself is unusable** — the sentence naming the path, which is
+       the one the boot kept (:func:`src.core.appdb.store_state`), so the app
+       bar and the chat refusal cannot disagree.
+
+    This is the single builder of that sentence: the chat route, the Settings
+    dialog and the app bar all reuse it, and none of them writes a sentence of
+    its own. It answers a **sentence**, never an HTTP status — the route decides
+    what the refusal costs.
+
+    A caller that goes on to build the connection from the same agent uses
+    :func:`load_endpoints_config`, which reads the rows **once** and hands them
+    to the same builder, so the sentence and the configuration can never be about
+    two different reads.
     """
-    # Local import: ``workspace_settings`` reads ``path_location`` *from* this
-    # module, so a module-level import here would be a cycle — the same
-    # cycle-avoidance every other caller of this module's bottom rung states.
-    from src.core import workspace_settings
+    return _resolve_agent_rows(agent)[2]
 
-    state = workspace_settings.workspace_settings_state()
-    if state["state"] == "failed":
-        return state["error"] or f"the workspace settings file {state['path']} cannot be used"
+
+def _resolve_agent_rows(
+    agent: Optional[Mapping[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
+    """``(model_row, server_row, sentence)`` — the seam's one read of the store.
+
+    The two answers are the two branches of D7 and nothing else: either both
+    rows are there and the sentence is ``None``, or the sentence names the state
+    and at least one row is missing. Split out of
+    :func:`agent_connection_refusal` so the refusal stays the single builder of
+    the sentence while the seam gets the rows it just checked.
+    """
+    # Local import, the reason every caller of this module's bottom rung has:
+    # ``appdb`` reads ``PROJECT_ROOT`` *from* this module.
+    from src.core import appdb
+
+    row: Mapping[str, Any] = agent or {}
+    who = str(row.get("label") or row.get("id") or "").strip() or "the selected agent"
+
+    state = appdb.store_state()
     if state["state"] != "ok":
-        return state["message"] or f"there is no workspace settings file at {state['path']} yet"
-    if not state["configured"]:
-        return state["message"] or (
-            f"the workspace settings file {state['path']} still holds the "
-            "template's text; set them in the Settings dialog"
+        return (
+            None,
+            None,
+            state["sentence"]
+            or f"nojae's settings store at {state['path']} is unusable.",
         )
-    return None
+
+    model_id = row.get("modelId")
+    if model_id is None:
+        return (
+            None,
+            None,
+            f"Agent {who} has no model to run with. Please assign a model in "
+            "the Agent modes dialog.",
+        )
+
+    try:
+        model = appdb.model_row(model_id)
+        server = None if model is None else appdb.server_row(model["serverId"])
+    except appdb.AppStoreError as exc:
+        # The store was usable at boot and is not now — the sentence the failure
+        # itself carries, naming the path, is the honest one.
+        return (None, None, str(exc))
+
+    if model is None:
+        return (
+            None,
+            None,
+            f"Agent {who} has no model to run with: the model it names is not in "
+            f"nojae's settings store at {appdb.database_path()}. Please assign a "
+            "model in the Agent modes dialog.",
+        )
+    if server is None:
+        return (
+            None,
+            None,
+            f"Agent {who} has no model to run with: the model it names "
+            f"({model['name']!r}) belongs to a server that is not in nojae's "
+            f"settings store at {appdb.database_path()}.",
+        )
+    return (model, server, None)
 
 
-def load_endpoints_config() -> Tuple[
-    Optional[EndpointsConfig], Optional[Union[ValidationError, str]]
-]:
-    """Build and validate the endpoints config from the workspace's settings file.
+def load_endpoints_config(
+    agent: Optional[Mapping[str, Any]],
+) -> Tuple[Optional[EndpointsConfig], Optional[Union[ValidationError, str]]]:
+    """The model connection **one agent** runs on, or the sentence why it cannot.
 
-    The model connection comes from the workspace's
-    ``.nojae/nojae-settings.json``, which is why the file's *state* is decided
-    here too:
+    The contract this function has always held — ``(config, None)`` or
+    ``(None, sentence)`` — but **per agent**, because which connection answers is
+    no longer one answer for the whole app (D7). The three answers are:
 
-    * ``(config, None)`` — the file parsed and the sampler values validated;
-    * ``(None, ValidationError)`` — a value pydantic rejects;
-    * ``(None, sentence)`` — the file is **absent**, **malformed** or still
-      holds the template's instruction text (spec D8, D9). The sentence names
-      the file and its path, and it is the one the Settings dialog shows: it
-      comes from :func:`workspace_settings_refusal` above, so a chat refusal and
-      ws-04's ``GET /api/settings`` cannot disagree about what is wrong.
+    * ``(config, None)`` — the agent has a model, its server is there, and the
+      sampler columns validated;
+    * ``(None, ValidationError)`` — a column pydantic rejects;
+    * ``(None, sentence)`` — any of :func:`agent_connection_refusal`'s three
+      states: no model, a model whose server row is missing, an unusable store.
 
-    Never a silent default. A caller that answered on defaults here would
-    measure the defaults, not the model — and the alternative, dialling the
-    template's instruction sentence as a URL, makes a transport error quote a
-    sentence back at the user.
+    **A turn resolves once, at its start**, and this is where it resolves: the
+    caller holds the answer for the whole turn, so a save that lands mid-turn
+    cannot split the turn that is streaming. That is the invariant that replaces
+    today's "refused while a chat reply streams" gate for these stores.
+
+    A missing agent — no id, or an id the store does not hold — is the caller's
+    **422 naming the field** (D5), answered before this is reached; there is no
+    server-side default to fall back to, so nothing here resolves one.
+
+    Never a silent default: an agent with no model refuses rather than dialling a
+    model nobody chose for it (D5).
     """
-    # Local import, for the reason every caller of this module's bottom rung
-    # has: ``workspace_settings`` reads ``path_location`` *from* this module,
-    # so a module-level import here would be a cycle.
-    from src.core import workspace_settings
-
-    refusal = workspace_settings_refusal()
+    model, server, refusal = _resolve_agent_rows(agent)
     if refusal is not None:
         return None, refusal
     try:
-        return (
-            EndpointsConfig.from_workspace(workspace_settings.load_workspace_settings()),
-            None,
-        )
+        return EndpointsConfig.from_store(server, model), None
     except ValidationError as exc:
         return None, exc
 
@@ -463,13 +525,11 @@ def _render_env(values: Dict[str, str]) -> str:
         "# mcp_connectors/mcp-settings.default.json when a folder becomes the",
         "# working location, their per-entry ``enable`` flag is the single",
         "# source of truth, no .env key is involved.",
-        "# The model connection for this workspace — server, key, model id,",
-        "# system prompt, sampling, the vision flag, the LSP ids to activate",
-        "# and the cap on one chat reply's tool loop — lives only in",
-        "# .nojae/nojae-settings.json at the working location: seeded from",
-        "# nojae-settings.default.json when a folder becomes the working",
-        "# location, written by the Settings dialog, a hand-edit there needs a",
-        "# server restart, no .env key is involved.",
+        "# The model connection — servers, their models, the key, the system",
+        "# prompt, sampling and the vision flag — and the tool-loop cap (one",
+        "# number per agent) live in nojae's settings store at the install",
+        "# root, edited from the Settings dialog. It is a database, not a file",
+        "# to hand-edit, and no .env key is involved.",
         "",
         "# Absolute path to the python interpreter the stdio connectors run",
         "# on (the console and fedit commands in .nojae/mcp-settings.json",
@@ -481,53 +541,24 @@ def _render_env(values: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def max_tool_iteration() -> int:
-    """Tool-iteration cap for one chat reply; absent or out of range falls
-    back to ``DEFAULT_MAX_TOOL_ITERATION`` / ``1``.
+def max_tool_iteration(agent: Optional[Mapping[str, Any]] = None) -> int:
+    """The **resolved agent's** tool-iteration cap (D9), or the seeded number.
 
-    The cap counts **MCP tool rounds only**: a round that used nothing but
-    language-server tools does not advance it, so LSP usage is never bounded
-    here (the Editor's LSP queries aren't a tool loop at all). Its value is
-    ``maxToolIteration`` in the workspace's ``.nojae/nojae-settings.json``,
-    read through the typed accessor: it left ``.env`` with the rest of group 1,
-    and with it went the hand-written-``.env`` escape hatch that used to
-    override the key, because the file that held the key no longer exists.
+    The cap counts **MCP tool rounds only**, as it always has: a round that used
+    nothing but language-server tools does not advance it, so LSP usage is never
+    bounded here (the Editor's LSP queries aren't a tool loop at all).
+
+    It is a per-agent column now, so the value comes from the agent a turn
+    resolved at its start — :func:`src.core.appdb.agent_max_tool_iteration`,
+    which is the one accessor for the floor. ``None`` (no agent handed in) is the
+    seeded number, which is what a caller with no turn to speak of gets.
     """
-    # Local import: ``workspace_settings`` reads ``path_location`` *from* this
-    # module, so a module-level import here would be a cycle.
-    from src.core import workspace_settings
+    # Local import: ``appdb`` reads ``PROJECT_ROOT`` *from* this module.
+    from src.core import appdb
 
-    raw = workspace_settings.workspace_setting("maxToolIteration")
-    if raw is None:
+    if agent is None:
         return DEFAULT_MAX_TOOL_ITERATION
-    return max(1, int(raw))
-
-
-def lsp_enabled_ids() -> List[str]:
-    """Language-server ids activated for the Chat tab.
-
-    They are ``lspEnabled`` in the workspace's ``.nojae/nojae-settings.json``:
-    an array of strings, so the file already holds a list and there is nothing
-    to split. Duplicates drop and the file's order is kept, which is the order
-    the hub starts servers in; a value the reader could not check answers no id
-    at all rather than a partial list.
-
-    A server is only actually started when this list contains its id *and* its
-    ``enable`` flag is true in ``.nojae/lsp-settings.json`` — the two gates let
-    a whole prepared config file stay dormant.
-    """
-    # Local import, same cycle-avoidance reason as ``max_tool_iteration``.
-    from src.core import workspace_settings
-
-    raw = workspace_settings.workspace_setting("lspEnabled")
-    ids: List[str] = []
-    if not isinstance(raw, list):
-        return ids
-    for part in raw:
-        entry = part.strip() if isinstance(part, str) else ""
-        if entry and entry not in ids:
-            ids.append(entry)
-    return ids
+    return appdb.agent_max_tool_iteration(agent)
 
 
 def _encode_value(value: str) -> str:

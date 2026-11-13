@@ -552,12 +552,44 @@ def _config(endpoint: Optional[str] = "model-a") -> EndpointsConfig:
     )
 
 
+#: The agent the fixture's client names on every chat turn. D5 made the field
+#: mandatory — there is no server-side default agent any more — so a test about
+#: anything *else* on this route has to supply one, exactly as the composer does.
+#: The refusal for a missing or unknown id is pinned in ``tests/test_api.py``
+#: (``TestChatAgentModeField``), which posts through the undecorated client
+#: below.
+DEFAULT_AGENT = "code"
+
+
+class _ChatClient:
+    """A ``TestClient`` whose ``POST /api/chat`` names an agent when it is given none.
+
+    ``http`` is the undecorated client, for the tests that are about the request
+    body itself. Everything else goes through this one, so a test of streaming,
+    sanitizing or pausing does not have to restate a field the feature made
+    mandatory in the same breath.
+    """
+
+    def __init__(self, http: TestClient) -> None:
+        self.http = http
+        self.app = http.app
+
+    def post(self, url: str, *args: Any, **kwargs: Any):
+        body = kwargs.get("json")
+        if url == "/api/chat" and isinstance(body, dict) and "agentMode" not in body:
+            kwargs["json"] = {**body, "agentMode": DEFAULT_AGENT}
+        return self.http.post(url, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.http, name)
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch):
     app = create_app()
-    monkeypatch.setattr(routes, "load_endpoints_config", lambda: (_config(), None))
+    monkeypatch.setattr(routes, "load_endpoints_config", lambda agent: (_config(), None))
     with TestClient(app) as test_client:
-        yield test_client
+        yield _ChatClient(test_client)
 
 
 def _events(body: str):
@@ -1011,7 +1043,7 @@ class TestStreamedDisplayIsSanitized:
         monkeypatch.setattr(
             routes,
             "load_endpoints_config",
-            lambda: (
+            lambda agent: (
                 EndpointsConfig(
                     serverUrl="http://localhost:8080/v1",
                     apiKey="sk-42",
@@ -1023,7 +1055,8 @@ class TestStreamedDisplayIsSanitized:
         monkeypatch.setattr(routes, "stream_chat", fake)
         with TestClient(app) as test_client:
             response = test_client.post(
-                "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+                "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
+                                   "agentMode": DEFAULT_AGENT},
             )
         assert '"api_key_seen": "sk-42"' in response.text
 
@@ -1105,11 +1138,159 @@ class TestStreamedDisplayIsSanitized:
         assert client.post("/api/chat", json=payload).status_code == 422
 
     def test_no_model_configured_returns_400(self, client, monkeypatch):
-        monkeypatch.setattr(routes, "load_endpoints_config", lambda: (_config(None), None))
+        monkeypatch.setattr(
+            routes, "load_endpoints_config", lambda agent: (_config(None), None)
+        )
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
         assert response.status_code == 400
+
+
+class TestTheTurnResolvesThroughTheStore:
+    """D7's switch, end to end through the chat route.
+
+    ``_load_config`` is **not** patched for these cases: which server answers a
+    turn is a fact about the store's rows, so the assertions are about what a
+    chat request does with them.
+    """
+
+    @pytest.fixture
+    def store_client(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        """A real app whose ``stream_chat`` records the connection it was handed."""
+        seen: Dict[str, Any] = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None,
+                 agent_instructions=None, mode_instructions=None, **tools):
+            seen.update({"model": model, "server_url": server_url, "api_key": api_key})
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        app = create_app()
+        with TestClient(app) as test_client:
+            yield test_client, seen
+
+    @staticmethod
+    def _post(client, agent_mode: str = "code"):
+        return client.post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "agentMode": agent_mode},
+        )
+
+    def test_the_next_turns_server_comes_from_the_agents_model_row(
+        self, store_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """Point the agent at another server's model, and the next turn moves."""
+        from src.core import appdb
+        from tests.conftest import neutralise_store
+
+        client, seen = store_client
+        neutralise_store(
+            monkeypatch, tmp_path,
+            serverUrl="http://first-host/v1", endpoint="first-model",
+        )
+        assert self._post(client).status_code == 200
+        assert seen["server_url"] == "http://first-host/v1"
+        assert seen["model"] == "first-model"
+
+        # A **second** server with its own model, written through the routes a
+        # user's dialog uses, with the agent's `model_id` pointed at it.
+        created = client.post(
+            "/api/servers/add",
+            json={"name": "Second", "url": "http://second-host/v1", "apiKey": ""},
+        )
+        server_id = next(
+            server["id"] for server in created.json()["servers"]
+            if server["name"] == "Second"
+        )
+        client.post(
+            "/api/models/add", json={"serverId": server_id, "name": "second-model"}
+        )
+        second_model = next(
+            model["id"] for server in appdb.load_servers()
+            for model in server["models"] if model["name"] == "second-model"
+        )
+        appdb.connection().execute(
+            "UPDATE agents SET model_id = ? WHERE id = 'code'", (second_model,)
+        )
+
+        assert self._post(client).status_code == 200
+        assert seen["server_url"] == "http://second-host/v1"
+        assert seen["model"] == "second-model"
+
+    def test_a_save_inside_the_turn_cannot_split_it(
+        self, store_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """A turn resolves **once, at its start** (D7).
+
+        The stub below rewrites the server row from inside the worker — as mid
+        turn as a save can land — and records the connection it was *handed*. The
+        row having moved must not reach that argument, which is exactly what
+        replaces "refused while a chat reply streams" for these stores (§4.5).
+        """
+        from src.core import appdb
+        from tests.conftest import neutralise_store
+
+        client, seen = store_client
+        neutralise_store(
+            monkeypatch, tmp_path,
+            serverUrl="http://before-host/v1", endpoint="before-model",
+        )
+
+        seen_list: List[Dict[str, Any]] = []
+
+        def saving_stream(messages, model, server_url, emit, sampling=None,
+                          cancel_event=None, pause_event=None, api_key="none",
+                          sysprompt=None, agent_instructions=None,
+                          mode_instructions=None, **tools):
+            seen_list.append({"model": model, "server_url": server_url})
+            if len(seen_list) == 1:
+                appdb.connection().execute(
+                    "UPDATE servers SET url = 'http://after-host/v1' "
+                    "WHERE url = 'http://before-host/v1'"
+                )
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", saving_stream)
+
+        assert self._post(client).status_code == 200
+        assert self._post(client).status_code == 200
+
+        # The turn that was streaming answered on the connection it resolved ...
+        assert seen_list[0]["server_url"] == "http://before-host/v1"
+        # ... and the save was visible to the *next* turn, not that one.
+        assert seen_list[1]["server_url"] == "http://after-host/v1"
+
+    def test_an_agent_with_no_model_refuses_with_one_sentence_naming_it(
+        self, store_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """AC-3's server half: the same sentence the app bar and dialog show."""
+        from src.config import agent_connection_refusal
+        from src.core import appdb
+        from tests.conftest import neutralise_store
+
+        client, seen = store_client
+        neutralise_store(
+            monkeypatch, tmp_path,
+            serverUrl="http://x/v1", endpoint="m",
+            agents_without_model=("code",),
+        )
+
+        response = self._post(client)
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "no model" in detail
+        assert appdb.resolve_agent("code")[0]["label"] in detail
+        assert detail == agent_connection_refusal(appdb.resolve_agent("code")[0])
+        # Nothing streamed: the worker was never handed a connection.
+        assert seen == {}
 
 
 class TestChatPauseEndpoint:
@@ -1428,168 +1609,158 @@ class TestStreamChatPause:
         assert names == ["usage", "tool_call", "tool_result", "pause_ack"]
 
 
-class TestAgentModePromptAssembly:
-    """am-04: the resolved mode's words reach ``POST /chat``'s system message.
+def add_agent(client, agent_id: str, label: str, **fields: Any) -> Dict[str, Any]:
+    """Create one agent through the route the dialog uses, and answer its row.
 
-    Runs against a ``tmp_path`` workspace whose ``.nojae/agent-modes.json`` the
-    test writes, so the mode the route resolves is a real one read through the
-    real loader (no stand-in: what is under test is the route's use of it). The
-    stub records the ``stream_chat`` kwargs, which is where am-04 does the
-    substitution — the five-part *order* belongs to ``core.chat`` and is pinned
-    in ``TestStreamChat`` above.
+    The model association comes from whatever the store already holds, so a test
+    that says nothing about models gets the harness's one row — a turn needs an
+    agent *and* a model (D5), and a created agent with neither would be a refusal
+    this file is not about. A test that wants the refusal states it itself.
     """
-
-    @staticmethod
-    def _write_modes(root: Path, agents: Dict[str, Any], default: str = "builder"):
-        folder = root / agent_modes.POLICY_DIRNAME
-        folder.mkdir(exist_ok=True)
-        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
-            json.dumps({
-                "version": agent_modes.AGENT_MODES_VERSION,
-                "default": default,
-                "agents": agents,
-            }, indent=2),
-            encoding="utf-8",
+    if "modelId" not in fields:
+        fields["modelId"] = next(
+            (
+                agent["modelId"]
+                for agent in client.get("/api/agents").json()["agents"]
+                if agent["modelId"] is not None
+            ),
+            None,
         )
+    response = client.post("/api/agents/add", json={
+        "id": agent_id, "label": label, **fields,
+    })
+    assert response.status_code == 200, response.json()
+    return {agent["id"]: agent for agent in response.json()["agents"]}[agent_id]
+
+
+class TestAgentModePromptAssembly:
+    """The resolved agent's words reach ``POST /api/chat``'s system message.
+
+    The agents are rows now, so the persona a turn runs as is the row the route
+    read — created through the very route the dialog uses, which is what makes
+    this the request path rather than a mock of it. The stub records the
+    ``stream_chat`` kwargs, where the substitution happens; the five-part *order*
+    belongs to ``core.chat`` and is pinned in ``TestStreamChat`` above.
+    """
 
     @pytest.fixture
     def mode_client(self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """``client`` on a scratch workspace with AGENTS.md, plus the stub's kwargs."""
         (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
         monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-        agent_modes.invalidate_agent_modes_cache()
         seen: Dict[str, Any] = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None, **tools):
+            seen.clear()
             seen["sysprompt"] = sysprompt
             seen["agent_instructions"] = agent_instructions
             if mode_instructions is not None:
                 seen["mode_instructions"] = mode_instructions
+            seen.update(tools)
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
-        try:
-            yield client, tmp_path, seen
-        finally:
-            agent_modes.invalidate_agent_modes_cache()
+        yield client, tmp_path, seen
 
     @staticmethod
-    def _post(client) -> None:
+    def _post(client, agent: str = "builder") -> None:
         response = client.post(
-            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "agentMode": agent},
         )
         assert response.status_code == 200
 
     def test_the_persona_replaces_the_configured_prompt(self, mode_client):
-        client, root, seen = mode_client
-        self._write_modes(root, {
-            "builder": {"label": "Builder", "systemMessage": "PERSONA TEXT"},
-        })
+        client, _root, seen = mode_client
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT")
         self._post(client)
         assert seen["sysprompt"] == "PERSONA TEXT"
-        # D1: alternatives, never stacked — the configured prompt is gone.
+        # D8: alternatives, never stacked — the model's own prompt is gone.
         assert DEFAULT_LLM_SYSPROMPT not in seen["sysprompt"]
 
     def test_an_empty_persona_falls_back_to_the_configured_prompt(
         self, mode_client
     ):
-        # The escape hatch, as a supported path: `"systemMessage": ""` on the
-        # default mode restores the pre-mode behaviour with no code change.
-        client, root, seen = mode_client
-        self._write_modes(root, {"builder": {"label": "Builder",
-                                             "systemMessage": ""}})
+        # The escape hatch, as a supported path: an empty persona restores the
+        # pre-agent behaviour with no code change.
+        client, _root, seen = mode_client
+        add_agent(client, "builder", "Builder", systemMessage="")
         self._post(client)
         assert seen["sysprompt"] == DEFAULT_LLM_SYSPROMPT
 
-    def test_a_missing_persona_key_is_the_same_fallback(self, mode_client):
-        client, root, seen = mode_client
-        self._write_modes(root, {"builder": {"label": "Builder"}})
+    def test_a_missing_persona_is_the_same_fallback(self, mode_client):
+        client, _root, seen = mode_client
+        add_agent(client, "builder", "Builder")
         self._post(client)
         assert seen["sysprompt"] == DEFAULT_LLM_SYSPROMPT
 
-    def test_a_mode_without_blocks_keeps_the_call_shape(self, mode_client):
-        # ``mode_instructions`` is passed only when the mode has blocks (the
+    def test_an_agent_without_blocks_keeps_the_call_shape(self, mode_client):
+        # ``mode_instructions`` is passed only when the agent has blocks (the
         # conditional shape already used for ``batch_instructions``), so every
-        # chat request that exists today is unaffected.
-        client, root, seen = mode_client
-        self._write_modes(root, {"builder": {"label": "Builder",
-                                             "systemMessage": "PERSONA"}})
+        # ordinary chat request is unaffected.
+        client, _root, seen = mode_client
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA")
         self._post(client)
         assert "mode_instructions" not in seen
 
-    def test_the_app_owned_mode_blocks_reach_the_call(self, mode_client,
-                                                      monkeypatch):
-        # Only the reserved Todo builder carries blocks, and it cannot be the
-        # file's ``default`` (D9), so the route's rendering of them is exercised
-        # by handing it that mode directly.
+    def test_the_app_owned_agent_blocks_reach_the_call(self, mode_client):
+        # Only the app-owned agent carries blocks; it is a real row, so picking
+        # it is the supported path rather than a monkeypatch.
         client, _root, seen = mode_client
-        monkeypatch.setattr(
-            routes.agent_modes, "resolve_mode",
-            lambda mode_id: (modes_defaults.todo_builder_mode(), []),
-        )
-        self._post(client)
+        self._post(client, modes_defaults.TODO_BUILDER_MODE_ID)
         assert seen["mode_instructions"] == "\n\n".join(
             modes_defaults.todo_builder_mode().instructions
         )
         assert modes_defaults.lot_conventions_block() in seen["mode_instructions"]
 
-    def test_the_project_instructions_arrive_for_a_tools_off_mode(
+    def test_the_project_instructions_arrive_for_a_tools_off_agent(
         self, mode_client
     ):
-        # am-00's invariant as a test: AGENTS.md is unconditional. A mode with
-        # both tool flags false still gets the project block.
+        # AGENTS.md is unconditional. An agent with both hub flags false still
+        # gets the project block.
         client, root, seen = mode_client
-        self._write_modes(root, {"builder": {
-            "label": "Builder", "mcptools": False, "lsptools": False,
-            "systemMessage": "PERSONA TEXT",
-        }})
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT",
+                  mcpEnable=False, lspEnable=False)
         self._post(client)
         assert seen["agent_instructions"].endswith("Use pytest.")
         assert f"project root is {root}" in seen["agent_instructions"]
 
-    def test_the_modes_file_is_resolved_per_request(self, mode_client):
-        # Hot edit, no second cache layer: the persona of the *next* turn of a
-        # conversation is the one the file says now.
-        client, root, seen = mode_client
-        self._write_modes(root, {"builder": {"label": "Builder",
-                                             "systemMessage": "PERSONA ONE"}})
+    def test_the_agent_is_resolved_per_request(self, mode_client):
+        # Hot edit, no cache layer: the persona of the *next* turn of a
+        # conversation is the row says now (D11).
+        client, _root, seen = mode_client
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA ONE")
         self._post(client)
         assert seen["sysprompt"] == "PERSONA ONE"
-        self._write_modes(root, {"builder": {"label": "Builder",
-                                             "systemMessage": "PERSONA TWO"}})
+        assert client.post("/api/agents/save", json={
+            "id": "builder", "systemMessage": "PERSONA TWO",
+        }).status_code == 200
         self._post(client)
         assert seen["sysprompt"] == "PERSONA TWO"
 
-    def test_a_broken_modes_file_still_chats_on_the_defaults(self, mode_client):
-        # D11 on the request path: a typo costs the user their persona, not the
-        # conversation.
-        client, root, _seen = mode_client
-        folder = root / agent_modes.POLICY_DIRNAME
-        folder.mkdir(exist_ok=True)
-        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
-            "{ not json", encoding="utf-8")
-        self._post(client)
-        assert _seen["sysprompt"] == "\n".join(
-            modes_defaults.CODE_PERSONA)
+    def test_a_damaged_store_still_chats_on_what_it_can_render(self, mode_client):
+        """D7 on the request path: a bad row costs the user that agent, not the turn.
 
-    def test_a_workspace_with_no_modes_file_chats_on_the_same_defaults(
-        self, mode_client
-    ):
-        # am-04 §9: the behaviour does not depend on whether am-03's seed
-        # happened — a workspace created before it shipped, or one the seeder
-        # could not write, resolves to the same built-in ``code`` persona.
+        The store's agent read never raises (task 03), so a row the reader cannot
+        render is reported and the rest stand — a chat turn naming a *good* agent
+        still runs.
+        """
+        from src.core import appdb
+
         client, _root, seen = mode_client
-        self._post(client)
+        conn = appdb.connection()
+        conn.execute("UPDATE agents SET label = '' WHERE id = 'architect'")
+        self._post(client, "code")
         assert seen["sysprompt"] == "\n".join(modes_defaults.CODE_PERSONA)
-        assert "mode_instructions" not in seen
 
     def test_nothing_anywhere_can_suppress_the_project_instructions(self):
-        # am-00's invariant, stated as a test: AGENTS.md is always injected.
-        # Neither the core, the modes vocabulary nor a request body carries a
-        # knob for it, so no caller — a later feature or a hand-edited file —
+        # The invariant, stated as a test: AGENTS.md is always injected.
+        # Neither the core, the agent vocabulary nor a request body carries a
+        # knob for it, so no caller — a later feature or a hand-edited row —
         # can ask for a conversation without them.
         import inspect
 
@@ -1607,8 +1778,6 @@ class TestAgentModePromptAssembly:
 
         assert suppressed_names(chat_core.stream_chat.__code__.co_varnames) == []
         assert suppressed_names(routes.ChatIn.model_fields) == []
-        assert suppressed_names(agent_modes.MODE_KEYS) == []
-        assert suppressed_names(agent_modes.TOP_LEVEL_KEYS) == []
         # The two instruction arguments are the only injection points, and both
         # are appended to the system message, never allowed to replace it: the
         # route passes ``agent_instructions=agent_instructions_block()`` with no
@@ -1626,17 +1795,15 @@ class TestAgentModePromptAssembly:
 
     def test_the_five_parts_arrive_in_order_through_the_route(self, mode_client,
                                                               monkeypatch):
-        """End to end: persona → notice → AGENTS.md → mode blocks → lot.
+        """End to end: persona → notice → AGENTS.md → agent blocks → lot.
 
         The stub above only sees the kwargs; this lets the *real* ``stream_chat``
         run (with the LLM client seam stubbed) so the assertion is on the system
         message that would leave the process, with a persona, blocks and
         ``batchContext`` all in play at once.
         """
-        client, root, _seen = mode_client
-        # A hub with one live connector, so tools really are passed and the
-        # notice has a place in the message (gating the hubs per mode is
-        # am-05's job, not this task's).
+        client, _root, _seen = mode_client
+
         class Hub:
             def status(self):
                 return []
@@ -1656,19 +1823,20 @@ class TestAgentModePromptAssembly:
             "src.core.chat.stream_completion",
             lambda **kwargs: captured.update(kwargs) or iter([]),
         )
-        # A mode of the same shape as the reserved one — persona plus blocks —
-        # with a persona that does not use the word "tool", so the notice is
+        # An agent of the same shape as the app-owned one — persona plus blocks
+        # — with a persona that does not use the word "tool", so the notice is
         # expected (its own behaviour is pinned in TestStreamChat above).
         monkeypatch.setattr(
             routes.agent_modes, "resolve_mode",
             lambda mode_id: (agent_modes.AgentMode(
                 id="builder", label="Builder", system_message="PERSONA TEXT",
-                mcptools=True, lsptools=False, editable=False,
+                mcptools=True, lsptools=False, readonly=True,
                 instructions=("MODE BLOCKS", "SECOND MODE BLOCK"),
             ), []),
         )
         response = client.post("/api/chat", json={
             "messages": [{"role": "user", "content": "hi"}],
+            "agentMode": "builder",
             "batchContext": "The lot: tasks 1 to 8.",
         })
         assert response.status_code == 200
@@ -1682,6 +1850,7 @@ class TestAgentModePromptAssembly:
         ]
         assert parts == sorted(parts)
         assert len(set(parts)) == 5
+
 
 
 class TestChatMcpFilter:
@@ -1934,14 +2103,18 @@ class TestAgentModeToolGate:
         # The regression guard: every call site that existed before the feature
         # (and every existing test in this file) sees exactly the kwargs it saw
         # then — same keys, same merged tool list, same cap.
-        from tests.conftest import neutralise_workspace_settings
+        from tests.conftest import neutralise_store
 
         client, _mcp, _lsp = hubs
-        # The cap is the workspace file's ``maxToolIteration`` now, not the env key.
-        neutralise_workspace_settings(monkeypatch, tmp_path, maxToolIteration=7)
+        # The cap is the resolved agent's own column now (D9), not the env key.
+        neutralise_store(monkeypatch, tmp_path, maxToolIteration=7)
+        from src.core import appdb
+        agent, _findings = appdb.resolve_agent("code")
         request = self._request(client.app)
-        without = routes._chat_tool_kwargs(request)
-        with_mode = routes._chat_tool_kwargs(request, mode=self._mode(True, True))
+        without = routes._chat_tool_kwargs(request, agent=agent)
+        with_mode = routes._chat_tool_kwargs(
+            request, mode=self._mode(True, True), agent=agent
+        )
         assert set(without) == {
             "tools", "tool_executor", "tool_servers", "max_tool_iterations",
             "uncapped_tool_names",
@@ -1961,25 +2134,11 @@ class TestAgentModeToolGate:
 
     # -- the same verdict, through ``POST /api/chat`` --------------------------
 
-    @staticmethod
-    def _write_modes(root: Path, agents: Dict[str, Any], default: str = "builder"):
-        folder = root / agent_modes.POLICY_DIRNAME
-        folder.mkdir(exist_ok=True)
-        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
-            json.dumps({
-                "version": agent_modes.AGENT_MODES_VERSION,
-                "default": default,
-                "agents": agents,
-            }, indent=2),
-            encoding="utf-8",
-        )
-
     @pytest.fixture
     def route_client(self, client, tmp_path: Path, monkeypatch):
         """Real ``stream_chat`` on a scratch workspace; the seam is the spy."""
         (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
         monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-        agent_modes.invalidate_agent_modes_cache()
         hub = self.Hub()
         client.app.state.mcp = hub
         monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
@@ -1989,22 +2148,17 @@ class TestAgentModeToolGate:
             "src.core.chat.stream_completion",
             lambda **kwargs: captured.update(kwargs) or iter([]),
         )
-        try:
-            yield client, tmp_path, hub, captured
-        finally:
-            agent_modes.invalidate_agent_modes_cache()
+        yield client, tmp_path, hub, captured
 
-    def test_a_tools_off_mode_reaches_the_llm_client_with_no_tools(
+    def test_a_tools_off_agent_reaches_the_llm_client_with_no_tools(
         self, route_client):
-        client, root, hub, captured = route_client
-        self._write_modes(root, {"builder": {
-            "label": "Builder", "mcptools": False, "lsptools": False,
-            "systemMessage": "PERSONA TEXT",
-        }})
+        client, _root, hub, captured = route_client
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT",
+                  mcpEnable=False, lspEnable=False)
         response = client.post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "hi"}],
-                  "mcpEnabled": ["console"]},
+                  "agentMode": "builder", "mcpEnabled": ["console"]},
         )
         assert response.status_code == 200
         assert hub.requested_ids == [[]]
@@ -2019,40 +2173,41 @@ class TestAgentModeToolGate:
         # AGENTS.md is unaffected by the gate (am-00's invariant).
         assert "# rules" in captured["messages"][0]["content"]
 
-    def test_a_tools_on_mode_keeps_the_tools_and_the_notice(self, route_client):
+    def test_a_tools_on_agent_keeps_the_tools_and_the_notice(self, route_client):
         # Same request, same persona, one flipped flag: the tool array and the
         # notice are both back, which is what makes the test above about the
-        # mode rather than about the persona's wording.
-        client, root, hub, captured = route_client
-        self._write_modes(root, {"builder": {
-            "label": "Builder", "mcptools": True, "lsptools": False,
-            "systemMessage": "PERSONA TEXT",
-        }})
+        # agent rather than about the persona's wording.
+        client, _root, hub, captured = route_client
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT",
+                  mcpEnable=True, lspEnable=False)
         response = client.post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "hi"}],
-                  "mcpEnabled": ["console"]},
+                  "agentMode": "builder", "mcpEnabled": ["console"]},
         )
         assert response.status_code == 200
         assert hub.requested_ids == [["console"]]
         assert self._names(captured) == ["use_console"]
         assert chat_core.TOOL_NOTICE.strip() in captured["messages"][0]["content"]
 
-    def test_the_shipped_chat_mode_is_a_tools_off_mode(self, route_client,
-                                                       monkeypatch):
-        # am-00's two ``chat`` bullets against the defaults users actually get:
-        # the persona's "you have no tools here" is a fact about the request,
-        # not a request, and it comes from the shipped file rather than a
-        # hand-written one.
-        chat = modes_defaults.DEFAULT_AGENTS_DOCUMENT["agents"]["chat"]
-        assert (chat["mcptools"], chat["lsptools"]) == (False, False)
-        client, root, hub, captured = route_client
-        self._write_modes(root, {"chat": dict(chat)}, default="chat")
+    def test_the_shipped_chat_agent_is_a_tools_off_agent(self, route_client,
+                                                        monkeypatch):
+        # am-00's two ``chat`` bullets against the agents users actually get: the
+        # persona's "you have no tools here" is a fact about the request, not a
+        # request, and it comes from the seeded row rather than a hand-written
+        # one.
+        chat = next(
+            mode for mode in modes_defaults.default_modes()
+            if mode.id == modes_defaults.CHAT_MODE_ID
+        )
+        assert (chat.mcptools, chat.lsptools) == (False, False)
+        client, _root, hub, captured = route_client
         monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
         client.app.state.lsp = self.Hub()
         response = client.post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "hi"}],
+                  "agentMode": modes_defaults.CHAT_MODE_ID,
                   "mcpEnabled": ["console"], "lspEnabled": ["pyright"]},
         )
         assert response.status_code == 200

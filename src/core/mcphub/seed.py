@@ -2,8 +2,8 @@
 
 ``<working location>/.nojae/mcp-settings.json`` is the one source of MCP
 connectors (see :mod:`mcphub.constants`). It joins the reserved folder's
-family — ``read-write-policy.json``, ``agent-modes.json``,
-``prompt-helpers.json`` — and arrives by the same rule: **seeded by
+family — ``read-write-policy.json`` —
+and arrives by the same rule: **seeded by
 exclusive create at the two moments a folder becomes the working location
 (boot, and ``POST /api/path-location``), never overwritten**.
 

@@ -28,8 +28,8 @@ const locked = computed(
   () => state.lsp.locked || state.phase !== 'idle' || batch.active,
 )
 
-// The same D4 gate as the MCP panel, judged by the same function: a mode whose
-// `lsptools` is false gets no language-server schemas at all, so the switches
+// The same gate as the MCP panel, judged by the same function: an agent whose
+// `lsp_enable` is false gets no language-server schemas at all, so the switches
 // are shown inert with the reason rather than hidden.
 const gatedByMode = computed(() => modeBlocksHub('lsp'))
 const switchesDisabled = computed(() => locked.value || gatedByMode.value)

@@ -6,8 +6,7 @@ import {
   applySessionAgentMode,
   clearAgentModeNotice,
   loadAgentModes,
-  registerAgentModeTurnCounter,
-  syncAgentModeLock,
+  selectedAgentGateReason,
 } from './useAgentModes'
 
 const state = reactive({
@@ -24,7 +23,12 @@ const state = reactive({
   // (0 = idle, so the clock reads 00:00:00).
   // Covers the whole request — waiting, thinking and every MCP/LSP tool
   // round — and is cleared when the reply ends, is stopped or errors out.
-  session: { startedAt: 0 },
+  // `agentMode` is the agent **this** turn was sent as, recorded when the
+  // request is opened (null = no turn running). The app bar names the running
+  // model off it rather than off the composer's selection, because a mid-stream
+  // dropdown change reaches no turn in flight — the line would otherwise be able
+  // to name an agent the stream is not answering as.
+  session: { startedAt: 0, agentMode: null },
   // The reasoning panel's Live View (toggled in WorkBenchFocusGutter.vue): on
   // lets the panel paint only what its box can hold, which is the default —
   // the bounded panel is the cheap one, and the whole history is what the
@@ -234,11 +238,6 @@ function toggleLiveView() {
   if (chatBusy()) return
   state.liveView = !state.liveView
 }
-
-// How many turns this conversation already holds — the fact the agent-mode lock
-// (D7) is a rule about. Injected into useAgentModes rather than imported: the
-// dependency direction stays acyclic (useChat -> useAgentModes, never back).
-registerAgentModeTurnCounter(() => state.messages.length > 0)
 
 function setChatMcp(id, on) {
   if (state.mcp.locked || chatBusy()) return
@@ -940,6 +939,9 @@ function finish(assistant) {
   assistant.streaming = false
   state.phase = 'idle'
   state.session.startedAt = 0
+  // The turn is over, so nothing is running on any agent: the app bar's running
+  // line goes blank with the clock, rather than keeping the last model's name.
+  state.session.agentMode = null
   controller = null
   // A pause whose `pause_ack` never arrives (the server died mid-round, or the
   // fallback abort ended the stream): the reply is over either way, so the ⏸
@@ -1033,11 +1035,6 @@ async function startTurn({
     // so (display state, like `truncated` — never written to session JSON).
     paused: false,
   })
-  // The thread now has a turn — the second half of the D7 rule: a
-  // contract-owning mode (the server's `editable: false`) becomes unleaveable
-  // from here on. Queried rather than asserted, so the lock can never disagree
-  // with the message list it is a rule about.
-  syncAgentModeLock()
   // Keep the reactive proxy so token mutations re-render.
   const assistant = state.messages[state.messages.length - 1]
   activeMessage = assistant
@@ -1061,17 +1058,21 @@ async function startTurn({
         (id) => state.lsp.enabled[id],
       )
     }
-    // The agent mode for this turn (am-07). Omitted when the mode list failed
-    // to load, so the server's own default applies — the same rule as the hub
-    // allowlists above, for the same reason: a dropdown that could not be
-    // filled must not silently hand the conversation to a different persona.
-    // `agentMode === undefined` → the composer's selection; a resolved id (the
-    // batch runner's pin) → that id, whatever the select shows; `null` → omit
-    // the key so the server's default applies.
+    // The agent mode for this turn (am-07). The composer refuses an interactive
+    // send before it reaches here when the list is not loaded (task 12), and a
+    // lot refuses at launch when its pin does not resolve, so a live turn always
+    // names the agent it runs as. `agentMode === undefined` still means "read the
+    // composer's selection" (the interactive shape); a resolved id (the batch
+    // runner's pin) is sent as it stands.
     const modeId = agentMode === undefined ? agentModePayloadId() : agentMode
     if (modeId) {
       payload.agentMode = modeId
     }
+    // Recorded for the app bar's running line: the agent **this** request
+    // carries, not the composer's current selection. A lot's pin therefore
+    // reads correctly, and a dropdown moved mid-reply cannot make the line name
+    // an agent the stream is not answering as.
+    state.session.agentMode = modeId ?? null
     if (batchContext) {
       // The lot's big picture (batch mode): the server appends it to its own
       // system message, so it rides on every task turn without ever becoming
@@ -1131,6 +1132,13 @@ export function useChat() {
     // window between two task turns). sendBatchTurn below deliberately checks
     // the phase only — that window is exactly when it must be able to fire.
     if ((!trimmed && !pendingImage) || chatBusy()) return
+
+    // §5.4: an agent with no model — or a list the composer never read — cannot
+    // be sent to. The same answer paints the warning icon and disables Send, so
+    // a keyboard send, an Enter keypress and a hand-made call all stop here.
+    // Nothing has been posted or pushed, so the draft survives and no stream is
+    // left half-open. The server's 422 stays behind this for a stale tab.
+    if (selectedAgentGateReason()) return
 
     // Reuse the preview HTML rendered by setDraft; re-render only if Enter
     // beat the debounce (or nothing was ever rendered for this text).
@@ -1225,9 +1233,6 @@ export function useChat() {
     // Drop the message and everything after it (its replies and tool badges)
     // so the edited text re-sends onto a clean conversation tail.
     state.messages.splice(index)
-    // An edited-away thread can be empty, and the D7 lock is a rule about the
-    // thread — so it is re-derived here too (queried, never asserted).
-    syncAgentModeLock()
     state.error = null
   }
 
@@ -1297,11 +1302,12 @@ export function useChat() {
       loadChatMcp()
       loadChatLsp()
     }
-    // The mode the file was saved with (v4 envelope) is conversation state too:
-    // useAgentModes judges it against *this* workspace — an unknown id falls
-    // back to the workspace default with one notice line, never a silent swap of
-    // persona and never a refused load — and restores the D7 lock, because a
-    // restored thread *is* that thread.
+    // The agent the file was saved with (v4 envelope) is conversation state too,
+    // and it **wins over the browser's remembered choice**: the file describes
+    // the conversation, `localStorage` describes the browser, and the more
+    // specific one answers a resume. useAgentModes judges it against the loaded
+    // list — an unknown id falls back to the first agent with one notice line,
+    // never a silent swap of persona and never a refused load.
     applySessionAgentMode(parsed.agentMode)
     state.error = null
     state.pendingImage = null
@@ -1325,19 +1331,16 @@ export function useChat() {
     // `assistant.streaming` is already false (the guard in applyEvent).
     state.pausePending = false
     userPaused = false
-    // A cleared thread has no turns, so the D7 mode lock is released — before
-    // the `refetchHubs` early return, next to the hub unlocks below: batch
-    // mode's between-task wipe resets without refetching, and it unlocks too
-    // (a lot never runs *as* the mode that authored it, D13).
-    syncAgentModeLock(false)
     // The session-mode notice explained a conversation that no longer exists.
+    // It goes before the `refetchHubs` early return, because batch mode's
+    // between-task wipe resets without refetching and must clear it too.
     clearAgentModeNotice()
     if (!refetchHubs) return
     // New conversation: MCP and LSP toggles unlock against freshly fetched
     // snapshots, keeping the previous on/off choices (the loaders seed the
-    // new lists from them). The mode list is refreshed by the same call: a
-    // modes file edited by hand while the lot ran (or while this tab sat
-    // idle) takes effect on the next conversation.
+    // new lists from them). The agent list is refreshed by the same call: a
+    // store edited while the lot ran (or while this tab sat idle) takes effect
+    // on the next conversation.
     state.mcp.locked = false
     state.lsp.locked = false
     loadChatHubs()

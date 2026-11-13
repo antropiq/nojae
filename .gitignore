@@ -1,9 +1,14 @@
 # Workspace policy / stores (hidden folder, read-write-policy.json governs it)
 .nojae/
 
-# Secrets (each secret file has a committed .example template)
+# Secrets (each text secret file has a committed .example template)
 .env
 .env.test
+# nojaé's own settings store: binary and single-writer, so it is never
+# hand-edited and has no committed template -- the app creates and owns it.
+nojae.db
+nojae.db-wal
+nojae.db-shm
 
 # Logs
 logs/

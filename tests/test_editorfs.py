@@ -1002,27 +1002,29 @@ class TestSurfaceShape:
             "/api/fs/move-batch": ["post"],
         }
 
-    def test_the_agent_modes_pair_has_its_own_pinned_verb_set(self):
-        """The modes editor's two routes, pinned beside the map they are *not* in.
+    def test_the_agents_surface_has_its_own_pinned_verb_set(self):
+        """The agents' routes, pinned beside the map they are *not* in.
 
-        The map above is scoped to ``/api/fs``, and the modes file is reached
-        through its own path pair instead — so a verb set that never consults
-        these paths would silently bless a third route on them. Pinned here in
-        the same OpenAPI shape rather than assumed into the ``/api/fs`` allowlist;
-        the *why* (a tool must not reach the switch that decides whether tools
-        exist) is asserted by ``TestTheAgentModesRoutesStayPinnedToTheirPaths`` in
+        The map above is scoped to ``/api/fs``, and the agents live in the store
+        behind their own path set instead — so a verb set that never consults
+        these paths would silently bless a fifth route on them. Pinned here in
+        the same OpenAPI shape rather than assumed into the ``/api/fs``
+        allowlist; the *why* (a tool must not reach the personas, and the store
+        is invisible to ``/api/fs`` anyway) is asserted by
+        ``TestTheAgentRoutesStayPinnedToTheirPaths`` in
         ``tests/test_write_surface_isolation.py``.
         """
         paths = create_app().openapi()["paths"]
-        modes = {
+        agents = {
             path: sorted(ops)
             for path, ops in paths.items()
-            if path.startswith("/api/agent-modes")
+            if path.startswith("/api/agents")
         }
-        assert modes == {
-            "/api/agent-modes": ["get"],
-            "/api/agent-modes/document": ["get"],
-            "/api/agent-modes/save": ["post"],
+        assert agents == {
+            "/api/agents": ["get"],
+            "/api/agents/add": ["post"],
+            "/api/agents/save": ["post"],
+            "/api/agents/delete": ["post"],
         }
 
     def test_editorfs_exposes_the_guarded_write_and_nothing_beyond_it(self):

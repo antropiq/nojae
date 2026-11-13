@@ -1,148 +1,126 @@
 import { expect, test } from '@playwright/test'
-import fs from 'node:fs'
-import path from 'node:path'
 
-// Task am-07 — level: UI state. The mode dropdown needs no LLM call: read the
-// workspace's own list from GET /api/agent-modes, and check that the
-// composer offers it and that a mode whose flag is false turns the matching tool
-// panel inert. As in 01-app-boot, every expected label is read from the endpoint
-// rather than written here, so the spec follows the modes file it measures.
+// Task appdb-13 — level: UI state, over the install's agent store.
 //
-// Nothing here names the app-owned mode: the non-editable entry is found by its
-// flag, which is the only way the client is allowed to recognise it (D9).
+// The composer's dropdown, the hub panels' gray-out and the Agent-modes dialog
+// all read **one** payload, `GET /api/agents`, because the agents are rows of
+// the installation's `nojae.db` rather than a file in a workspace (D2, D11). So
+// this spec reads that route instead of the workspace's old modes file: a spec
+// that opens the store's bytes would be a second authority on the store, which
+// §4.6 forbids. Nothing here names the app-owned agent either — it is found by
+// its `readonly` flag, the only way the client is allowed to recognise it (D4).
 //
-// What it measures therefore has to be a file the spec owns. That file is the
-// user's — `.nojae/agent-modes.json`, edited outside the app — so its flags are
-// settings, not fixtures: a persona switched to `"mcptools": true` leaves no
-// mode to gate, and a spec reading the *boot* workspace fails on an app that is
-// working correctly. So the spec moves the working location to a scratch folder
-// it creates, where am-03's seeding left nojae's own document, and reads
-// the payload from there.
+// What the spec measures:
 //
-// The scratch is removed with node's `fs`, not `/api/fs/file`: switching into it
-// seeds a `.nojae/` there, and that folder is reserved — the Editor will not
-// delete a subtree that contains it. Same shape as 03-workspace-switch.
-// The name avoids the file's own name: gitignore is held to ignoring the
-// reserved *folder*, never a line per file in it (am-03's acceptance test).
-const SCRATCH = 'e2e-modes-root'
+//  1. the dropdown offers exactly the store's rows, the app-owned one included,
+//     and an agent with a hub switched off turns that panel inert;
+//  2. the pencil opens the store editor, whose tabs are the store's rows in the
+//     store's order;
+//  3. Create adds a tab and writes nothing until that tab's own Save; Save
+//     creates the row, a second Save edits it, and Delete removes it again;
+//  4. a `readonly` agent shows its fields disabled with a live model dropdown,
+//     and refuses every other write **directly against its route** (AC-4).
+//
+// The suite's temporary store starts from the built-ins with the fixture's model
+// assigned to every agent (D14), so nothing here needs a model of its own and no
+// LLM call is made. A created agent is deleted again — the store is shared by
+// the whole suite, and the spec must not leave rows behind.
 
-// The root this server booted on, remembered so a spec that fails between its
-// two switches cannot leave the whole suite pointing at a scratch folder.
-let bootRoot = null
-// Whether the working location is currently on the scratch root: the restore in
-// `afterEach` only runs when it is, and a spec that died mid-way leaves this
-// true so the next one cleans up after it.
-let switched = false
+// The label the create/edit test uses. `E2e ` is the prefix the teardown sweeps,
+// so a spec that fails between its own write and its own delete still leaves the
+// install's agent list as it found it.
+const NEW_LABEL = 'E2e Reviewer'
+const EDITED_LABEL = 'E2e Reviewer Edited'
+const NEW_PERSONA = 'You are an end-to-end reviewer.\nCheck the diff before it lands.'
 
-async function currentRoot(request) {
-  return (await (await request.get('/api/path-location')).json()).path
+async function agentsPayload(request) {
+  const res = await request.get('/api/agents')
+  expect(res.ok(), `GET /api/agents failed: ${await res.text()}`).toBe(true)
+  return res.json()
 }
 
-// Removal is over when the path is gone, not when `rmSync` returned: on Windows
-// the last handle to the folder (the `git` of a status query, the shell the
-// Editor's terminal ran in it) can close after the call, leaving the name in the
-// listing — and `switchToScratch`'s own `create` then answers 409 for a folder
-// this spec just deleted. Same rule as 03-workspace-switch's helper.
-async function removeScratch(root) {
-  const target = path.join(root, SCRATCH)
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 })
-    } catch {
-      // Still held; the attempt below retries while the handle closes.
-    }
-    if (!fs.existsSync(target)) return
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  // Still held: the next `create` names it, which is the honest place to fail.
+async function serversPayload(request) {
+  const res = await request.get('/api/servers')
+  expect(res.ok(), `GET /api/servers failed: ${await res.text()}`).toBe(true)
+  return res.json()
 }
 
-test.beforeEach(async ({ request }) => {
-  await removeScratch(await currentRoot(request))
-})
-
-test.afterEach(async ({ request }) => {
-  // Only a test that actually moved the location has to move it back — a switch
-  // restarts both hubs, so restoring it needlessly is not free.
-  if (bootRoot === null || !switched) return
-  switched = false
-  const res = await request.post('/api/path-location', { data: { path: bootRoot } })
-  expect(res.ok(), `could not restore the working location: ${await res.text()}`).toBe(true)
-  await removeScratch(bootRoot)
-})
-
-// The scratch workspace on its own: create it and move the working location
-// onto it. The switch is the app's own route — the one the Settings dialog
-// uses — and it seeds the modes document as it goes.
-async function switchToScratch(request) {
-  bootRoot ??= await currentRoot(request)
-  const created = await request.post('/api/fs/create', { data: { path: SCRATCH, dir: true } })
-  expect(created.ok(), `could not create the scratch workspace: ${await created.text()}`).toBe(true)
-  const moved = await request.post('/api/path-location', {
-    data: { path: path.join(bootRoot, SCRATCH) },
-  })
-  expect(moved.ok(), `could not move the working location: ${await moved.text()}`).toBe(true)
-  switched = true
-  // The server canonicalises the root it accepted (realpath), so compare against
-  // what it reports rather than what was sent.
-  return (await moved.json()).path
+// The model every created agent is pointed at: the one the suite's fixture
+// materialised into the temporary store. Read, never spelled.
+async function firstModel(request) {
+  const servers = await serversPayload(request)
+  const model = servers.servers.flatMap((server) => server.models)[0]
+  expect(model, 'the suite fixture has a model').toBeTruthy()
+  return model
 }
 
-// Switch to the scratch workspace and answer with the **dropdown's** payload.
-// The editor's read is a second endpoint on purpose (D2: the two reads are
-// never merged), so the editor spec below calls `switchToScratch` and reads
-// `GET /api/agent-modes/document` itself.
-async function seededModesPayload(request) {
-  const scratchRoot = await switchToScratch(request)
-  const res = await request.get('/api/agent-modes')
-  expect(res.ok(), `GET /api/agent-modes should succeed, got ${res.status()}`).toBe(true)
-  const payload = await res.json()
-  // The payload came from the scratch root's seeded file and was understood as
-  // this version understands it. That is what makes the flags below facts about
-  // nojae's own document rather than a coincidence of this machine.
-  expect(payload.source.path).toBe(path.join(scratchRoot, '.nojae', 'agent-modes.json'))
-  expect(payload.source.exists, 'the switch seeded the modes file').toBe(true)
-  expect(payload.source.loaded, 'the seeded modes file loads cleanly').toBe(true)
-  expect(payload.findings, 'the seeded modes file has no problems').toEqual([])
-  return payload
-}
-
-// The modes file as the workspace holds it, read with node's `fs`: the folder is
-// reserved, so no Editor route can see it — the same reason the scratch itself is
-// removed with `fs` and not `/api/fs/file`. This is the spec's witness that a
-// save wrote what the form showed, rather than a second reading of the route
-// that wrote it.
-function readModesFile(scratchRoot) {
-  return fs.readFileSync(path.join(scratchRoot, '.nojae', 'agent-modes.json'), 'utf8')
-}
-
-// The dialog's tabs: `Common` plus one per entry the **file** declares, in the
-// file's order. Scoped to the dialog's own nav — the app's tab strip renders
-// buttons of its own, and a dialog is not a tab container to the a11y tree.
+// The dialog's tabs, scoped to its own nav: the app's tab strip renders buttons
+// of its own, and a dialog is not a tab container to the a11y tree.
 function modeTabs(page) {
   return page.locator('.agent-modes-nav .agent-modes-tab')
 }
 
+// Which section of the card is showing, and what holds the focus. Read through
+// `dataset` because an agent id is arbitrary text.
+function focusProbe(page) {
+  return page.evaluate(() => {
+    const el = document.activeElement
+    return {
+      tag: el?.tagName ?? null,
+      tab: el?.closest('section[data-tab]')?.dataset.tab ?? null,
+    }
+  })
+}
+
+// Opening the card is itself the read: the card fetches `GET /api/agents` on
+// mount, so the response is the moment its draft is on screen.
+async function openModesDialog(page) {
+  const read = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/api/agents',
+  )
+  await page.locator('.chat-mode-edit').click()
+  await read
+  await expect(page.locator('.agent-modes-dialog')).toBeVisible()
+}
+
+async function closeModesDialog(page) {
+  await page
+    .locator('.agent-modes-dialog')
+    .getByRole('button', { name: 'Cancel' })
+    .click()
+  await expect(page.locator('.agent-modes-dialog')).toHaveCount(0)
+}
+
+// The rows a spec created are swept through the route, so a failure between a
+// create and its delete cannot pollute a later spec — or a later run.
+test.afterEach(async ({ request }) => {
+  const res = await request.get('/api/agents')
+  if (!res.ok()) return
+  const { agents } = await res.json()
+  for (const agent of agents ?? []) {
+    if (agent.deletable && String(agent.label ?? '').startsWith('E2e ')) {
+      await request.post('/api/agents/delete', { data: { id: agent.id } })
+    }
+  }
+})
+
 test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
-  test('the seeded default is shown, and a mode with mcptools false gates the panel', async ({
+  test('the store is offered, the app-owned agent included, and a mode with MCP off gates the panel', async ({
     page,
-    request,
   }) => {
-    const modes = await seededModesPayload(request)
-    expect(modes.modes.length, 'the seeded modes document offers modes').toBeGreaterThan(1)
-    const defaultMode = modes.modes.find((mode) => mode.id === modes.default)
-    expect(defaultMode, 'the default is one of the offered modes').toBeTruthy()
-    // A mode that switches MCP off, and one that leaves it on: the pair the
-    // gate is about. These hold of nojae's own document, which is why
-    // they are assertions here rather than assumptions about someone's file.
-    const gated = modes.modes.find((mode) => mode.mcptools === false)
-    const open = modes.modes.find((mode) => mode.mcptools === true)
-    expect(gated, 'a seeded mode switches MCP off').toBeTruthy()
-    expect(open, 'a seeded mode leaves MCP on').toBeTruthy()
-    // The app-owned mode is last and the only non-editable one (D9) — the payload
+    const payload = await agentsPayload(page.request)
+    expect(payload.agents.length, 'the seeded store offers agents').toBeGreaterThan(1)
+    // The app-owned agent is last and the only `readonly` one (D4) — the flag
     // the client must read instead of naming the id.
-    expect(modes.modes.at(-1).editable, 'the last mode is the app-owned one').toBe(false)
-    expect(modes.modes.slice(0, -1).every((mode) => mode.editable)).toBe(true)
+    expect(payload.agents.at(-1).readonly, 'the last agent is the app-owned one').toBe(true)
+    expect(payload.agents.filter((agent) => agent.readonly)).toHaveLength(1)
+    // A mode that switches MCP off, and one that leaves it on: the pair the
+    // gate is about. These hold of the seeded store, which is why they are
+    // assertions rather than assumptions about someone's rows.
+    const gated = payload.agents.find((agent) => agent.mcpEnable === false)
+    const open = payload.agents.find((agent) => agent.mcpEnable === true)
+    expect(gated, 'a seeded agent switches MCP off').toBeTruthy()
+    expect(open, 'a seeded agent leaves MCP on').toBeTruthy()
 
     // The panel only exists when Settings declares connectors; without them
     // there is nothing to gate, and the spec says so instead of passing empty.
@@ -153,51 +131,49 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
     await page.getByRole('tab', { name: 'WorkBench' }).click()
 
     const select = page.getByLabel('Agent mode')
-    await expect(select, 'the composer offers the mode dropdown').toBeVisible()
-    await expect(select).toHaveValue(defaultMode.id)
-    // The one sentence that explains the gating: the select's title names the
-    // mode and the hubs it can reach.
-    const hint = (await select.getAttribute('title')) ?? ''
-    expect(hint).toContain(defaultMode.label)
-    // …and it *names the tools*, not just the persona: what a mode can reach is
-    // the part of the sentence the user acts on. The default is the mode that
-    // reaches everything, so its hint says so. (am-08 §4.)
-    expect(defaultMode.mcptools, 'the seeded default opens MCP').toBe(true)
-    expect(hint).toContain('available')
+    await expect(select, 'the composer offers the agent dropdown').toBeVisible()
+    // Exactly the store's rows, in the store's order, the app-owned one last.
+    await expect(select.getByRole('option')).toHaveText(
+      payload.agents.map((agent) => agent.label),
+    )
 
-    if (mcpConnectors.length) {
-      await expect(page.locator('.chat-mcp-panel')).toBeVisible()
-      await expect(page.locator('.chat-mcp-panel input[role="switch"]')).toHaveCount(
-        mcpConnectors.length,
-      )
+    // The select's title names the agent and the hubs it can reach — the part
+    // of the sentence the user acts on. The wording is derived from the row's
+    // own flags, so it follows whatever the seeded store holds.
+    const hintFor = (agent) => {
+      const hubs = []
+      if (agent.mcpEnable) hubs.push('MCP')
+      if (agent.lspEnable) hubs.push('language servers')
+      return hubs.length ? `${hubs.join(' and ')} available` : 'no tools'
     }
 
     await select.selectOption(gated.id)
     await expect(select).toHaveValue(gated.id)
     const gatedHint = (await select.getAttribute('title')) ?? ''
     expect(gatedHint).toContain(gated.label)
-    // MCP off is the one clause the gated mode cannot be missing, whatever its
-    // LSP flag says: the hint is what tells the user the panel went dark by
-    // itself and not because Settings did.
-    expect(gatedHint).not.toContain('MCP available')
+    expect(gatedHint).toContain(hintFor(gated))
 
     if (mcpConnectors.length) {
+      await expect(page.locator('.chat-mcp-panel')).toBeVisible()
+      await expect(page.locator('.chat-mcp-panel input[role="switch"]')).toHaveCount(
+        mcpConnectors.length,
+      )
       // Disabled, never hidden: the toggles stay real (Settings owns them), and
-      // the row's tooltip says which mode took the hub away — the reason is a
-      // tooltip only, never a line of text in the panel. Scoped to the MCP
-      // panel: the LSP panel judges its own flag.
+      // the row's tooltip says which agent took the hub away.
       const row = page.locator('.chat-mcp-panel .chat-mcp-row').first()
-      const rowTitle = (await row.getAttribute('title')) ?? ''
-      expect(rowTitle).toContain(gated.label)
-      // Every switch inert, and still the same number of them.
+      expect((await row.getAttribute('title')) ?? '').toContain(gated.label)
       await expect(
         page.locator('.chat-mcp-panel input[role="switch"]:disabled'),
       ).toHaveCount(mcpConnectors.length)
     }
 
     await select.selectOption(open.id)
+    await expect(select).toHaveValue(open.id)
+    expect((await select.getAttribute('title')) ?? '').toContain(hintFor(open))
     if (mcpConnectors.length) {
-      await expect(page.locator('.chat-mcp-panel input[role="switch"]').first()).toBeEnabled()
+      await expect(
+        page.locator('.chat-mcp-panel input[role="switch"]').first(),
+      ).toBeEnabled()
     }
   })
 
@@ -225,9 +201,9 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
     expect(box.x + box.width).toBeLessThanOrEqual(bullets.x + 1)
     expect(bullets.x + bullets.width).toBeLessThanOrEqual(rightGroup.x + 1)
 
-    // The modes pencil (eds-07) joined that same row without moving anything:
-    // it sits immediately right of the select, on the same line, at the same
-    // height, and the select's right edge is still left of the bullets.
+    // The modes pencil joined that same row without moving anything: it sits
+    // immediately right of the select, on the same line, at the same height,
+    // and the select's right edge is still left of the bullets.
     const pencil = page.locator('.chat-mode-edit')
     await expect(pencil).toBeVisible()
     const pencilBox = await pencil.boundingBox()
@@ -239,34 +215,38 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
     expect(pencilBox.x + pencilBox.width).toBeLessThanOrEqual(bullets.x + 1)
   })
 
-  // A modes list that cannot be fetched must cost the user nothing: no control
-  // that cannot be used, and the chat request keeps the shape it had before the
-  // feature (no `agentMode` key), which is what lets the server apply its own
-  // default. Driving it needs the endpoint to fail, so the route is stubbed —
-  // and no LLM call is made either way.
-  test('a failing /api/agent-modes leaves the composer as it was', async ({ page }) => {
-    await page.route('/api/agent-modes', (route) =>
-      route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }),
+  // A store that cannot be read must cost the user nothing beyond Send: no
+  // control that cannot be used, and the reason is the list's own failure. D5
+  // removed the server-side default a missing list used to lean on, so the
+  // composer refuses rather than sending no agent it cannot name.
+  test('a failing /api/agents leaves the composer unable to send, with the pencil live', async ({
+    page,
+  }) => {
+    await page.route(
+      (url) => url.pathname === '/api/agents',
+      (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }),
     )
     await page.goto('/')
     await page.getByRole('tab', { name: 'WorkBench' }).click()
 
     await expect(page.getByLabel('Agent mode')).toHaveCount(0)
     // Everything else about the composer is still there.
-    await expect(page.getByLabel('Send message')).toBeVisible()
-    await expect(page.locator('.chat-textarea')).toBeVisible()
+    const textarea = page.locator('.chat-textarea')
+    await expect(textarea).toBeVisible()
+    await textarea.fill('a question nothing can answer')
 
-    // …including the modes editor, which is *not* gated on the dropdown's
-    // verdict (D10): the card reads the file through its own route, so a list
-    // that could not be loaded — a broken modes file — is exactly when it is
-    // most useful. The stub above matches only the list URL, so this pins the
-    // affordance itself (present and enabled); what the card does once open is
-    // the dialog suite's business, and no click happens here.
+    // Send is disabled and its title is the list's own reason, not a guess.
+    const send = page.locator('.chat-send')
+    await expect(send).toBeDisabled()
+    expect(await send.getAttribute('title')).toContain('agent list could not be read')
+
+    // The modes editor is *not* gated on the dropdown's verdict: a store whose
+    // list could not be read is exactly when it is most useful.
     const pencil = page.locator('.chat-mode-edit')
     await expect(pencil).toBeVisible()
     await expect(pencil).toBeEnabled()
 
-    // The hub panels are not gated by a mode nobody resolved.
+    // The hub panels are not gated by an agent nobody resolved.
     const mcpRes = await page.request.get('/api/mcp')
     const mcpConnectors = (await mcpRes.json()).connectors.filter((c) => c.active)
     if (mcpConnectors.length) {
@@ -275,148 +255,106 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
   })
 })
 
-// Task eds-08 — level: the modes editor, end to end. The pencil beside the
-// dropdown opens the card that edits the workspace's modes **file**; this spec
-// follows one edit all the way to the bytes on disk and back to the dropdown.
-//
-// It measures three things the spec file asks for, and nothing else:
-//
-//  1. the pencil sits beside the dropdown and opens the dialog, whose tabs are
-//     `Common` plus one per mode the **file** declares, in the file's order —
-//     and the app-owned mode is nowhere in it;
-//  2. **Create agent** adds a tab, focuses it, and writes nothing: Cancel
-//     leaves the file byte-identical;
-//  3. Save writes the document, the dropdown reloads with the new mode
-//     selectable and selected as the new default, and the file holds what the
-//     form showed — a persona that round-trips through the loader with no
-//     findings.
-//
-// What it deliberately does **not** measure: the pencil being inert while a
-// reply streams or a lot runs. Reaching either state needs a model, and this
-// suite makes no LLM call here; that rule belongs to the component tests.
-//
-// Nothing here names the app-owned mode either: its id and its label are read
-// out of `GET /api/agent-modes` as the **non-editable** entry's data, and used
-// only to assert the dialog does not contain them.
-const NEW_LABEL = 'E2e Reviewer'
-// The extra persona line this spec adds to a persona the file already holds, so
-// the round-trip is a *change* the form made and not a copy of what was there.
-const PERSONA_TAIL = 'Review the diff before it lands.'
-
-// Which section of the card is showing, and what holds the focus: the dialog's
-// own answer to "did Create put me on the new mode's tab, in its first field?".
-// Read through `dataset` because an entry key is arbitrary text.
-function focusProbe(page) {
-  return page.evaluate(() => {
-    const el = document.activeElement
-    return {
-      tag: el?.tagName ?? null,
-      tab: el?.closest('section[data-tab]')?.dataset.tab ?? null,
-    }
-  })
-}
-
-test.describe('Agent modes editor: the pencil, the tabs, the save', () => {
-  test('the dialog edits the file it reads, and the disk agrees', async ({ page, request }) => {
-    // Every wait in here is for an app state or a response, never a sleep.
-    const waitForRoute = (pathname) =>
-      page.waitForResponse((response) => new URL(response.url()).pathname === pathname)
-    const scratchRoot = await switchToScratch(request)
-
-    // The editor's own read — the second endpoint, and the file's own verdict
-    // (D2). Everything the assertions below expect is read from it: the tab
-    // captions, the order, the caps, the readme, the persona that round-trips.
-    const docRes = await request.get('/api/agent-modes/document')
-    expect(docRes.ok(), `document read failed: ${await docRes.text()}`).toBe(true)
-    const doc = await docRes.json()
-    expect(doc.source.exists, 'the switch seeded the modes file').toBe(true)
-    expect(doc.source.loaded, 'the seeded modes file loads cleanly').toBe(true)
-    expect(doc.findings, 'the seeded modes file has no problems').toEqual([])
-    expect(doc.entries.length, 'the seeded document declares modes').toBeGreaterThan(1)
-    const captions = ['Common'].concat(
-      doc.entries.map(
-        (entry) =>
-          (typeof entry.fields?.label === 'string' && entry.fields.label.trim()) || entry.key,
-      ),
-    )
+test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
+  // AC-4's app-owned half: the agent is visible in both places, its fields are
+  // disabled while its model stays live, and every other write — including one
+  // attempted directly against the route — answers the same refusal sentence.
+  test('a readonly agent is visible, its model is live, and its other writes are refused', async ({
+    page,
+    request,
+  }) => {
+    const payload = await agentsPayload(request)
+    const appOwned = payload.agents.find((agent) => agent.readonly)
+    expect(appOwned, 'the store holds one app-owned agent').toBeTruthy()
+    expect(appOwned.modelId, 'the suite fixture gives it a model').not.toBeNull()
 
     await page.goto('/')
     await page.getByRole('tab', { name: 'WorkBench' }).click()
 
-    // 1. The pencil sits beside the dropdown, and opens the card.
-    const pencil = page.locator('.chat-mode-edit')
-    await expect(pencil, 'the pencil is beside the mode dropdown').toBeVisible()
+    // It is in the composer's dropdown.
     const select = page.getByLabel('Agent mode')
-    // The select renders only once the list loaded, so its box is worth taking
-    // after it is there rather than before.
-    await expect(select).toBeVisible()
-    const selectBox = await select.boundingBox()
-    const pencilBox = await pencil.boundingBox()
-    expect(pencilBox.x).toBeGreaterThanOrEqual(selectBox.x + selectBox.width)
+    await expect(select.getByRole('option', { name: appOwned.label })).toHaveCount(1)
 
-    // Opening the card *is* the document read — the card fetches on mount, so
-    // the read is what opening waits for.
-    const openModesDialog = async () => {
-      const read = waitForRoute('/api/agent-modes/document')
-      await pencil.click()
-      await read
-    }
-    await openModesDialog()
+    // And it has a tab in the editor: visible, with its nojae-owned fields
+    // disabled and the model dropdown live.
+    await openModesDialog(page)
+    await modeTabs(page).filter({ hasText: appOwned.label }).click()
+    const section = page.locator(`section[data-tab="${appOwned.id}"]`)
+    await expect(section.locator('.agent-modes-readonly')).toBeVisible()
+    await expect(section.getByLabel('Label')).toBeDisabled()
+    // No id field at all: a stored row's id is immutable and names nothing the
+    // user acts on, so the dialog does not spend room on it.
+    await expect(section.getByLabel('Id', { exact: true })).toHaveCount(0)
+    await expect(section.locator('textarea')).toBeDisabled()
+    await expect(section.locator('input[type="number"]')).toBeDisabled()
+    await expect(section.locator('input[role="switch"]').first()).toBeDisabled()
+    await expect(section.getByLabel('Model')).toBeEnabled()
+    await closeModesDialog(page)
+
+    // AC-4's route half: a write that is not the model association is refused
+    // with the one sentence, so the rule does not depend on the dialog.
+    const refused = await request.post('/api/agents/save', {
+      data: { id: appOwned.id, mcpEnable: false },
+    })
+    expect(refused.status()).toBe(422)
+    const detail = (await refused.json()).detail
+    expect(detail).toContain('This agent is nojae')
+    expect(detail).toContain('Its model is the one thing you can set')
+
+    // The model association is the one field that agent's write accepts.
+    const assigned = await request.post('/api/agents/save', {
+      data: { id: appOwned.id, modelId: appOwned.modelId },
+    })
+    expect(assigned.ok(), await assigned.text()).toBe(true)
+    const afterAssign = (await assigned.json()).agents.find(
+      (agent) => agent.id === appOwned.id,
+    )
+    expect(afterAssign.modelId).toBe(appOwned.modelId)
+
+    // And it cannot be deleted, from the route either.
+    const refusedDelete = await request.post('/api/agents/delete', {
+      data: { id: appOwned.id },
+    })
+    expect(refusedDelete.status()).toBe(422)
+    expect((await refusedDelete.json()).detail).toContain('cannot be deleted')
+  })
+
+  test('Create adds a tab and writes nothing; Save creates, edits and deletes through the routes', async ({
+    page,
+    request,
+  }) => {
+    const before = await agentsPayload(request)
+    const model = await firstModel(request)
+    const captions = before.agents.map((agent) => agent.label)
+
+    await page.goto('/')
+    await page.getByRole('tab', { name: 'WorkBench' }).click()
+    await openModesDialog(page)
+
     const dialog = page.locator('.agent-modes-dialog')
-    await expect(dialog).toBeVisible()
-
-    // One tab per mode the file declares, in the file's order, plus Common —
-    // counted against the **document**, not against the dropdown's list, which
-    // is a different set (the built-in fallback and the app-owned mode).
     const tabs = modeTabs(page)
+    // One tab per row the store holds, in the store's order. `Common` is gone
+    // with the default-agent setting it edited (D5), and the app-owned agent
+    // now has a tab like every other row (D4).
     await expect(tabs).toHaveCount(captions.length)
-    for (let i = 0; i < captions.length; i += 1) {
-      await expect(tabs.nth(i), `tab ${i} is the file's ${i}th entry`).toHaveText(captions[i])
-    }
+    await expect(tabs).toHaveText(captions)
 
-    // The app-owned mode appears nowhere in the card. It is found here by its
-    // flag, and both of its identifiers are read from the server: the dialog
-    // holds neither, and the count above is the same claim from the other side.
-    const list = await (await request.get('/api/agent-modes')).json()
-    const appOwned = list.modes.filter((mode) => mode.editable === false)
-    expect(appOwned.length, 'exactly one mode is app-owned').toBe(1)
-    expect(
-      list.modes.length,
-      'the dropdown offers the file entries plus the app-owned one',
-    ).toBe(doc.entries.length + 1)
-    // `textContent`, not `innerText`: the tabs other than the active one are
-    // `v-show`n away and still part of the card, so a check that only read the
-    // rendered text would pass on a dialog that hid the reserved entry instead
-    // of never containing it.
-    const dialogText = await dialog.evaluate((el) => el.textContent ?? '')
-    expect(dialogText).not.toContain(appOwned[0].id)
-    expect(dialogText).not.toContain(appOwned[0].label)
-
-    // 2. Create agent: a tab appears, is focused, and nothing is written.
-    const bytesBefore = readModesFile(scratchRoot)
+    // 1. Create: a tab appears, is focused, and nothing is written.
     await dialog.locator('.agent-modes-create').getByLabel('New agent label').fill(NEW_LABEL)
     await dialog.locator('.agent-modes-create-button').click()
 
     await expect(tabs).toHaveCount(captions.length + 1)
     await expect(tabs.last()).toHaveText(NEW_LABEL)
-    // The card is *on* the new tab: its section is the visible one, and the
-    // Label field it shows holds the caption the tab just took. The card has no
-    // heading of its own any more — the tab is the title — so the field is what
-    // identifies the section that is on screen.
     const section = page.locator('.agent-modes-editor section:visible')
     await expect(section.getByLabel('Label')).toHaveValue(NEW_LABEL)
-    // Focus landed in that section's first field — the new mode's Label, not the
-    // first mode's, and *after* the tab switched (`v-show` keeps every section in
-    // the DOM, so the section the focused field belongs to is what makes the
-    // focus mean anything). Polled, because the card focuses on its next tick.
 
     // The id is the slug the composable derived from the label — read from the
     // form, judged against the caps the payload published, never spelled here.
     const idField = section.getByLabel('Id', { exact: true })
-    await expect(idField, "a new mode's id is editable while it is new").toBeEditable()
+    await expect(idField, "a new agent's id is editable while it is new").toBeEditable()
     const newId = await idField.inputValue()
-    expect(newId).toMatch(new RegExp(doc.caps.idPattern))
-    expect(doc.entries.map((entry) => entry.key)).not.toContain(newId)
+    expect(newId).toMatch(new RegExp(before.caps.idPattern))
+    expect(before.agents.map((agent) => agent.id)).not.toContain(newId)
     await expect
       .poll(async () => {
         const focused = await focusProbe(page)
@@ -424,76 +362,86 @@ test.describe('Agent modes editor: the pencil, the tabs, the save', () => {
       })
       .toBe(`INPUT:${newId}`)
 
-    await dialog.getByRole('button', { name: 'Cancel' }).click()
-    await expect(page.locator('.agent-modes-dialog')).toHaveCount(0)
-    expect(readModesFile(scratchRoot), 'Cancel writes nothing').toBe(bytesBefore)
+    await closeModesDialog(page)
+    expect(await agentsPayload(request), 'Cancel writes nothing').toEqual(before)
 
-    // 3. The same edit, saved.
-    await openModesDialog()
+    // 2. The same create, saved: the row exists after its own Save.
+    await openModesDialog(page)
     await dialog.locator('.agent-modes-create').getByLabel('New agent label').fill(NEW_LABEL)
     await dialog.locator('.agent-modes-create-button').click()
     const savedSection = page.locator('.agent-modes-editor section:visible')
-    expect(await savedSection.getByLabel('Id', { exact: true }).inputValue()).toBe(newId)
-
-    // A persona built from one the file already holds, so the round-trip is
-    // measured against text the loader is known to accept in list form.
-    const seededPersona = doc.entries
-      .map((entry) => entry.fields?.systemMessage)
-      .find((value) => Array.isArray(value) && value.length > 1)
-    expect(seededPersona, 'the seeded document holds a multi-line persona').toBeTruthy()
-    const persona = [...seededPersona, PERSONA_TAIL].join('\n')
-    await savedSection.locator('textarea').fill(persona)
-    // The counter under the field is the payload's cap and the draft's bytes —
-    // no cap is written in this file either.
+    await savedSection.locator('textarea').fill(NEW_PERSONA)
     await expect(savedSection.locator('.agent-modes-persona-count')).toContainText(
-      `${Buffer.byteLength(persona, 'utf8')} / ${doc.caps.maxPersonaBytes} bytes`,
+      `${Buffer.byteLength(NEW_PERSONA, 'utf8')} / ${before.caps.maxPersonaBytes} bytes`,
     )
+    await savedSection.getByLabel('Model').selectOption(String(model.id))
 
-    // The new mode becomes the default, on the Common tab.
-    await tabs.first().click()
-    await dialog.getByLabel('Default mode').selectOption(newId)
-
-    const saved = waitForRoute('/api/agent-modes/save')
+    const created = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/api/agents/add',
+    )
     await dialog.locator('.agent-modes-save').click()
-    const savedResponse = await saved
-    expect(savedResponse.status(), 'the save was accepted').toBe(200)
+    const createdResponse = await created
+    expect(createdResponse.status(), 'the create was accepted').toBe(200)
+    // A successful save **is** the whole action, so the card closes: the write
+    // was the user's intent and a card left open would leave them hunting for a
+    // second "done" (the same rule the delete does *not* follow — that one
+    // adopts the returned list and stays put). The row it wrote is in the store.
     await expect(page.locator('.agent-modes-dialog')).toHaveCount(0)
 
-    // The file holds what the form showed: the entries the file had, in order,
-    // the new one appended, the new default, and the readme the file already
-    // had (D6 — the writer preserves it rather than re-rendering it).
-    const written = JSON.parse(readModesFile(scratchRoot))
-    expect(Object.keys(written.agents)).toEqual([...doc.entries.map((entry) => entry.key), newId])
-    expect(written.default).toBe(newId)
-    expect(written.readme).toEqual(doc.readme)
-    const writtenEntry = written.agents[newId]
-    expect(writtenEntry.label).toBe(NEW_LABEL)
-    expect(writtenEntry.mcptools).toBe(false)
-    expect(writtenEntry.lsptools).toBe(false)
-    // No blank line, so the writer chose the list form — the form the loader
-    // reads back line for line, which is what makes the text round-trip.
-    expect(writtenEntry.systemMessage).toEqual([...seededPersona, PERSONA_TAIL])
-    expect(writtenEntry.systemMessage.join('\n')).toBe(persona)
+    const afterCreate = await agentsPayload(request)
+    const createdRow = afterCreate.agents.find((agent) => agent.id === newId)
+    expect(createdRow, 'the new agent is in the store').toBeTruthy()
+    expect(createdRow.label).toBe(NEW_LABEL)
+    expect(createdRow.modelId).toBe(model.id)
+    expect(createdRow.systemMessage).toBe(NEW_PERSONA)
+    expect(createdRow.deletable, 'a user-created agent can be deleted').toBe(true)
 
-    // The loader's verdict on the bytes the dialog wrote: understood, and clean.
-    const after = await (await request.get('/api/agent-modes')).json()
-    expect(after.source.loaded, 'the saved file loads').toBe(true)
-    expect(after.findings, 'the saved file has no findings').toEqual([])
-    const offered = after.modes.find((mode) => mode.id === newId)
-    expect(offered, 'the new mode is offered').toBeTruthy()
-    expect(offered.editable, 'the new mode is an editable one').toBe(true)
-    expect(offered.label).toBe(NEW_LABEL)
-    expect(after.default).toBe(newId)
+    // 3. Edit the same row, read back from the store: it is now an **existing**
+    // agent, so it has no id field any more (the id cannot be renamed), and its
+    // tab follows the label live while Save rewrites the row it was read under.
+    await openModesDialog(page)
+    await modeTabs(page).filter({ hasText: NEW_LABEL }).click()
+    const editSection = page.locator('.agent-modes-editor section:visible')
+    await expect(editSection.getByLabel('Id', { exact: true })).toHaveCount(0)
+    await editSection.getByLabel('Label').fill(EDITED_LABEL)
+    await expect(tabs.filter({ hasText: EDITED_LABEL })).toHaveCount(1)
+    const edited = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/api/agents/save',
+    )
+    await dialog.locator('.agent-modes-save').click()
+    const editedResponse = await edited
+    expect(editedResponse.status(), 'the edit was accepted').toBe(200)
+    await expect(page.locator('.agent-modes-dialog')).toHaveCount(0)
 
-    // The dropdown reloaded from the save response: the new mode is an option,
-    // and it is the selection.
-    // By role, not by an `option[value=…]` selector: Vue binds an option's value
-    // as a DOM *property*, so the attribute is not what carries it.
-    await expect(select.getByRole('option', { name: NEW_LABEL })).toHaveCount(1)
-    await expect(select, 'the selection moved to the newly set default').toHaveValue(newId)
-    // …and it can be chosen, i.e. it is a real option and not a stray value.
-    await select.selectOption(after.modes[0].id)
+    const afterEdit = await agentsPayload(request)
+    const editedRow = afterEdit.agents.find((agent) => agent.id === newId)
+    expect(editedRow.label).toBe(EDITED_LABEL)
+    expect(editedRow.systemMessage).toBe(NEW_PERSONA)
+
+    // The composer's dropdown reloaded from the write: the new agent is an
+    // option, and it can be chosen like any other.
+    const select = page.getByLabel('Agent mode')
+    await expect(select.getByRole('option', { name: EDITED_LABEL })).toHaveCount(1)
     await select.selectOption(newId)
     await expect(select).toHaveValue(newId)
+
+    // 4. Delete it again through the dialog, so the install's store is exactly
+    // as this spec found it.
+    await openModesDialog(page)
+    await modeTabs(page).filter({ hasText: EDITED_LABEL }).click()
+    const deleteSection = page.locator('.agent-modes-editor section:visible')
+    await deleteSection.locator('.agent-modes-delete-button').click()
+    const deleted = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/api/agents/delete',
+    )
+    await deleteSection.locator('.agent-modes-delete-yes').click()
+    const deletedResponse = await deleted
+    expect(deletedResponse.status(), 'the delete was accepted').toBe(200)
+    await expect(tabs).toHaveCount(captions.length)
+    expect((await agentsPayload(request)).agents.map((agent) => agent.id)).not.toContain(
+      newId,
+    )
+    await closeModesDialog(page)
+    await expect(select.getByRole('option', { name: EDITED_LABEL })).toHaveCount(0)
   })
 })

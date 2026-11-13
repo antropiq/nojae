@@ -1,40 +1,38 @@
-"""am-02: the words behind the modes — the seeded document, the app-owned mode.
+"""The words behind the agents: the built-in personas and the app-owned one.
 
-am-01's :mod:`core.agent_modes` decides whether a modes document is well-formed;
-this module holds the one document nojae **seeds**, the one mode it never
-lets anyone edit, and the batch-conventions block that mode carries. Nothing here
-reads a file, opens a route or calls a model: it is vocabulary and rendering.
+This module holds the four definitions nojae ships — three personas a user may
+edit and the one agent it never lets them edit — plus the batch-conventions block
+that agent carries. Nothing here reads a file, opens a route or calls a model: it
+is vocabulary and rendering.
 
-Why a Python literal and not a ``.json`` on disk (the ``editorfs/policy_seed.py``
-argument, applied harder): the bytes the seeder writes (am-03) and the fallback
-used when the file is broken are **the same object**, and a test asserts that
-object round-trips through am-01's loader with zero findings. A file would let
-the seed and the reader agree by luck.
+Why a Python literal rather than rows in the store: the **seeder** reads this
+module and the **fallback** reads it too, so a store seeded at boot and a read
+over a damaged row answer the same words from one definition. A copy in the schema
+would let the two agree by luck.
 
 The personas are **instructions to the model, in the second person**, never
 descriptions of a role, and an editable one stays inside ~15 lines: this text is
-paid for on every turn of the thread, and a mode's job is to remove options, not
-to decorate. The byte cap is am-01's to enforce — every entry here sits an order
-of magnitude under it, which the module's own self-check also holds.
+paid for on every turn of the thread, and an agent's job is to remove options, not
+to decorate. The byte cap is :mod:`core.agent_modes`'s to enforce — every entry
+here sits an order of magnitude under it, which the module's own self-check holds.
 
 Two rules the tests hold, because prose rots quietly:
 
-* a persona names the other modes only through the label constants below, so a
+* a persona names the other agents only through the label constants below, so a
   rename cannot leave a stale phrase in someone's prompt;
 * a persona never claims to have read ``AGENTS.md`` — it says "the project
   instructions above", which is what :func:`config.agent_instructions_block`
-  actually puts there, and every mode receives it.
+  actually puts there, and every agent receives it.
 """
 
-import json
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 
 from src.core import agent_modes, batch
 from src.core.agent_modes import AgentMode
 
-#: The three mode ids nojae seeds, and their dropdown labels. Both are
-#: constants because the personas quote the labels in their own first line (see
-#: the module docstring): one name per mode, in the code and in the prose.
+#: The three agent ids nojae seeds, and their dropdown labels. Both are constants
+#: because the personas quote the labels in their own first line (see the module
+#: docstring): one name per agent, in the code and in the prose.
 CHAT_MODE_ID = "chat"
 CODE_MODE_ID = "code"
 ARCHITECT_MODE_ID = "architect"
@@ -43,45 +41,16 @@ CHAT_LABEL = "Chat"
 CODE_LABEL = "Code"
 ARCHITECT_LABEL = "Architect"
 
-#: The app-owned mode (am-00 D9): not in the seeded document, not editable, and
-#: the only mode that carries generated blocks.
+#: The app-owned agent (D4): not among the editable ones, not deletable, and the
+#: only one that carries generated blocks.
 TODO_BUILDER_MODE_ID = "todoBuilder"
 TODO_BUILDER_LABEL = "Todo builder"
-
-
-# -- the seeded document --------------------------------------------------------
-
-#: Prose for the human editing the file by hand. JSON has no comments, and this
-#: file is edited by hand outside the app (D6), so it has to explain its own
-#: vocabulary: the four things a first-time editor cannot infer from the keys.
-AGENT_MODES_README: Tuple[str, ...] = (
-    "nojae reads this file to build the agent-mode dropdown.",
-    "The keys in it are matched exactly: an unknown key is refused with an error,",
-    "not ignored, so a misspelling is reported instead of quietly switching an",
-    "agent off. The allowed top-level keys are version, readme, default and",
-    "agents; the allowed keys of one mode are label, mcptools, lsptools and",
-    "systemMessage.",
-    "The entries under agents are kept in the order you wrote them, and that is",
-    "the order of the dropdown.",
-    'systemMessage is the persona sent to the model. Write it as a string, or as',
-    "a list with one line per entry (readable inside JSON). An empty or missing",
-    "systemMessage means: use LLM_SYSPROMPT from .env instead.",
-    "mcptools and lsptools are JSON booleans, true or false - not 1/0, not",
-    '"yes"/"no". A missing one means false. They decide whether that hub reaches',
-    "the model at all; Settings still decides which of its connectors are on.",
-    '"todoBuilder" is defined by nojae and cannot be set here; an entry',
-    "for it is ignored.",
-    "nojae seeds this file when a folder becomes the working location, then",
-    "never writes it again. It is machine-local and gitignored, so each checkout",
-    "edits its own agents.",
-)
-
 
 # -- the three editable personas ------------------------------------------------
 #
 # Second-person instructions, not role descriptions. ``code`` is what the app
 # already does, plus the "you implement" framing that was missing; the others
-# work by taking options away. Each first line names its own mode through the
+# work by taking options away. Each first line names its own agent through the
 # label constant, so a rename cannot leave a stale word in someone's prompt.
 
 CHAT_PERSONA: Tuple[str, ...] = (
@@ -145,56 +114,36 @@ TODO_BUILDER_PERSONA: Tuple[str, ...] = (
 )
 
 
-#: The document am-03 seeds and am-01 falls back to — one object, two uses.
-#: ``todoBuilder`` is deliberately absent from it (D9); :func:`resolve_modes`
-#: appends the app-owned mode last, whatever a file says.
-DEFAULT_AGENTS_DOCUMENT: Dict[str, Any] = {
-    "version": agent_modes.AGENT_MODES_VERSION,
-    "readme": list(AGENT_MODES_README),
-    "default": CODE_MODE_ID,
-    "agents": {
-        CHAT_MODE_ID: {
-            "label": CHAT_LABEL,
-            "mcptools": False,
-            "lsptools": False,
-            "systemMessage": list(CHAT_PERSONA),
-        },
-        CODE_MODE_ID: {
-            "label": CODE_LABEL,
-            "mcptools": True,
-            "lsptools": True,
-            "systemMessage": list(CODE_PERSONA),
-        },
-        ARCHITECT_MODE_ID: {
-            "label": ARCHITECT_LABEL,
-            "mcptools": True,
-            "lsptools": False,
-            "systemMessage": list(ARCHITECT_PERSONA),
-        },
-    },
-}
+#: The three editable built-ins, in the order the seeder writes them — which is
+#: also the dropdown's order. ``todoBuilder`` is deliberately absent (D4): the
+#: app-owned agent is rendered from :func:`todo_builder_mode` and sorted last,
+#: whatever a table says.
+BUILT_IN_MODES: Tuple[Tuple[str, str, bool, bool, Tuple[str, ...]], ...] = (
+    (CHAT_MODE_ID, CHAT_LABEL, False, False, CHAT_PERSONA),
+    (CODE_MODE_ID, CODE_LABEL, True, True, CODE_PERSONA),
+    (ARCHITECT_MODE_ID, ARCHITECT_LABEL, True, False, ARCHITECT_PERSONA),
+)
 
 
 def default_modes() -> List[AgentMode]:
-    """The built-in modes, run through am-01's validator (never hand-built).
+    """The three editable built-in agents — the seeder's and the fallback's one list.
 
-    The fallback path and the seeded path then share one definition, which is the
-    whole point: a key the seeder writes that the validator does not accept fails
-    here, at import of the fallback, instead of showing up as findings in every
-    workspace on the machine.
-
-    The assertion is about *our own* content, so raising is right; am-01's
-    never-raises promise is about the file on disk.
+    The store's seeder inserts these rows and :func:`core.agent_modes.resolve_modes`
+    answers them when a row is missing, so both read this function rather than a
+    copy. The values are validated by the module's own ``_self_check`` below, which
+    is where a mistake in a persona or a label is caught — at import, not in a
+    workspace.
     """
-    document = json.loads(json.dumps(DEFAULT_AGENTS_DOCUMENT))
-    modes, declared_default, findings, usable = agent_modes._validated_document(
-        document, "<built-in defaults>"
-    )
-    assert usable and not findings, f"the seeded modes document is invalid: {findings}"
-    assert declared_default == DEFAULT_AGENTS_DOCUMENT["default"], (
-        "the seeded default is not one of the seeded modes"
-    )
-    return modes
+    return [
+        AgentMode(
+            id=mode_id,
+            label=label,
+            system_message="\n".join(persona),
+            mcptools=mcptools,
+            lsptools=lsptools,
+        )
+        for mode_id, label, mcptools, lsptools, persona in BUILT_IN_MODES
+    ]
 
 
 # -- the reserved mode ----------------------------------------------------------
@@ -233,13 +182,13 @@ def todo_builder_persona() -> str:
 
 
 def todo_builder_mode() -> AgentMode:
-    """The app-owned mode (D9): persona and instructions rendered from code.
+    """The app-owned agent (D4): persona and instructions rendered from code.
 
-    Never built from the modes file — :func:`core.agent_modes.resolve_modes`
-    appends this last whatever the file declares, and an entry for the id there
-    is answered with a note. ``instructions`` carries the generated lot
-    conventions; am-04 renders them after AGENTS.md and before the lot's own big
-    picture, so the text stays in the same order for a re-read.
+    ``instructions`` carries the generated lot conventions; the chat route renders
+    them after AGENTS.md and before the lot's own big picture, so the text stays in
+    the same order for a re-read. The store's boot re-asserts this row from here
+    for every column but ``model_id``, which is what makes re-seeding safe rather
+    than destructive.
     """
     return AgentMode(
         id=TODO_BUILDER_MODE_ID,
@@ -247,25 +196,9 @@ def todo_builder_mode() -> AgentMode:
         system_message=todo_builder_persona(),
         mcptools=True,
         lsptools=False,
-        editable=False,
+        readonly=True,
         instructions=(lot_conventions_block(),),
     )
-
-
-def default_agent_modes_text() -> str:
-    """The bytes the seeder writes (am-03), rendered from the literal.
-
-    Same shape as ``policy_seed.default_policy_text()``: one ``json.dumps`` of the
-    document, indented, with a trailing newline, so the file a workspace receives
-    is readable by hand and is the object the loader accepts, byte for byte. It
-    lives here rather than in the seeder so the seeded bytes have exactly one
-    home: the fallback and the file cannot then disagree.
-
-    ``ensure_ascii=False`` because this file is edited by hand outside the app
-    (D6): the personas use real prose, and a file whose dashes arrive as
-    ``\u2014`` is a file nobody wants to read or patch.
-    """
-    return json.dumps(DEFAULT_AGENTS_DOCUMENT, indent=2, ensure_ascii=False) + "\n"
 
 
 # -- self-check ----------------------------------------------------------------
@@ -273,14 +206,11 @@ def default_agent_modes_text() -> str:
 def _self_check() -> None:
     """Fail at import on the content rules this module states about itself.
 
-    A persona typed over am-01's cap, a label that no longer matches the id the
-    rest of the feature keys on, or a seeded ``default`` naming a mode the
-    document does not declare are all mistakes a later edit can make silently —
-    and every one of them costs someone their persona text on every turn.
+    A persona typed over the cap, a label that no longer matches the id the rest
+    of the feature keys on, or an id outside the pattern are all mistakes a later
+    edit can make silently — and every one of them costs someone their persona text
+    on every turn.
     """
-    # The persona checks come first: they are this module's own rules, and they
-    # speak in this module's voice. The document round-trip below answers through
-    # am-01's validator, whose findings are the same fact in the loader's words.
     personas = (
         (CHAT_MODE_ID, CHAT_PERSONA),
         (CODE_MODE_ID, CODE_PERSONA),
@@ -296,22 +226,30 @@ def _self_check() -> None:
                 f"the {mode_id} persona is {size} bytes, over half the "
                 f"{agent_modes.MAX_MODE_SYSTEM_MESSAGE_BYTES} cap"
             )
-    declared = list(DEFAULT_AGENTS_DOCUMENT["agents"])
+    declared = [mode_id for mode_id, *_rest in BUILT_IN_MODES]
     if declared != [CHAT_MODE_ID, CODE_MODE_ID, ARCHITECT_MODE_ID]:
         raise ValueError(
-            f"the seeded modes document declares {declared}, expected "
+            f"the built-in agents are {declared}, expected "
             f"{[CHAT_MODE_ID, CODE_MODE_ID, ARCHITECT_MODE_ID]}"
         )
     for reserved in agent_modes.RESERVED_MODE_IDS:
         if reserved in declared:
             raise ValueError(
-                f"the reserved mode {reserved!r} must not be in the seeded document"
+                f"the reserved agent {reserved!r} must not be among the editable ones"
             )
     if TODO_BUILDER_MODE_ID not in agent_modes.RESERVED_MODE_IDS:
         raise ValueError(
             f"{TODO_BUILDER_MODE_ID!r} is not in agent_modes.RESERVED_MODE_IDS"
         )
-    default_modes()
+    for mode in [*default_modes(), todo_builder_mode()]:
+        if agent_modes._mode_id_problem(mode.id) is not None:
+            raise ValueError(f"the built-in id {mode.id!r} is not a usable agent id")
+        if agent_modes._label_problem(mode.label) is not None:
+            raise ValueError(f"the built-in label {mode.label!r} is not usable")
+        if agent_modes._persona_problem(mode.system_message) is not None:
+            raise ValueError(f"the {mode.id} persona does not fit its cap")
+    if not todo_builder_mode().readonly:
+        raise ValueError(f"{TODO_BUILDER_MODE_ID} must be readonly (D4)")
 
 
 _self_check()

@@ -15,6 +15,8 @@ import pytest
 
 from mcp_connectors import path_policy
 
+from src.core import appdb
+
 
 class TestComponentHitFold:
     """§6 behaviour test 7, second half: ``.ssh`` in a ``.SSH`` folder."""
@@ -344,3 +346,63 @@ class TestWindowsValuesArriveFromTheEnvironment:
 
         resolved = Path(path_location()).resolve().as_posix()
         assert path_policy.lists_are_meaningful(resolved)
+
+
+class TestTheSettingsStoreIsOnTheFloor:
+    """D10: the store and its WAL sidecars are refused by name, at any depth.
+
+    This is the connectors' **own** list — the floor that speaks *outside* a
+    root, where no workspace policy can reach. Inside a root the workspace's own
+    file decides (``tests/test_fedit_policy.py`` and ``tests/test_console_policy.py``
+    pin that half), and the two lists stay separate on purpose: merging them
+    would move secrets into a per-project file.
+
+    The names are built from ``appdb``'s constants so a rename of the store
+    fails here rather than leaving the floor protecting a file that no longer
+    exists.
+    """
+
+    NAMES: Tuple[str, ...] = (
+        appdb.DB_FILENAME,
+        *(appdb.DB_FILENAME + suffix for suffix in appdb.WAL_SIDECAR_SUFFIXES),
+    )
+
+    @pytest.mark.parametrize("name", NAMES)
+    @pytest.mark.parametrize("for_write", [True, False])
+    def test_all_three_names_are_refused_for_read_and_write(
+        self, name: str, for_write: bool
+    ):
+        reason = path_policy.deny_reason(
+            Path("/home/vgr/checkout") / name, for_write=for_write
+        )
+        assert reason is not None, name
+        assert name in reason
+
+    @pytest.mark.parametrize("name", NAMES)
+    def test_the_floor_matches_the_last_component_not_a_root(self, name: str):
+        """A name check, so a copy of the store anywhere is refused."""
+        assert path_policy.deny_reason(
+            Path(f"/srv/backups/2026-11/{name}"), for_write=False
+        ) is not None
+
+    @pytest.mark.parametrize("name", NAMES)
+    def test_the_folded_spelling_is_refused_when_the_caller_folds(self, name: str):
+        assert (
+            path_policy.deny_reason(Path(f"/tmp/Checkout/{name.upper()}"),
+                                    for_write=True, fold=True)
+            is not None
+        )
+
+    def test_an_unrelated_database_is_left_alone(self):
+        """Why these are *names* and not a ``.db`` suffix or prefix.
+
+        A project the connector is pointed at legitimately holds SQLite files;
+        denying the extension would refuse the very data an agent is asked about,
+        for no secret gained.
+        """
+        for rel in ("app.db", "data.sqlite", "db.sqlite3", "notesdb", "backup.db.gz"):
+            assert path_policy.deny_reason(Path("/srv/app") / rel,
+                                           for_write=True) is None, rel
+        assert not any(name.endswith(".db") for name in path_policy.DENY_FILE_SUFFIXES)
+        assert not any(name.startswith("nojae")
+                       for name in path_policy.DENY_FILE_PREFIXES)

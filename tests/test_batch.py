@@ -528,8 +528,15 @@ def _chat_stream_stub(monkeypatch: pytest.MonkeyPatch, seen: Dict[str, Any]):
     monkeypatch.setattr(routes, "stream_chat", fake)
 
 
+#: The agent a lot pins at launch (``useBatch.LOT_TASK_MODE_ID``), and the one
+#: every chat turn here names: D5 made ``agentMode`` mandatory, so a request that
+#: intends to stream has to state it — which is exactly what the lot does.
+LOT_AGENT = "code"
+
+
 def _post_chat(client: TestClient, extra: Optional[Dict[str, Any]] = None):
-    body: Dict[str, Any] = {"messages": [{"role": "user", "content": "task 1"}]}
+    body: Dict[str, Any] = {"messages": [{"role": "user", "content": "task 1"}],
+                            "agentMode": LOT_AGENT}
     body.update(extra or {})
     return client.post("/api/chat", json=body)
 
@@ -543,7 +550,7 @@ def chat_client(batch_client, tmp_path, monkeypatch):
                                         encoding="utf-8")
     config = EndpointsConfig(serverUrl="http://localhost:8080/v1",
                              endpoint="model-a", sysprompt="Base prompt.")
-    monkeypatch.setattr(routes, "load_endpoints_config", lambda: (config, None))
+    monkeypatch.setattr(routes, "load_endpoints_config", lambda agent: (config, None))
     return batch_client
 
 
@@ -578,6 +585,31 @@ class TestBatchContextOnChat:
         response = _post_chat(chat_client, {"batchContext": "x" * 33})
         assert response.status_code == 422
         assert "batchContext is too large" in response.json()["detail"][0]["msg"]
+
+
+class TestTheLotPinnedAgentMustBeRunnable:
+    """A task turn is still a normal chat turn: the lot's pin does not exempt it.
+
+    The client refuses to launch such a lot before the first task (task 12); this
+    is the server half of the same rule — the 422 stays the authority, for a
+    stale tab or a hand-made request.
+    """
+
+    def test_a_pinned_agent_with_no_model_refuses_the_task_turn(
+        self, batch_client, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from tests.conftest import neutralise_store
+
+        neutralise_store(
+            monkeypatch, tmp_path,
+            serverUrl="http://x/v1", endpoint="m",
+            agents_without_model=(LOT_AGENT,),
+        )
+
+        response = _post_chat(batch_client, {"batchContext": "The lot: 2 tasks."})
+
+        assert response.status_code == 422
+        assert "no model" in response.json()["detail"]
 
 
 class TestSystemPromptOrdering:
@@ -667,7 +699,8 @@ class TestChatStreamSlotIsFreed:
         reader.start()
         chat = chat_client.post("/api/chat",
                                 json={"messages": [{"role": "user",
-                                                    "content": "task 1"}]})
+                                                    "content": "task 1"}],
+                                      "agentMode": LOT_AGENT})
         reader.join(timeout=5)
 
         assert chat.status_code == 200

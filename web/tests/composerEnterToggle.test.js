@@ -6,7 +6,7 @@ import {
   ENTER_SENDS_KEY,
   useComposerKeys,
 } from '../src/composables/useComposerKeys'
-import { useAgentModes } from '../src/composables/useAgentModes'
+import { useAgentModes, loadAgentModes } from '../src/composables/useAgentModes'
 import { useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
 
@@ -37,6 +37,29 @@ function jsonResponse(body, ok = true, status = 200) {
   })
 }
 
+// What `GET /api/agents` answers: one runnable agent is enough for a send gate
+// whose "can it run" answer is true.
+function agentsBody() {
+  return {
+    agents: [
+      {
+        id: 'code',
+        label: 'Code',
+        mcpEnable: true,
+        lspEnable: true,
+        readonly: false,
+        deletable: false,
+        maxToolIteration: 25,
+        systemMessage: '',
+        modelId: 1,
+        modelName: 'model-1',
+      },
+    ],
+    caps: { minToolIteration: 1, maxIdChars: 32 },
+    findings: [],
+  }
+}
+
 // Records every route the composer touches. `/api/chat` answers a plain
 // failure: `startTurn` then drops the empty assistant turn and returns the app
 // to idle, so one test's send cannot leak into the next.
@@ -46,9 +69,7 @@ function stubRoutes() {
     const key = String(url)
     calls.push({ key, method: init?.method ?? 'GET' })
     if (key === '/api/chat') return jsonResponse({ detail: 'stubbed' }, false, 599)
-    if (key === '/api/agent-modes') {
-      return jsonResponse({ modes: [], default: null, source: {}, findings: [] })
-    }
+    if (key === '/api/agents') return jsonResponse(agentsBody())
     return jsonResponse({}, false, 404)
   })
   return calls
@@ -68,9 +89,7 @@ function resetAll() {
   agentModes.modes = []
   agentModes.current = null
   agentModes.loaded = false
-  agentModes.locked = false
   agentModes.findings = []
-  agentModes.source = null
   agentModes.notice = null
   // The toggle is a persisted preference, so a test must not inherit the
   // previous one through either the singleton or the storage behind it.
@@ -84,6 +103,9 @@ async function mountComposer() {
   host = document.createElement('div')
   document.body.appendChild(host)
   const wrapper = mount(WorkBenchInput, { attachTo: host })
+  // The composer needs a readable agent list with a runnable agent before its
+  // Send gate opens (§5.4, task 12).
+  await loadAgentModes()
   await flushPromises()
   return wrapper
 }

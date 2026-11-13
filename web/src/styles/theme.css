@@ -724,8 +724,12 @@ body {
   font-size: 1.15rem;
 }
 
-/* Two-column body: section list (1/4) beside the section editor (3/4).
-   Fills the fixed card height; the editor scrolls, the nav stays put. */
+/* The card's column stack: the section nav, the body that fills the rest of the
+   fixed card height, and the footer. What the body sits *inside* differs per
+   card: Settings lays its sections out as a horizontal strip above a full-width
+   editor (see the `.settings-dialog` rules below), the agent-modes card keeps
+   its tabs in a column beside the editor. Either way the editor scrolls and the
+   nav stays put. */
 .settings-form {
   display: flex;
   flex-direction: column;
@@ -742,6 +746,20 @@ body {
   flex: 1;
   min-height: 0;
   margin-bottom: var(--bi-space-2);
+}
+
+/* Settings' sections are a tab strip across the top of the card, not a column
+   beside the editor: the nav is a sibling of `.settings-body`, so the body holds
+   only the editor and takes the whole width. Scoped through `.settings-dialog`
+   because the agent-modes card shares these classes and keeps the vertical nav
+   it was built with. */
+.settings-dialog .settings-nav {
+  flex: 0 0 auto;
+  margin-bottom: var(--bi-space-2);
+}
+
+.settings-dialog .settings-body {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .settings-nav {
@@ -763,8 +781,18 @@ body {
   text-align: left;
 }
 
+.settings-dialog .settings-nav ul {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--bi-space-1);
+}
+
 .settings-nav li {
   width: 100%;
+}
+
+.settings-dialog .settings-nav li {
+  width: auto;
 }
 
 .settings-nav button {
@@ -812,6 +840,148 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: var(--bi-space-2);
+}
+
+/* -- the Models section (appdb-08) ---------------------------------------------
+
+   The connection's master–detail, inside the section the dialog's own
+   two-column body already gives it: servers on the left, the selected row's
+   fields on the right. It reuses `.settings-grid` for the samplers and the
+   `.settings-nav button` look for its rows, so only what this section has and
+   nothing else in the dialog does is declared here. */
+.models-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--bi-space-3);
+  align-items: start;
+}
+
+.models-tree,
+.models-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  text-align: left;
+}
+
+.models-children {
+  padding-left: var(--bi-space-3);
+}
+
+.models-row {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+/* The disclosure and the row's name are two buttons so a click on the arrow
+   opens the list and a click on the name selects the row — one control doing
+   both would make "open without editing" impossible. */
+.models-disclosure {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--bi-icon);
+  cursor: pointer;
+}
+
+.models-name {
+  flex: 1 1 auto;
+  width: auto;
+  margin: 0;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--pico-border-radius);
+  background-color: transparent;
+  color: var(--bi-icon);
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.models-name:hover {
+  background-color: var(--bi-surface-2);
+}
+
+.models-name.active {
+  background-color: var(--bi-surface-2);
+  border-color: var(--bi-border);
+  color: var(--pico-primary);
+  font-weight: 600;
+}
+
+.models-count {
+  color: var(--pico-muted-color);
+  font-weight: 400;
+}
+
+.models-detail-title {
+  margin: 0 0 var(--bi-space-1);
+  font-size: 0.95rem;
+}
+
+.models-detail-actions,
+.models-add {
+  display: flex;
+  gap: var(--bi-space-1);
+  margin-top: var(--bi-space-2);
+}
+
+.models-detail-actions button,
+.models-add button {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  padding-inline: 0.9rem;
+  font-size: 0.85rem;
+}
+
+/* What *Fetch models* answered for the server being edited: a compact listing
+   beside the button that asked for it, so the click has an answer on the row it
+   came from. The names are the server's own, so they are monospace and never
+   wrapped mid-id. */
+.models-fetched-list {
+  margin: var(--bi-space-1) 0 0;
+  padding-left: 1.1rem;
+  list-style: none;
+  columns: 2;
+  column-gap: var(--bi-space-2);
+}
+
+.models-fetched-list li {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.8rem;
+  color: var(--pico-muted-color);
+  break-inside: avoid;
+}
+
+/* The unassigned line is quiet on purpose — a caption, not a banner — but it is
+   a button, because it is the way into the dialog that fixes it (§5.1). */
+.models-unassigned {
+  margin: 0 0 var(--bi-space-2);
+}
+
+.models-unassigned-link {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--pico-primary);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .models-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* Password input with an inline show/hide (eye) toggle. */
@@ -900,12 +1070,11 @@ body {
    plus the colours that mark a tab whose entry holds Save. No size is repeated
    and the `<dialog>` element is never sized (see the settings card note). */
 
-/* The editor column: the card is already tall enough for the fields it shows, so
-   the shared `.settings-editor` scroll is never needed here — and a scrollbar
-   that has nothing to scroll is just a stolen edge. Clipped instead (Settings
-   keeps its `overflow-y: auto`). */
+/* The editor column scrolls like Settings': an agent tab now holds more fields
+   than the fixed card height can show (the model dropdown is the last of them),
+   so clipping here would hide a control instead of offering it. */
 .agent-modes-editor {
-  overflow-y: hidden;
+  overflow-y: auto;
 }
 
 /* One finding per line: the dialog renders a list of findings inside a single
@@ -915,15 +1084,24 @@ body {
   display: block;
 }
 
-/* The lines the card can say about the file as a whole (a conflict, "saving
-   will create this file", the loader's file-level findings). They sit between
-   the hint and the body, so each keeps one tight margin. */
-.agent-modes-conflict,
-.agent-modes-creates-file,
+/* The lines the card can say about the store as a whole (the read's findings, a
+   refused write's sentence). They sit between the title and the body, so each
+   keeps one tight margin. */
 .agent-modes-file-findings,
-.agent-modes-file-notes,
 .agent-modes-server-findings {
   margin: 0 0 var(--bi-space-1);
+}
+
+/* Why a `readonly` agent's fields are disabled. A caption, not an alarm: it
+   explains a state the user can work with (the model is still theirs). */
+.agent-modes-readonly {
+  margin: 0 0 var(--bi-space-1);
+}
+
+/* The quiet line naming the model an agent will run on — the answer someone
+   reading a persona wants without opening another dialog. */
+.agent-modes-model-line {
+  margin: 0 0 var(--bi-space-2);
 }
 
 /* The nav's create affordance, under the tab list: a labelled field and one
@@ -1567,6 +1745,16 @@ input.appbar-location-input {
   flex: 0 0 auto;
 }
 
+/* §5.4: the selected agent has no model to run with. A glyph, not a banner: it
+   belongs beside the pencil that opens the card where the model is assigned,
+   and it uses the warning accent so the disabled Send has a visible reason. */
+.chat-mode-warning {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--bi-warning);
+}
+
 .chat-mode-select {
   width: auto;
   max-width: 12rem;
@@ -1600,7 +1788,9 @@ input.appbar-location-input {
   color: var(--pico-muted-color);
 }
 
-/* Nine numbered registration slots above the textarea (MemoryBullets.vue).
+/* The numbered registration bullets above the textarea (MemoryBullets.vue) — as
+   many as the store holds, wrapping rather than overflowing, plus the "+" the row
+   shows only when it holds none.
    Pico's input-group rules (`[role=group] { margin-bottom: var(--pico-spacing) }`)
    would otherwise push the row away from the textarea and offset the bullets
    from the buttons beside them, so the margin and padding are zeroed here;
@@ -1644,6 +1834,31 @@ input.appbar-location-input {
   align-items: center;
   justify-content: center;
   transition: transform 120ms ease;
+}
+
+/* The row's add affordance, shown only when the store holds no bullet at all —
+   without it the dialog where Add lives would be unreachable, because the only
+   way to open it was to click a bullet. Drawn like a bullet so it sits in the
+   row, but it is not one: it carries no number and no colour, and the e2e specs
+   count `.memory-bullet` to ask how many bullets there are. */
+.memory-bullets .memory-bullet-add {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border: 1px dashed var(--bi-border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--pico-muted-color);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .memory-bullets .memory-bullet:hover {

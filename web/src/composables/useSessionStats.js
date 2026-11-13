@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import { liveTokenRate, useChat } from './useChat'
-import { useAppShell } from './useAppShell'
+import { modelInView, useAppShell } from './useAppShell'
 import { useBatch } from './useBatch'
 import { inferenceRunning } from '../lib/inference-state'
 
@@ -24,7 +24,8 @@ import { inferenceRunning } from '../lib/inference-state'
 
 const { state: chatState } = useChat()
 // Only for ``config``, the ``/api/config`` read the app shell holds: the
-// occupancy badge needs the context-window cap and nothing else.
+// occupancy badge needs the context-window cap and nothing else, and that cap
+// arrives **per model** (D5) -- so it is read off the model in view.
 const { state: shellState } = useAppShell()
 const { state: batchState } = useBatch()
 
@@ -129,7 +130,7 @@ const rateTitle = computed(() =>
 // -- context occupancy -------------------------------------------------------
 
 const contextWindow = computed(
-  () => shellState.config?.contextWindow ?? null,
+  () => modelInView(shellState.config)?.contextWindow ?? null,
 )
 
 // Context-window occupancy: the LAST round's prompt + completion (exactly what

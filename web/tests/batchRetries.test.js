@@ -214,7 +214,7 @@ function listingOf(stillInLot) {
 // removes at most one — the file whose agent moved it into `done/`.
 // `movedAfter[number]` is how many turns of that task it takes (Infinity: the
 // agent never moves it, the case the retry exists for).
-// `modes` is what `GET /api/agent-modes` answers (default: the seeded four);
+// `modes` is what `GET /api/agents` answers (default: the seeded four);
 // `modes: null` makes that fetch fail. `payloads` collects whole /api/chat bodies.
 function stubRoutes({
   sent,
@@ -230,7 +230,7 @@ function stubRoutes({
   const turnsOf = new Map()
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     const key = String(url)
-    if (key.startsWith('/api/agent-modes')) {
+    if (key.startsWith('/api/agents')) {
       if (modes === null) {
         return { ok: false, status: 500, json: async () => ({}) }
       }
@@ -270,38 +270,50 @@ function stubRoutes({
   })
 }
 
-function seedLot(tasks) {
+async function seedLot(tasks) {
   batch.listing = listingOf(tasks)
+  // A lot now refuses to launch without a resolved pin (task 12), so every case
+  // that intends to run one starts from the readable list its stub answers. A
+  // case that wants the unreadable state loads `modes: null` itself; `loaded`
+  // then stays false and this retry cannot mask it.
+  if (!agentModes.loaded) await loadAgentModes()
 }
 
-// A modes payload in the shape `GET /api/agent-modes` answers (am-06). The
-// app-owned mode is spelled with a stand-in id here too: this file may not name
+// An agents payload in the shape `GET /api/agents` answers since appdb-10. The
+// app-owned agent is spelled with a stand-in id here too: this file may not name
 // it either, for the same reason `web/src` may not (the scan in
 // agentModes.test.js reads the id out of the Python module).
-function seededModesBody({ codeMcpTools = true, withoutCodeMode = false } = {}) {
-  const modes = [
-    { id: 'chat', label: 'Chat', mcptools: false, lsptools: false, editable: true },
+function seededModesBody({ codeMcpTools = true, withoutCodeMode = false, codeWithoutModel = false } = {}) {
+  const rows = [
+    { id: 'chat', label: 'Chat', mcpEnable: false, lspEnable: false, readonly: false },
     {
       id: LOT_TASK_MODE_ID,
       label: 'Code',
-      mcptools: codeMcpTools,
-      lsptools: true,
-      editable: true,
+      mcpEnable: codeMcpTools,
+      lspEnable: true,
+      readonly: false,
     },
-    { id: 'architect', label: 'Architect', mcptools: true, lsptools: false, editable: true },
-    { id: 'reserved-mode-under-test', label: 'Reserved', mcptools: true, lsptools: false, editable: false },
+    { id: 'architect', label: 'Architect', mcpEnable: true, lspEnable: false, readonly: false },
+    { id: 'reserved-mode-under-test', label: 'Reserved', mcpEnable: true, lspEnable: false, readonly: true },
   ]
+  // The list the lot's own dropdown reads: `chat` first, so a launch that does
+  // *not* pin would send that one — which is what makes the pin assertions below
+  // mean something (the store has no default agent to fall back on, D5).
   return {
-    modes: withoutCodeMode
-      ? modes.filter((mode) => mode.id !== LOT_TASK_MODE_ID)
-      : modes,
-    default: 'chat',
-    source: {
-      path: '/work/.nojae/agent-modes.json',
-      exists: true,
-      loaded: true,
-      version: 1,
-    },
+    agents: (withoutCodeMode
+      ? rows.filter((row) => row.id !== LOT_TASK_MODE_ID)
+      : rows
+    ).map((row, index) => {
+      const modelId = codeWithoutModel && row.id === LOT_TASK_MODE_ID ? null : index + 1
+      return {
+        ...row,
+        maxToolIteration: 25,
+        systemMessage: '',
+        modelId,
+        modelName: modelId === null ? null : `model-${modelId}`,
+      }
+    }),
+    caps: { minToolIteration: 1, maxIdChars: 32 },
     findings: [],
   }
 }
@@ -339,11 +351,10 @@ function reset() {
   batch.modeNote = null
   agentModes.modes = []
   agentModes.current = null
-  agentModes.default = null
   agentModes.loaded = false
-  agentModes.locked = false
   agentModes.findings = []
   agentModes.notice = null
+  window.localStorage.clear()
 }
 
 const agentModes = useAgentModes().state
@@ -357,7 +368,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
     stubRoutes({ sent, tasks }) // every turn moves its own task file
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -376,7 +387,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
     const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
     // Task 1's agent forgets the move on its first turn and does it on the retry.
     stubRoutes({ sent, tasks, movedAfter: { 1: 2 } })
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -399,7 +410,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, tasks, movedAfter: { 1: 2 } })
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -417,7 +428,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
     // Task 1's file never leaves the folder: context overflow, a dead tool, or
     // an agent that simply will not do the move.
     stubRoutes({ sent, tasks, movedAfter: { 1: Infinity } })
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -448,6 +459,9 @@ describe('the loop relaunches a task whose file never left the lot', () => {
     const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
       const key = String(url)
+      if (key.startsWith('/api/agents')) {
+        return { ok: true, json: async () => seededModesBody() }
+      }
       if (key.startsWith('/api/chat')) {
         sent.push(JSON.parse(init.body).messages[0].content)
         // The honest server-cut signal: an `error` frame carrying `truncated`.
@@ -462,7 +476,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
       const payload = listingOf(tasks) // nothing ever moves
       return { ok: true, json: async () => payload }
     })
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -480,7 +494,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
     stubRoutes({ sent, tasks, failListing: true })
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -502,7 +516,7 @@ describe('the loop relaunches a task whose file never left the lot', () => {
       movedAfter: { 1: Infinity },
       duringTurn: () => stopBatch(),
     })
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -534,7 +548,7 @@ describe('the lot pins its mode', () => {
     await loadAgentModes()
     // The user was drafting the lot in another mode before opening Batch.
     setAgentMode('architect')
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -563,7 +577,7 @@ describe('the lot pins its mode', () => {
       duringTurn: () => setAgentMode('chat'),
     })
     await loadAgentModes()
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -573,43 +587,70 @@ describe('the lot pins its mode', () => {
     expect(agentModes.current).toBe('chat')
   })
 
-  // A workspace that renamed its coding mode is not refused: that would make
-  // modes able to break a lot that works today. It sends no `agentMode` at all
-  // (the server's default answers, the pre-feature shape) and says so once.
-  it('with no code mode the launch proceeds unpinned, with one line', async () => {
+  // A store with no coding agent is now a launch refusal: D5 left no
+  // server-side default an unpinned task turn could fall back on, so launching
+  // would only fail on the first task anyway (task 12).
+  it('a store with no code agent refuses to launch, naming the pin', async () => {
     const sent = []
     const payloads = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, payloads, tasks, modes: seededModesBody({ withoutCodeMode: true }) })
     await loadAgentModes()
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
+    expect(sent).toEqual([])
+    expect(payloads).toEqual([])
+    expect(batch.active).toBe(false)
     expect(batch.pinnedMode).toBeNull()
-    expect(batch.modeNote).toContain(`no "${LOT_TASK_MODE_ID}" mode`)
-    // Names the workspace's own default, so the line says what really answers.
-    expect(batch.modeNote).toContain('"chat"')
-    expect(payloads).toHaveLength(1)
-    expect('agentMode' in payloads[0]).toBe(false)
-    expect(batch.status).toBe('finished')
+    expect(chat.error).toContain(`"${LOT_TASK_MODE_ID}"`)
+    expect(chat.error).toContain('has no')
   })
 
-  // Same laxness when the list could not be read at all: nothing to pin, and a
-  // line that does not claim to know this workspace's default.
-  it('an unreadable modes list pins nothing and launches anyway', async () => {
+  // The other unresolved pin: a list that could not be read at all. Same
+  // refusal, because the store being unreadable is the only remaining cause
+  // (built-ins cannot be deleted, D4) and running under a stranger is worse.
+  it('an unreadable agent list refuses to launch', async () => {
     const sent = []
     const payloads = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, payloads, tasks, modes: null })
     await loadAgentModes()
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
+    expect(sent).toEqual([])
+    expect(payloads).toEqual([])
+    expect(batch.active).toBe(false)
     expect(batch.pinnedMode).toBeNull()
-    expect(batch.modeNote).toContain('could not be read')
-    expect('agentMode' in payloads[0]).toBe(false)
+    expect(chat.error).toContain('could not be read')
+  })
+
+  // New only because nothing was unrunnable before: the pinned agent's model is
+  // the model every task turn runs on (§6), so a null one stops the lot.
+  it('a pinned agent with no model refuses with the sentence naming it', async () => {
+    const sent = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({
+      sent,
+      tasks,
+      modes: seededModesBody({ codeWithoutModel: true }),
+    })
+    await loadAgentModes()
+    chat.mcp.loaded = true
+    chat.mcp.enabled = { fedit: true, console: true }
+    await seedLot(tasks)
+
+    await launch()
+
+    expect(sent).toEqual([])
+    expect(batch.active).toBe(false)
+    expect(batch.pinnedMode).toBeNull()
+    expect(chat.error).toContain('Code')
+    expect(chat.error).toContain('no model')
+    expect(chat.error).toContain('assign a model')
   })
 
   // The §1 clause: the mode gate joins the *existing* connector list rather
@@ -622,7 +663,7 @@ describe('the lot pins its mode', () => {
     await loadAgentModes()
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: true }
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -643,7 +684,7 @@ describe('the lot pins its mode', () => {
     await loadAgentModes()
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: false }
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -668,7 +709,7 @@ describe('the lot pins its mode', () => {
     await loadAgentModes()
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: true }
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
 
@@ -683,7 +724,7 @@ describe('the lot pins its mode', () => {
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, tasks, movedAfter: { 1: Infinity } })
     await loadAgentModes()
-    seedLot(tasks)
+    await seedLot(tasks)
 
     await launch()
     expect(batch.pinnedMode).toBe(LOT_TASK_MODE_ID)
@@ -708,7 +749,7 @@ describe('the big picture rides automatically', () => {
     const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
     stubRoutes({ sent, payloads, tasks })
     await loadAgentModes()
-    seedLot(tasks)
+    await seedLot(tasks)
     batch.listing.lot = {
       name: 'ed-00-lot.md',
       path: 'todos/ed-00-lot.md',
@@ -731,7 +772,7 @@ describe('the big picture rides automatically', () => {
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, payloads, tasks })
     await loadAgentModes()
-    seedLot(tasks) // listingOf() carries lot: null
+    await seedLot(tasks) // listingOf() carries lot: null
 
     await launch()
 

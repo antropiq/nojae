@@ -2180,11 +2180,19 @@ class TestWritesStayBrowserOnly:
         ``trash_path`` for a removal — so a scan of ``src`` for those names
         answers "who can write" without trusting the prose. The package's own
         files are skipped (they *define* them).
+
+        ``core/appdb.py`` is the one **borrower of the folder** — and, since
+        appdb-10, the only one: a destructive write to the settings store keeps a
+        copy of the whole database first (D12), and the rule says it reuses the
+        Editor's own backup helper so there is one backup tree, one digest rule
+        and one retention sweep. The routes stopped naming it when the agent
+        writes moved behind the store's accessors, which is the narrower surface
+        the assertion below now records. It is that helper and nothing else — the
+        store module reaches no file write, no create and no trash.
         """
         source_root = Path(editorfs.__file__).resolve().parents[2]  # ``src``
         writers = (
             "write_file",
-            "backup_for_write",
             "create_path",
             "rename_path",
             "move_paths_batch",
@@ -2198,6 +2206,14 @@ class TestWritesStayBrowserOnly:
             if any(name in text for name in writers):
                 callers.append(str(path.relative_to(source_root)))
         assert callers == [str(Path("api") / "routes.py")]
+
+        borrowers = sorted(
+            str(path.relative_to(source_root))
+            for path in source_root.rglob("*.py")
+            if path.parent.name != "editorfs"
+            and "backup_for_write" in path.read_text(encoding="utf-8")
+        )
+        assert borrowers == [str(Path("core") / "appdb.py")]
 
     def test_no_core_module_imports_the_http_layer(self):
         """Core owns logic, the API owns transport — and that is the wall.

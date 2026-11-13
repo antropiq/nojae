@@ -65,7 +65,7 @@ describe('the LSP panel', () => {
   it('stays in place while a mode gates the switches', () => {
     seedServers()
     agentModes.modes = [
-      { id: 'chat', label: 'Chat', mcptools: false, lsptools: false, editable: true },
+      { id: 'chat', label: 'Chat', mcpEnable: false, lspEnable: false },
     ]
     agentModes.current = 'chat'
     agentModes.loaded = true

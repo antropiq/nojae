@@ -24,11 +24,13 @@ import path from 'node:path'
 //      with `"enable": true`, `"extensions": [".txt"]`, `"workspaceRoot"` set to
 //      that working location, and `"command": ["<the Python that runs the app>",
 //      "tests/fake_langserver.py"]`.
-//   2. Put its id in `lspEnabled` in `.nojae/nojae-settings.json`.
-//   3. Start the app **without** `NOJAE_DISABLE_LSP` in its environment.
-//   4. `POST /api/lsp/restart`, then switch that server on in the WorkBench Tools
-//      panel — the browser's half of the gate.
-//   5. Open a `.txt` file in the Editor and Ctrl+click a name. The caret lands on
+//   2. Start the app **without** `NOJAE_DISABLE_LSP` in its environment. The
+//      declaration's `enable: true` is the whole activation decision (D13), so
+//      there is no second switch to tick anywhere.
+//   3. `POST /api/lsp/restart`, then switch that server on in the WorkBench Tools
+//      panel — the **conversation**-scoped allowlist, a different axis from the
+//      activation gate.
+//   4. Open a `.txt` file in the Editor and Ctrl+click a name. The caret lands on
 //      line 3 (the fake server answers a definition at 0-based line 2).
 // A stub is deliberately not used in place of this: a spec that asserts a stub
 // proves nothing about the feature.

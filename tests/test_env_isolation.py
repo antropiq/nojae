@@ -1,33 +1,24 @@
-"""ws-03 — the leak the reads cutover creates, stated as a test.
+"""The suite's hermeticity, stated as tests rather than trusted as fixtures.
 
-Group 1 (server, key, model id, prompt, sampling, ``lspEnabled``, the tool-loop
-cap) left ``.env`` for ``<working location>/.nojae/nojae-settings.json``. That
-move silently removes the protection of the suite's six
-``for key in config_module.SETTING_KEYS`` wipe loops (``test_api.py``,
-``test_lsp.py`` twice, ``test_mcp.py``, ``test_mcp_settings_seed.py``,
-``test_lsp_settings_seed.py``): those loops wipe *environment* keys, and the
-group-1 values no longer live in the environment, so nothing in them stands
-between a test and the developer's own settings file — a live ``serverUrl`` and
-``serverApiKey``, plus a real language-server list and tool-loop cap. The
-replacement guard is the *location*: ``tests/conftest.py``'s autouse
-``_no_workspace_settings_leak`` points ``NOJAE_PATH_LOCATION`` at a
-throw-away root, so the lookup can only find a file the test itself wrote.
+Three things a test could otherwise read from the machine it runs on, and the
+guard that stops each:
 
-This file is that invariant rather than a trust in the fixture (spec section
-10: "no test can read group-1 values from a location it did not create"). It
-asserts it through the module's **own** attributes —
-``workspace_settings.workspace_settings_file_path()``,
-``WORKSPACE_SETTINGS_TEMPLATE`` — the way every other test in the folder points
-at a hub's declared file, so a rename cannot quietly stop these cases exercising
-the real path. Nothing here reads the values of, or writes to, this checkout's
-own ``.nojae``.
+* **the settings store** — ``<install root>/nojae.db``, which holds the
+  developer's servers, key and agents. ``tests/conftest.py``'s autouse
+  :func:`_every_test_gets_its_own_store` points it at a temporary file and
+  asserts the install's own path can never be opened;
+  ``tests/test_store_hermeticity.py`` is that invariant as a test.
+* **the working location** — ``NOJAE_PATH_LOCATION``, which decides where
+  ``AGENTS.md``, the hubs' declarations and the e2e suite's connection fixture
+  are looked for. The autouse :func:`_no_ambient_path_location` points it at a
+  throw-away root.
+* **the environment** — ``SETTING_KEYS`` is the two technical keys,
+  ``LLM_DEBUG`` and ``NOJAE_PYTHON_ROOT``, and the wipe loops in the app's
+  fixtures must keep protecting exactly those, because those keys *stay* in the
+  environment. Drop one from the tuple and the ambient environment answers it
+  here.
 
-The group-2/3 half of the story is asserted too, and it is what keeps this file
-honest: ``SETTING_KEYS`` is the two technical keys — ``LLM_DEBUG`` and
-``NOJAE_PYTHON_ROOT`` — and the wipe loops must keep protecting exactly those,
-because those keys *stay* in the environment. Drop one from the tuple over
-there and the ambient environment answers it here, which turns one of the cases
-below red.
+Nothing here reads the values of, or writes to, this checkout's own ``.nojae``.
 """
 
 import os
@@ -37,123 +28,78 @@ import pytest
 
 from src import config as config_module
 from src.config import DEFAULT_MAX_TOOL_ITERATION, load_endpoints_config
-from src.core import agent_modes, workspace_settings
 from tests.conftest import (
-    neutralise_workspace_settings,
-    workspace_settings_guard_root,
+    clear_test_settings_mode,
+    neutralise_store,
+    store_guard_root,
+    workspace_guard_root,
 )
+from src.core import appdb
 
 
-def install_settings_path() -> Path:
-    """This checkout's own settings file — the thing a leak would read.
-
-    Built through ``workspace_settings``'s own naming rules against
-    ``config.PROJECT_ROOT``, because "the guard points at the new file's own
-    constant, not a re-derived path" is what this file exists to show.
-    """
-    return Path(
-        workspace_settings.workspace_settings_file_path(str(config_module.PROJECT_ROOT))
-    )
+def agent_row(agent_id: str = "code") -> dict:
+    """The store's row for ``agent_id``, as a turn hands it to the seam."""
+    row, _findings = appdb.resolve_agent(agent_id)
+    assert row is not None, f"the seeded store has no agent {agent_id!r}"
+    return row
 
 
-class TestTheGuardIsPointedAtTheNewFilesConstant:
-    """The autouse guard neutralises *this* store, by the module's own naming."""
+class TestTheWorkingLocationGuardPointsOffThisCheckout:
+    """The autouse guard neutralises the location, by the module's own accessor."""
 
-    def test_the_active_lookup_is_the_neutralised_root_not_this_checkout(
-        self, tmp_path: Path
-    ):
-        guard_root = workspace_settings_guard_root(tmp_path)
+    def test_the_working_location_is_the_guard_root(self, tmp_path: Path):
+        guard_root = workspace_guard_root(tmp_path)
 
-        # The guard moved the working location off the install directory.
         assert os.path.normcase(config_module.path_location()) == os.path.normcase(
             str(guard_root)
         )
         assert os.path.normcase(str(guard_root)) != os.path.normcase(
             str(config_module.PROJECT_ROOT)
         )
-        # And the settings lookup followed it: the file it consulted is under the
-        # guard root, not this checkout's — whatever that one holds. A leak
-        # reports the install path here.
-        state = workspace_settings.workspace_settings_state()
-        answered = os.path.normcase(state["path"])
-        assert answered.startswith(os.path.normcase(str(guard_root)))
-        assert answered != os.path.normcase(str(install_settings_path()))
 
-    def test_the_install_own_file_exists_yet_answers_nothing_here(
+    def test_the_e2e_connection_fixture_is_looked_for_under_the_guard_root(
         self, tmp_path: Path
     ):
-        """The leak case: this checkout has a real file, and it is not read.
+        """The fixture is a *file* still, so the location is what keeps it honest.
 
-        ``WORKSPACE_SETTINGS_TEMPLATE`` lives at the install root, so an install
-        that has ever booted also has a real
-        ``<install>/.nojae/nojae-settings.json`` — a developer's own model
-        connection. On a machine where that file does not exist yet the case
-        still proves the invariant (the lookup landed on the guard root), and it
-        never prints the file's values: a failure names the guard that broke
-        rather than echoing a live API key into the runner's output.
+        With the switch off it is not read at all; with it on the lookup lands
+        under the guard root, never on this checkout's hand-authored file.
         """
-        leaked = install_settings_path()
-        state = workspace_settings.workspace_settings_state()
+        guard_root = os.path.normcase(
+            os.path.realpath(str(workspace_guard_root(tmp_path)))
+        )
+        answered = os.path.normcase(
+            os.path.realpath(str(appdb.test_settings_path()))
+        )
 
-        if leaked.is_file():
-            if os.path.normcase(state["path"]) == os.path.normcase(str(leaked)):
-                pytest.fail(
-                    "the workspace settings guard leaked: the lookup answered "
-                    f"{leaked}, i.e. this checkout's own file, not the test's "
-                    "throw-away location"
-                )
-            # The install's file holds a real connection on a used machine; it
-            # must not reach this test's mapping either.
-            assert workspace_settings.load_workspace_settings() == {}
+        assert answered.startswith(guard_root)
+        assert appdb.TEST_SETTINGS_FILENAME in answered
 
-        # No group-1 value reaches the config either way, so there is nothing to
-        # dial and the refusal names the guard root's own path.
-        config, error = load_endpoints_config()
+
+class TestNoTestTurnsOnAConnectionItDidNotWrite:
+    """No rows of its own → nothing answers; its own rows → their values answer."""
+
+    def test_without_rows_of_its_own_every_agent_refuses(self, tmp_path: Path):
+        """A first boot has four agents and no models: every turn refuses (D7)."""
+        config, error = load_endpoints_config(agent_row())
+
         assert config is None
         assert isinstance(error, str)
-        assert os.path.normcase(state["path"]) in os.path.normcase(error)
+        assert "no model" in error
 
-
-class TestNoTestReadsValuesFromALocationItDidNotCreate:
-    """No file of its own → nothing answers; its own file → its values answer."""
-
-    def test_without_a_file_of_its_own_nothing_is_configured(self, tmp_path: Path):
-        state = workspace_settings.workspace_settings_state()
-        assert state["state"] == "absent"
-        assert state["configured"] is False
-        assert workspace_settings.load_workspace_settings() == {}
-
-        config, error = load_endpoints_config()
-        assert config is None
-        assert isinstance(error, str) and state["path"] in error
-
-    def test_a_seeded_file_answers_not_configured_not_a_default(self, tmp_path: Path):
-        """A boot seed at the guard root is still no usable connection (D8)."""
-        workspace_settings.ensure_workspace_settings_file(
-            str(workspace_settings_guard_root(tmp_path))
-        )
-        state = workspace_settings.workspace_settings_state()
-        assert state["state"] == "ok"
-        assert state["configured"] is False
-
-        config, error = load_endpoints_config()
-        assert config is None
-        assert isinstance(error, str) and state["path"] in error
-
-    def test_after_the_test_writes_its_own_file_the_values_answer(
+    def test_after_the_test_writes_its_own_rows_the_values_answer(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """The guard is a neutralisation, not a wall: an owned file is read."""
-        neutralise_workspace_settings(
+        """The guard is a neutralisation, not a wall: owned rows are read."""
+        neutralise_store(
             monkeypatch,
             tmp_path,
             serverUrl="http://mine:9090/v1",
             serverApiKey="sk-mine",
             endpoint="my-model",
         )
-        assert workspace_settings.workspace_settings_state()["state"] == "ok"
 
-        config, error = load_endpoints_config()
+        config, error = load_endpoints_config(agent_row())
         assert error is None
         assert config is not None
         assert config.serverUrl == "http://mine:9090/v1"
@@ -161,29 +107,57 @@ class TestNoTestReadsValuesFromALocationItDidNotCreate:
         assert config.model_list() == ["my-model"]
 
 
-class TestTheWorkspaceSourcedHelpersAreNeutralToo:
-    """``lsp_enabled_ids()`` / ``max_tool_iteration()`` answer the code default."""
+class TestThePerAgentCapIsNeutralToo:
+    """``max_tool_iteration()`` answers the seeded number, never a typed one.
 
-    def test_no_language_server_is_active_from_an_ambient_file(self):
-        # A developer with servers enabled in this checkout's file would see them
-        # reach every test — including the two-gate LSP cases — if the guard did
-        # not move the location.
-        assert config_module.lsp_enabled_ids() == []
+    It used to have a sibling here, the reader of the workspace file's
+    ``lspEnabled`` array: the second LSP gate. D13 deleted that gate, so the only
+    activation answer a language server gets is its declaration's ``enable``
+    flag, and the declaration lookup the guard moves with the working location is
+    the one that answers it — which is what
+    ``test_no_language_server_is_active_from_an_ambient_declaration`` below asks.
+    """
 
-    def test_the_tool_loop_cap_is_the_code_default(self):
-        # This checkout's file carries the template's 300, so a leak answers 300
-        # and every tool-loop assertion in the suite changes meaning.
+    def test_the_tool_loop_cap_is_the_seeded_number(self):
+        # A developer's store may hold any number on any agent; a test that names
+        # no agent must not answer it, or every tool-loop assertion changes meaning.
         assert config_module.max_tool_iteration() == DEFAULT_MAX_TOOL_ITERATION
 
-    def test_an_env_name_cannot_reopen_either_one(
+    def test_an_env_name_cannot_reopen_it(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        """Both are read from the file only (D2): no ``os.environ`` fallback."""
-        monkeypatch.setenv("LSP_ENABLED", "pyright,typescript")
+        """Read from the agent's column only (D2): no ``os.environ`` fallback."""
         monkeypatch.setenv("MAX_TOOL_ITERATION", "3")
         monkeypatch.setenv("MAX_MCP_ITERATION", "3")
-        assert config_module.lsp_enabled_ids() == []
-        assert config_module.max_tool_iteration() == DEFAULT_MAX_TOOL_ITERATION
+        assert config_module.max_tool_iteration(agent_row()) == (
+            DEFAULT_MAX_TOOL_ITERATION
+        )
+
+    def test_no_language_server_is_active_from_an_ambient_declaration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The one gate, and it is neutral too (D13).
+
+        With a single gate the declaration file is the only thing that can put a
+        language server on a turn's tool list, so a developer who runs real
+        servers in this checkout must not have them reach every test. The
+        answer comes from the working location the guard moved — and an
+        ``LSP_ENABLED`` in the ambient environment reopens nothing, because
+        nothing reads that name any more.
+        """
+        from src.api import routes
+        from src.core import lsphub
+        from src.core.lsphub import constants as lsp_constants
+
+        monkeypatch.setenv("LSP_ENABLED", "pyright,typescript")
+        # The declaration the lookup answers from is the guard's throw-away
+        # root's, not this checkout's — and that file is not there, so the
+        # scan finds nothing to activate.
+        assert lsp_constants.lsp_settings_path().is_relative_to(
+            Path(config_module.path_location())
+        )
+        assert lsphub.constants.LSP_SETTINGS_PATH is None
+        assert routes._active_server_ids() == []
 
 
 class TestTheEnvWipeLoopsStillCoverWhatStaysInTheEnv:
@@ -194,18 +168,18 @@ class TestTheEnvWipeLoopsStillCoverWhatStaysInTheEnv:
     ):
         """The six fixtures' loop, run here: the managed keys stay neutralised.
 
-        The model connection is neutralised by the *location*; the keys that
-        stayed in ``.env`` are neutralised by wiping ``SETTING_KEYS`` — which
-        is why that tuple must keep naming them.
+        The model connection is neutralised by the temporary store; the keys
+        that stayed in ``.env`` are neutralised by wiping ``SETTING_KEYS`` —
+        which is why that tuple must keep naming them.
         """
         for key in config_module.SETTING_KEYS:
             monkeypatch.delenv(key, raising=False)
             assert key not in os.environ
 
-        # A file of this test's own, so the config is built at all: with the env
+        # Rows of this test's own, so the config is built at all: with the env
         # wiped, nothing ambient reaches it.
-        neutralise_workspace_settings(monkeypatch, tmp_path)
-        config, error = load_endpoints_config()
+        neutralise_store(monkeypatch, tmp_path)
+        config, error = load_endpoints_config(agent_row())
         assert error is None
         assert config is not None
 
@@ -223,74 +197,56 @@ class TestTheEnvWipeLoopsStillCoverWhatStaysInTheEnv:
 
 
 class TestTheTestSettingsSwitchCannotLeakIntoTheSuite:
-    """T-D7: the e2e switch is pinned off, so it cannot redirect these reads.
+    """D14: the e2e switch is pinned off, so it cannot redirect the store.
 
-    ``NOJAE_TEST_SETTINGS`` makes a process read the suite's own
+    ``NOJAE_TEST_SETTINGS`` puts a process in the e2e suite's mode, where the
+    store is a temporary database materialised from
     ``.nojae/nojae-test-settings.json`` — a hand-authored fixture the app never
     seeds. An exported ``1`` in the runner's shell would leave every test here
-    reading a file that is not there, failing en masse for a reason no traceback
-    explains, so ``tests/conftest.py`` clears the key and these cases pin that.
+    failing en masse for a reason no traceback explains, so ``tests/conftest.py``
+    clears the key and these cases pin that.
     """
 
-    @pytest.fixture(autouse=True, scope="module")
-    def ambient_switch_is_exported(self):
-        """Put the switch in the environment for this module, as a shell would.
+    def test_the_guard_clears_an_ambient_value(self, _hermetic):
+        """The guard itself, run against an exported ``1``.
 
-        A module-scoped autouse fixture runs *before* the function-scoped guard
-        this file is about, so every test here starts with the key exported —
-        the exact leak ``tests/conftest.py`` exists to close. Drop that guard and
-        the cases below go red on this machine rather than passing quietly, which
-        is what makes this a test of the guard and not of the ambient shell.
+        Called directly rather than exported around the test: a module-scoped
+        export would be read by ``_every_test_gets_its_own_store`` too, and the
+        store fixture would then boot from this checkout's own hand-authored
+        fixture — the very leak this case exists to forbid. Running the guard's
+        own function asks the same question without arranging that collision.
         """
-        saved = os.environ.get(workspace_settings.TEST_SETTINGS_KEY)
-        os.environ[workspace_settings.TEST_SETTINGS_KEY] = "1"
-        yield
-        if saved is None:
-            os.environ.pop(workspace_settings.TEST_SETTINGS_KEY, None)
-        else:
-            os.environ[workspace_settings.TEST_SETTINGS_KEY] = saved
+        _hermetic.setenv(appdb.TEST_SETTINGS_KEY, "1")
+        assert appdb.test_mode() is True
 
-    def test_the_guard_clears_an_ambient_value(self):
-        """The exported ``1`` above is gone by the time a test body runs."""
-        assert workspace_settings.TEST_SETTINGS_KEY not in os.environ
-        assert workspace_settings.test_settings_mode() is False
-        assert workspace_settings.active_settings_filename() == (
-            workspace_settings.WORKSPACE_SETTINGS_FILENAME
-        )
-        # And the read side answers the production name, so a group-1 value can
-        # only come from a file this test wrote.
-        assert workspace_settings.workspace_settings_state()["path"].endswith(
-            workspace_settings.WORKSPACE_SETTINGS_FILENAME
+        clear_test_settings_mode(_hermetic)
+
+        assert appdb.TEST_SETTINGS_KEY not in os.environ
+        assert appdb.test_mode() is False
+        # And the store's path is the install's own, never a throw-away root.
+        assert appdb.database_path() == (
+            Path(appdb.PROJECT_ROOT) / appdb.DB_FILENAME
         )
 
-    def test_with_the_switch_on_no_test_reads_the_production_file(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    def test_with_the_switch_on_the_store_moves_off_the_install(
+        self, monkeypatch: pytest.MonkeyPatch
     ):
-        """The mode is reachable per test — and then the workspace file is dead."""
-        neutralise_workspace_settings(monkeypatch, tmp_path,
-                                      serverUrl="http://dev-live:9/v1")
-        monkeypatch.setenv(workspace_settings.TEST_SETTINGS_KEY, "1")
-        workspace_settings.invalidate_workspace_settings()
+        """The mode is reachable per test — and then the install's file is gone.
 
-        state = workspace_settings.workspace_settings_state()
-        assert state["state"] == "absent"
-        assert state["path"].endswith(
-            workspace_settings.WORKSPACE_TEST_SETTINGS_FILENAME
-        )
-        assert workspace_settings.load_workspace_settings() == {}
-        assert workspace_settings.workspace_setting("serverUrl") is None
+        A connection written into this test's own store is *not* what a
+        switched-on process reads either: the path itself moves to the temporary
+        root, which is what makes "no fallback in either direction" mechanical.
+        """
+        install_path = appdb.database_path()
+        monkeypatch.setenv(appdb.TEST_SETTINGS_KEY, "1")
 
-        config, error = load_endpoints_config()
-        assert config is None
-        assert isinstance(error, str)
-        assert workspace_settings.WORKSPACE_TEST_SETTINGS_FILENAME in error
+        assert appdb.test_mode() is True
+        assert appdb.database_path() != install_path
+        assert appdb.database_path().parent == appdb.test_root()
+        assert appdb.database_path().name == appdb.DB_FILENAME
 
-    def test_the_two_names_are_named_by_the_module_not_by_a_literal(self):
-        """These cases exercise the real lookup only if the names differ."""
-        assert workspace_settings.WORKSPACE_TEST_SETTINGS_FILENAME != (
-            workspace_settings.WORKSPACE_SETTINGS_FILENAME
-        )
-        assert workspace_settings.TEST_SETTINGS_KEY == "NOJAE_TEST_SETTINGS"
+    def test_the_switch_is_named_by_the_module_not_by_a_literal(self):
+        assert appdb.TEST_SETTINGS_KEY == "NOJAE_TEST_SETTINGS"
 
 
 class TestAGuardSurvivesATestUndoingItsOwnPatches:
@@ -313,7 +269,7 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
     def test_the_working_location_stays_off_the_install_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        guard_root = workspace_settings_guard_root(tmp_path)
+        guard_root = workspace_guard_root(tmp_path)
         assert os.path.normcase(config_module.path_location()) == os.path.normcase(
             str(guard_root)
         )
@@ -332,28 +288,30 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
             str(config_module.PROJECT_ROOT)
         )
 
-    def test_the_modes_lookup_still_answers_the_guard_root(
+    def test_the_agents_lookup_still_answers_the_guard_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """The bug this pins: the modes file read was the developer's own.
+        """The bug this pins: the agents were read from the developer's own state.
 
-        Asserted through the answered **path**, never through the file's
-        contents — naming the developer's agents here would make the case depend
-        on them again, which is the thing being forbidden.
+        The modes file is gone (appdb-10) and the agents are rows of the install's
+        store, so the leak this guards against is the same one the store guard
+        closes — asserted through the answered **path**, never through the rows,
+        because naming the developer's agents here would make the case depend on
+        them again, which is the thing being forbidden.
         """
         monkeypatch.setenv("NOJAE_UNDO_PROBE", "1")
         monkeypatch.undo()
 
-        answered = os.path.normcase(agent_modes.agent_modes_path())
+        answered = os.path.normcase(str(appdb.database_path()))
         # The module resolves the location through realpath, so compare resolved
         # against resolved rather than assuming tmp_path is already one.
         guard_root = os.path.normcase(
-            os.path.realpath(str(workspace_settings_guard_root(tmp_path)))
+            os.path.realpath(str(store_guard_root(tmp_path)))
         )
         assert answered.startswith(guard_root), (
-            f"the modes lookup answered {answered}, outside the test's throw-away "
+            f"the store lookup answered {answered}, outside the test's throw-away "
             f"root {guard_root}: the guard was lifted and this checkout's own "
-            ".nojae/agent-modes.json is being read"
+            "settings store is being read"
         )
 
     def test_the_process_and_switch_guards_still_hold(
@@ -370,5 +328,5 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
 
         assert os.environ.get("NOJAE_DISABLE_MCP") == "1"
         assert os.environ.get("NOJAE_DISABLE_LSP") == "1"
-        assert workspace_settings.TEST_SETTINGS_KEY not in os.environ
+        assert appdb.TEST_SETTINGS_KEY not in os.environ
         assert config_module.LLM_DEBUG_KEY not in os.environ

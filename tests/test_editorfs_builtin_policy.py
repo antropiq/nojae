@@ -15,9 +15,15 @@ Both sides of that comparison are read at call time (the location from the
 environment, the install dir from ``editorfs.constants``), so the shapes the task
 names — the app's parent, a sibling copy — are built as real paths rather than
 mocked, which is what keeps a live level A and a dormant one tellable apart.
+
+The last class is appdb-05's: the settings store and its WAL sidecars, hidden
+from every file surface (D10). It runs against a scratch folder made "the app"
+the same way, so the three names can be planted as real files — and as real
+``git`` rows — without this checkout's own database being touched.
 """
 
 import os
+import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -27,13 +33,24 @@ from fastapi.testclient import TestClient
 from mcp_connectors import policy_shared as shared
 
 from src.api.server import create_app
+from src.core import appdb
 from src.core import editorfs
-from src.core import prompt_helpers
 from src.core.editorfs import builtin_policy
 from src.core.editorfs import policy_file, policy_seed
 from src.core.editorfs import policy_modes
 
 APP_ROOT = os.path.realpath(str(editorfs.constants.PROJECT_ROOT))
+
+#: The store and its two WAL sidecars, as workspace-relative names — built from
+#: ``appdb``'s own constants so a rename of the store moves every assertion
+#: below with it (the same reasoning ``tests/test_store_hermeticity.py`` gives
+#: for the guard's tuple).
+STORE_NAMES: List[str] = [appdb.DB_FILENAME] + [
+    f"{appdb.DB_FILENAME}{suffix}" for suffix in appdb.WAL_SIDECAR_SUFFIXES
+]
+
+#: The level-A pattern that hides them, spelled the way the rule spells it.
+STORE_RULE_PATTERN = f"**/{appdb.DB_FILENAME}*"
 
 
 @pytest.fixture
@@ -133,6 +150,11 @@ class TestSelfWorkspaceRules:
             ("logs/editor_backups/x.orig", "logs/**"),
             ("web/dist/index.html", "web/dist/**"),
             ("web/dist/assets/app.js", "web/dist/**"),
+            (appdb.DB_FILENAME, STORE_RULE_PATTERN),
+            (f"{appdb.DB_FILENAME}{appdb.WAL_SIDECAR_SUFFIXES[0]}",
+             STORE_RULE_PATTERN),
+            (f"{appdb.DB_FILENAME}{appdb.WAL_SIDECAR_SUFFIXES[1]}",
+             STORE_RULE_PATTERN),
         ],
     )
     def test_an_app_owned_path_carries_its_rule_verbatim(
@@ -150,6 +172,9 @@ class TestSelfWorkspaceRules:
             ("web/.env.local", shared.HIDDEN),
             ("logs/trash/x", shared.HIDDEN),
             ("web/dist/index.html", shared.READ_ONLY),
+            (appdb.DB_FILENAME, shared.HIDDEN),
+            (f"{appdb.DB_FILENAME}{appdb.WAL_SIDECAR_SUFFIXES[0]}", shared.HIDDEN),
+            (f"{appdb.DB_FILENAME}{appdb.WAL_SIDECAR_SUFFIXES[1]}", shared.HIDDEN),
         ],
     )
     def test_the_mode_each_rule_gives(self, app_workspace, rel: str, mode: str):
@@ -161,6 +186,42 @@ class TestSelfWorkspaceRules:
         message = policy_modes.refusal_message(verdict, for_write=True)
         assert "nojae's own rules for this workspace" in message
         assert verdict.reason in message
+
+    def test_the_store_rule_says_what_the_store_holds(self, app_workspace):
+        """D10's reason, spelled the way the other rules spell theirs.
+
+        The sentence is the one the spec dictates, because a refusal that only
+        says "hidden" sends the reader to a file they cannot edit for an answer
+        they cannot use: the store holds the model credentials, and the app is
+        its only editor.
+        """
+        verdict = policy_modes.mode_for(appdb.DB_FILENAME)
+        assert verdict.reason == (
+            "nojaé's own settings store, which holds the model credentials"
+        )
+        message = policy_modes.refusal_message(verdict, for_write=True)
+        assert "nojae's own rules for this workspace" in message
+        assert verdict.reason in message
+
+    def test_the_sidecars_are_the_stores_own_names_not_a_suffix_rule(
+        self, app_workspace
+    ):
+        """The trailing ``*`` reaches ``-wal``/``-shm``; a ``.db`` rule would not.
+
+        The sidecars hold committed bytes and the write-ahead index, so hiding
+        the main file alone would leave a reader one ``stat`` away from the
+        store's contents. And the rule is a *name*, so an unrelated database of
+        the same extension is untouched — the same argument the connector floor
+        makes for listing the three names instead of a ``.db`` suffix.
+        """
+        for name in STORE_NAMES:
+            assert policy_modes.mode_for(name).pattern == STORE_RULE_PATTERN, name
+        for rel in ("app.db", "data.sqlite", "notesdb", "backup/app.db"):
+            assert policy_modes.mode_for(rel).mode == shared.READ_WRITE, rel
+        # The prefix shape, kept on purpose exactly as ``.env**`` keeps it: a
+        # name that *starts* with the store's name is one of them, so a stray
+        # ``nojae.db.journal`` cannot be read while the real file cannot.
+        assert policy_modes.mode_for("nojae.db.bak").mode == shared.HIDDEN
 
     @pytest.mark.parametrize("rel", ["notes.env", "src/environment.py", "a/env/x"])
     def test_a_name_only_shaped_like_env_is_not_app_owned(self, app_workspace, rel: str):
@@ -250,6 +311,22 @@ class TestForeignWorkspace:
     ):
         assert policy_modes.mode_for(rel).mode == shared.READ_WRITE
 
+    @pytest.mark.parametrize("rel", STORE_NAMES)
+    def test_a_foreign_database_of_the_same_name_is_an_ordinary_file(
+        self, foreign_workspace, rel: str
+    ):
+        """D10's negative half: the rule is about *whose* file it is.
+
+        A project that happens to keep a SQLite file called ``nojae.db`` — or a
+        copy of this repo this process did not boot from — has no reason for the
+        pane to hide it, so the verdict is the ordinary one and level A
+        contributes no rule at all. This is the row that fails the moment the
+        rule is made unconditional or moved into the seeded policy.
+        """
+        verdict = policy_modes.mode_for(rel)
+        assert verdict == shared.Verdict(shared.READ_WRITE, None, None, None), rel
+        assert builtin_policy.builtin_rules(rel) == [], rel
+
     def test_the_app_owned_names_are_ordinary_too(self, foreign_workspace):
         """``resources/memory_registration.json`` is the *old* app file: here it
         is a stale leftover of somebody else's tree, so nothing about it is a
@@ -265,19 +342,16 @@ class TestForeignWorkspace:
     def test_the_prompt_helpers_file_is_hidden_in_a_foreign_workspace(
         self, foreign_workspace
     ):
-        """D7: the replacement for the deleted level-A rule is the reservation,
-        which is unconditional — so the file is invisible in a foreign project's
-        tree exactly as it is in nojae's own.
+        """The reservation is unconditional, so a leftover helper file is hidden.
 
-        Built from the module's own constants, not a literal: a rename of the
-        folder or the file must move this assertion with it rather than leave it
-        testing a path that no longer exists.
+        D7's rule, and appdb-07 leaves it standing: the app neither seeds nor
+        reads ``.nojae/prompt-helpers.json`` any more, but a workspace opened
+        before the move still has the file, and it is a name inside the reserved
+        folder — so it is invisible there exactly as it is in nojae's own tree.
+        The name is spelled here rather than taken from a module, because no
+        module owns it any more.
         """
-        rel = (
-            f"{prompt_helpers.POLICY_DIRNAME}/"
-            f"{prompt_helpers.PROMPT_HELPERS_FILENAME}"
-        )
-        verdict = policy_modes.mode_for(rel)
+        verdict = policy_modes.mode_for(".nojae/prompt-helpers.json")
         assert verdict.mode == shared.HIDDEN
         assert verdict.level == shared.LEVEL_BUILTIN
         assert verdict.reason == builtin_policy.reserved_reason()
@@ -453,8 +527,12 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
     def test_the_prompt_helpers_file_is_absent_to_a_read_and_named_to_a_write(
         self, app_workspace
     ):
-        """D7 at the routes: the helpers file has **no level-A pattern** — the
-        reserved folder is what hides it, so the verdict comes from the folder.
+        """The reservation at the routes, on the file the app no longer owns.
+
+        D7's rule, kept by appdb-07 for the state a real tree can still be in: a
+        workspace opened before the helpers moved into the store still holds
+        ``.nojae/prompt-helpers.json``, and the app neither seeds nor reads it —
+        so the only thing that can happen to it is the reservation's verdict.
 
         This is deliberately not another row of the list above: that list asserts
         the matched *pattern* is quoted in the 422 and never appears in the 404,
@@ -464,16 +542,13 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         indistinguishable from absence all the same, exactly as
         ``tests/test_editorfs_write.py`` pins for a batch under ``.nojae/trash``.
         """
-        rel = (
-            f"{prompt_helpers.POLICY_DIRNAME}/"
-            f"{prompt_helpers.PROMPT_HELPERS_FILENAME}"
-        )
-        reserved = f'"{prompt_helpers.POLICY_DIRNAME}"'
+        rel = ".nojae/prompt-helpers.json"
+        reserved = '".nojae"'
         with TestClient(create_app()) as client:
             read = client.get("/api/fs/file", params={"path": rel})
             assert read.status_code == 404
             assert "does not exist" in read.json()["detail"]
-            assert prompt_helpers.POLICY_DIRNAME not in _root_names(client)
+            assert ".nojae" not in _root_names(client)
 
             write = client.put(
                 "/api/fs/file", json={"path": rel, "text": "hand-edited\n"}
@@ -541,3 +616,192 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         verdict = policy_modes.mode_for(".env")
         assert verdict.level == shared.LEVEL_BUILTIN
         assert policy_modes.refusal_message(verdict, for_write=True)
+
+
+def _git(repo: Path, *args: str) -> str:
+    """One hermetic git command in ``repo`` (the ``test_editorfs_git.py`` form).
+
+    The global/system config is ignored and the identity comes from the
+    environment, so a developer's ``~/.gitconfig`` cannot change what a row
+    here asserts.
+    """
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr.decode()}"
+    return proc.stdout.decode()
+
+
+class TestTheStoreIsInvisibleToEveryFileSurface:
+    """D10 as a test rather than a sentence: the store answers *absence*.
+
+    The workspace is a scratch folder made "the app" by moving both sides of
+    :func:`builtin_policy.is_self_workspace` (the repo's own ``app_like``
+    pattern), so the three names can be planted as real files — including a
+    dirty git row — without touching this checkout's own database. Every
+    surface the task names is asserted here: the tree, the read, the search,
+    ``git status``, and a write attempt, which must be **named** to refusal
+    rather than silently absent (pol-00 D8's asymmetry).
+    """
+
+    @pytest.fixture
+    def app_like(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A scratch *repository* that is also "the install", holding the store."""
+        root = tmp_path / "app"
+        root.mkdir()
+        # Text, not the real binary: the search's binary sniff would hide these
+        # rows on its own, and the assertion is about the *policy* filter.
+        for name in STORE_NAMES:
+            (root / name).write_text("sqlite format marker\n", encoding="utf-8")
+        (root / "keep.py").write_text("needle here\n", encoding="utf-8")
+        monkeypatch.setattr(editorfs.constants, "PROJECT_ROOT", root)
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+        policy_file.invalidate_policy_cache()
+        assert builtin_policy.is_self_workspace() is True
+        return root
+
+    @pytest.fixture
+    def repo(self, app_like: Path) -> Path:
+        """The same folder as a committed repository, so status has rows to hide."""
+        _git(app_like, "init", "-q")
+        _git(app_like, "add", "keep.py")
+        _git(app_like, "commit", "-qm", "seed")
+        return app_like
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(create_app()) as test_client:
+            yield test_client
+
+    @pytest.mark.parametrize("name", STORE_NAMES)
+    def test_the_tree_does_not_list_it(self, repo: Path, client, name: str):
+        assert name not in _root_names(client)
+
+    @pytest.mark.parametrize("name", STORE_NAMES)
+    def test_a_read_answers_absence_without_naming_the_rule(
+        self, repo: Path, client, name: str
+    ):
+        response = client.get("/api/fs/file", params={"path": name})
+        assert response.status_code == 404, name
+        assert STORE_RULE_PATTERN not in response.text, name
+
+    @pytest.mark.parametrize("name", STORE_NAMES)
+    def test_a_write_is_refused_and_names_the_rule(self, repo: Path, client, name: str):
+        response = client.put(
+            "/api/fs/file", json={"path": name, "text": "overwritten\n"}
+        )
+        assert response.status_code == 422, name
+        detail = response.json()["detail"]
+        assert f'"{STORE_RULE_PATTERN}"' in detail, name
+        assert "nojae's own rules" in detail, name
+        assert "settings store" in detail, name
+
+    @pytest.mark.parametrize("name", STORE_NAMES)
+    def test_creating_over_it_is_refused_the_same_way(
+        self, repo: Path, client, name: str
+    ):
+        """A create asks the whole chain, so the leaf's rule fires there too."""
+        response = client.post("/api/fs/create", json={"path": name, "dir": False})
+        assert response.status_code == 422, name
+        assert f'"{STORE_RULE_PATTERN}"' in response.json()["detail"], name
+
+    def test_the_search_never_opens_it_and_never_names_it(
+        self, repo: Path, client
+    ):
+        """The store's bytes are not a match row, and its name is not a scope.
+
+        The planted sidecar contents include a needle the same scan finds in
+        ``keep.py``, so an empty row list is the policy and not a broken scan.
+        """
+        found = client.get("/api/fs/search", params={"q": "sqlite format"})
+        assert found.status_code == 200
+        assert [row["path"] for row in found.json()["matches"]] == []
+        scanned = client.get("/api/fs/search", params={"q": "needle"})
+        assert [row["path"] for row in scanned.json()["matches"]] == ["keep.py"]
+        for name in STORE_NAMES:
+            scope = client.get("/api/fs/search", params={"path": name, "q": "sqlite"})
+            assert scope.status_code == 404, name
+            body = scope.json()["detail"]
+            assert STORE_RULE_PATTERN not in body, name
+
+    def test_git_status_lists_no_row_for_it(self, repo: Path, client):
+        """The status list may never name a file the tree refuses to show.
+
+        The three names are *untracked* here, which is exactly the shape a
+        ``.gitignore`` miss would leave in the real checkout — so the row's
+        absence is the policy filter doing its job, and ``keep.py``'s presence
+        (modified, unstaged) proves the query itself is alive.
+        """
+        (repo / "keep.py").write_text("needle here\nchanged\n", encoding="utf-8")
+        paths = [entry["path"] for entry in client.get("/api/fs/status").json()["entries"]]
+        assert paths == ["keep.py"]
+
+    def test_the_install_ignores_the_store_in_source_control(self):
+        """The other half of "absent from git status" in the real checkout.
+
+        The policy filter hides a row from *this app's* status endpoint; only a
+        ``.gitignore`` entry keeps ``git status`` on the command line quiet, and
+        the app creates the file in a checkout someone may commit from. Asserted
+        as text (the ``.nojae/`` check's style) rather than by running git here,
+        so the test does not depend on this checkout's own dirty state.
+        """
+        lines = [
+            line.strip()
+            for line in (
+                Path(editorfs.constants.PROJECT_ROOT) / ".gitignore"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        for name in STORE_NAMES:
+            assert name in lines, name
+
+    def test_the_foreign_folder_of_the_same_names_is_an_ordinary_triple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The negative case, at the same surfaces.
+
+        One tree, one set of files, one difference: ``PROJECT_ROOT`` stays where
+        the real install is, so this workspace is *not* the app. All three names
+        are listed, readable, searchable, and get their ``git status`` rows —
+        the failing test if the rule ever becomes unconditional.
+        """
+        foreign = tmp_path / "someone-elses-project"
+        foreign.mkdir()
+        for name in STORE_NAMES:
+            (foreign / name).write_text("sqlite format marker\n", encoding="utf-8")
+        (foreign / "keep.py").write_text("needle here\n", encoding="utf-8")
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(foreign))
+        policy_file.invalidate_policy_cache()
+        assert builtin_policy.is_self_workspace() is False
+        _git(foreign, "init", "-q")
+        _git(foreign, "add", "keep.py")
+        _git(foreign, "commit", "-qm", "seed")
+
+        with TestClient(create_app()) as client:
+            names = _root_names(client)
+            for name in STORE_NAMES:
+                assert name in names, name
+                assert client.get(
+                    "/api/fs/file", params={"path": name}
+                ).status_code == 200, name
+            assert [
+                row["path"]
+                for row in client.get(
+                    "/api/fs/search", params={"q": "sqlite format"}
+                ).json()["matches"]
+            ] == sorted(STORE_NAMES)
+            rows = sorted(
+                entry["path"] for entry in client.get("/api/fs/status").json()["entries"]
+            )
+            # ``keep.py`` is committed and clean, so its absence from the rows
+            # says nothing; the three names being *present* is the assertion.
+            assert rows == sorted(STORE_NAMES)

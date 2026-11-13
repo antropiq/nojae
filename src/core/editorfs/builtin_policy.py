@@ -72,6 +72,28 @@ BUILTIN_RULES: Tuple[Tuple[str, str, str], ...] = (
         shared.HIDDEN,
         "nojae regenerates it from the settings template on every save",
     ),
+    # The store (``src/core/appdb.py``) and its WAL sidecars — ``nojae.db``,
+    # ``nojae.db-wal``, ``nojae.db-shm`` — sit beside ``.env`` at the install
+    # root, which is inside the tree whenever the workspace *is* this checkout
+    # (D10). The file holds the model credentials and the app is its only
+    # reader and writer, so a pane that could open it would be a second one
+    # over the same bytes: ``hidden``, like ``.env``, not ``ro``. The ``**/``
+    # is ``.env**``'s reason again (a bare root-anchored pattern would not
+    # reach the name at depth), and the trailing ``*`` is what reaches the
+    # sidecars, which hold committed bytes and so are part of the store rather
+    # than decoration beside it. A folder that is not this installation has no
+    # reason to hide a file called ``nojae.db``, which is why this is level A
+    # and not the seeded file. The name is spelled here rather than imported
+    # from ``appdb``: this is a rule *about* a name, not a lookup of one, and
+    # the connectors' own floor (``mcp_connectors/path_policy.py``) has to
+    # spell it too — the two lists stay separate by rule, and
+    # ``tests/test_appdb_store.py`` pins both files as the named exceptions to
+    # "only ``appdb`` names the store".
+    (
+        "**/nojae.db*",
+        shared.HIDDEN,
+        "nojaé's own settings store, which holds the model credentials",
+    ),
     # ``BACKUP_DIR`` (``constants.py``) lives under ``logs/``, beside the
     # ``fedit`` connector's chain — outside the workspace *by path*, but inside
     # the tree whenever the workspace is the repo, so the Editor could browse

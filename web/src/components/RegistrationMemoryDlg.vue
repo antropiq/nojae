@@ -1,41 +1,73 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { useChat } from '../composables/useChat'
-import { PROMPT_HELPER_DEFAULT_COLOR, usePromptHelpers } from '../composables/usePromptHelpers'
+import {
+  bulletNumber,
+  newBulletColor,
+  usePromptHelpers,
+} from '../composables/usePromptHelpers'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
-  index: { type: Number, default: null },
+  // The row this dialog edits, as the store's id — or ``null`` for a bullet that
+  // does not exist yet, which is what "Add bullet" opens. A slot index is gone
+  // with the count rule: the id is the only handle that survives a delete.
+  //
+  // ``helperId`` rather than a bare ``id``: in a component's public API the
+  // unqualified word answers nothing, and this card's template already uses
+  // ``id`` for the heading's own ``aria-labelledby``.
+  helperId: { type: Number, default: null },
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'add'])
 
-const { state, savePromptHelper } = usePromptHelpers()
+const { state, savePromptHelper, addPromptHelper, deletePromptHelper } =
+  usePromptHelpers()
 const { appendDraft } = useChat()
 
 const dialogEl = ref(null)
 const content = ref('')
-const color = ref(PROMPT_HELPER_DEFAULT_COLOR)
+const color = ref(newBulletColor())
 const error = ref('')
 
 const busy = computed(() => state.saving)
+const isNew = computed(() => props.helperId === null)
+// The heading says which bullet this is by **position**, because that is the
+// number the row draws. A new bullet has no position yet, so it is named by
+// what it is.
+const title = computed(() => {
+  if (isNew.value) return 'New memory bullet'
+  const index = state.slots.findIndex((slot) => slot.id === props.helperId)
+  return `Memory bullet ${bulletNumber(index < 0 ? state.slots.length : index)}`
+})
 
-// Prefill from the slot and show, following the SettingsDialog pattern
+// Prefill from the row and show, following the SettingsDialog pattern
 // (watch + showModal, backdrop click, native-close sync).
+//
+// ``shownFor`` is why the row is tracked by id rather than by "is the dialog
+// already open": the parent can move this form from one row to another **while
+// it stays open** — that is what "Add bullet" does — and each move has to
+// prefill. A slots change alone must not, or a reload would wipe what the user
+// is typing.
+const shownFor = ref(null)
+
 watch(
-  () => [props.open, props.index, state.slots],
+  () => [props.open, props.helperId, state.slots],
   async () => {
     await nextTick()
     const dialog = dialogEl.value
     if (!dialog) return
-    if (props.open && props.index !== null && !dialog.open) {
-      const slot = state.slots[props.index]
-      content.value = slot?.content ?? ''
-      color.value = slot?.color ?? PROMPT_HELPER_DEFAULT_COLOR
-      error.value = ''
-      dialog.showModal()
-    } else if (!props.open && dialog.open) {
-      dialog.close()
+    if (!props.open) {
+      if (dialog.open) dialog.close()
+      shownFor.value = null
+      return
     }
+    if (dialog.open && shownFor.value === props.helperId) return
+    shownFor.value = props.helperId
+    const slot = state.slots.find((entry) => entry.id === props.helperId)
+    content.value = slot?.content ?? ''
+    color.value = slot?.color ?? newBulletColor()
+    error.value = ''
+    if (!dialog.open) dialog.showModal()
   },
 )
 
@@ -50,17 +82,39 @@ function onNativeClose() {
 }
 
 async function save() {
-  if (props.index === null || state.saving) return
+  if (state.saving) return
   error.value = ''
   const saved = content.value
-  const ok = await savePromptHelper(props.index, color.value, saved)
-  if (!ok) {
+  const slots = isNew.value
+    ? await addPromptHelper(color.value, saved)
+    : await savePromptHelper(props.helperId, color.value, saved)
+  if (slots === null) {
     error.value = state.error || 'Could not save the memory bullet.'
     return
   }
   dialogEl.value?.close()
-  // Saving empty content only clears the slot — nothing goes into the draft.
+  // Saving empty content only clears the bullet — nothing goes into the draft.
   if (saved !== '') appendDraft(saved)
+}
+
+// Appends a bullet and hands the parent the open-a-new-form request. The current
+// edits are discarded on purpose: "Add" is a new bullet, not a second save, and
+// a silent overwrite of the row being edited would be the worse surprise.
+function addBullet() {
+  if (state.saving) return
+  emit('add')
+}
+
+async function removeBullet() {
+  if (isNew.value || state.saving) return
+  if (!window.confirm('Delete this memory bullet?')) return
+  error.value = ''
+  const slots = await deletePromptHelper(props.helperId)
+  if (slots === null) {
+    error.value = state.error || 'Could not delete the memory bullet.'
+    return
+  }
+  dialogEl.value?.close()
 }
 </script>
 
@@ -74,7 +128,7 @@ async function save() {
   >
     <article>
       <header>
-        <h2 id="memory-dlg-title">Memory bullet {{ (props.index ?? 0) + 1 }}</h2>
+        <h2 id="memory-dlg-title">{{ title }}</h2>
       </header>
       <p class="caption">
         This message is appended to the chat draft when the bullet is clicked.
@@ -97,6 +151,27 @@ async function save() {
           <input v-model="color" type="color" />
         </label>
         <footer class="settings-actions">
+          <!-- Delete sits left of Cancel and asks first: the store keeps a copy
+               of the whole database before the row goes (D12), but the bullet
+               itself is gone from the row, so the confirmation is the one guard.
+               It never exists for a bullet that has not been created. -->
+          <button
+            v-if="!isNew"
+            class="secondary contrast memory-bullet-delete"
+            type="button"
+            :disabled="busy"
+            @click="removeBullet"
+          >
+            Delete this bullet
+          </button>
+          <button
+            class="secondary contrast memory-bullet-add"
+            type="button"
+            :disabled="busy"
+            @click="addBullet"
+          >
+            Add bullet
+          </button>
           <button
             class="secondary contrast"
             type="button"
@@ -106,7 +181,7 @@ async function save() {
             Cancel
           </button>
           <button type="submit" :disabled="busy">
-            {{ busy ? 'Saving…' : 'Save' }}
+            {{ busy ? 'Saving…' : isNew ? 'Add' : 'Save' }}
           </button>
         </footer>
       </form>

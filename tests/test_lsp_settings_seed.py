@@ -199,14 +199,11 @@ class _RecordingHub:
 def seed_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A live app on a scratch root, declaration paths unpinned, no legacy lift."""
     from src import config as config_module
-    from src.core import mcphub, prompt_helpers
+    from src.core import mcphub
 
     for key in config_module.SETTING_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
-    monkeypatch.setattr(
-        prompt_helpers, "LEGACY_PROMPT_HELPERS_PATH", tmp_path / "no-legacy.json"
-    )
     # Unpin both declaration lookups: these tests assert the resolvers follow
     # the *working location*, which a pin would defeat.
     monkeypatch.setattr(mcphub.constants, "MCP_SETTINGS_PATH", None)

@@ -30,14 +30,49 @@ from src.core.lsphub import (
 )
 from src.core.editorfs import mutate as editorfs_mutate, policy_seed
 from src.core.termhub import TerminalHub
-from src.core import agent_modes
-from src.core import prompt_helpers
-from src.core import workspace_settings
-from src.config import lsp_enabled_ids
+from src.core import appdb
 
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 
 _log = logging.getLogger("nojae")
+
+
+def _boot_app_store() -> Dict[str, Any]:
+    """Bring the app's own settings store up; never raise.
+
+    ``appdb.boot()`` is open-or-create → schema at the current level, upgrade, or
+    refuse → seed (§4.3), and it already answers a state dict instead of raising,
+    so this wrapper only guards the *unexpected* — the same contract the five
+    seeds below hold, and the reason it matters most here: a database this app
+    could not open, write or understand must not take the boot down with it. The
+    app starts, the store's state is kept where a later task can answer it
+    (:func:`src.core.appdb.store_state` — the app bar's notice and the chat
+    refusal are tasks 09 and 03), and the sentence naming the path goes to the
+    log so the failure is a named state rather than a silent empty store.
+
+    It runs **before** the workspace seeds because it is install-scoped: nothing
+    in it depends on, or is invalidated by, the working location (D11).
+    """
+    try:
+        result = appdb.boot()
+    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
+        _log.warning("could not bring up the settings store: %s", exc)
+        return {"state": "unusable", "path": None, "sentence": str(exc)}
+    if result["state"] == "unusable":
+        _log.warning("the settings store is unusable: %s", result["sentence"])
+    else:
+        _log.info(
+            "settings store at %s (schema level %s%s): %d built-in agent(s) "
+            "inserted, %d re-asserted, %d prompt-helper row(s) seeded",
+            result["path"],
+            result["version"],
+            "" if result["upgradedFrom"] is None
+            else f", upgraded from {result['upgradedFrom']}",
+            result["agents"]["inserted"],
+            result["agents"]["reasserted"],
+            result["promptHelpers"],
+        )
+    return result
 
 
 def _seed_workspace_policy() -> Dict[str, Any]:
@@ -63,65 +98,13 @@ def _seed_workspace_policy() -> Dict[str, Any]:
     return result
 
 
-def _seed_agent_modes() -> Dict[str, Any]:
-    """Leave the workspace's default agent-modes file behind; never raise.
-
-    am-03's first of two entry points, sitting beside the policy seed because it
-    is the same contract: ``ensure_agent_modes_file`` already answers a dict
-    instead of raising, so this wrapper only guards the *unexpected*, and a
-    modes file this app could not write must not take the boot down with it. An
-    unseeded workspace chats on the built-in modes — its dropdown simply has
-    nothing of its own to customise yet.
-    """
-    try:
-        result = agent_modes.ensure_agent_modes_file(path_location())
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not seed the agent-modes file: %s", exc)
-        return {"state": "failed", "path": None, "error": str(exc)}
-    if result["state"] == "failed":
-        _log.warning(
-            "could not seed the agent-modes file at %s: %s",
-            result["path"],
-            result["error"],
-        )
-    return result
-
-
-def _seed_prompt_helpers() -> Dict[str, Any]:
-    """Leave the workspace's default prompt-helpers file behind; never raise.
-
-    mbl-02's first of two entry points, the third sibling of the policy and
-    modes seeds and the same contract: ``ensure_prompt_helpers_file`` already
-    answers a dict instead of raising, so this wrapper only guards the
-    *unexpected*, and a helpers file this app could not write must not take the
-    boot down with it. An unseeded workspace chats on nine empty bullets —
-    :func:`load_prompt_helpers` answers the defaults for an absent file.
-
-    This is also the one moment the old app-level ``resources/`` file is read
-    (spec D6): the lift happens on the branch where the file was just created,
-    and the legacy file itself is left in place.
-    """
-    try:
-        result = prompt_helpers.ensure_prompt_helpers_file(path_location())
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not seed the prompt-helpers file: %s", exc)
-        return {"state": "failed", "path": None, "error": str(exc)}
-    if result["state"] == "failed":
-        _log.warning(
-            "could not seed the prompt-helpers file at %s: %s",
-            result["path"],
-            result["error"],
-        )
-    return result
-
-
 def _seed_mcp_settings() -> Dict[str, Any]:
     """Leave the workspace's MCP declaration file behind; never raise.
 
     The second half of the pair the declaration file needs: it lives inside
     ``.nojae`` now, so the boot seed must land *before* the lifespan's first
     connector scan — a hub rebuilt over an unseeded folder would come up with
-    zero connectors. Same contract as the policy, modes and helpers seeds:
+    zero connectors. Same contract as the policy and modes seeds:
     ``ensure_mcp_settings_file`` already answers a dict instead of raising, so
     this wrapper only guards the *unexpected*, and a declaration file this app
     could not write must not take the boot down with it. An unseeded workspace
@@ -164,37 +147,6 @@ def _seed_lsp_template() -> Dict[str, Any]:
     if result["state"] == "failed":
         _log.warning(
             "could not seed the LSP settings template at %s: %s",
-            result["path"],
-            result["error"],
-        )
-    return result
-
-
-def _seed_workspace_settings() -> Dict[str, Any]:
-    """Leave the workspace's model-connection file behind; never raise.
-
-    The workspace's ``.nojae/nojae-settings.json`` is seeded the same way as the
-    four above: exclusive create from the committed template, so a workspace
-    travels with its own model the way ``mcp-settings.json`` travels with its
-    connectors. Same contract as the MCP seed, and the same *ordering* reason:
-    ``lspEnabled`` is read during the lifespan's first language-server scan once
-    the reads are cut over (the next task), so this lands before that scan — the
-    alternative would boot a workspace on **zero** language servers until the next
-    restart.
-
-    Same reserved folder, so this runs after the seeds that create it and is a
-    plain file write in the usual case. Failure is a note in the log (and, on the
-    switch, in the payload), never a boot failure: a workspace with no settings
-    file simply has no model connection yet, and the Settings dialog says so.
-    """
-    try:
-        result = workspace_settings.ensure_workspace_settings_file(path_location())
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not seed the workspace settings file: %s", exc)
-        return {"state": "failed", "path": None, "error": str(exc)}
-    if result["state"] == "failed":
-        _log.warning(
-            "could not seed the workspace settings file at %s: %s",
             result["path"],
             result["error"],
         )
@@ -250,24 +202,13 @@ def create_app() -> FastAPI:
     # honest place. Failure is a note in the log, never a boot failure: an
     # unseeded workspace still works, it just has no level-B rules yet.
     _seed_workspace_policy()
-    # The agent-modes file (am-03) follows the same rule and the same moment:
-    # seeded here at boot, and by ``POST /api/path-location`` on a switch. It
-    # goes after the policy seed because both belong to the same reserved
-    # folder, and the policy seed is the one that creates it — so in the usual
-    # case this is a plain file write, not a second mkdir. Failure is a note in
-    # the log (and, on the switch, in the payload), never a boot failure: a
-    # workspace with no modes file chats on the built-in defaults.
-    _seed_agent_modes()
-    # The prompt-helpers file follows the same rule and the same two moments:
-    # same reserved folder, so this runs after the seeds that create it and is a
-    # plain file write in the usual case. Failure is a note in the log (and, on
-    # the switch, in the payload), never a boot failure — a workspace with no
-    # helpers file chats on nine empty bullets. It is *not* called from
-    # ``config.path_location()`` (spec D5): that is a per-request reader, and a
-    # reader that writes is how a stray ``.nojae`` turns up in a project someone
-    # only meant to browse; ``POST /api/path-location`` is the other moment.
-    _seed_prompt_helpers()
-    # And the workspace's MCP declaration file: it lives inside ``.nojae``
+    # The agent modes are **not** seeded here any more (appdb-10): the personas
+    # are rows of the install's ``nojae.db``, which
+    # :func:`_boot_app_store` brings up and seeds in the lifespan below. Nothing
+    # about an agent depends on the working location, so there is nothing to
+    # leave in the folder a switch just moved to (D11).
+    #
+    # The workspace's MCP declaration file: it lives inside ``.nojae``
     # now, so this seed must land before the lifespan's first connector scan
     # below — that is the whole ordering rule for this one. Same reserved
     # folder, same contract: a note in the log, never a boot failure; a
@@ -281,18 +222,6 @@ def create_app() -> FastAPI:
     # servers. Nothing scans the template, so — unlike the MCP seed — its
     # ordering against the lifespan's first server scan carries no rule.
     _seed_lsp_template()
-    # And the workspace's model-connection file. It carries the same ordering rule
-    # as the MCP seed above and for the same reason: ``lspEnabled`` is read
-    # *during* the lifespan's first language-server scan below, so this must land
-    # before that scan or a workspace boots on zero language servers until the
-    # next restart. (That scan does not consult this file yet — the reads are cut
-    # over by the next task — so today the seed only leaves the bytes; the
-    # ordering is placed now so it is already right when they move.) Same reserved
-    # folder, same contract: a note in the log, never a boot failure; a workspace
-    # with no settings file has no model connection yet, and the Settings dialog
-    # says so rather than making a transport call with the template's instruction
-    # text.
-    _seed_workspace_settings()
     # And drain the trash of whichever location that is, plus the legacy
     # ``logs/trash`` batches the pre-``.nojae`` code wrote here. Age is the only
     # signal for a batch nobody addresses any more, and a boot is the one moment
@@ -301,6 +230,23 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # The app's own settings store comes up first: open-or-create, schema at
+        # the current level (or upgrade, or refuse), then seed (§4.3). It is
+        # install-scoped, so it has no ordering relationship with the workspace
+        # seeds above — nothing in them reads it and nothing in it reads the
+        # working location (D11).
+        #
+        # In the lifespan rather than beside those seeds, because ``create_app()``
+        # runs at *import* time here (the module-level ``app`` below), and a store
+        # created at import happens before any test fixture can move the install
+        # root — the suite would create the developer's real ``nojae.db``. The
+        # lifespan is the one moment guaranteed to run exactly once per started
+        # app, which is also what a test that owns its own store can drive.
+        #
+        # The answer is not kept on ``app.state``: ``appdb.store_state()`` is the
+        # one place the store's state is recorded, so the app bar and the chat
+        # refusal of the tasks after this one cannot disagree with the boot.
+        _boot_app_store()
         # MCP connector sessions live exactly as long as the web app: connected
         # here on startup, closed on shutdown. The env var is a test/dev switch
         # that keeps the endpoints alive but connects nothing. Every connector
@@ -321,16 +267,13 @@ def create_app() -> FastAPI:
         servers = (
             [] if os.environ.get("NOJAE_DISABLE_LSP") else all_servers()[0]
         )
-        # Two gates must agree for a server to run: its ``enable`` flag in
-        # .nojae/lsp-settings.json and ``lspEnabled`` in the workspace's
-        # .nojae/nojae-settings.json, so a prepared config file can stay
-        # entirely dormant.
-        active_ids = {
-            server["id"] for server in servers if server["enable"]
-        } & set(lsp_enabled_ids())
+        # One gate decides whether a server runs here: its ``enable`` flag in
+        # .nojae/lsp-settings.json — the same rule the MCP hub above follows,
+        # so ``start_all`` is all the app asks of either hub. (The hub itself
+        # skips the entries whose flag is off, and the lazy ones.)
         lsp = LspManager(servers)
         app.state.lsp = lsp
-        await lsp.start_enabled(sorted(active_ids))
+        await lsp.start_all()
         # The terminal registry is a plain dict (no hub thread): sessions are
         # driven by their WebSocket coroutine, on this loop. Nothing spawns at
         # boot — a session is only born on a WS upgrade — but it is created

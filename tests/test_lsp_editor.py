@@ -793,17 +793,19 @@ def editor_client(monkeypatch, tmp_path):
     """The app with a real hub behind it, on a ``tmp_path`` workspace.
 
     Driven the way ``tests/test_lsp.py``'s ``TestLspEndpoints`` drives the LSP
-    routes — ``neutralise_workspace_settings`` for the model connection and the
-    activation gate, ``lsphub.constants`` for the declaration file — with one
-    difference: the hub is a real ``LspManager`` running the fake server, so the
-    route's answer is a real answer rather than a stub's.
+    routes — ``neutralise_store`` for the model connection, ``lsphub.constants``
+    for the declaration file, which is also the **only** activation gate (D13:
+    the ``fake`` entry below is declared ``enable: true``, and that is the whole
+    reason the hub has a server to answer with) — with one difference: the hub is
+    a real ``LspManager`` running the fake server, so the route's answer is a
+    real answer rather than a stub's.
     """
     from src import config as config_module
     from src.api import routes
     from src.api.server import create_app
     from src.core import mcphub
     from src.core.lsphub import constants as lsp_constants
-    from tests.conftest import neutralise_workspace_settings
+    from tests.conftest import neutralise_store
 
     for key in config_module.SETTING_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -811,7 +813,7 @@ def editor_client(monkeypatch, tmp_path):
 
     root = tmp_path / "workspace"
     root.mkdir(exist_ok=True)
-    neutralise_workspace_settings(monkeypatch, root, lspEnabled=["fake"])
+    neutralise_store(monkeypatch, root)
 
     servers_dir = tmp_path / "lsp_connectors"
     servers_dir.mkdir()
@@ -992,44 +994,26 @@ class TestTheTwoGatesThatMustNotApply:
         client, _app, _manager = editor_client
         root = tmp_path / "workspace"
         (root / "a.py").write_text("x = 1\n", encoding="utf-8")
-        folder = root / agent_modes.POLICY_DIRNAME
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / agent_modes.AGENT_MODES_FILENAME).write_text(
-            json.dumps(
-                {
-                    "version": agent_modes.AGENT_MODES_VERSION,
-                    "default": "code",
-                    "agents": {
-                        "code": {
-                            "label": "Code",
-                            "mcptools": True,
-                            "lsptools": False,
-                            "systemMessage": "implement it",
-                        }
-                    },
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        # The agent is a row now, so its flag is set where the dialog sets it.
+        assert client.post("/api/agents/save", json={
+            "id": "code", "mcpEnable": True, "lspEnable": False,
+            "systemMessage": "implement it",
+        }).status_code == 200
+
+        # The agent really is the one in force, and its flag really is off —
+        # otherwise the assertion below would pass for the wrong reason.
+        mode, _findings = agent_modes.resolve_mode("code")
+        assert mode is not None and mode.id == "code"
+        assert mode.lsptools is False
+
+        response = client.post(
+            "/api/lsp/query",
+            json={"action": "definition", "path": "a.py", "line": 0, "character": 0},
         )
-        agent_modes.invalidate_agent_modes_cache()
-        try:
-            # The mode really is the one in force, and its flag really is off —
-            # otherwise the assertion below would pass for the wrong reason.
-            mode, _findings = agent_modes.resolve_mode(None)
-            assert mode is not None and mode.id == "code"
-            assert mode.lsptools is False
 
-            response = client.post(
-                "/api/lsp/query",
-                json={"action": "definition", "path": "a.py", "line": 0, "character": 0},
-            )
-
-            assert response.status_code == 200
-            assert response.json()["status"] == "ok"
-            assert response.json()["server"] == "fake"
-        finally:
-            agent_modes.invalidate_agent_modes_cache()
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+        assert response.json()["server"] == "fake"
 
     def test_a_busy_app_leaves_the_pane_answering(self, editor_client, tmp_path, monkeypatch):
         """The route consults no busy flag: reading code is not a write.

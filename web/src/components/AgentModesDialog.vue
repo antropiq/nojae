@@ -1,118 +1,95 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import {
-  addModeToDraft,
-  blockingFindings,
-  createDisabledFor,
-  deleteDisabledFor,
-  deleteModeFromDraft,
-  draftIsDirty,
-  draftWillCreateFile,
-  entryBlocksSave,
-  entryFindingsFor,
-  fetchAgentModesDocument,
-  fileFindingsFor,
-  findingFieldFor,
+  NO_MODEL_LABEL,
+  READONLY_CAPTION,
+  addAgentToDraft,
+  deleteAgent,
+  deleteOfferedFor,
+  entryProblems,
+  fetchAgentDraft,
+  fieldsDisabledFor,
   idEditableFor,
-  idValidityProblem,
+  modelChoices,
+  modelLineFor,
   personaByteCount,
-  personaLineBudget,
-  saveAgentModesDocument,
+  saveAgent,
   saveDisabledFor,
   slugForDraft,
   tabCaptionFor,
   useAgentModes,
 } from '../composables/useAgentModes'
+import { useAppShell } from '../composables/useAppShell'
 
-// The agent-modes editor (eds-06): one card that edits the workspace's modes
-// file the way SettingsDialog edits the model connection — fields instead of
-// JSON, the caps enforced on the way in, and the file's own problems named where
-// they can be fixed.
+// The agent-list editor: one card that edits the installation's `agents` rows
+// the way SettingsDialog edits the servers and models — one tab per agent,
+// fields instead of a file, the caps enforced on the way in.
 //
 // It decides **nothing**. Every rule this card renders is a plain function from
-// `useAgentModes` (eds-05): the slug, the counters, the Save-disabled verdict,
-// the Delete refusal, the tab caption, which finding belongs on which field. The
-// component only turns those answers into fields, so a rule cannot drift from
-// the dialog that shows it — and no cap is spelled here, because every number
-// arrives in the document payload's `caps`.
+// `useAgentModes`: the slug, the byte counter, the field-named problems, the
+// Save verdict, the Delete offer, the model line. The component only turns those
+// answers into fields, so a rule cannot drift from the dialog that shows it —
+// and no cap is spelled here, because every number arrives in the payload's
+// `caps`.
+//
+// **`readonly` is data, never an id.** The fields of an app-owned agent render
+// disabled and one caption says why, but this file never compares an agent id:
+// the flag the server publishes is the whole answer (and a test scans `web/src`
+// to keep it that way).
 //
 // It opens the way the other cards open (watch + showModal + backdrop click +
 // native-close sync, the SettingsDialog / RegistrationMemoryDlg / BatchModeDialog
 // pattern), and reuses their two-column shape: a vertical nav beside the editor
-// column, one tab per mode the **file** declares in the file's own order, plus
-// Common (D5). The app-owned mode is absent from everything rendered here — it
-// is not in the payload's entries, not in the default dropdown and not in any
-// list (D4), and this file never names its id.
-//
-// The dialog is a browser surface: it reaches the file through the two
-// purpose-built calls the composable owns (its document read and its whole-
-// document save), never through a file-tree route and never through a path
-// parameter — which is why no route path is spelled anywhere in this file.
+// column, one tab per agent the **store** holds, in the order it holds them.
+// The Common tab is gone — its only control edited the default agent D5 removed —
+// and the app-owned agent now *has* a tab, exactly like every other row (D4).
 
 const props = defineProps({
   open: { type: Boolean, default: false },
-  // D10's enablement, passed in by whoever mounts this (eds-07): the pencil is
-  // inert while a reply streams and while a lot runs. The dialog does not read
-  // useChat or useBatch — the same acyclic rule useAgentModes itself follows.
-  batchActive: { type: Boolean, default: false },
-  // The mode the composer's dropdown currently holds, passed in so the card can
-  // open on that mode's tab. It is only a preference: the app-owned mode is not
-  // in the file's entries, so an id the payload does not carry falls through to
-  // the ordinary open rule below.
+  // The agent the composer's dropdown currently holds, passed in so the card
+  // opens on that agent's tab. Only a preference: an id the list does not hold
+  // falls through to the first agent, which is the landing rule.
   initialMode: { type: String, default: null },
 })
 const emit = defineEmits(['close'])
 
 const { editor } = useAgentModes()
+// The model dropdown's contents are the *connection* store's rows, which the
+// Settings dialog already reads. Sharing the singleton rather than fetching a
+// second time is what keeps the two dialogs naming one catalogue.
+const { state: shell, loadServers } = useAppShell()
 
 const dialogEl = ref(null)
 const draft = ref(null)
-const activeTab = ref('common')
+const activeTab = ref(null)
 const createLabel = ref('')
-const pendingDelete = ref(null) // one Delete awaiting its confirm, per tab
+const pendingDelete = ref(null) // the entry whose Delete awaits its confirm
+const savingEntry = ref(null) // the entry whose Save is in flight
 
 // The draft is this dialog's state, not the singleton's: a card that reads a
-// broken file must leave the composer's dropdown exactly as it was.
+// damaged store must leave the composer's dropdown exactly as it was.
 const loaded = computed(() => draft.value !== null)
 const entries = computed(() => draft.value?.entries ?? [])
-const willCreate = computed(() => loaded.value && draftWillCreateFile(draft.value))
-const dirty = computed(() => loaded.value && draftIsDirty(draft.value))
-const fileFindings = computed(() => (loaded.value ? fileFindingsFor(draft.value) : { errors: [], notes: [] }))
-// The count the footer states and the Save button obeys are the *same* verdict:
-// `blockingFindings` is the composable's, including the draft's own re-measured
-// persona/default/count findings and excluding a finding the form has fixed.
-const blocking = computed(() => (loaded.value ? blockingFindings(draft.value).length : 0))
-
-const saveBlocked = computed(() =>
-  !loaded.value || editor.saving || saveDisabledFor(draft.value, { saving: editor.saving }),
+const activeEntry = computed(
+  () => entries.value.find((entry) => `entry:${entry.id}` === activeTab.value) ?? null,
 )
-const createBlocked = computed(() => !loaded.value || editor.saving || createDisabledFor(draft.value))
+const groups = computed(() => modelChoices(shell.servers))
+const serverFindings = computed(() => editor.serverFindings)
 
-// The Common tab's default dropdown: the editable modes the *file* declares, in
-// the file's order. It cannot select the app-owned mode because the payload
-// never carries it, and it never lists an entry the dialog has no tab for.
-const defaultableModes = computed(() => entries.value.filter((entry) => entry.hasForm))
-
-const conflictLine = computed(() => {
-  const conflict = editor.conflict
-  if (!conflict) return null
-  return (
-    `The file changed on disk since this dialog read it, so nothing was written: ` +
-    `${conflict.path || 'the agent-modes file'} now holds mtime ${conflict.diskMtime}, ` +
-    `this dialog holds ${conflict.documentMtime}. Your draft is still here — close without ` +
-    `saving to keep the file as it is, or edit it outside the app and reopen.`
-  )
+// The one answer the Save button renders, from the composable — for the tab the
+// user is looking at. A card with no active tab (nothing loaded) has no Save.
+const saveBlocked = computed(() => {
+  if (!loaded.value || editor.saving) return true
+  return saveDisabledFor(draft.value, activeEntry.value, { saving: savingEntry.value !== null })
 })
 
-const serverFindings = computed(() => editor.invalidFindings)
-
 // Open/fetch/close, following the SettingsDialog pattern. Opening *is* the read:
-// the document is uncached on purpose (it is the save's baseline), so a card
-// that has been open for ten minutes knows it.
+// agents are uncached on purpose (the store is the cache, D11), so a card that
+// has been open for ten minutes knows it.
 //
 // `immediate` because the pencil mounts this card with `open` already true (the
 // composer holds the flag): a watch that only fires on a *change* would leave a
-// card mounted while open never reading the file.
+// card mounted while open never reading the list.
 watch(
   () => [props.open, editor.loading],
   async () => {
@@ -121,7 +98,7 @@ watch(
     if (!dialog) return
     if (props.open && !dialog.open) {
       dialog.showModal()
-      if (!loaded.value) await openDocument()
+      if (!loaded.value) await openList()
     } else if (!props.open && dialog.open) {
       dialog.close()
     }
@@ -129,38 +106,34 @@ watch(
   { immediate: true },
 )
 
-async function openDocument() {
-  activeTab.value = 'common'
+async function openList() {
   createLabel.value = ''
   pendingDelete.value = null
-  draft.value = await fetchAgentModesDocument()
-  // D3: a finding *opens its entry's tab*. So the card lands on the first entry
-  // holding Save (`entryBlocksSave`, the composable's verdict), and only
-  // otherwise on the first mode the file declares. With nothing declared, the
-  // Common tab is the one that opens.
+  savingEntry.value = null
+  // The models the dropdown offers, from the connection store's own read. A
+  // failure is not this card's to report: an empty catalogue simply means every
+  // model option is the empty one. Re-read every time the card opens, because a
+  // model may have been added since.
+  loadServers()
+  draft.value = await fetchAgentDraft()
   const opened = draft.value
   if (!opened) return
-  // D3 first: a finding *opens its entry's tab*, so the fix is on screen — that
-  // rule outranks the convenience below. Otherwise the composer's current mode,
-  // when the file declares it, opens: the pencil sits beside the dropdown, so
-  // the tab the user is editing is usually the one they just picked. The
-  // app-owned mode is not among the entries, and neither is a stale id — both
-  // fall through to the file's first entry.
-  const broken = opened.entries.find((entry) => entryBlocksSave(opened, entry))
-  const chosen = opened.entries.find((entry) => entry.key === props.initialMode)
-  focusTab(tabIdFor(broken ?? chosen ?? opened.entries[0] ?? null), /* focusFields = */ false)
+  // The landing rule: the composer's current agent when the list holds it, and
+  // otherwise the first agent — which is the fallback the card always had.
+  const chosen = opened.entries.find((entry) => entry.id === props.initialMode)
+  activeTab.value = tabIdFor(chosen ?? opened.entries[0] ?? null)
 }
 
 function tabIdFor(entry) {
-  return entry ? `entry:${entry.key}` : 'common'
+  return entry ? `entry:${entry.id}` : null
 }
 
 function onBackdropClick(event) {
   if (event.target === dialogEl.value) cancel()
 }
 
-// Esc (or a programmatic close) is Cancel: it writes nothing, so a file that
-// existed stays byte-identical and a file that did not exist still does not.
+// Esc (or a programmatic close) is Cancel: it writes nothing, so the store is
+// exactly as it was and any unsaved tab is dropped.
 function onNativeClose() {
   if (props.open) emit('close')
 }
@@ -171,133 +144,98 @@ function cancel() {
   emit('close')
 }
 
-// Create agent (D5): append the tab immediately and focus it. Nothing is
-// written — the new mode exists only in this card's state until Save. Its id is
-// the slug of its label, and it stays editable only while the mode is new.
+// Create agent: append the tab immediately and focus it. **Nothing is written**
+// until that tab's own Save, because the row does not exist yet — which is the
+// one thing that differs between a create and an update here.
 async function createAgent() {
-  if (!loaded.value || createBlocked.value) return
-  const entry = addModeToDraft(draft.value, createLabel.value)
+  if (!loaded.value || editor.saving) return
+  const entry = addAgentToDraft(draft.value, createLabel.value)
   focusTab(tabIdFor(entry), true)
 }
 
-// Focus what the user is about to type into: the first field of the section that
-// is now shown. `v-show` keeps every section in the DOM, so the query is scoped
-// to the active tab's own section — otherwise a Create would focus the *first*
-// mode's Label instead of the new mode's.
+// Focus what the user is about to type into: the first live field of the
+// section now shown. `v-show` keeps every section in the DOM, so the query is
+// scoped to the active tab's own section — otherwise a Create would focus the
+// *first* agent's Label instead of the new one's.
 async function focusTab(id, focusFields = true) {
   activeTab.value = id
   await nextTick()
   if (!focusFields) return
-  const key = id === 'common' ? 'common' : id.slice('entry:'.length)
-  // Matched through `dataset`, not an attribute selector: an entry key is a raw
-  // JSON key from a hand-edited file, and one holding a quote or a bracket would
-  // make such a selector throw. The focus is a convenience, never a crash.
+  const key = id.slice('entry:'.length)
   const section = [...(dialogEl.value?.querySelectorAll('section[data-tab]') ?? [])].find(
     (node) => node.dataset.tab === key,
   )
-  section?.querySelector('input:not([disabled]), textarea:not([disabled])')?.focus()
+  section
+    ?.querySelector('input:not([disabled]), textarea:not([disabled]), select:not([disabled])')
+    ?.focus()
 }
 
-// A new mode's id follows its Label field until the user edits it by hand: the
+// A new agent's id follows its Label field until the user edits it by hand: the
 // slug is the composable's rule, and an id typed here is judged by the same one.
-function onNewLabelChange(entry) {
+function onLabelChange(entry) {
   if (!idEditableFor(entry)) return
-  entry.key = slugForDraft(draft.value, entry.label)
+  entry.id = slugForDraft(draft.value, entry.label)
 }
 
-function idProblem(entry) {
-  return loaded.value ? idValidityProblem(draft.value, entry) : null
+function problemsOn(entry) {
+  return loaded.value ? entryProblems(draft.value, entry) : []
 }
 
-function findingsOn(entry) {
-  return loaded.value ? entryFindingsFor(draft.value, entry) : []
+// The problems that name one field, placed next to it — the same "next to" the
+// loader's findings had, now with a field name instead of a JSON pointer.
+function fieldProblems(entry, field) {
+  return problemsOn(entry).filter((problem) => problem.field === field)
 }
 
-// The findings that name one field of this entry — the loader's own sentences,
-// placed next to the field they talk about (D3). `findingFieldFor` reads the
-// JSON pointer out of the message, so "next to" is the loader's fact and not a
-// guess made here.
-function fieldFindings(entry, field) {
-  return findingsOn(entry).filter((finding) => findingFieldFor(entry, finding.message) === field)
+function fieldsLocked(entry) {
+  return fieldsDisabledFor(entry) || savingEntry.value !== null
 }
 
-// The findings that name no field this form has: an unknown key, a finding about
-// the entry as a whole. They are listed at the end of the tab, because there is
-// no field to put them on — and they are the ones the form cannot fix, only
-// delete (D3).
-function unfixedFindings(entry) {
-  return findingsOn(entry).filter(
-    (finding) => !['label', 'mcptools', 'lsptools', 'systemMessage'].includes(
-      findingFieldFor(entry, finding.message),
-    ),
-  )
+function modelLine(entry) {
+  return modelLineFor(entry, shell.servers)
 }
 
-function personaCounters(entry) {
-  const text = typeof entry.personaText === 'string' ? entry.personaText : ''
-  return {
-    bytes: personaByteCount(text),
-    cap: draft.value?.caps?.maxPersonaBytes ?? null,
-    budget: personaLineBudget(draft.value, text),
-  }
-}
-
-// The built-in persona for this entry, or null when the app has none for it —
-// which is what makes Reset appear only for an entry nojae ships a persona
-// for (a user-created mode has nothing to reset to).
-function builtInPersona(entry) {
-  const agents = draft.value?.defaults?.agents
-  if (!agents || !Object.prototype.hasOwnProperty.call(agents, entry.key)) return null
-  const raw = agents[entry.key]?.systemMessage
-  if (typeof raw === 'string') return raw
-  if (Array.isArray(raw) && raw.every((line) => typeof line === 'string')) return raw.join('\n')
-  return null
-}
-
-function resetPersona(entry) {
-  const persona = builtInPersona(entry)
-  if (persona !== null) entry.personaText = persona
-}
-
-// Delete, with a confirm, refused for the mode that is currently the default (a
-// default must name a declared mode). The refusal is the composable's answer;
-// this card only puts it next to the button.
+// Delete, with a confirm. Offered for user-created agents only (D4) — the flag
+// is the store's, so this card never names an agent to decide.
 function askDelete(entry) {
-  if (deleteDisabledFor(draft.value, entry.key)) return // the named refusal is already shown
-  pendingDelete.value = entry.key
-}
-
-function confirmDelete() {
-  const key = pendingDelete.value
-  if (!key || !loaded.value) return
-  deleteModeFromDraft(draft.value, key)
-  pendingDelete.value = null
-  if (activeTab.value === `entry:${key}`) activeTab.value = 'common'
+  if (!deleteOfferedFor(entry)) return
+  pendingDelete.value = entry.id
 }
 
 function dismissDelete() {
   pendingDelete.value = null
 }
 
-function deleteRefusal(entry) {
-  return deleteDisabledFor(draft.value, entry.key)
-    ? 'This is the default mode — pick another default before deleting it.'
-    : null
+async function confirmDelete() {
+  const entry = activeEntry.value
+  if (!entry || entry.id !== pendingDelete.value) return
+  pendingDelete.value = null
+  const next = await deleteAgent(entry)
+  if (!next) return // the reason is on the card's error line
+  // The whole list came back: adopt it, drop the deleted tab, and land on the
+  // first agent that is left (there is always a built-in, D4).
+  draft.value = next
+  activeTab.value = tabIdFor(entries.value[0] ?? null)
 }
 
+// Save one agent — this tab's, and only this one. A new row is created; an
+// existing one is rewritten, and a `readonly` row sends its model alone. The
+// answer is the whole new list, and it has already refreshed the composer's
+// dropdown (`acceptPayload` in the composable), so a successful save closes the
+// card — the write is the whole action, and a card left open would leave the
+// user hunting for a second "done".
 async function save() {
-  if (!loaded.value || saveBlocked.value) return
-  const ok = await saveAgentModesDocument(draft.value, { batchActive: props.batchActive })
-  if (ok) cancel()
-  // A failure keeps the card open with the reason named (a 409 conflict, a
-  // server 422's findings, a transport error): nothing is merged, nothing is
-  // overwritten and the draft survives.
-}
-
-// Cancel writes nothing: the draft is dropped, so a file that existed is
-// byte-identical and a file that did not exist still does not.
-function cancelWritesNothing() {
-  return dirty.value ? 'Cancel discards these edits and writes nothing.' : 'Cancel writes nothing.'
+  const entry = activeEntry.value
+  if (!entry || saveBlocked.value) return
+  savingEntry.value = entry.id
+  try {
+    const next = await saveAgent(entry)
+    if (!next) return // a refusal keeps the card open, with its sentence shown
+    draft.value = next
+    emit('close')
+  } finally {
+    savingEntry.value = null
+  }
 }
 </script>
 
@@ -314,21 +252,11 @@ function cancelWritesNothing() {
         <h2 id="agent-modes-title" class="settings-title">Agent modes</h2>
       </header>
 
-      <p v-if="editor.loading" class="caption" role="status">Reading the modes file…</p>
+      <p v-if="editor.loading" class="caption" role="status">Reading the agents…</p>
       <p v-if="editor.error" class="alert-error" role="alert">{{ editor.error }}</p>
-      <p v-if="conflictLine" class="alert-error agent-modes-conflict" role="alert">{{ conflictLine }}</p>
-      <p v-if="willCreate" class="caption agent-modes-creates-file" role="status">
-        This workspace has no modes file yet — saving will create it, starting from
-        nojae's default modes.
-      </p>
 
-      <p v-if="fileFindings.errors.length" class="alert-error agent-modes-file-findings" role="alert">
-        <span v-for="finding in fileFindings.errors" :key="finding.message" class="agent-modes-finding">
-          {{ finding.message }}
-        </span>
-      </p>
-      <p v-if="fileFindings.notes.length" class="caption agent-modes-file-notes">
-        <span v-for="finding in fileFindings.notes" :key="finding.message" class="agent-modes-finding">
+      <p v-if="draft?.findings?.length" class="alert-error agent-modes-file-findings" role="alert">
+        <span v-for="finding in draft.findings" :key="finding.message" class="agent-modes-finding">
           {{ finding.message }}
         </span>
       </p>
@@ -345,26 +273,16 @@ function cancelWritesNothing() {
         <div class="settings-body agent-modes-body">
           <nav class="settings-nav agent-modes-nav" aria-label="Agent modes">
             <ul>
-              <li>
-                <button
-                  type="button"
-                  :class="{ active: activeTab === 'common', 'agent-modes-tab': true }"
-                  :aria-current="activeTab === 'common' ? 'true' : undefined"
-                  @click="activeTab = 'common'"
-                >
-                  Common
-                </button>
-              </li>
-              <li v-for="entry in entries" :key="entry.key">
+              <li v-for="entry in entries" :key="entry.id">
                 <button
                   type="button"
                   :class="{
                     'agent-modes-tab': true,
-                    active: activeTab === `entry:${entry.key}`,
-                    'agent-modes-tab--broken': entryBlocksSave(draft, entry),
+                    active: activeTab === `entry:${entry.id}`,
+                    'agent-modes-tab--broken': problemsOn(entry).length > 0,
                   }"
-                  :aria-current="activeTab === `entry:${entry.key}` ? 'true' : undefined"
-                  @click="activeTab = `entry:${entry.key}`"
+                  :aria-current="activeTab === `entry:${entry.id}` ? 'true' : undefined"
+                  @click="activeTab = `entry:${entry.id}`"
                 >
                   {{ tabCaptionFor(entry) }}
                 </button>
@@ -378,13 +296,13 @@ function cancelWritesNothing() {
                 spellcheck="false"
                 placeholder="Reviewer"
                 autocomplete="off"
-                :disabled="createBlocked"
+                :disabled="editor.saving"
               />
             </label>
             <button
               class="agent-modes-create-button"
               type="button"
-              :disabled="createBlocked"
+              :disabled="editor.saving"
               @click="createAgent"
             >
               + Create agent
@@ -392,163 +310,170 @@ function cancelWritesNothing() {
           </nav>
 
           <div class="settings-editor agent-modes-editor">
-            <section data-tab="common" v-show="activeTab === 'common'">
-              <h3 class="settings-section-title">Common</h3>
-              <label>
-                Default mode
-                <select v-model="draft.default" :disabled="editor.saving">
-                  <option v-if="!defaultableModes.length" value="" disabled>
-                    This file declares no modes to default to
-                  </option>
-                  <option v-for="entry in defaultableModes" :key="entry.key" :value="entry.key">
-                    {{ tabCaptionFor(entry) }}
-                  </option>
-                </select>
-              </label>
-            </section>
-
             <section
               v-for="entry in entries"
-              :key="entry.key"
-              :data-tab="entry.key"
-              v-show="activeTab === `entry:${entry.key}`"
+              :key="entry.id"
+              :data-tab="entry.id"
+              v-show="activeTab === `entry:${entry.id}`"
             >
-              <template v-if="!entry.hasForm">
-                <!-- An entry with no fields to put in a form (its value is not an
-                     object, its id is outside the pattern): the tab holds the
-                     finding and a Delete only, so the file's own text is visible
-                     and removable — Delete is the only way out of it. -->
-                <p class="caption">
-                  This entry has no fields to edit. It is listed because the file
-                  declares it; saving cannot keep it.
-                </p>
-                <p
-                  v-for="finding in findingsOn(entry)"
-                  :key="finding.message"
-                  class="alert-error agent-modes-field-finding"
-                  role="alert"
-                >
-                  {{ finding.message }}
-                </p>
-              </template>
+              <!-- A `readonly` agent: everything nojae owns is rendered but
+                   disabled, the model stays live, and one caption says why. The
+                   **flag** decides this, never an id (§4.4). -->
+              <p v-if="entry.readonly" class="caption agent-modes-readonly">
+                {{ READONLY_CAPTION }}
+              </p>
 
-              <template v-else>
-                <label>
-                  Label
-                  <input
-                    v-model="entry.label"
-                    type="text"
-                    spellcheck="false"
-                    autocomplete="off"
-                    :disabled="editor.saving"
-                    @change="onNewLabelChange(entry)"
-                  />
-                </label>
-                <p
-                  v-for="finding in fieldFindings(entry, 'label')"
-                  :key="finding.message"
-                  class="alert-error agent-modes-field-finding"
-                  role="alert"
-                >
-                  {{ finding.message }}
-                </p>
-                <label v-if="idEditableFor(entry)">
-                  Id
-                  <input
-                    v-model="entry.key"
-                    type="text"
-                    spellcheck="false"
-                    autocomplete="off"
-                    :disabled="editor.saving"
-                  />
-                </label>
-                <p v-if="idProblem(entry)" class="alert-error agent-modes-field-finding" role="alert">
-                  {{ idProblem(entry) }}
-                </p>
+              <label>
+                Label
+                <input
+                  v-model="entry.label"
+                  type="text"
+                  spellcheck="false"
+                  autocomplete="off"
+                  :disabled="fieldsLocked(entry)"
+                  @change="onLabelChange(entry)"
+                />
+              </label>
+              <p
+                v-for="problem in fieldProblems(entry, 'label')"
+                :key="problem.message"
+                class="alert-error agent-modes-field-finding"
+                role="alert"
+              >
+                {{ problem.message }}
+              </p>
 
-                <div class="agent-modes-switches">
-                  <label class="agent-modes-switch">
-                    <input type="checkbox" role="switch" v-model="entry.mcptools" :disabled="editor.saving" />
-                    MCP tools
-                  </label>
-                  <label class="agent-modes-switch">
-                    <input type="checkbox" role="switch" v-model="entry.lsptools" :disabled="editor.saving" />
-                    LSP tools
-                  </label>
-                </div>
-                <p
-                  v-for="finding in [...fieldFindings(entry, 'mcptools'), ...fieldFindings(entry, 'lsptools')]"
-                  :key="finding.message"
-                  class="alert-error agent-modes-field-finding"
-                  role="alert"
-                >
-                  {{ finding.message }}
-                </p>
-                <label>
-                  System prompt
-                  <textarea
-                    v-model="entry.personaText"
-                    rows="8"
-                    spellcheck="false"
-                    :disabled="editor.saving || entry.personaText === null"
-                    placeholder="Leave empty to use the configured system prompt."
-                  ></textarea>
+              <!-- The id: a field only while the agent is **new**, where the
+                   slug the Label generated can still be corrected. An existing
+                   row's id is immutable (a rename would orphan the sessions that
+                   name it) and names nothing the user acts on, so it is not
+                   shown — the tab is captioned by the Label, and the room is
+                   better spent on the fields that can be edited. -->
+              <label v-if="idEditableFor(entry)">
+                Id
+                <input
+                  v-model="entry.id"
+                  type="text"
+                  spellcheck="false"
+                  autocomplete="off"
+                  :disabled="fieldsLocked(entry)"
+                />
+              </label>
+              <p
+                v-for="problem in fieldProblems(entry, 'id')"
+                :key="problem.message"
+                class="alert-error agent-modes-field-finding"
+                role="alert"
+              >
+                {{ problem.message }}
+              </p>
+
+              <div class="agent-modes-switches">
+                <label class="agent-modes-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    v-model="entry.mcpEnable"
+                    :disabled="fieldsLocked(entry)"
+                  />
+                  MCP tools
                 </label>
-                <p
-                  v-for="finding in fieldFindings(entry, 'systemMessage')"
-                  :key="finding.message"
-                  class="alert-error agent-modes-field-finding agent-modes-persona-finding"
-                  role="alert"
-                >
-                  {{ finding.message }}
-                </p>
-                <p class="caption agent-modes-persona-count">
-                  {{ personaCounters(entry).bytes }} / {{ personaCounters(entry).cap }} bytes
-                </p>
-                <p v-if="personaCounters(entry).budget" class="caption agent-modes-persona-lines">
-                  remaining line cap: {{ personaCounters(entry).budget.remaining }}
-                </p>
-                <p
-                  v-if="personaCounters(entry).budget?.warning"
-                  class="caption agent-modes-persona-warning"
-                  role="status"
-                >
-                  {{ personaCounters(entry).budget.warning }}
-                </p>
-                <p
-                  v-for="finding in unfixedFindings(entry)"
-                  :key="finding.message"
-                  class="alert-error agent-modes-field-finding"
-                  role="alert"
-                >
-                  {{ finding.message }}
-                </p>
-              </template>
+                <label class="agent-modes-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    v-model="entry.lspEnable"
+                    :disabled="fieldsLocked(entry)"
+                  />
+                  LSP tools
+                </label>
+              </div>
+
+              <label>
+                System prompt
+                <textarea
+                  v-model="entry.personaText"
+                  rows="8"
+                  spellcheck="false"
+                  :disabled="fieldsLocked(entry)"
+                  placeholder="Leave empty to use the model's own system prompt."
+                ></textarea>
+              </label>
+              <p
+                v-for="problem in fieldProblems(entry, 'systemMessage')"
+                :key="problem.message"
+                class="alert-error agent-modes-field-finding agent-modes-persona-finding"
+                role="alert"
+              >
+                {{ problem.message }}
+              </p>
+              <p class="caption agent-modes-persona-count">
+                {{ personaByteCount(entry.personaText) }} / {{ draft.caps.maxPersonaBytes ?? '—' }} bytes
+              </p>
+
+              <label>
+                Max tool iterations
+                <input
+                  v-model.number="entry.maxToolIteration"
+                  type="number"
+                  :min="draft.caps.minToolIteration ?? null"
+                  :disabled="fieldsLocked(entry)"
+                />
+              </label>
+              <p
+                v-for="problem in fieldProblems(entry, 'maxToolIteration')"
+                :key="problem.message"
+                class="alert-error agent-modes-field-finding"
+                role="alert"
+              >
+                {{ problem.message }}
+              </p>
+
+              <!-- The model: live for **every** agent, a `readonly` one
+                   included, because it is the one field of those rows the user
+                   owns. No "use the default" entry — there is no default (D5) —
+                   so the empty option is an explicit, legal choice with a
+                   visible cost. -->
+              <label>
+                Model
+                <select v-model.number="entry.modelId" :disabled="savingEntry !== null">
+                  <option :value="null">{{ NO_MODEL_LABEL }}</option>
+                  <optgroup
+                    v-for="group in groups"
+                    :key="group.server"
+                    :label="group.server"
+                  >
+                    <option
+                      v-for="model in group.models"
+                      :key="model.id"
+                      :value="model.id"
+                    >
+                      {{ model.name }}
+                    </option>
+                  </optgroup>
+                </select>
+              </label>
+              <p class="caption agent-modes-model-line">{{ modelLine(entry) }}</p>
 
               <div class="agent-modes-actions">
+                <!-- Delete is offered for user-created agents only; a built-in's
+                     tab says so instead of offering a button that can only be
+                     refused (D4, AC-11). -->
                 <button
-                  v-if="builtInPersona(entry) !== null"
-                  class="secondary contrast agent-modes-reset"
-                  type="button"
-                  :disabled="editor.saving"
-                  @click="resetPersona(entry)"
-                >
-                  Reset
-                </button>
-                <button
+                  v-if="deleteOfferedFor(entry)"
                   class="secondary contrast agent-modes-delete-button"
                   type="button"
-                  :disabled="editor.saving || deleteDisabledFor(draft, entry.key)"
+                  :disabled="editor.saving || entry.isNew"
                   @click="askDelete(entry)"
                 >
                   Delete
                 </button>
               </div>
               <div class="agent-modes-delete">
-                <p v-if="deleteRefusal(entry)" class="caption alert-error agent-modes-delete-refusal" role="status">
-                  {{ deleteRefusal(entry) }}
+                <p v-if="!deleteOfferedFor(entry)" class="caption agent-modes-delete-refusal">
+                  {{ entry.isNew ? 'Save this agent before it can be deleted.' : 'nojae owns this agent, so it cannot be deleted.' }}
                 </p>
-                <div v-if="pendingDelete === entry.key" class="agent-modes-delete-confirm">
+                <div v-if="pendingDelete === entry.id" class="agent-modes-delete-confirm">
                   <!-- The confirm is asked *in place*, not by a nested dialog:
                        this card is already a modal. -->
                   <button class="agent-modes-delete-yes" type="button" @click="confirmDelete">
@@ -564,21 +489,24 @@ function cancelWritesNothing() {
         </div>
 
         <footer class="settings-actions">
-          <p v-if="blocking" class="caption agent-modes-blocking-note" role="status">
-            {{ blocking }} problem{{ blocking === 1 ? '' : 's' }} in this document must
-            be fixed or removed before it can be saved — no entry is dropped silently.
+          <p
+            v-if="activeEntry && problemsOn(activeEntry).length"
+            class="caption agent-modes-blocking-note"
+            role="status"
+          >
+            {{ problemsOn(activeEntry).length }} problem{{ problemsOn(activeEntry).length === 1 ? '' : 's' }}
+            in this agent must be fixed before it can be saved.
           </p>
           <button class="secondary contrast" type="button" :disabled="editor.saving" @click="cancel">
             Cancel
           </button>
-          <p v-if="dirty" class="caption agent-modes-dirty-note" role="status">{{ cancelWritesNothing() }}</p>
           <button
             class="agent-modes-save"
             type="button"
             :disabled="saveBlocked"
             @click="save"
           >
-            {{ editor.saving ? 'Saving…' : willCreate ? 'Create file' : 'Save' }}
+            {{ savingEntry ? 'Saving…' : 'Save' }}
           </button>
         </footer>
       </form>

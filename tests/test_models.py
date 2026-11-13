@@ -124,27 +124,39 @@ class TestEndpointsConfig:
             EndpointsConfig.model_validate({"temp": "hot"})
 
 
-class TestFromWorkspace:
-    """``from_workspace``: the whole configuration comes from the JSON mapping."""
+def server_row(**overrides) -> dict:
+    """A ``servers`` row as :mod:`src.core.appdb` hands it out (payload names)."""
+    row = {"id": 1, "name": "Local", "url": "http://host:8080/v1", "apiKey": ""}
+    row.update(overrides)
+    return row
 
-    def test_full_document(self):
-        cfg = EndpointsConfig.from_workspace(
-            {
-                "serverUrl": "http://host:8080/v1",
-                "serverApiKey": "sk-target",
-                "endpoint": "model-a",
-                "sysprompt": "Answer briefly.",
-                "supportsVision": True,
-                "temperature": 0.2,
-                "topP": 0.95,
-                "topK": 20,
-                "minP": 0,
-                "repeatPenalty": 1.0,
-                "presencePenalty": 0,
-                "reasoning": "low",
-                "lspEnabled": ["pyright"],
-                "maxToolIteration": 300,
-            },
+
+def model_row(**overrides) -> dict:
+    """A ``models`` row as the store hands it out, with every column present."""
+    row = {
+        "id": 1,
+        "serverId": 1,
+        "name": "model-a",
+        "sysPrompt": "Answer briefly.",
+        "temperature": 0.2,
+        "topP": 0.95,
+        "topK": 20,
+        "minP": 0,
+        "repeatPenalty": 1.0,
+        "presencePenalty": 0,
+        "reasoning": "low",
+        "supportsVision": True,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestFromStore:
+    """``from_store``: the whole configuration comes from the store's two rows."""
+
+    def test_full_rows(self):
+        cfg = EndpointsConfig.from_store(
+            server_row(apiKey="sk-target"), model_row()
         )
         assert cfg.serverUrl == "http://host:8080/v1"
         assert cfg.apiKey == "sk-target"
@@ -162,52 +174,55 @@ class TestFromWorkspace:
         }
 
     def test_native_types_pass_straight_through(self):
-        """D6: ``True`` / ``0.7`` / ``40`` need no coercion, and no string parser."""
-        cfg = EndpointsConfig.from_workspace(
-            {"supportsVision": True, "temperature": 0.7, "topK": 40}
+        """``True`` / ``0.7`` / ``40`` need no coercion, and no string parser."""
+        cfg = EndpointsConfig.from_store(
+            server_row(), model_row(supportsVision=True, temperature=0.7, topK=40)
         )
         assert cfg.supports_vision is True
         assert cfg.temperature == 0.7
         assert cfg.top_k == 40
 
-    def test_an_absent_sampler_member_is_omitted_from_the_request_body(self):
-        cfg = EndpointsConfig.from_workspace({"serverUrl": "http://x/v1"})
+    def test_a_null_sampler_column_is_omitted_from_the_request_body(self):
+        """§4.2: a ``NULL`` sampler is "unset"; a ``0`` column is a value."""
+        cfg = EndpointsConfig.from_store(
+            server_row(),
+            model_row(
+                temperature=None, topP=None, topK=0, minP=None,
+                repeatPenalty=None, presencePenalty=None, reasoning=None,
+            ),
+        )
         assert cfg.temperature is None
         assert cfg.top_p is None
-        assert cfg.top_k is None
         assert cfg.min_p is None
         assert cfg.repeat_penalty is None
         assert cfg.presence_penalty is None
         assert cfg.reasoning_effort is None
-        assert cfg.to_kwargs() == {}
+        assert cfg.to_kwargs() == {"top_k": 0}
 
-    def test_absent_members_mean_the_documented_default(self):
-        cfg = EndpointsConfig.from_workspace({})
-        assert cfg.serverUrl == ""
-        assert cfg.apiKey == ""
-        assert cfg.endpoint is None
-        assert cfg.model_list() == []
+    def test_an_empty_sys_prompt_means_the_built_in_default(self):
+        """D8: the prompt's second level is now a property of the *model*."""
+        cfg = EndpointsConfig.from_store(server_row(), model_row(sysPrompt=""))
         assert cfg.sysprompt == DEFAULT_LLM_SYSPROMPT
-        assert cfg.supports_vision is False
 
-    def test_a_blank_string_member_is_absent_not_a_value(self):
-        cfg = EndpointsConfig.from_workspace(
-            {"endpoint": "  ", "sysprompt": "   ", "serverUrl": "  http://x/v1  "}
+    def test_blank_strings_are_absent_not_values(self):
+        cfg = EndpointsConfig.from_store(
+            server_row(url="  http://x/v1  ", name="  "),
+            model_row(name="  ", sysPrompt="   "),
         )
         assert cfg.endpoint is None
         assert cfg.sysprompt == DEFAULT_LLM_SYSPROMPT
         assert cfg.serverUrl == "http://x/v1"
 
-    def test_an_empty_mapping_is_valid_and_says_no_server(self):
-        """How an absent or malformed file reaches a caller: nothing to dial.
+    def test_a_missing_row_says_no_server_rather_than_raising(self):
+        """How the seam's refusal reaches this builder: nothing to dial.
 
-        The refusal is the reader's job (D8/D9), so the builder neither raises
-        nor invents — a workspace with no file is a config with no server.
+        The refusal is the seam's job (D7), so the builder neither raises nor
+        invites — a model whose server row is missing is a config with no server.
         """
-        cfg = EndpointsConfig.from_workspace({})
+        cfg = EndpointsConfig.from_store(None, None)
         assert cfg.serverUrl == ""
         assert cfg.model_list() == []
 
     def test_a_bad_reasoning_still_raises(self):
         with pytest.raises(ValidationError):
-            EndpointsConfig.from_workspace({"reasoning": "sideways"})
+            EndpointsConfig.from_store(server_row(), model_row(reasoning="sideways"))

@@ -120,8 +120,8 @@ async function seed(request, target, text) {
 //
 // The policy file goes in **before** the switch, so the seed that a switch
 // performs finds it and leaves it alone (its create is exclusive, `O_EXCL`) —
-// the same reason 04-agent-modes reads the modes file with `fs` rather than
-// through a route: `.nojae` is reserved, and the app never writes this file.
+// `.nojae` is reserved, and the app never writes this file through an Editor
+// route, so the spec does it from outside with `fs`.
 async function seedFixture(request) {
   const created = await create(request, SCRATCH, true)
   expect(created.ok(), `could not create the scratch workspace: ${await created.text()}`).toBe(

@@ -718,20 +718,22 @@ class TestLocalReachRefusal:
 
 
 class TestMcpEnvHelpers:
-    def test_max_tool_iteration_comes_from_the_workspace_file(self, monkeypatch, tmp_path):
-        """The cap reads the settings file, not the env (its env names are dead).
+    def test_max_tool_iteration_comes_from_the_agents_row(self, monkeypatch, tmp_path):
+        """The cap reads the resolved agent's column, not the env (D9).
 
         The env-key cases that used to live here moved to
-        ``tests/test_config.py::TestWorkspaceSourcedConfigHelpers`` when the cap
-        left ``.env`` for ``.nojae/nojae-settings.json``; what stays is that a
-        MCP-facing caller sees the file's value.
+        ``tests/test_config.py::TestThePerAgentCap`` when the cap left ``.env``
+        for the store; what stays is that a MCP-facing caller sees the agent's
+        own value.
         """
-        from tests.conftest import neutralise_workspace_settings
+        from src.core import appdb
+        from tests.conftest import neutralise_store
 
-        neutralise_workspace_settings(monkeypatch, tmp_path, maxToolIteration=7)
+        neutralise_store(monkeypatch, tmp_path, maxToolIteration=7)
         monkeypatch.setenv("MAX_TOOL_ITERATION", "99")
         monkeypatch.setenv("MAX_MCP_ITERATION", "99")
-        assert max_tool_iteration() == 7
+        agent, _findings = appdb.resolve_agent("code")
+        assert max_tool_iteration(agent) == 7
 
 
 class TestConnectorEnvironment:
@@ -793,14 +795,13 @@ class FakeManager:
 def mcp_client(monkeypatch, tmp_path):
     from src import config as config_module
 
-    from tests.conftest import neutralise_workspace_settings
+    from tests.conftest import neutralise_store
 
     for key in config_module.SETTING_KEYS:
         monkeypatch.delenv(key, raising=False)
-    # The tool-loop cap is ``maxToolIteration`` in the workspace file now; pin it
-    # to 25 here so the ``maxIterations == 25`` assertions below stay meaningful
-    # (the template's own value is 300, and the boot seed would write that).
-    neutralise_workspace_settings(monkeypatch, tmp_path, maxToolIteration=25)
+    # The tool-loop cap is a per-agent column now (D9); pin it to 25 here so a
+    # case that reads it back keeps a number it named.
+    neutralise_store(monkeypatch, tmp_path, maxToolIteration=25)
     monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
     # Point the hub at a temp declaration file, so the developer's own
     # mcp_connectors/mcp-settings.json stays untouched. No file is written: the
@@ -812,7 +813,7 @@ def mcp_client(monkeypatch, tmp_path):
     monkeypatch.setattr(
         routes,
         "load_endpoints_config",
-        lambda: (
+        lambda agent: (
             SimpleNamespace(
                 serverUrl="http://x/v1", endpoint="m", model_list=lambda: ["m"],
                 to_kwargs=lambda: {}, apiKey="", sysprompt=None,
@@ -884,7 +885,9 @@ class TestMcpEndpoints:
         client, _ = mcp_client
         body = client.get("/api/mcp").json()
         assert body["connectors"] == []
-        assert body["maxIterations"] == 25
+        # No tool-loop cap here any more: it is an agent column now (D9), edited
+        # on that agent's tab, so this section neither reports nor writes one.
+        assert "maxIterations" not in body
         assert body["externalsError"] is None
 
     def test_get_lists_declared_connectors_with_enable_as_active(
@@ -926,7 +929,7 @@ class TestMcpEndpoints:
         assert "ctx7sk-secret-value" not in response.text
         assert "CONTEXT7_API_KEY" not in response.text
 
-    def test_post_writes_enable_back_and_the_cap_to_the_workspace_file(
+    def test_post_writes_enable_back_and_nothing_else(
         self, mcp_client, tmp_path
     ):
         import os
@@ -934,23 +937,19 @@ class TestMcpEndpoints:
         from dotenv import dotenv_values
 
         from src import config as config_module
-        from src.core import workspace_settings
 
         path = self._externals_file(tmp_path)
         client, _ = mcp_client
-        response = client.post(
-            "/api/mcp", json={"enabled": ["context7"], "maxIterations": 9}
-        )
+        response = client.post("/api/mcp", json={"enabled": ["context7"]})
         assert response.status_code == 200
         # The enable flag is the only activation source: no MCP_ENABLED is
         # ever written back to .env or the environment.
         assert "MCP_ENABLED" not in os.environ
         file_values = dotenv_values(config_module.ENV_PATH)
         assert "MCP_ENABLED" not in file_values
-        # The tool-loop cap is a workspace-file member now (group 1 left
-        # .env): written as a real integer where the reader reads it, never
-        # rendered by the .env template again.
-        assert workspace_settings.workspace_setting("maxToolIteration") == 9
+        # The tool-loop cap is not this route's to write any more (D9): it is an
+        # agent column, edited on that agent's tab, so no `maxIterations` reaches
+        # a store from here — and the `.env` template never rendered one.
         assert "MAX_TOOL_ITERATION" not in file_values
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["context7"]["enable"] is True
@@ -974,10 +973,15 @@ class TestMcpEndpoints:
         assert response.status_code == 422
         assert "ghost" in response.text
 
-    def test_post_invalid_max_iterations_returns_422(self, mcp_client):
+    def test_post_no_longer_carries_a_cap(self, mcp_client, tmp_path):
+        """A body naming one is ignored, and no cap reaches any store (D9)."""
+        self._externals_file(tmp_path)
         client, _ = mcp_client
-        assert client.post("/api/mcp", json={"maxIterations": 0}).status_code == 422
-        assert client.post("/api/mcp", json={"maxIterations": 9999}).status_code == 422
+
+        response = client.post("/api/mcp", json={"maxIterations": 0})
+
+        assert response.status_code == 200
+        assert "maxIterations" not in response.json()
 
     def test_post_empty_list_deactivates_all(self, mcp_client, tmp_path):
         path = self._externals_file(tmp_path)
@@ -1665,7 +1669,8 @@ class TestChatMcpWiring:
 
         monkeypatch.setattr(routes, "stream_chat", fake_stream)
         response = client.post(
-            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
+                               "agentMode": "code"}
         )
         assert response.status_code == 200
         assert hub.ids == ["context7"]
@@ -1687,7 +1692,8 @@ class TestChatMcpWiring:
 
         monkeypatch.setattr(routes, "stream_chat", fake_stream)
         response = client.post(
-            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
+                               "agentMode": "code"}
         )
         assert response.status_code == 200
         assert captured["ok"] is True

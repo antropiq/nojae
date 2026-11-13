@@ -157,24 +157,29 @@ pytest                # backend
 cd web && npm test    # frontend
 ```
 
-The suite is hermetic: it needs no reachable model, and `NOJAE_DISABLE_MCP`
-/ `NOJAE_DISABLE_LSP` switch the two hubs off entirely.
+The suite is hermetic: it needs no reachable model, `NOJAE_DISABLE_MCP`
+/ `NOJAE_DISABLE_LSP` switch the two hubs off entirely, and every test runs on a
+temporary settings store of its own — the install's `nojae.db` is never opened.
 
 ### Setting up tests for nojae
 
 The end-to-end suite (`cd web && npm run test:e2e`) has **its own** model
-connection, so a spec can never talk to the server your workspace is configured
-with. Two files, one switch:
+connection, so a spec can never talk to a server this install is configured with.
+Two files, one switch:
 
 | File | Holds |
 |---|---|
 | `.env.test` (from `.env.test.example`) | The **app-level** keys — `LLM_DEBUG` and `NOJAE_PYTHON_ROOT`: the same set `.env` holds. |
-| `.nojae/nojae-test-settings.json` | The suite's **model connection** — the same members as the workspace's `nojae-settings.json`: server, key, model id, prompt, sampling, the vision flag, `lspEnabled`, `maxToolIteration`. |
+| `.nojae/nojae-test-settings.json` | The suite's **model connection** — one `server` object holding one `model` object, spelled with the settings store's own column names: `name`, `url`, `api_key`, then the model's `name`, `sys_prompt`, samplers and `supports_vision`. |
 
 `web/playwright.config.js` parses `.env.test` into the environment of the server
-under test and exports `NOJAE_TEST_SETTINGS=1`, which is the one switch
-that makes that server read the test settings file instead of the workspace's
-own. Nothing else turns it on — the backend suite pins it off.
+under test and exports `NOJAE_TEST_SETTINGS=1`, which is the one switch that puts
+that server in **test mode**: it never opens the install's `nojae.db`, and works
+instead on a temporary database it creates in a throw-away folder. The test
+settings file's job is to **seed that database** — one server row, one model row,
+and every agent pointed at that model — so the suite resolves a turn's connection
+exactly the way a real turn does, against a configuration nobody else owns.
+Nothing else turns it on — the backend suite pins it off.
 
 **The test settings file is created by hand and never by the app.** It has no
 committed template and the app never seeds, saves or rewrites it, so a
@@ -185,22 +190,34 @@ about it may.
 
 ```json
 {
-  "serverUrl": "http://<test-host>:8080/v1",
-  "serverApiKey": "",
-  "endpoint": "<the test model id, exactly as the server names it>",
-  "supportsVision": false,
-  "sysprompt": "You are a helpful assistant.",
-  "temperature": 1,
-  "topP": 0.95,
-  "topK": 20,
-  "minP": 0,
-  "repeatPenalty": 1.0,
-  "presencePenalty": 0,
-  "reasoning": "off",
-  "lspEnabled": [],
-  "maxToolIteration": 25
+  "server": {
+    "name": "test-local",
+    "url": "http://<test-host>:8080/v1",
+    "api_key": "",
+    "model": {
+      "name": "<the test model id, exactly as the server names it>",
+      "sys_prompt": "You are a helpful assistant.",
+      "temperature": 1,
+      "top_p": 0.95,
+      "top_k": 20,
+      "min_p": 0,
+      "repeat_penalty": 1.0,
+      "presence_penalty": 0,
+      "reasoning": "off",
+      "supports_vision": false
+    }
+  }
 }
 ```
+
+The member names are the store's **column** names, and every one of them is
+required: the reader validates the file with the tables' own strictness, so an
+unknown key, a missing one or a wrong type is a named failure rather than a
+silently-defaulted sampler — a green suite that measured a default is worse than
+a red one. Neither id appears, because the harness assigns both. Two things that
+used to be members are **absent on purpose**: LSP activation is the workspace
+declaration's `enable` flag alone, and the tool-loop cap is a per-agent number a
+spec that needs one sets on its own agent row.
 
 Write it at `<working location>/.nojae/nojae-test-settings.json` — the working
 location the server boots on, which is the repo root unless
@@ -208,16 +225,16 @@ location the server boots on, which is the repo root unless
 `"reasoning": "off"` are what keep the streaming specs reproducible.
 
 **A missing file stops the whole suite before a spec runs**, with a message
-naming the path — there is no fallback to the workspace's settings file, because
-a suite that quietly reached your own server and key would be green while
-proving nothing. Fix it by writing the file above; then make sure the server it
-names is reachable, since the endpoint stays a real one.
+naming the path — there is no fallback to this install's store, because a suite
+that quietly reached your own servers and key would be green while proving
+nothing. Fix it by writing the file above; then make sure the server it names is
+reachable, since the endpoint stays a real one.
 
 Two checks confirm the fixture really is what the suite talks to (one machine,
 by hand):
 
-1. Put a deliberately wrong `endpoint` in the file and run the suite — the
-   failure names `nojae-test-settings.json`.
+1. Put a deliberately wrong `server.model.name` in the file and run the suite —
+   the failure names `nojae-test-settings.json`.
 2. Move the file away and run it again — the suite refuses to start, before any
    spec runs.
 
@@ -228,38 +245,79 @@ exists to prevent: a green run measured against someone else's server.
 
 ## 2. Configuring the app
 
-Four files hold the settings and the declarations. The two hub declaration files
-are **hot**: a change is picked up by **Settings → Refresh MCP** /
-**Refresh LSP**, or by the toggles in the Settings dialog, without an app
-restart. `.env` and
-`.nojae/nojae-settings.json` follow the other rule: a save from the dialog is
-live at once, a hand-edit needs a server restart.
+Two kinds of thing configure the app. The **model connection, the agents and the
+prompt-helper bullets** are rows of one SQLite database — `nojae.db`, at the
+install root, created by the app on first boot and edited from the dialogs. The
+**declarations** stay files, in the working location's reserved `.nojae/`, and
+they are the only settings a folder carries.
 
-| File | Declares |
-|---|---|
-| `.env` (from `.env.example`) | The two install-scoped technical keys: `LLM_DEBUG` (log every request payload) and `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on). |
-| `.nojae/nojae-settings.json` (seeded from `nojae-settings.default.json`) | The model connection, sampling and LSP activation for this workspace. |
-| `.nojae/mcp-settings.json` (seeded from `mcp_connectors/mcp-settings.default.json`) | The MCP connectors the agent may call. |
-| `.nojae/lsp-settings.json` (written from the seeded `.nojae/lsp-settings.template.json`) | The language servers. |
+| | Holds | Written by |
+|---|---|---|
+| `nojae.db` (install root) | The servers and the models under them, each server with its key; the agents; the prompt helpers. | the Settings and Agent-modes dialogs — and nothing else |
+| `.env` (from `.env.example`) | The two install-scoped technical keys: `LLM_DEBUG` (log every request payload) and `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on). | by hand; nothing in the dialog edits them |
+| `.nojae/mcp-settings.json` (seeded from `mcp_connectors/mcp-settings.default.json`) | The MCP connectors the agent may call. | by hand; the dialog's toggles write each entry's `enable` flag |
+| `.nojae/lsp-settings.json` (written from the seeded `.nojae/lsp-settings.template.json`) | The language servers. | by hand; same |
 
-The two declaration files may carry API keys, so they are gitignored and their
-secrets are never returned by the API; the settings file holds the model key too
-(gitignored with the rest of `.nojae`), and the Settings dialog writes it. All
-three belong to the **working location**: when a folder becomes it, the app
-seeds the model connection and the MCP declaration from their committed
-templates — the MCP one with the `console` and `fedit` connectors pre-declared —
-and leaves the LSP *template* beside it, a copy of
-`lsp_connectors/lsp_servers.example.json`. No seed ever overwrites an existing
-file. The LSP declaration is never seeded as a working file — its entries name
-machine-local paths — you write it yourself from the template.
+The database is **binary and single-writer**: never hand-edited, and with no
+committed template, because it has no member you would type into it. It holds the
+model keys, so it is gitignored like the other secret-bearing files, and it is
+hidden from the Editor's tree, from file reads and search, and from both
+connectors — the protection `.env` already has. A store the app cannot open is a
+**named state**, never a silent empty one: the app bar says so in the one sentence
+that names the path, and a chat turn refuses with that same sentence.
 
-The workspace's agent-modes file, `.nojae/agent-modes.json`, is seeded the same
-way and is not in that table because it declares nothing that runs: it holds the
-personas the composer's modes send to the model, and the app writes it from the
-pencil beside the mode dropdown. Like the hub declarations it is **hot** — the
-modes are re-read whenever the file changes, so a hand-edit outside the app needs
-no restart either. Like every other file of that folder it stays out of the
-Editor's tree — `.nojae` is reserved — so the pencil is the app's own way in.
+The two declaration files may carry API keys too, so they are gitignored and their
+secrets are never returned by the API. Both belong to the **working location**:
+when a folder becomes it, the app seeds the MCP declaration from its committed
+template — with the `console` and `fedit` connectors pre-declared — and leaves the
+LSP *template* beside it, a copy of `lsp_connectors/lsp_servers.example.json`. No
+seed ever overwrites an existing file. The LSP declaration is never seeded as a
+working file — its entries name machine-local paths — you write it yourself from
+the template.
+
+Nothing about the connection, the agents or the bullets travels with the folder:
+point the working location at another project and the same servers, the same
+agents and the same bullets answer there. The store is read afresh at the start of
+every turn, so a dialog save needs no restart at all. `.env` follows the other
+rule: a hand-edit waits for one.
+
+### The model connection — Settings → **Models**
+
+A connection is two things, and the dialog edits them one after the other:
+
+1. **Add a server** — a name you will recognise, its OpenAI-compatible base URL
+   (`http://127.0.0.1:8080/v1` for a local llama.cpp), and its API key, which
+   stays on the server and is never sent to a connector, a log or a tool listing.
+   **Fetch models** asks that server what it offers: the names it answers with are
+   listed under the button and fill the name list the model field completes from.
+   It dials the URL in the field, so it works on a server that is not saved yet.
+2. **Add a model under it** — the id *exactly as the server names it*, the system
+   prompt that model is given, its samplers, and whether it accepts images. A
+   sampler left empty is left out of the request rather than defaulted, so `0` and
+   "not set" stay different values.
+
+A server with no model under it dials nothing, and an agent with no model cannot
+run — there is no default model to fall back on, so the composer says which agent
+is unrunnable before the Send button lets you find out. Which agent runs on which
+model is the agent's own field, set in the Agent-modes dialog.
+
+### The agents — the pencil beside the composer's dropdown
+
+The **Agent-modes** dialog holds the personas the composer offers: per agent a
+label, the two hub switches (whether the MCP tools and the language servers reach
+it at all), the persona, the cap on that agent's tool loop, and the model it runs
+on — plus create and delete. The agents nojae ships with are seeded into the
+store on every boot, so no hand-edit and no damaged file can lose them; the one
+the lot contract pins is **read-only** — it is listed like the others and its
+model is yours to set, but everything else about it is re-asserted from code at
+each start.
+
+Deleting a server, a model or an agent first copies the whole database into the
+app's dated backup folder (`logs/editor_backups/`, kept as long as every other
+backup the app makes), so the mistake is recoverable. And since the store has no
+hand-edited member, that is the whole reset story: stop the app, remove `nojae.db`
+and its `-wal`/`-shm` sidecars beside it, start it — the app rebuilds it with the
+built-in agents and no servers.
 
 ### The MCP setup file — `.nojae/mcp-settings.json`
 
@@ -367,15 +425,25 @@ server adds `lsp_<id>_<action>` tools — diagnostics, hover, definition,
 references, symbols, completion, formatting — to the WorkBench tab.
 `${NAME}` expansion works here exactly as it does for MCP.
 
-Two gates must agree for a server to run: its `enable` flag in
-`lsp-settings.json` **and** its id in the `lspEnabled` array of
-`.nojae/nojae-settings.json`, so a prepared declaration can stay entirely
-dormant. The ids are the server ids in the file — `pyright`, `typescript` and
-`vue` in the examples below — and the Settings dialog's LSP section toggles
-that array for you (a hand-edit of it needs a server restart, as for every
-member of that file). A freshly seeded workspace has `lspEnabled: []`, so even
-a declaration with every `enable` set to true starts nothing until you switch
-the servers on there.
+One gate decides whether a server runs in this workspace: its `enable` flag in
+`lsp-settings.json`. That file is the single source of truth, exactly as
+`mcp-settings.json` is for the connectors — so a declaration you copy in with
+`enable: true` starts those servers on first open, and a workspace cloned from
+another machine runs what its own file says with nothing else to tick. The
+Settings dialog's LSP section is an editor over that flag: a ticked row means
+"this server runs here", the save writes the flag back to the file, and a
+hand-edit of the file takes effect on the next hub restart (the section's
+restart button, or an app restart).
+
+There used to be a second switch agreeing with that flag, so a prepared
+declaration could stay entirely dormant until servers were ticked. It is gone,
+and with it the state where a declaration full of `enable: true` started nothing
+— which is the honest reading of a file that says "enabled", and what MCP has
+always meant by its own flag. The name `lspEnabled` survives in one place, for a
+different question: the **conversation**-scoped `lspEnabled` the WorkBench Tools
+panel holds and the Editor's code pane sends, which narrows the running servers
+to the ones this conversation may use and can never add one that the declaration
+has switched off.
 
 Install the servers themselves with npm, the same line on either system (the
 `lsp` extra only brings the Python client side):
@@ -518,18 +586,20 @@ which answers one question per file — `rw`, `ro` or `hidden` — for the Edito
 *and* for the agent's file tools: a folder you mark `ro` is not editable by an
 agent either. The file is seeded for you (dependency and build folders come
 read-only) and edited outside the app — see
-[`docs/POLICY-MANAGEMENT-DOC-EN.md`](docs/POLICY-MANAGEMENT-DOC-EN.md).
+[`docs/POLICY-MANAGEMENT-DOC-EN.md`](docs/POLICY-MANAGEMENT-DOC-EN.md). The
+settings store is deliberately **not** part of that switch: the servers, the
+agents and the bullets are the install's, so a workspace change invalidates only
+the hubs, the policy and the tree caches.
 
-### LLM configuration — `.env`
+### The install's technical keys — `.env`
 
 Copy `.env.example` to `.env` when you want to turn the request logging on or to
 name the interpreter your connectors run on. This file holds only what is scoped
-to **this nojae install**: the model connection — server, key, model id, system
-prompt, sampling, the vision flag, the LSP ids to activate and the cap on one
-chat reply's tool loop — lives in the workspace's `.nojae/nojae-settings.json`,
-which the Settings dialog writes and which travels with the folder (see the
-table at the top of this section). What is left here are the two technical keys
-below, and nothing in the dialog edits them:
+to **this nojae install** and edited by hand: the model connection — servers,
+their models, keys, prompts, sampling and the vision flag — is in the settings
+store, edited from the Settings dialog, and the tool-loop cap is a number on each
+agent (see the table at the top of this section). What is left here are the two
+technical keys below, and nothing in the dialog edits them:
 
 ```bash
 #LLM_DEBUG=1                # logs every request payload to the console
@@ -559,9 +629,10 @@ nojae          # API + UI on http://127.0.0.1:8001
 ```
 
 Nothing else is required for the Editor. A fresh checkout's WorkBench needs one
-thing: the model connection, which the Settings dialog writes into the
-workspace's settings file — a freshly seeded one is not configured yet and says
-so. The connectors and servers only decide how far the agent may reach.
+thing: the model connection, which **Settings → Models** writes into the install's
+settings store — a fresh one holds no server and says so in the app bar, and until
+an agent is given a model no turn can run. The connectors and servers only decide
+how far the agent may reach.
 
 ---
 
@@ -571,23 +642,25 @@ so. The connectors and servers only decide how far the agent may reach.
 
 ![The WorkBench tab](docs/workbench-tab.png)
 
-A streaming chat with your configured model, in an **agent mode** you pick from
-the composer: **Chat** (no tools at all), **Code** (file tools and language
-servers — the mode that implements, and leaves the tree compiling and tested),
+A streaming chat with your configured model, in an **agent** you pick from the
+composer: **Chat** (no tools at all), **Code** (file tools and language
+servers — the agent that implements, and leaves the tree compiling and tested),
 **Architect** (reads and asks, writes only a markdown spec), and **Todo builder**,
 which turns a spec into a numbered lot of task files and is defined by the app.
-A mode replaces the persona sent to the model and decides whether a whole tool
-hub reaches it at all; it can only ever narrow what Settings already allows. The
-**pencil** beside that dropdown edits the modes file itself —
-`<working location>/.nojae/agent-modes.json` — as fields instead of JSON: per mode
-a label, the two hub switches and the persona (with a button that puts
-nojae's own persona back for the three it ships), plus create, delete and
-this workspace's default, with the app's caps enforced as you type. The app-owned
-**Todo builder** is not in it — the app defines that mode, and the file never
-declares it. Saving writes the whole file, the bytes it replaced going to the
-app's backup folder, and the dropdown reloads from that answer. The file stays
-editable outside the app too: one that changed there since the dialog read it is
-reported as a conflict rather than overwritten.
+An agent replaces the persona sent to the model, decides whether a whole tool hub
+reaches it at all, and names the model the turn runs on; it can only ever narrow
+what Settings already allows. The composer opens on the agent this browser used
+last, like the theme and the other per-browser preferences.
+
+The **pencil** beside that dropdown is the agent editor, over the store's agent
+rows: per agent a label, the two hub switches, the persona, the cap on that
+agent's tool loop and its model, plus create and delete, with the app's caps
+enforced as you type. The four agents nojae ships with are listed there too, and
+the app-owned **Todo builder** is the read-only one: its tab renders, its model is
+yours to set, and everything else about it is re-asserted from code at every boot,
+so no edit — here or anywhere — can drift it. An agent with no model shows a
+warning beside the pencil and cannot be sent to; the fix is either to give it a
+model in that dialog or to pick an agent that has one.
 
 **Batch mode** works through a folder of task files — `todos/` by default, files
 named `01-slug.md`, `02-slug.md`, …, with `00-…` as the lot's big picture, which
@@ -598,16 +671,21 @@ it into `todos/done`, which is its own acknowledgement — so a file still in pl
 is relaunched with a note saying why, up to three times, after which the lot
 aborts. Each relaunch first waits a rising interval (5s, then 15s, then 30s), so
 a slow trailing move or a brief network cut is absorbed rather than costing a
-wasted turn; Stop cuts the wait short. The mode is pinned when the lot launches,
-the conversation is reset between tasks, and continuity comes from disk: git and
-the files that moved.
+wasted turn; Stop cuts the wait short. The agent is pinned when the lot launches
+— always **Code**, the agent the lot contract is written for — so moving the
+composer's choice mid-lot reaches no task, and a lot whose Code agent is missing
+or has no model refuses at launch rather than running under a stranger. The
+conversation is reset between tasks, and continuity comes from disk: git and the
+files that moved.
 Batch mode refuses to start unless the connectors it depends on are on.
 
 Around the composer: the reasoning and tool panel (every tool call, its result
-and the server that answered), image attach when `supportsVision` is on,
-workspace-scoped prompt helpers, a session stopwatch and context-size badge, and
-Save / Load of a conversation as a plain JSON file. Markdown renders with KaTeX,
-highlighted code and Mermaid diagrams, always through the sanitizer.
+and the server that answered), image attach when the model in view accepts images,
+the prompt-helper bullets (the install's, so the same bullets answer in every
+workspace — as many as you have added, and no fixed count), a session stopwatch
+and context-size badge, and Save / Load of a conversation as a plain JSON file.
+Markdown renders with KaTeX, highlighted code and Mermaid diagrams, always through
+the sanitizer.
 
 `Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Send
 button swaps the two, so a long message can be finished — and reread — before it
@@ -657,4 +735,4 @@ is configuration, never code. Every reply is one stream that closes with exactly
 one terminal event, so a paused answer still ends as a kept partial turn.
 Configuration changes are live the moment the Settings dialog saves them; a
 hand-edit of a hub declaration file is picked up by its **Refresh**, and only a
-hand-edit of `.env` or of the workspace settings file waits for a server restart.
+hand-edit of `.env` waits for a server restart.

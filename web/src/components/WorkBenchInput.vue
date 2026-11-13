@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BatchProgressBar from './BatchProgressBar.vue'
 import AgentModesDialog from './AgentModesDialog.vue'
 import MemoryBullets from './MemoryBullets.vue'
@@ -12,14 +12,16 @@ import {
   useChat,
 } from '../composables/useChat'
 import { copyText } from '../lib/clipboard'
-import { useAppShell } from '../composables/useAppShell'
+import { modelInView, useAppShell } from '../composables/useAppShell'
 import { useBatch } from '../composables/useBatch'
 import {
+  NO_MODEL_WARNING,
   findingsLine,
   modeHint,
-  modeOptionDisabled,
   modeSelectTitle,
   modeSelectDisabled,
+  selectedAgentCanRun,
+  selectedAgentGateReason,
   setAgentMode,
   useAgentModes,
 } from '../composables/useAgentModes'
@@ -50,16 +52,25 @@ const { state: composerKeys, toggleEnterSends } = useComposerKeys()
 const draftEl = ref(null)
 onMounted(() => registerDraftInput(draftEl.value))
 
-// Registration dialog for the clicked bullet slot (null index = closed).
+// Registration dialog for the clicked bullet, addressed by the store's id
+// (``null`` id = closed). Not an index: with no count rule the position a bullet
+// is drawn at is not a handle a write can use.
 const dialogOpen = ref(false)
-const dialogIndex = ref(null)
+const dialogId = ref(null)
 
-function openBulletDialog(index) {
+function openBulletDialog(id) {
   // Unreachable once the bullets are inert, but the guard keeps a keyboard or
   // synthetic click from opening an editor for a draft nobody can send.
   if (batch.active) return
-  dialogIndex.value = index
+  dialogId.value = id
   dialogOpen.value = true
+}
+
+// "Add bullet" from inside the dialog: the form moves to a new row, which the
+// dialog renders as an empty add (it prefills from an id the list does not hold).
+function addBulletDialog() {
+  if (batch.active) return
+  dialogId.value = null
 }
 
 const streaming = computed(() => state.phase !== 'idle')
@@ -67,11 +78,21 @@ const streaming = computed(() => state.phase !== 'idle')
 // the whole lot, including the momentary idle between two task turns, which is
 // why the composer cannot key on `streaming` alone here.
 const locked = computed(() => streaming.value || batch.active)
+// §5.4: the selected agent's own "can it run" answer, and the composer's one
+// gate. The warning icon, the Send button's disabled state and its title all
+// read these two answers instead of re-deriving the rule.
+const selectedCanRun = computed(() => selectedAgentCanRun())
+const showNoModelWarning = computed(
+  () => agentModes.loaded && !!agentModes.current && !selectedCanRun.value,
+)
+const sendGateReason = computed(() => selectedAgentGateReason())
 const canSend = computed(
   () =>
     !locked.value &&
+    !sendGateReason.value &&
     (state.draft.raw.trim().length > 0 || state.pendingImage !== null),
 )
+const sendTitle = computed(() => sendGateReason.value ?? 'Send')
 
 function submit() {
   if (!canSend.value) return
@@ -109,9 +130,11 @@ const canRestart = computed(
 
 // The select's title, and the quiet findings line, come from the composable —
 // this component only renders them. Switching mid-`streaming` is allowed and
-// has no effect on the turn already in flight (that request carried the mode
-// chosen when it was sent); the `:disabled` rule the composable owns is the
-// only refusal, and it is D7's, not a streaming guard.
+// has no effect on the turn already in flight (that request carried the agent
+// chosen when it was sent). **There is no mode lock** any more (§4.4): a thread
+// that has turned can move to any agent, including the app-owned one. What is
+// left of the disabling rules is the running lot, whose agent the runner pinned
+// at launch — a rendering rule the composable owns.
 const modeTitle = computed(() => modeSelectTitle({ batchActive: batch.active }))
 const modeFindingsLine = computed(() => findingsLine())
 
@@ -119,29 +142,23 @@ function onModeChange(event) {
   setAgentMode(event.target.value)
 }
 
-// --- The modes editor (the pencil beside the dropdown; eds-07) ---------------
+// --- The modes editor (the pencil beside the dropdown) -----------------------
 
-// One button, one card: the pencil opens `AgentModesDialog`, which reads the
-// modes **file** through its own document route rather than through the
-// dropdown's verdict — so it stays reachable when the dropdown's list failed to
-// load, which is precisely when a broken file needs fixing.
+// One button, one card: the pencil opens `AgentModesDialog`, which reads and
+// saves the store's agents through the composable's own calls rather than
+// through the dropdown's verdict — so it stays reachable when the dropdown's
+// list failed to load, which is precisely when a broken store needs fixing.
 const modesDialogOpen = ref(false)
 
-// D10's enablement, the dropdown's own window and nothing wider:
-//  * inert while a reply streams — the same window in which the Editor's writes
-//    are refused, and an editor whose Save will be refused is worse than no
-//    editor;
-//  * inert while a lot runs — the lot was launched on the modes the file had
-//    then, so the pencil joins the rule that makes the `<select>` inert for a
-//    running lot, and never one of its own;
-//  * live with a failed list — deliberately not gated on `agentModes.loaded`.
+// The pencil's enablement, the dropdown's own window and nothing wider:
+//  * inert while a reply streams — a dialog opened into a turn would show a
+//    selection that turn no longer runs under;
+//  * inert while a lot runs — the lot pinned its agent at launch, and a save
+//    cannot move it;
+//  * live with a failed list — deliberately not gated on `agentModes.loaded`,
+//    because a store that could not be read is precisely the one worth opening.
 // The click guard is the same verdict, not a second rule: a synthetic or
 // keyboard activation cannot open the card in the window it must not open in.
-//
-// Not `modeSelectDisabled(batch.active)`: that predicate carries the D7 lock
-// too, and a locked *conversation* is no reason to refuse an edit of the
-// workspace's file — a save made while locked is exactly the case D9's
-// `resetDecisionAfterSave` handles by leaving the selection where it is.
 const pencilDisabled = computed(() => batch.active || streaming.value)
 // Naming: neither string may contain the select's own accessible name, or the
 // two controls in this column would answer the same `getByLabel` query (the
@@ -164,12 +181,26 @@ function closeModesDialog() {
   modesDialogOpen.value = false
 }
 
+// The Models section's unassigned line asks for this card from the other dialog
+// (§5.1). The request is a counter, not a flag, so this watch is the only place
+// the card opens from outside the composer, and the pencil's own enablement is
+// the gate — a line that opened a card whose Save would be refused would be the
+// same mistake D10 refuses for the button.
+watch(
+  () => appShellState.agentModesRequest,
+  (request, previous) => {
+    if (request === previous) return
+    openModesDialog()
+  },
+)
+
 // --- Image attach (the hidden file input below, driven by the icon button) ---
 
-// Only usable when the configured endpoint is declared vision-capable
-// (SUPPORTS_VISION in .env, via /api/config).
+// Only usable when the model the turn will run on is declared vision-capable.
+// `/api/config` carries the flag **per model** (D5), so it is read off the model
+// in view rather than off "the" connection.
 const supportsVision = computed(
-  () => appShellState.config?.supportsVision === true,
+  () => modelInView(appShellState.config)?.supportsVision === true,
 )
 
 const fileInput = ref(null)
@@ -444,19 +475,18 @@ onBeforeUnmount(() => {
               <path d="m17 15 3 3-3 3" />
             </svg>
           </button>
-          <!-- The agent mode this conversation answers as (am-07), and the
-               pencil that edits it (eds-07). The **column** always renders: the
-               pencil is useful whatever the dropdown's verdict, and a modes
-               file whose list could not be loaded is precisely the one worth
-               opening. The `<select>` inside it is still rendered only once the
-               list loaded — a control that cannot be used is worse than no
-               control, and with a failed fetch the payload omits `agentMode`, so
-               the server's own default applies (the pre-feature behaviour). The
-               column sits in the left action group, after the buttons, so the
-               memory bullets stay centered as the layout promises. The select is
-               inert while a batch runs: the lot is one job executed under one
-               mode the runner pins for the whole run (D13), so the dropdown can
-               neither change it mid-lot nor pretend it owns it. -->
+          <!-- The agent this conversation answers as, and the pencil that edits
+               the agent list. The **column** always renders: the pencil is
+               useful whatever the dropdown's verdict, and a store whose list
+               could not be read is precisely the one worth opening. The
+               `<select>` inside it is still rendered only once the list loaded —
+               a control that cannot be used is worse than no control. The column
+               sits in the left action group, after the buttons, so the memory
+               bullets stay centered as the layout promises. The select is inert
+               while a batch runs: the lot is one job executed under one agent the
+               runner pins for the whole run (D13), so the dropdown can neither
+               change it mid-lot nor pretend it owns it. Nothing else disables
+               it — there is no mode lock (§4.4, AC-10). -->
           <div class="chat-mode-col">
             <div class="chat-mode-row">
               <select
@@ -472,20 +502,19 @@ onBeforeUnmount(() => {
                   v-for="mode in agentModes.modes"
                   :key="mode.id"
                   :value="mode.id"
-                  :disabled="modeOptionDisabled(mode.id)"
                   :title="modeHint(mode.id)"
                 >
                   {{ mode.label }}
                 </option>
               </select>
-              <!-- The pencil (eds-07): this workspace's modes editor, immediately
-                   after the select and on its line, drawn with the glyph the app
-                   already uses for "Edit and resend". It opens the card that
-                   edits the modes **file**, so it is *not* gated on the dropdown
-                   having loaded — a file whose list could not be loaded is
-                   exactly the one worth opening. Its accessible name deliberately
-                   does not contain the select's ("Agent mode"), so the two
-                   controls stay distinguishable to a query and to a reader. -->
+              <!-- The pencil: the agent-list editor, immediately after the
+                   select and on its line, drawn with the glyph the app already
+                   uses for "Edit and resend". It opens the card that edits the
+                   store's agents, so it is *not* gated on the dropdown having
+                   loaded — a store whose list could not be read is exactly the
+                   one worth opening. Its accessible name deliberately does not
+                   contain the select's ("Agent mode"), so the two controls stay
+                   distinguishable to a query and to a reader. -->
               <button
                 class="icon-btn chat-mode-edit"
                 type="button"
@@ -499,15 +528,33 @@ onBeforeUnmount(() => {
                   <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
                 </svg>
               </button>
+              <!-- §5.4: the selected agent has no model, so no turn can run. It
+                   sits immediately beside the pencil — the row already exists, so
+                   the warning adds a glyph and no layout — and the fix is either
+                   assigning a model in the card the pencil opens, or picking an
+                   agent that has one. Only the row's own `modelId` is read. -->
+              <span
+                v-if="showNoModelWarning"
+                class="chat-mode-warning"
+                role="img"
+                :aria-label="NO_MODEL_WARNING"
+                :title="NO_MODEL_WARNING"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+                  <path d="M12 9v4" />
+                  <path d="M12 17h.01" />
+                </svg>
+              </span>
             </div>
             <!-- The two quiet lines this control can carry, never a modal and
-                 never a banner: a session asked for a mode this workspace does
-                 not have (its substitution is said out loud, not chosen
-                 silently), or the hand-edited modes file has findings the server
-                 could not use (D11 — the defaults still answer, and the fix
-                 lives outside the app). It is also the slot D9's skipped reset
-                 speaks through, so it renders with or without the select: the
-                 column is there for the pencil whatever the list's verdict. -->
+                 never a banner: a session asked for an agent this installation
+                 does not have (its substitution is said out loud, not chosen
+                 silently), or the store's read has findings the server could not
+                 use (the rest of the list still renders, and the fix lives in the
+                 dialog). It renders with or without the select: the column is
+                 there for the pencil whatever the list's verdict. -->
             <p v-if="agentModes.notice" class="chat-mode-findings" role="status">
               {{ agentModes.notice }}
             </p>
@@ -608,7 +655,7 @@ onBeforeUnmount(() => {
             type="button"
             :disabled="!canSend"
             aria-label="Send message"
-            title="Send"
+            :title="sendTitle"
             @click="submit"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -658,12 +705,13 @@ onBeforeUnmount(() => {
     </div>
     <RegistrationMemoryDlg
       :open="dialogOpen"
-      :index="dialogIndex"
+      :helper-id="dialogId"
       @close="dialogOpen = false"
+      @add="addBulletDialog"
     />
     <!-- The modes editor, mounted where it is used (the way the bullet dialog
-         above is): `batchActive` is D10's enablement, handed to the card so its
-         Save says the same thing the pencil already did.
+         above is). The card's writes are the browser's own and are not gated on
+         a reply: a turn resolves its agent once, at its start (§4.5).
 
          `v-if` rather than an always-mounted card: a closed `<dialog>` is still
          in the DOM, and this one is labelled "Agent modes" — a substring of the
@@ -675,7 +723,6 @@ onBeforeUnmount(() => {
     <AgentModesDialog
       v-if="modesDialogOpen"
       :open="modesDialogOpen"
-      :batch-active="batch.active"
       :initial-mode="agentModes.current"
       @close="closeModesDialog"
     />

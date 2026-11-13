@@ -8,13 +8,31 @@ import SessionStatBadges from './SessionStatBadges.vue'
 import { useAppShell } from '../composables/useAppShell'
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
+import { modeById, runningOnLine } from '../composables/useAgentModes'
 
 const { state, openSettings, setPathLocation } = useAppShell()
 const { state: chat } = useChat()
 const { state: batch } = useBatch()
 
-const models = computed(() => (state.config?.models ?? []).join(' · '))
-const serverUrl = computed(() => state.config?.serverUrl || '')
+// The connection indicator, narrowed to the **store-level** question (§5.4):
+// is the store usable, and does it hold at least one model? Whether *this* turn
+// can run is deliberately the composer's business — that is where the agent is
+// chosen and where the fix is one click away — so the bar says nothing about the
+// selected agent. One warning in two places would mean two sentences to keep in
+// step, and a user who cannot tell which one they are answering.
+//
+// The sentence is the server's: an unusable store answers 422 with one naming
+// its path, and that is shown verbatim. "No model configured" is the bar's own,
+// because there is no server sentence for a store that is perfectly usable and
+// simply empty.
+const storeLine = computed(() => {
+  const store = state.storeState
+  if (store && !store.usable) return store.sentence || null
+  if (state.config && !(state.config.models ?? []).length) {
+    return 'no model configured'
+  }
+  return null
+})
 
 // One pill for the app: a chat reply in flight reports its own phase
 // (including the reasoning flag).
@@ -84,19 +102,12 @@ const locationTitle = computed(() =>
 )
 
 // What the switch answered that is worth a line under the field: the refusal
-// (red), or the reserved-folder seeds that could not land. The latter is a
-// warning and never a refusal — the location *did* move and both hubs
-// restarted. The three seeds fail independently but are the outcome of one
-// action, so they join into one sentence.
-const locationNote = computed(() =>
-  [
-    state.pathLocationPolicyNote,
-    state.pathLocationAgentModesNote,
-    state.pathLocationPromptHelpersNote,
-  ]
-    .filter(Boolean)
-    .join(' '),
-)
+// (red), or the reserved folder's policy seed that could not land. The latter is
+// a warning and never a refusal — the location *did* move and both hubs
+// restarted. The agent-modes block that used to ride along here is gone with the
+// file: the agents are rows of the install's store, so a workspace has nothing
+// to report about them (§4.7).
+const locationNote = computed(() => state.pathLocationPolicyNote ?? '')
 
 // One gesture, two entries: the button and Enter in the field. The lock is
 // re-checked here rather than left to the disabled button, because a key
@@ -124,6 +135,23 @@ const pillClass = computed(() => {
   }
   return 'status-idle'
 })
+
+// The brand's second line while a reply streams: which model the answer is
+// coming from, on which server. It reads the agent the **turn was sent as**
+// (`chat.session.agentMode`, recorded when the request opened) and not the
+// composer's selection, so a dropdown moved mid-reply — or a lot running under
+// its own pin — cannot make the line name a stranger to the stream.
+//
+// Gone the moment the reply ends: a model that is not answering anything is not
+// worth a line, and keeping the last one on screen would pass it off as current.
+// The recorded agent is required as much as the busy flag, because `modeById`
+// answers the composer's *current* selection for a missing id: a turn that
+// carries no agent would otherwise be credited with whatever the dropdown
+// happens to hold — a stranger to the stream.
+const runningLine = computed(() => {
+  if (!chatBusy.value || !chat.session.agentMode) return null
+  return runningOnLine(modeById(chat.session.agentMode), state.config?.models)
+})
 </script>
 
 <template>
@@ -137,8 +165,15 @@ const pillClass = computed(() => {
       </span>
       <span class="brand-text">
         <span class="brand-name">Nojaé</span>
-        <span v-if="models" class="brand-sub">{{ models }}</span>
-        <span v-if="serverUrl" class="brand-sub">on {{ serverUrl }}</span>
+        <!-- One line, whichever half of the answer it is: the store is unusable
+             (its own sentence, naming the path), or it holds no model at all.
+             A configured install shows nothing here while it is idle -- the
+             model a turn runs on is the composer's answer, and it is named
+             there. Once a reply streams, the line becomes the running model
+             instead: the store's problem and a live turn cannot coexist, so
+             there is never a second line to make room for. -->
+        <span v-if="storeLine" class="brand-sub">{{ storeLine }}</span>
+        <span v-else-if="runningLine" class="brand-sub">{{ runningLine }}</span>
       </span>
     </div>
 

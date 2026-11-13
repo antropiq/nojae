@@ -3,58 +3,80 @@ import { reactive } from 'vue'
 // ---------------------------------------------------------------------------
 // Agent modes: the persona WorkBench answers as, and what it may reach.
 //
-// One fetch (`GET /api/agent-modes`, am-06) fills this singleton: the dropdown
-// in the composer, the hub panels' gray-out and the `agentMode` key of every
-// chat payload all read *here*, so the same verdict drives all three. The list
-// is the workspace's — `.nojae/agent-modes.json`, edited outside the app — so
-// nothing here holds a mode id: the app-owned mode is recognised by
-// `editable: false`, which is data from the server. That is deliberate — the
-// id that mode has is the server's to know, and `web/src` must never contain it
-// (a later test in this lot holds that line).
+// One fetch (`GET /api/agents`) fills this singleton: the dropdown in the
+// composer, the hub panels' gray-out, the Agent-modes dialog and the
+// `agentMode` key of every chat payload all read *here*, so the same verdict
+// drives all four. The list is the **install's** — rows of nojae's settings
+// store, the same in every workspace — so nothing here holds an agent id: an
+// agent the app owns is recognised by `readonly` (which fields are disabled) and
+// by `deletable` (whether Delete is offered), both of them **data** from the
+// server. That is deliberate — the ids those rows have are the server's to
+// know, and `web/src` must never contain one.
 //
-// Every decision lives in this file as a plain function, so a Settings editor
-// for modes (a later lot) can reuse the rules instead of re-deriving them in a
-// component. The rules that judge a *hypothetical* mode take it as an argument
-// (`agentModeLockedFor`), so they stay testable without a mounted app.
+// Every decision lives in this file as a plain function, so the components
+// render answers instead of re-deriving rules — and no cap is spelled here
+// either: the byte counter, the id pattern and the tool-iteration floor all
+// arrive in the payload's `caps`.
 //
-// That editor landed below (eds-05): the dialog's rules over a **draft
-// document** — the editable copy of what `GET /api/agent-modes/document`
-// answered — plus its two calls. The dropdown's rules above are untouched, and
-// the save feeds the dropdown through `acceptPayload`, so a saved document
-// reloads the list without a second round-trip (D9). No cap is spelled here:
-// every number the form enforces arrives in the document payload's `caps`.
+// What this file no longer has, because D5 and §4.4 deleted it rather than
+// moved it: the mode **lock** (with `agentModeLockedFor`, `modeOptionDisabled`
+// and the fixed-mode tooltip sentence), the server-side **default** agent and
+// the whole file-document machinery the dialog used to edit (`mtime`, the
+// conflict guard, the draft-from-a-document reader). The last-used agent is
+// browser state — `localStorage`, the theme composable's shape — and the dialog
+// now reads and saves the store's rows one agent at a time.
 // ---------------------------------------------------------------------------
 
 const state = reactive({
-  modes: [], // [{ id, label, mcptools, lsptools, editable }] — dropdown order
-  current: null, // the mode id in play; null until the list loaded
-  default: null, // what the server says this workspace's default is
-  loaded: false, // false = the fetch failed; send() then omits agentMode
-  locked: false, // D7: the current mode owns a contract and the thread turned
-  findings: [], // validation findings about the modes file, if any
-  source: null, // { path, exists, loaded, version } — where the list came from
+  // [{ id, label, mcpEnable, lspEnable, readonly, deletable, maxToolIteration,
+  //    systemMessage, modelId, modelName }] — the rows `GET /api/agents`
+  // answers, in dropdown order. `readonly` is which fields the dialog disables
+  // (§4.4), `deletable` whether its Delete is offered (D4), and `modelId` +
+  // `modelName` whether this agent can run at all (D5) — the composer's warning
+  // reads those fields rather than re-deriving the rule.
+  modes: [],
+  current: null, // the agent id in play; null until a list has been read
+  loaded: false, // false = the fetch failed; Send then refuses (task 12)
+  findings: [], // what the store's read noticed, if anything
   notice: null, // one quiet line the composer shows under the select
 })
 
-// A second fetch already in flight (tab entry racing a workspace switch).
+//: Where the last agent the user chose is remembered. Browser state, like the
+//: theme and the layout keys — *not* configuration, and therefore not in the
+//: store the installation owns (D5): a second browser on the same install may
+//: open on a different agent, and a workspace switch changes nothing.
+const STORAGE_KEY = 'nojae:agent-mode'
+
+// A second fetch already in flight (tab entry racing a boot).
 let inFlight = null
+
+// ---------------------------------------------------------------------------
+// The browser's remembered choice
+// ---------------------------------------------------------------------------
+
+// Tolerant on purpose: a missing key, a cleared storage and a private-mode
+// throw all mean the same thing — no remembered agent.
+export function rememberedAgentId() {
+  try {
+    const value = window.localStorage.getItem(STORAGE_KEY)
+    return value ? value : null
+  } catch {
+    return null
+  }
+}
+
+export function rememberAgent(id) {
+  try {
+    if (id) window.localStorage.setItem(STORAGE_KEY, String(id))
+    else window.localStorage.removeItem(STORAGE_KEY)
+  } catch {
+    // Private mode / storage disabled: the choice lasts the session.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Pure rules
 // ---------------------------------------------------------------------------
-
-// Turn-count probe, injected by useChat the way `registerChatBusyGuard` injects
-// the batch flag: useAgentModes must not import useChat (useChat imports this
-// module), and the thread's length is the only fact the D7 lock needs.
-let turnCounter = null
-
-export function registerAgentModeTurnCounter(hasTurns) {
-  turnCounter = typeof hasTurns === 'function' ? hasTurns : null
-}
-
-function threadHasTurns() {
-  return !!turnCounter?.()
-}
 
 // The mode object for an id (or for `state.current` when called with nothing).
 export function modeById(id) {
@@ -68,14 +90,13 @@ export function currentMode() {
 
 // `true` when the current mode switches that hub off, so the panel is disabled.
 //
-// Gated on `loaded` as much as on the flags: with a stale list the payload
-// carries no `agentMode`, so the **server's** default answers the turn and this
-// client cannot know what it gates. Gray-out then would be a lie, so the panels
+// Gated on `loaded` as much as on the flags: with a stale list this client
+// cannot know what the turn it is about to send would gate, so the panels
 // behave exactly as they did before the feature (no gate). What the gate costs
 // the user is said by the panel's own row tooltip, not by a sentence here.
 export function modeBlocksHub(hub) {
   const mode = state.loaded ? currentMode() : null
-  return !!mode && mode[`${hub}tools`] === false
+  return !!mode && mode[`${hub}Enable`] === false
 }
 
 // The select's `title`: the mode's own sentence about what it can reach. The
@@ -84,8 +105,8 @@ export function modeHint(id) {
   const mode = modeById(id)
   if (!mode) return ''
   const hubs = []
-  if (mode.mcptools) hubs.push('MCP')
-  if (mode.lsptools) hubs.push('language servers')
+  if (mode.mcpEnable) hubs.push('MCP')
+  if (mode.lspEnable) hubs.push('language servers')
   const tools = hubs.length
     ? `${hubs.join(' and ')} available`
     : 'no tools'
@@ -93,40 +114,20 @@ export function modeHint(id) {
 }
 
 // The `<select>`'s title: the hint, qualified by whatever currently stops the
-// user acting on it. Kept here (not in the component) because it is the one
-// place D7 and D13 are explained to a human, and both rules are this module's.
+// user acting on it. The **only** qualifier left is a running lot: D5 deleted
+// the mode lock and with it the fixed-mode sentence — "a message describing
+// behaviour that no longer happens is worse than no message".
 export function modeSelectTitle({ batchActive = false } = {}) {
   const hint = modeHint(state.current)
   if (!hint) return ''
   if (batchActive) return `${hint} — a running batch picks its own mode`
-  if (state.locked) {
-    return `${hint} — this conversation's mode is fixed once it has a turn`
-  }
   return hint
 }
 
-// D7: a mode is locked when it is **not** editable (it owns a contract — the
-// lot conventions) *and* the thread already has a turn. Entering is always
-// allowed; leaving a locked mode is what the guard refuses.
-export function agentModeLockedFor(mode, hasTurns) {
-  return !!mode && !mode.editable && !!hasTurns
-}
-
-// Recomputed on every turn (a send, a reset, a session load) rather than
-// remembered: the lock is a function of the thread, not a flag someone sets.
-export function syncAgentModeLock(hasTurns) {
-  state.locked = agentModeLockedFor(currentMode(), hasTurns ?? threadHasTurns())
-}
-
-// The D7 guard, as a predicate so `setAgentMode` and the `<select>`'s option
-// list ask the same question: a locked thread keeps its mode.
-export function modeOptionDisabled(id) {
-  return state.locked && id !== state.current
-}
-
-// Whether the whole `<select>` is inert: D7's lock, or a running lot whose mode
-// the runner pinned (D13). A mid-`streaming` switch is *not* in here — it is
-// allowed and simply cannot reach the turn already in flight.
+// Whether the whole `<select>` is inert: a running lot whose mode the runner
+// pinned (D13), and nothing else. A mid-`streaming` switch is *not* in here —
+// the server has always accepted an `agentMode` change at any point in a
+// thread, so switching simply cannot reach the turn already in flight.
 //
 // The batch half is a *rendering* rule; the behaviour lives in useBatch, which
 // resolves `LOT_TASK_MODE_ID` once per run into `state.pinnedMode` and reads it
@@ -135,77 +136,152 @@ export function modeOptionDisabled(id) {
 // and leaving it live would advertise a power the dropdown does not have over
 // a lot.
 export function modeSelectDisabled(batchActive = false) {
-  return state.locked || !!batchActive
+  return !!batchActive
 }
 
-// The guard is **client-side convenience, not enforcement**: the server accepts
-// an `agentMode` change at any point in a thread, including this one, because a
-// resumed session JSON may legitimately want a different persona for its next
-// turn. This exists to stop an accidental click, not to police the user.
+// Choosing an agent: whatever the thread has done, from any agent to any other
+// (§4.4, AC-10). What is left of the old guard is the list itself — a client
+// never invents an id — and the browser's memory of the choice.
 export function setAgentMode(id) {
-  if (state.locked) return // leaving a locked mode: refused
   const next = modeById(id)
   if (!next) return // never the server's list, never a guess
   state.current = next.id
-  // Entering a contract-owning mode on a thread that already turned locks at
-  // once — no second click needed to see the lock.
-  syncAgentModeLock(threadHasTurns())
+  rememberAgent(next.id)
 }
 
-// What `send()` puts in `payload.agentMode`: null means *omit the key*, so the
-// server's own default applies — the same rule (and the same reason) as the
-// `mcpEnabled` / `lspEnabled` allowlists in useChat's payload.
+// What `send()` puts in `payload.agentMode`: null means *omit the key*, which
+// since D5 is a 422 naming the field rather than a server-side default — so the
+// composer refuses the send before it gets there (task 12). Never a guess.
 export function agentModePayloadId() {
   return state.loaded && state.current ? state.current : null
 }
 
-// One quiet line about a hand-edited file the server had problems with. Not a
-// modal and not a banner: the file belongs to the user and lives outside the
-// app, and a warning that cannot be dismissed would nag on every turn.
+// §5.4/§5.5: *can the selected agent run?* — the plain answer the composer's
+// warning icon and its Send gate both read.
+//
+// It reads the row's **own** field, which task 03 put there (`modelId` plus the
+// resolved `modelName`), and never re-derives the rule from two tables. The
+// server's sentence — the one naming the agent — is the authority behind it,
+// not something this client builds: no agent id is named here, and no model is
+// guessed.
+export function selectedAgentCanRun() {
+  const mode = currentMode()
+  if (!mode) return false // nothing read yet: the composer cannot name an agent
+  return mode.modelId !== null && mode.modelId !== undefined
+}
+
+// The same answer for any row a caller holds (a lot's pinned agent, a test).
+export function agentCanRun(mode) {
+  return !!mode && mode.modelId !== null && mode.modelId !== undefined
+}
+
+//: The app bar's line for a **running** turn: which model the stream is being
+//: answered by, on which server. It is the agent the turn was *sent* as that
+//: answers (the caller resolves that id, not this function), and the names are
+//: the server's — `modelName` from the agent row, the server from the model the
+//: row points at in `GET /api/config`'s list.
+//:
+//: Nothing is invented here: an agent with no model, or one whose row names a
+//: model the catalogue no longer holds and carries no name of its own, answers
+//: null — the bar then says nothing rather than naming a stranger. The server
+//: half is dropped alone when only it is missing, because the model name is
+//: still the truth about the turn.
+export function runningOnLine(mode, models) {
+  if (!agentCanRun(mode)) return null
+  const entry = (Array.isArray(models) ? models : []).find(
+    (model) => model?.id === mode.modelId,
+  )
+  const modelName = String(entry?.name ?? mode.modelName ?? '').trim()
+  if (!modelName) return null
+  const serverName = String(entry?.serverName ?? '').trim()
+  return serverName ? `Running ${modelName} on ${serverName}` : `Running ${modelName}`
+}
+
+//: The composer's warning (§5.4). One wording for the icon's tooltip, its
+//: accessible name and the Send button's disabled reason, so the user cannot
+//: read two different explanations of the same state.
+export const NO_MODEL_WARNING = 'Agent has no model to run with. Please assign a model'
+
+//: What a composer whose list never arrived says. It cannot name an agent it
+//: has not read, and D5 removed the server-side default the old send leaned on.
+export const AGENT_LIST_WARNING =
+  'The agent list could not be read — Send is unavailable until it loads'
+
+// D7's sentence, for the callers that name the agent (batch mode's launch
+// refusal). The composer's icon does *not* use it: it must never name an agent id,
+// and the icon is about the selection the user can see. Same wording as
+// ``src.config.agent_connection_refusal``'s no-model branch, built from the
+// row's label so the lot and the server say one thing.
+export function agentNoModelSentence(mode) {
+  const who = String(mode?.label ?? '').trim() || 'the selected agent'
+  return `Agent ${who} has no model to run with. Please assign a model in the Agent modes dialog.`
+}
+
+// The one answer both the warning icon and the Send gate read (§5.4): null when
+// a turn may be sent, otherwise the reason it may not. Three states, in the order
+// the user can act on them:
+//
+//  * the list never loaded — the composer cannot name an agent at all;
+//  * a loaded list with no selection — the same answer, for a store with no rows;
+//  * the selected row has no model — D7's sentence behind it, the icon before it.
+export function selectedAgentGateReason() {
+  if (!state.loaded) return AGENT_LIST_WARNING
+  const mode = currentMode()
+  if (!mode) return AGENT_LIST_WARNING
+  if (!agentCanRun(mode)) return NO_MODEL_WARNING
+  return null
+}
+
+// One quiet line about what the store's read noticed. Not a modal and not a
+// banner: a warning that cannot be dismissed would nag on every turn. The store
+// has no file to point at (the agents are rows), so the line names the dialog
+// the user can fix them in instead of a path.
 export function findingsLine() {
   if (!state.findings.length) return null
   const n = state.findings.length
-  const path = state.source?.path ?? '.nojae/agent-modes.json'
-  return `${n} problem${n === 1 ? '' : 's'} in the workspace agent-modes file — see ${path}`
+  return `${n} problem${n === 1 ? '' : 's'} in nojae's settings store — see the Agent modes dialog`
 }
 
 // The notice line is about one *loaded session*, so a new conversation retires
-// it. `findingsLine()` needs no such reset: the file's problems are the
-// workspace's, and they come back with the next fetch of the list.
+// it. `findingsLine()` needs no such reset: the store's problems come back with
+// the next fetch of the list.
 export function clearAgentModeNotice() {
   state.notice = null
 }
 
-// The mode a loaded session file asked for, judged against *this* workspace.
-// An unknown id falls back to the workspace default — never to a different
-// persona silently, and never by refusing to load the conversation (the same
-// non-blocking rule the server applies to the file itself, D11).
+// The mode a loaded session file asked for, judged against the loaded list.
+//
+// **The file wins over the browser's memory**, which is the one place the two
+// kinds of state meet: the file describes the conversation, `localStorage`
+// describes the browser, and the more specific one answers a resume. An unknown
+// id falls back to the list's first entry — never to a different persona
+// silently, and never by refusing to load the conversation.
 export function applySessionAgentMode(rawId) {
   const wanted = typeof rawId === 'string' ? rawId.trim() : ''
   if (!wanted) {
-    // A v3 file carries no mode: leave `current` at the workspace default.
+    // A v3 file carries no mode: the composer keeps the agent it had (the
+    // remembered one, or the first).
     state.notice = null
-    if (!state.current && state.default) state.current = state.default
-    syncAgentModeLock(threadHasTurns())
+    if (!state.current) state.current = state.modes[0]?.id ?? null
     return null
   }
   if (!state.loaded) {
-    // Nothing trustworthy to judge it against, and `send()` is already omitting
-    // the key — so the server's default answers this conversation. Said out
-    // loud, because a saved mode that silently does nothing reads as a bug.
-    state.notice = `The saved session asked for agent mode "${wanted}", but this workspace's mode list could not be read — the server's default applies.`
-    syncAgentModeLock(threadHasTurns())
+    // Nothing trustworthy to judge it against, and the composer already refuses
+    // to send without a list. Said out loud, because a saved mode that silently
+    // does nothing reads as a bug.
+    state.notice = `The saved session asked for agent mode "${wanted}", but the agent list could not be read — the composer cannot send until it is.`
     return null
   }
-  if (modeById(wanted)) {
-    state.current = wanted
+  const found = modeById(wanted)
+  if (found) {
+    state.current = found.id
+    rememberAgent(found.id)
     state.notice = null
-    syncAgentModeLock(threadHasTurns())
     return wanted
   }
-  state.current = state.default
-  state.notice = `The saved session asked for agent mode "${wanted}", which this workspace does not have — using ${state.default ?? 'the workspace default'}.`
-  syncAgentModeLock(threadHasTurns())
+  const fallback = state.modes[0]?.id ?? null
+  state.current = fallback
+  state.notice = `The saved session asked for agent mode "${wanted}", which this installation does not have — using ${modeById(fallback)?.label ?? 'the first agent'}.`
   return null
 }
 
@@ -213,48 +289,57 @@ export function applySessionAgentMode(rawId) {
 // The fetch
 // ---------------------------------------------------------------------------
 
+// Adopt one `GET /api/agents` answer: the rows verbatim (that *is* the shape the
+// dialog edits — "the draft becomes the agent list"), plus the selection.
+//
+// The selection is resolved in one order, and each step says which authority
+// answered: a selection the new list still holds is kept (a plain refresh, or a
+// save); otherwise the **remembered** id (§5.4, `localStorage`), because that is
+// the last agent the user chose in this browser; otherwise the first entry. A
+// remembered id naming an agent that is gone — deleted, or a store restored from
+// elsewhere — therefore falls back instead of leaving the composer with nothing.
 function acceptPayload(body, { reseed }) {
-  const modes = Array.isArray(body?.modes) ? body.modes : []
-  if (!modes.length) throw new Error('no modes in the response')
-  state.modes = modes.map((mode) => ({
-    id: mode.id,
-    label: mode.label ?? mode.id,
-    mcptools: mode.mcptools !== false,
-    lsptools: mode.lsptools !== false,
-    editable: mode.editable !== false,
+  const agents = Array.isArray(body?.agents) ? body.agents : []
+  if (!agents.length) throw new Error('no agents in the response')
+  state.modes = agents.map((agent) => ({
+    id: agent.id,
+    label: agent.label ?? agent.id,
+    maxToolIteration: agent.maxToolIteration ?? null,
+    mcpEnable: agent.mcpEnable !== false,
+    lspEnable: agent.lspEnable !== false,
+    systemMessage: typeof agent.systemMessage === 'string' ? agent.systemMessage : '',
+    // §4.4: **`readonly` is data**, the one flag that decides which fields of a
+    // tab render disabled. Nothing here compares an agent id.
+    readonly: agent.readonly === true,
+    // D4: whether Delete is offered. A flag for the same reason — three of
+    // nojae's four rows are deletable=no without being readonly.
+    deletable: agent.deletable !== false,
+    modelId: agent.modelId ?? null,
+    modelName: agent.modelName ?? null,
   }))
   state.findings = Array.isArray(body.findings) ? body.findings : []
-  state.source = body.source ?? null
-  state.default =
-    typeof body.default === 'string' && modeById(body.default)
-      ? body.default
-      : state.modes[0].id
-  // A workspace switch re-seeds unconditionally: an id that existed in the old
-  // root's file probably does not exist in the new one, and the alternative is
-  // a 422 on every send. A plain refresh (tab entry) keeps the user's choice
-  // whenever the mode is still offered.
-  if (reseed || !modeById(state.current)) state.current = state.default
-  // Leaving the root retires a notice about a session loaded from it. A plain
-  // refresh keeps it: the conversation it describes is still on screen.
+  const kept = modeById(state.current)
+  const remembered = modeById(rememberedAgentId())
+  const chosen = kept?.id ?? remembered?.id ?? state.modes[0].id
+  state.current = chosen
   if (reseed) state.notice = null
   state.loaded = true
-  syncAgentModeLock(threadHasTurns())
 }
 
-// Load the workspace's modes. `reseed: true` (the working-location switch, and
-// the first load) also moves `current` to the new default.
+// Read the agent list. `reseed: true` (the first load, and after a store write)
+// also retires the quiet session notice.
 //
 // Failure **hides nothing and changes nothing**: `loaded` goes false, `current`
-// stays as it was, and `send()` omits `agentMode` — so the server answers with
-// its own default, exactly what a client predating the feature gets. A failed
-// dropdown must never silently downgrade anybody to another persona, which is
-// also why the previous list survives a failed *refresh*: the composer keeps
-// showing the mode the last turn actually used.
+// stays as it was, and the composer refuses to send (task 12) — D5 removed the
+// server-side fallback a missing list used to lean on. A failed dropdown must
+// never silently downgrade anybody to another persona, which is also why the
+// previous list survives a failed *refresh*: the composer keeps showing the
+// agent the last turn actually used.
 export async function loadAgentModes({ reseed = false } = {}) {
   if (inFlight) return inFlight
   inFlight = (async () => {
     try {
-      const res = await fetch('/api/agent-modes')
+      const res = await fetch('/api/agents')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       acceptPayload(await res.json(), { reseed })
     } catch {
@@ -273,22 +358,30 @@ export function agentModesLoaded() {
 }
 
 // ---------------------------------------------------------------------------
-// The modes editor (eds-05): the dialog's rules over a *draft document*.
+// The modes editor: the dialog's rules over **the agent list itself**.
 //
-// `GET /api/agent-modes/document` answers *what my file says* (D2 — the file's
-// own entries verbatim, broken ones shown with their finding, plus the `mtime`
-// token the save compares). `createAgentModesDraft` turns that payload into the
-// dialog's editable copy; everything below judges **that draft** as plain
-// functions, so the component renders answers instead of re-deriving rules, and
-// every rule stays testable without a mounted app.
+// The doc-shaped half is gone with the file it edited (§4.7): there is no
+// document to read, no `mtime` token to compare, no conflict, no "saving will
+// create this file" and no findings that name a JSON pointer — the app is the
+// store's only writer. What the dialog edits is what `GET /api/agents` answers,
+// so the draft *is* the list, and every rule below judges that draft as a plain
+// function so the component renders answers instead of deriving them.
 //
-// No cap is spelled in this half either: every number the form enforces arrives
-// in the payload's `caps` (the mode count, the id pattern and length, the label
-// cap, the persona byte cap, the persona line budget). The label cap is
-// deliberately absent from the form rules — a label over it is the server's
-// trim, not a form error (D3: "it is presentation, and the loader already
-// treats it that way").
+// No cap is spelled here: the id pattern and length, the label cap, the persona
+// byte cap and the tool-iteration floor all arrive in the payload's `caps`
+// (task 03's read publishes them), which is also what the server refuses
+// against.
 // ---------------------------------------------------------------------------
+
+//: The model dropdown's empty option, and the sentence a tab shows when it is
+//: the answer. Spell it once: the empty option and "cannot run" are one fact.
+export const NO_MODEL_LABEL = '— no model: this agent cannot run —'
+
+//: Why a tab's other fields are disabled. Said once, for every `readonly` row —
+//: the client never names one (§4.4).
+export const READONLY_CAPTION =
+  'These fields belong to nojae: it re-asserts them from code on every start. ' +
+  'The model is yours to choose.'
 
 function capsOf(draft) {
   return draft?.caps ?? {}
@@ -298,25 +391,25 @@ function byteLengthOf(text) {
   return new TextEncoder().encode(text).length
 }
 
-// The slug a new mode's id starts as (D5): lowercase, then letters/digits/
-// '_'/'-', within the payload's id cap, made unique against the ids already in
-// the document. `caps` is the draft's own `caps` object — the numbers come from
-// the payload, never a literal here (a missing cap means "no client-side cap",
-// which the server still enforces on save).
+// The slug a new agent's id starts as: lowercase, then letters/digits/'_'/'-',
+// within the payload's id cap, made unique against the ids already in the list.
+// `caps` is the draft's own `caps` object — the numbers come from the payload,
+// never a literal here (a missing cap means "no client-side cap", which the
+// server still enforces).
 export function slugForModeId(label, takenIds = [], caps = null) {
   const maxIdChars = Number.isFinite(caps?.maxIdChars) ? caps.maxIdChars : null
   let slug = String(label ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^[-_]+|[-_]+$/g, '')
-  if (!slug) slug = 'mode' // an empty slug is not an id; a neutral one is editable
-  if (!/^[a-z]/.test(slug)) slug = `m-${slug}` // the pattern wants a lowercase start
+  if (!slug) slug = 'agent' // an empty slug is not an id; a neutral one is editable
+  if (!/^[a-z]/.test(slug)) slug = `a-${slug}` // the pattern wants a lowercase start
   if (maxIdChars !== null && slug.length > maxIdChars) slug = slug.slice(0, maxIdChars)
   const taken = new Set(takenIds ?? [])
   if (!taken.has(slug)) return slug
   // Uniqueness: a numeric suffix, and the base gives up its tail for it — the
   // result never exceeds the cap, because an over-cap id is what the validator
-  // drops, and the form would then refuse its own Create.
+  // refuses, and the form would then refuse its own Create.
   for (let n = 2; ; n += 1) {
     const suffix = `-${n}`
     const base =
@@ -327,36 +420,47 @@ export function slugForModeId(label, takenIds = [], caps = null) {
 }
 
 // The draft's ids, minus one **entry**'s (matched by identity, not by key: a
-// new mode whose typed id collides with an existing one must still be told it
+// new agent whose typed id collides with an existing one must still be told it
 // collides) — the "taken" set a slug or a typed id is judged against.
-function takenKeys(draft, exceptEntry = null) {
+function takenIds(draft, exceptEntry = null) {
   return (draft?.entries ?? [])
     .filter((entry) => entry !== exceptEntry)
-    .map((entry) => entry.key)
+    .map((entry) => entry.id)
 }
 
-// Slug generation for one draft: the label, and every id the document already
+// Slug generation for one draft: the label, and every id the list already
 // holds, under the draft's own caps.
 export function slugForDraft(draft, label) {
-  return slugForModeId(label, takenKeys(draft), capsOf(draft))
+  return slugForModeId(label, takenIds(draft), capsOf(draft))
 }
 
-// Whether an entry's id field is editable: **only while the mode is new** (D5).
+// Whether an entry's id field is editable: **only while the agent is new**.
 // Renaming an existing id is a delete plus an add and silently orphans every
 // saved session that names it, so this is a function's answer, not a template's
 // `:disabled`.
 export function idEditableFor(entry) {
-  return !!entry && entry.isNew === true && entry.hasForm === true
+  return !!entry && entry.isNew === true && entry.readonly !== true
 }
 
-// Why a *new* mode's id is not usable in this document, or null when it is:
-// the payload's pattern, the payload's length cap, and uniqueness against the
-// ids already declared. Existing entries are not judged here — their key came
-// from the file and their id field is read-only (D5).
+// Whether an entry's editable fields are live: everything but the model is
+// nojae's on a `readonly` row (§4.4/§5.2).
+export function fieldsDisabledFor(entry) {
+  return !!entry && (entry.readonly === true || entry.saving === true)
+}
+
+// Whether Delete is offered: user-created rows only (D4), and never for a row
+// that does not exist yet.
+export function deleteOfferedFor(entry) {
+  return !!entry && entry.isNew !== true && entry.deletable !== false
+}
+
+// Why a *new* agent's id is not usable, or null when it is: the payload's
+// pattern, the payload's length cap, and uniqueness against the ids already in
+// the list. Existing entries are not judged — their id is immutable.
 export function idValidityProblem(draft, entry) {
   if (!idEditableFor(entry)) return null
   const caps = capsOf(draft)
-  const id = entry.key
+  const id = entry.id
   if (typeof id !== 'string' || !id) return 'An id is required.'
   if (Number.isFinite(caps.maxIdChars) && id.length > caps.maxIdChars) {
     return `The id must be at most ${caps.maxIdChars} characters.`
@@ -364,23 +468,17 @@ export function idValidityProblem(draft, entry) {
   if (typeof caps.idPattern === 'string' && new RegExp(caps.idPattern).test(id) === false) {
     return `The id must match ${caps.idPattern} — a lowercase letter, then letters, digits, '_' or '-'.`
   }
-  if (takenKeys(draft, entry).includes(id)) {
-    return `The id "${id}" is already used by another mode.`
+  if (takenIds(draft, entry).includes(id)) {
+    return `The id "${id}" is already used by another agent.`
   }
   return null
 }
 
-// The persona's two counters. The **byte** one is hard (over the payload's cap
-// is invalid and blocks Save — the loader drops such an entry whole); the
-// **line** one is soft: it warns against the payload's budget and never blocks,
-// because it is a prose style rule, not a file rule.
+// The persona's byte counter — the one counter the tab shows. The cap is hard:
+// over it, the store refuses the row and the form blocks the save before the
+// server does.
 export function personaByteCount(text) {
   return byteLengthOf(typeof text === 'string' ? text : '')
-}
-
-export function personaLineCount(text) {
-  const value = typeof text === 'string' ? text : ''
-  return value === '' ? 0 : value.split('\n').length
 }
 
 export function personaOverByteCap(draft, text) {
@@ -388,425 +486,249 @@ export function personaOverByteCap(draft, text) {
   return Number.isFinite(cap) && personaByteCount(text) > cap
 }
 
-// The small label under the textarea: how much of the line budget is left, and
-// the warning once it is spent. Null when the payload states no budget.
-export function personaLineBudget(draft, text) {
-  const budget = capsOf(draft).maxPersonaLines
-  if (!Number.isFinite(budget)) return null
-  const lines = personaLineCount(text)
-  return {
-    budget,
-    lines,
-    remaining: Math.max(0, budget - lines),
-    over: lines > budget,
-    warning:
-      lines > budget
-        ? `The persona runs ${lines} lines, over the ${budget}-line budget this app writes personas to — a style budget, not a file rule.`
-        : null,
+// The tool-iteration cap's floor, as a message or null (D9: a floor of 1 and
+// **no ceiling**, so nothing here refuses a big number).
+export function toolIterationProblem(draft, value) {
+  const floor = capsOf(draft).minToolIteration
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  if (!Number.isInteger(number)) return 'Max tool iterations must be a whole number.'
+  if (Number.isFinite(floor) && number < floor) {
+    return `Max tool iterations must be at least ${floor}.`
   }
+  return null
 }
 
-// The draft's own over-the-cap persona as a finding, in the loader's shape
-// (pointer + message): the form blocks Save on it before the server would drop
-// the entry (D3 — the caps are enforced *in the form*, not discovered through a
-// refused save).
-function draftPersonaFinding(draft, entry) {
-  if (!personaOverByteCap(draft, entry.personaText)) return null
-  const cap = capsOf(draft).maxPersonaBytes
-  const size = personaByteCount(entry.personaText)
-  return {
-    kind: 'error',
-    message:
-      `agents.${entry.key}.systemMessage: is ${size} bytes, over the ${cap}-byte cap — ` +
-      'this text is re-sent on every turn of the conversation',
-  }
+// The row a label already belongs to, or null: two agents cannot answer to one
+// label (the schema's UNIQUE, refused in words by the route).
+function labelTakenBy(draft, entry) {
+  const wanted = String(entry?.label ?? '').trim()
+  if (!wanted) return null
+  return (
+    (draft?.entries ?? []).find(
+      (other) => other !== entry && String(other.label ?? '').trim() === wanted,
+    ) ?? null
+  )
 }
 
-// The mode-count cap: the form stops being valid **past** the cap rather than
-// the save being refused by the server later.
-export function modeCountProblem(draft) {
-  const cap = capsOf(draft).maxModes
-  const count = draft?.entries?.length ?? 0
-  if (!Number.isFinite(cap) || count <= cap) return null
-  return `The document holds ${count} modes, over the ${cap} this file may hold — delete one before adding or saving.`
-}
-
-// Whether Create would take the draft past the cap: the button is inert *at* the
-// cap, so the user never discovers the cap through a blocked Save.
-export function createDisabledFor(draft) {
-  const cap = capsOf(draft).maxModes
-  return Number.isFinite(cap) && (draft?.entries?.length ?? 0) >= cap
-}
-
-// Which field of an entry a finding talks about, out of the pointer it names
-// (`agents.code.systemMessage: …` → 'systemMessage'). A finding naming the
-// entry itself (`agents.code: …`) has no field, and neither has one naming a
-// key the vocabulary does not know — that is an unknown key, which the form
-// cannot fix.
-function findingField(entry, message) {
-  const prefix = `agents.${entry.key}.`
-  if (!String(message ?? '').startsWith(prefix)) return null
-  const field = String(message).slice(prefix.length).split(':')[0]
-  return ['label', 'mcptools', 'lsptools', 'systemMessage'].includes(field) ? field : null
-}
-
-// Is this file-level finding about the file's `default` key? The loader's
-// sentences about that key always name it quoted.
-function isDefaultFinding(message) {
-  return String(message ?? '').includes('"default"')
-}
-
-// The draft's own `default` rule, mirroring what the save refuses: a document
-// that declares modes must set a default naming one of them. A payload finding
-// about the default is resolved by the Common tab's choice — that is the one
-// file-level finding of its kind the dialog can fix — so this check, not the
-// stale payload finding, is what holds Save once entries exist.
-function draftDefaultProblem(draft) {
-  const entries = draft?.entries ?? []
-  if (!entries.length) return null
-  const keys = entries.map((entry) => entry.key)
-  if (keys.includes(draft.default)) return null
-  return `The default mode must name one of the modes this document declares (${keys.join(', ')}).`
-}
-
-// D3's blocking findings: every `error` kind, about an entry or the file as a
-// whole, that the draft has **not** fixed. A `note` (a file that named a
-// reserved id by hand) never holds Save — the save is what cleans it up (D4).
+// Every problem *this entry's form* has, each naming the field it belongs to:
+// `[{field, message}]`. The dialog puts each message next to its field and
+// blocks Save on the list, so the rules are enforced where they can be read
+// rather than discovered through a refused save.
 //
-// "Fixed" is judged against the draft's current values:
-// * a finding on a field the form can only produce validly for (label, the two
-//   switches) is resolved by the draft holding that field at all;
-// * a persona finding is re-measured against the payload's byte cap — editing
-//   the text down under it resolves it, leaving it over keeps blocking, and a
-//   persona shape no textarea can hold (an empty list, a list with a non-string)
-//   keeps its loader finding;
-// * an unknown key, an entry with no form, and any file-level finding except
-//   the default ones are not fixable in-form: they block until fixed or
-//   deleted, exactly as D3 says.
-export function blockingFindings(draft) {
-  const blocks = []
-  for (const entry of draft?.entries ?? []) {
-    if (!entry.hasForm) {
-      // An unrepresentable entry is visible and blocks: Delete is its only way
-      // out, and a save that quietly dropped it is the loss D2 exists to prevent.
-      for (const finding of entry.findings ?? []) {
-        if (finding.kind === 'error') blocks.push(finding)
-      }
-      continue
+// A `readonly` row has one field the user owns, so only the model is judged —
+// every other column is the server's to re-assert (D4).
+export function entryProblems(draft, entry) {
+  if (!entry) return []
+  const problems = []
+  if (entry.readonly !== true) {
+    if (!String(entry.label ?? '').trim()) {
+      problems.push({ field: 'label', message: 'A label is required.' })
+    } else if (labelTakenBy(draft, entry)) {
+      problems.push({
+        field: 'label',
+        message: `Another agent is already labelled "${String(entry.label).trim()}".`,
+      })
     }
-    for (const finding of entry.findings ?? []) {
-      if (finding.kind !== 'error') continue
-      const field = findingField(entry, finding.message)
-      if (field === 'label' || field === 'mcptools' || field === 'lsptools') continue
-      if (field === 'systemMessage' && entry.personaText !== null) continue // re-measured below
-      blocks.push(finding) // an unknown key, a persona shape, or a finding naming no field
-    }
-    const persona = draftPersonaFinding(draft, entry)
-    if (persona) blocks.push(persona)
-    // D3's third cap: the id. A *new* mode's id is the one the form can still
-    // make wrong (an existing entry's key came from the file and its field is
-    // read-only), so an id the payload's pattern or length cap refuses blocks
-    // Save here rather than becoming a save the server sends back.
     const idProblem = idValidityProblem(draft, entry)
-    if (idProblem) blocks.push({ kind: 'error', message: idProblem })
+    if (idProblem) problems.push({ field: 'id', message: idProblem })
+    if (personaOverByteCap(draft, entry.personaText)) {
+      const cap = capsOf(draft).maxPersonaBytes
+      problems.push({
+        field: 'systemMessage',
+        message:
+          `The system prompt is ${personaByteCount(entry.personaText)} bytes, over the ` +
+          `${cap}-byte cap — this text is re-sent on every turn of the conversation.`,
+      })
+    }
+    const capProblem = toolIterationProblem(draft, entry.maxToolIteration)
+    if (capProblem) problems.push({ field: 'maxToolIteration', message: capProblem })
   }
-  const hasEntries = (draft?.entries?.length ?? 0) > 0
-  for (const finding of draft?.findings ?? []) {
-    if (finding.kind !== 'error') continue
-    if (hasEntries && isDefaultFinding(finding.message)) continue // the Common tab answers it
-    blocks.push(finding)
-  }
-  const defaultProblem = draftDefaultProblem(draft)
-  if (defaultProblem) blocks.push({ kind: 'error', message: defaultProblem })
-  const countProblem = modeCountProblem(draft)
-  if (countProblem) blocks.push({ kind: 'error', message: countProblem })
-  return blocks
+  return problems
 }
 
 // The one answer the dialog renders for its Save button, so the rule is not
-// re-derived in the component: blocking findings, or a save already in flight.
-export function saveDisabledFor(draft, { saving = false } = {}) {
-  return saving || blockingFindings(draft).length > 0
-}
-
-// Which findings one entry's tab shows: the loader's own sentences naming it,
-// plus the draft's over-the-cap persona finding (the same shape, produced by
-// `blockingFindings`'s re-measurement). A tab renders these verbatim next to
-// the field each one names — the dialog adds nothing to the loader's voice and
-// filters nothing out, which is what keeps a hand-written entry that names a
-// reserved id *readable* even though it gets no tab of its own (D4).
-export function entryFindingsFor(draft, entry) {
-  if (!entry) return []
-  const own = Array.isArray(entry.findings) ? entry.findings : []
-  const persona = entry.hasForm ? draftPersonaFinding(draft, entry) : null
-  return persona ? [...own, persona] : own
-}
-
-// Whether *this entry* is one of the things holding Save: a loader error it
-// carries, the draft's over-the-cap persona, or a new mode's id the payload
-// refuses. The dialog asks this to decide which tab to open on (D3: a finding
-// opens its entry's tab) and which tabs to mark, so the answer stays the
-// composable's rather than a template reading findings by kind.
-export function entryBlocksSave(draft, entry) {
-  if (!entry) return false
-  if (entry.findings?.some((finding) => finding.kind === 'error')) return true
-  if (entry.hasForm && personaOverByteCap(draft, entry.personaText)) return true
-  return idValidityProblem(draft, entry) !== null
-}
-
-// Which findings the dialog lists as the **file's** own: every file-level
-// finding it produced, `error` and `note` alike. A note is listed but never
-// holds Save (`blockingFindings` decides that); an error is listed *and* holds
-// it — with one exception the listing shares with `blockingFindings`: a finding
-// about the file's `default` is answered by the Common tab's choice, so once the
-// draft names a declared mode it is listed **no longer**, and the lines on screen
-// and the Save button obey one verdict. The two kinds are separated here rather
-// than in the template, so the component renders the composable's answer instead
-// of sorting findings by kind itself.
-export function fileFindingsFor(draft) {
-  const list = Array.isArray(draft?.findings) ? draft.findings : []
-  const hasEntries = (draft?.entries?.length ?? 0) > 0
-  const errors = list.filter(
-    (finding) =>
-      finding.kind === 'error' &&
-      !(hasEntries && isDefaultFinding(finding.message)),
-  )
-  const notes = list.filter((finding) => finding.kind !== 'error')
-  const extra = [draftDefaultProblem(draft), modeCountProblem(draft)].filter(Boolean)
-  return { errors: [...errors, ...extra.map((message) => ({ kind: 'error', message }))], notes }
-}
-
-// Which field of the form one of an entry's findings talks about (`'label'`,
-// `'mcptools'`, `'lsptools'`, `'systemMessage'`, or null when it names the entry
-// itself or a key the vocabulary does not know — an unknown key, which the form
-// cannot fix). The dialog puts each finding next to the field it names, and this
-// is the loader-pointer reading that decides "next to", so it stays here rather
-// than becoming a string test in the template.
-export function findingFieldFor(entry, message) {
-  return entry ? findingField(entry, message) : null
+// re-derived in the component: this entry's problems, or a save already in
+// flight.
+export function saveDisabledFor(draft, entry, { saving = false } = {}) {
+  if (!entry || saving) return true
+  return entryProblems(draft, entry).length > 0
 }
 
 // A tab's caption: the Label field it currently holds, falling back to the id
-// when the label is empty — the loader's own rule (an empty label is the id),
-// and the reason a caption follows the Label field live rather than the file's
-// original text. An entry with no form has no label to follow: its raw key is
-// its caption, which is what shows the user *what the file says*.
+// when the label is empty. It follows the field live, which is why it is read
+// here and not remembered from the read.
 export function tabCaptionFor(entry) {
   if (!entry) return ''
   const label = typeof entry.label === 'string' ? entry.label.trim() : ''
-  return label || String(entry.key ?? '')
+  return label || String(entry.id ?? '')
 }
 
-// Dirty tracking: whether the draft differs from what was read. Cancel needs no
-// confirm when it is not; Save needs nothing when it is not either (the save
-// would rewrite the same bytes — allowed, but pointless to advertise).
-function draftSnapshot(draft) {
-  return JSON.stringify({
-    entries: draft.entries ?? [],
-    default: draft.default ?? null,
-    readmePresent: draft.readmePresent === true,
-    readme: draft.readme ?? null,
-  })
-}
-
-export function draftIsDirty(draft) {
-  return draftSnapshot(draft) !== (draft?.baseline ?? '')
-}
-
-// D3's absent-file case: the dialog says plainly that saving will create the
-// file, because there is nothing there to lose.
-export function draftWillCreateFile(draft) {
-  return draft?.source?.exists !== true
-}
-
-// The persona as the textarea holds it: a string verbatim, a list joined with
-// newlines (the loader's own join, so the round-trip is byte-identical), null
-// or absent as empty ("use the configured system prompt"). A shape no form can
-// hold (an empty list, a list with a non-string) leaves `personaText` null and
-// keeps the raw value for the save body — its finding is what the user sees.
-function personaOf(fields) {
-  const raw = 'systemMessage' in fields ? fields.systemMessage : undefined
-  if (typeof raw === 'string') return { text: raw, raw }
-  if (Array.isArray(raw) && raw.length > 0 && raw.every((line) => typeof line === 'string')) {
-    return { text: raw.join('\n'), raw }
+// The model dropdown's contents: every configured model, grouped by the server
+// that names it (§5.2). Plain data — the server list is `GET /api/servers`'s
+// answer, and this only reshapes it for the `<optgroup>`s.
+export function modelChoices(servers) {
+  const groups = []
+  for (const server of Array.isArray(servers) ? servers : []) {
+    const models = (server?.models ?? []).map((model) => ({
+      id: model.id,
+      name: model.name,
+    }))
+    if (models.length) groups.push({ server: server.name, models })
   }
-  return { text: raw === undefined || raw === null ? '' : null, raw }
+  return groups
 }
 
-// Turn the document payload into the dialog's editable draft: the file's own
-// entries in the file's own order (nothing added — the app-owned mode is absent
-// from the payload entirely, D4), each with its fields, its findings and
-// `hasForm`. For an absent file the built-in document is the draft (D3's one
-// legitimate case) and `draftWillCreateFile` says so.
-export function createAgentModesDraft(payload) {
-  const defaults = payload?.defaults ?? {}
-  const source = payload?.source ?? {}
-  // The built-in document is the draft for **one** case (D3): the file is
-  // absent, so there is nothing there to lose. A file that exists but holds no
-  // usable entries — unparseable, `agents` not an object, every entry dropped —
-  // drafts as *empty*, because offering the defaults there would be the loss
-  // this read exists to prevent, and its findings are what the dialog shows.
-  const absent = source.exists !== true
-  const declared = Array.isArray(payload?.entries) ? payload.entries : []
-  const rawEntries = absent && !declared.length
-    ? Object.entries(defaults.agents ?? {}).map(([key, fields]) => ({
-        key,
-        hasForm: true,
-        fields: fields ?? {},
-        findings: [],
-      }))
-    : declared
-  const entries = rawEntries.map((entry) => {
-    const fields = entry.fields ?? {}
-    const persona = personaOf(fields)
-    return {
-      key: entry.key,
-      hasForm: entry.hasForm !== false,
-      isNew: false,
-      label: typeof fields.label === 'string' ? fields.label : '',
-      mcptools: fields.mcptools === true,
-      lsptools: fields.lsptools === true,
-      personaText: persona.text,
-      personaNull: persona.raw === null,
-      personaAbsent: persona.raw === undefined,
-      findings: entry.findings ?? [],
-      rawEntry: entry,
+// The quiet line under an agent's model dropdown: which model it will run on,
+// named by its server and its own name — or, when it has none, the same "cannot
+// run" wording the dropdown's empty option uses.
+export function modelLineFor(entry, servers) {
+  if (!entry) return null
+  if (entry.modelId === null || entry.modelId === undefined) return NO_MODEL_LABEL
+  for (const server of Array.isArray(servers) ? servers : []) {
+    for (const model of server?.models ?? []) {
+      if (model.id === entry.modelId) return `${server.name} · ${model.name}`
     }
-  })
-  const keys = entries.map((entry) => entry.key)
-  const declaredDefault =
-    typeof payload?.default === 'string' && keys.includes(payload.default)
-      ? payload.default
-      : null
-  const draft = {
-    source,
-    caps: payload?.caps ?? {},
-    defaults,
-    findings: Array.isArray(payload?.findings) ? payload.findings : [],
-    entries,
-    default:
-      declaredDefault ??
-      (typeof defaults.default === 'string' ? defaults.default : null) ??
-      keys[0] ??
-      '',
-    readmePresent: 'readme' in (payload ?? {}),
-    readme: payload?.readme,
-    mtime: source.mtime ?? null,
   }
-  draft.baseline = draftSnapshot(draft)
-  return draft
+  // The row names a model the catalogue no longer holds — a hand-edited
+  // database, or a server removed in another tab. The agent cannot run either
+  // way, and the sentence that says so is the same one (D7).
+  return NO_MODEL_LABEL
 }
 
-// Create agent (D5): append the tab immediately and focus it — **nothing is
-// written**; the new mode exists only in the draft until Save. Its id is the
-// slug of its label, editable only while it is new (`idEditableFor`).
-export function addModeToDraft(draft, label) {
+// One store row as an editable entry: the shape the form holds.
+function entryOfRow(row) {
+  return {
+    id: row.id,
+    isNew: false,
+    label: row.label ?? '',
+    maxToolIteration: row.maxToolIteration ?? null,
+    mcpEnable: row.mcpEnable !== false,
+    lspEnable: row.lspEnable !== false,
+    personaText: typeof row.systemMessage === 'string' ? row.systemMessage : '',
+    readonly: row.readonly === true,
+    deletable: row.deletable !== false,
+    modelId: row.modelId ?? null,
+    modelName: row.modelName ?? null,
+  }
+}
+
+// The draft from an agent payload: **the list itself** (`state.modes`, already
+// adopted by `acceptPayload`), plus the caps the form enforces and whatever the
+// read noticed. Nothing is copied out of a document, and no entry is added: the
+// app owns these rows.
+export function createAgentDraft(payload) {
+  const agents = Array.isArray(payload?.agents) ? payload.agents : []
+  return {
+    caps: payload?.caps ?? {},
+    findings: Array.isArray(payload?.findings) ? payload.findings : [],
+    entries: agents.map(entryOfRow),
+  }
+}
+
+// Create agent: append the tab and focus it. **Nothing is written** until the
+// new tab's own Save — the row does not exist yet, which is what `isNew` says.
+// Its id is the slug of its label, editable only while it is new.
+export function addAgentToDraft(draft, label, { modelId = null } = {}) {
   const entry = {
-    key: slugForDraft(draft, label),
-    hasForm: true,
+    id: slugForDraft(draft, label),
     isNew: true,
     label: String(label ?? ''),
-    mcptools: false,
-    lsptools: false,
+    maxToolIteration: capsOf(draft).minToolIteration ?? null,
+    mcpEnable: false,
+    lspEnable: false,
     personaText: '',
-    personaNull: false,
-    personaAbsent: true,
-    findings: [],
-    rawEntry: null,
+    readonly: false,
+    deletable: false,
+    modelId,
+    modelName: null,
   }
   draft.entries.push(entry)
   return entry
 }
 
-// Delete exists (resolved open question 1): per-tab, and refused for the mode
-// that is currently the default — a default must name a declared mode.
-export function deleteDisabledFor(draft, key) {
-  return draft?.default === key
-}
-
-export function deleteModeFromDraft(draft, key) {
-  if (deleteDisabledFor(draft, key)) return false
-  const index = draft.entries.findIndex((entry) => entry.key === key)
+export function removeAgentFromDraft(draft, entry) {
+  const index = draft.entries.indexOf(entry)
   if (index === -1) return false
   draft.entries.splice(index, 1)
   return true
 }
 
-// The save body: D6's shape from the draft. `version` and `readme` are not sent
-// at all (the writer takes the version from the app's constant and the readme
-// from the file on disk); `agents` is the draft's entries in the draft's order;
-// an entry keeps only the vocabulary keys it actually had, so a key the file
-// never wrote does not appear because the form rendered a default for it. An
-// unrepresentable entry travels **verbatim** — the save refuses it (which is
-// right: it must be deleted first) rather than the client inventing a shape.
-function saveBodyOf(draft) {
-  const agents = {}
-  for (const entry of draft.entries ?? []) {
-    if (!entry.hasForm) {
-      agents[entry.key] =
-        entry.rawEntry && 'fields' in entry.rawEntry ? entry.rawEntry.fields : entry.rawEntry
-      continue
-    }
-    const fields = {}
-    if (entry.label !== '') fields.label = entry.label
-    fields.mcptools = entry.mcptools === true
-    fields.lsptools = entry.lsptools === true
-    if (entry.personaText === null) {
-      fields.systemMessage = entry.rawEntry?.fields?.systemMessage ?? null
-    } else if (entry.personaText !== '') {
-      fields.systemMessage = entry.personaText
-    } else if (!entry.personaAbsent) {
-      // The file said "use the configured prompt" (`null`) or held an empty
-      // persona: the draft keeps saying it, in the same shape.
-      fields.systemMessage = entry.personaNull ? null : ''
-    }
-    agents[entry.key] = fields
+// What one entry's write posts. A new agent names its own id (the slug a chat
+// payload and every saved session file carry); an existing one addresses the
+// row it was read under, and never sends its id as a change.
+//
+// A **`readonly`** row sends its model association and nothing else: every
+// other column is nojae's, and the route refuses the rest with one sentence
+// (D4) — so the client never asks for what it knows is refused.
+export function agentWritePayload(entry) {
+  if (entry.readonly === true) {
+    return { id: entry.id, modelId: entry.modelId ?? null }
   }
-  return { default: draft.default ?? '', agents }
+  const payload = {
+    label: String(entry.label ?? '').trim(),
+    mcpEnable: entry.mcpEnable === true,
+    lspEnable: entry.lspEnable === true,
+    systemMessage: entry.personaText ?? '',
+    modelId: entry.modelId ?? null,
+  }
+  const cap = Number(entry.maxToolIteration)
+  if (Number.isInteger(cap)) payload.maxToolIteration = cap
+  return payload
 }
 
 // ---------------------------------------------------------------------------
-// The two calls
+// The editor's transport state, and the four calls
+//
+// Kept separate from the dropdown's singleton so a failed dialog read can never
+// disturb the composer (the same non-destructive rule `loadAgentModes` follows).
 // ---------------------------------------------------------------------------
 
-// The dialog's own transport state — what a *component* renders, kept separate
-// from the dropdown's so a failed dialog read can never disturb the composer
-// (the same non-destructive rule `loadAgentModes` follows).
 const editorState = reactive({
-  open: false, // the dialog is open; a 409 keeps it open (D7)
-  loading: false, // the document read is in flight
-  saving: false, // a save is in flight
-  error: null, // a transport-level failure, said out loud
-  conflict: null, // D7's named conflict: { path, diskMtime, documentMtime }
-  invalidFindings: [], // a server 422's findings, should the form ever miss one
+  open: false,
+  loading: false,
+  saving: false,
+  error: null,
+  serverFindings: [], // the last refused write's messages, each naming a field
 })
 
 function describeError(body, fallback) {
   const detail = body?.detail
   if (typeof detail === 'string' && detail) return detail
   if (Array.isArray(detail)) {
-    const messages = detail.map((item) => item?.msg ?? 'invalid')
+    const messages = detail.map((item) => {
+      const field = Array.isArray(item?.loc)
+        ? item.loc.filter((part) => part !== 'body').join('.')
+        : ''
+      return field ? `${field}: ${item?.msg ?? 'invalid'}` : item?.msg ?? 'invalid'
+    })
     if (messages.length) return messages.join(' · ')
   }
   return fallback
 }
 
-// The document read (`GET /api/agent-modes/document`). Failure leaves the
-// dropdown exactly as it was — this call touches only its own state — and says
-// so through `editorState.error`. On success it answers the editable draft.
-export async function fetchAgentModesDocument() {
+// The read: `GET /api/agents`, which is the *same* payload the dropdown reads —
+// one factsheet for both, so the dialog can never show a list the composer does
+// not offer. The answer also feeds the singleton, so a save made here lands in
+// the dropdown without a second round-trip.
+export async function fetchAgentDraft() {
   editorState.loading = true
   editorState.error = null
-  editorState.conflict = null
-  editorState.invalidFindings = []
+  editorState.serverFindings = []
   try {
-    const res = await fetch('/api/agent-modes/document')
+    const res = await fetch('/api/agents')
     const body = await res.json().catch(() => null)
     if (!res.ok) {
-      editorState.error = describeError(body, `Could not read the agent-modes file (${res.status}).`)
+      editorState.error = describeError(body, `Could not read the agents (${res.status}).`)
       return null
     }
-    return createAgentModesDraft(body)
+    try {
+      acceptPayload(body, { reseed: false })
+    } catch {
+      // The list is empty in a way the composer refuses to render; the dialog
+      // still shows what came back, so the user can see there is nothing.
+    }
+    return createAgentDraft(body)
   } catch (exc) {
     editorState.error = `Could not reach the API: ${exc}`
     return null
@@ -815,103 +737,71 @@ export async function fetchAgentModesDocument() {
   }
 }
 
-// D9's reset decision, as a plain rule: after a save, does the selection move
-// to the newly set default? It moves — unless the current mode is **locked**
-// (the modes lot's D7: a thread that entered the app-owned mode keeps it) or a
-// lot is running (its mode is pinned at launch and a save cannot move it). When
-// it is skipped, the returned sentence is what the quiet line under the select
-// says, through the notice slot the composer already renders.
-export function resetDecisionAfterSave({ batchActive = false } = {}) {
-  if (batchActive) {
-    return { move: false, reason: 'a running lot picks its mode at launch' }
-  }
-  if (state.locked) {
-    return { move: false, reason: "this conversation's mode is fixed once it has a turn" }
-  }
-  return { move: true, reason: null }
-}
-
-// The whole-document save (`POST /api/agent-modes/save`), carrying the `mtime`
-// token the read returned. On success the response — the new verdict in the
-// dropdown's own shape — feeds the singleton through `acceptPayload`, so the
-// list reloads **without a second round-trip** (D9), and the selection moves to
-// the newly set default unless `resetDecisionAfterSave` says otherwise (a
-// deleted-while-selected mode lands on the default too, which is what reseed
-// does). On a 409 the draft is left untouched and the conflict is *named* —
-// both `mtime` numbers — with the dialog staying open; nothing is merged and
-// nothing is overwritten (D7, and reload-and-re-apply is out of this lot).
-export async function saveAgentModesDocument(draft, { batchActive = false } = {}) {
-  if (editorState.saving) return false
+// One write — create, update or the model-only save a `readonly` row allows.
+// The answer is the whole new list, so the dialog re-baselines on the server's
+// rows instead of splicing the one it sent (which is what makes a refusal, a
+// cascade or a re-asserted built-in visible without the client knowing the rule).
+async function postAgent(path, payload, fallback) {
+  if (editorState.saving) return null
   editorState.saving = true
   editorState.error = null
-  editorState.conflict = null
-  editorState.invalidFindings = []
+  editorState.serverFindings = []
   try {
-    const res = await fetch('/api/agent-modes/save', {
+    const res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ document: saveBodyOf(draft), mtime: draft?.mtime ?? null }),
+      body: JSON.stringify(payload),
     })
     const body = await res.json().catch(() => null)
     if (!res.ok) {
       const detail = body?.detail
-      if (res.status === 409 && detail && typeof detail === 'object') {
-        editorState.conflict = {
-          path: detail.path ?? '',
-          diskMtime: detail.diskMtime ?? null,
-          documentMtime: detail.documentMtime ?? null,
-        }
-      } else if (res.status === 422 && detail && typeof detail === 'object' && Array.isArray(detail.findings)) {
-        // The form should have blocked this save; if it did not, the server's
-        // findings are shown rather than swallowed.
-        editorState.invalidFindings = detail.findings
+      if (typeof detail === 'string' && detail) {
+        editorState.serverFindings = [{ kind: 'error', message: detail }]
       } else {
-        editorState.error = describeError(body, `Could not save the agent-modes file (${res.status}).`)
+        editorState.error = describeError(body, fallback)
       }
-      return false
+      return null
     }
-    // The draft is now what the disk holds: a fresh token and a clean baseline.
-    draft.mtime = body?.source?.mtime ?? null
-    draft.baseline = draftSnapshot(draft)
-    const decision = resetDecisionAfterSave({ batchActive })
-    const kept = state.current
     try {
-      acceptPayload(body, { reseed: true })
-      if (!decision.move) {
-        if (modeById(kept)) {
-          // The lock and the lot pin survive the reload: the list changed, the
-          // selection did not, and the quiet line says why.
-          state.current = kept
-          syncAgentModeLock(threadHasTurns())
-          state.notice = `The agent-modes file was saved — the selection did not move: ${decision.reason}.`
-        } else {
-          // The saved document deleted the very mode the lock (or the lot) was
-          // holding. There is nothing to keep, and pointing `current` at a mode
-          // this workspace no longer has would be a 422 on the next turn; the
-          // same out-loud fall-back `applySessionAgentMode` uses for an id this
-          // workspace does not have.
-          state.current = state.default
-          syncAgentModeLock(threadHasTurns())
-          state.notice = `The agent-modes file was saved, and it no longer declares the mode "${kept}" this conversation was using — using ${state.default ?? 'the workspace default'}.`
-        }
-      }
+      acceptPayload(body, { reseed: false })
     } catch {
-      // The bytes landed; only the dropdown's reload *of them* failed, and that
-      // is the failure `loadAgentModes` already absorbs: the previous list
-      // stands, `send()` omits the key so the server's default answers, and the
-      // next refresh picks the new verdict up. Saying "could not save" here
-      // would be a lie about a file that was saved.
       state.loaded = false
     }
-    return true
+    return createAgentDraft(body)
   } catch (exc) {
     editorState.error = `Could not reach the API: ${exc}`
-    return false
+    return null
   } finally {
     editorState.saving = false
   }
 }
 
-export function useAgentModes() {
-  return { state, editor: editorState, loadAgentModes, setAgentMode, currentMode, modeHint }
+// Save one agent. A new row is added; an existing one is rewritten — and a
+// `readonly` row sends its model alone. The answer is the new draft, or null
+// with the reason in `editorState`.
+export async function saveAgent(entry) {
+  const payload = agentWritePayload(entry)
+  return postAgent(
+    entry.isNew ? '/api/agents/add' : '/api/agents/save',
+    { ...payload, id: entry.id },
+    `Could not save the agent (${entry.isNew ? 'added' : 'saved'}).`,
+  )
 }
+
+// Remove one agent. The store copies the database first (D12), so the confirm
+// the dialog asks is the only guard the user needs.
+export async function deleteAgent(entry) {
+  return postAgent('/api/agents/delete', { id: entry.id }, 'Could not delete the agent.')
+}
+
+export function useAgentModes() {
+  return {
+    state,
+    editor: editorState,
+    loadAgentModes,
+    setAgentMode,
+    currentMode,
+    modeHint,
+  }
+}
+

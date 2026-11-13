@@ -18,6 +18,8 @@ from mcp_connectors import console_mcp as c
 from mcp_connectors import policy_file as connector_policy
 from mcp_connectors import policy_shared as shared
 
+from src.core import appdb
+
 from tests.conftest import console_tool
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,6 +315,46 @@ def test_a_traversal_out_of_a_secret_store_is_still_refused():
     # resolved target would be an ordinary file.
     msg = refused(f"cat {Path.home()}/.ssh/../../etc/hostname")
     assert "off-limits" in msg
+
+
+def test_the_settings_store_and_its_sidecars_are_refused_outside_the_root(
+    root: Path,
+):
+    """D10's connector half, console side: the store is unreachable by name.
+
+    The three names are planted in a *sibling* folder, because inside the root
+    the deny-list is bypassed and the workspace policy decides (the split the
+    ``.env`` test below pins) — and outside it this floor is the only rule that
+    speaks. The refusal is the name-based one, so it does not mention the
+    workspace policy: the two lists are separate by rule.
+    """
+    outside = root.parent / "console-store-sibling"
+    outside.mkdir(parents=True, exist_ok=True)
+    for name in (appdb.DB_FILENAME,
+                 *(appdb.DB_FILENAME + suffix
+                   for suffix in appdb.WAL_SIDECAR_SUFFIXES)):
+        target = outside / name
+        target.write_bytes(b"\x00")
+        for command in (f"cat {target}", f"cp {target} /tmp/x"):
+            msg = refused(command)
+            assert "off-limits" in msg, command
+            assert name in msg, command
+            assert "workspace policy" not in msg, command
+
+
+def test_an_unrelated_database_outside_the_root_is_still_readable(root: Path):
+    """The floor names three files, not an extension.
+
+    A project's own ``app.db`` is ordinary data, and refusing it would cost an
+    agent the question it was asked — the reason the entry is a name and not a
+    ``.db`` suffix.
+    """
+    outside = root.parent / "console-store-sibling"
+    outside.mkdir(parents=True, exist_ok=True)
+    target = outside / "app.db"
+    target.write_bytes(b"\x00")
+    ok, msg = c.validate_command(f"cat {target}")
+    assert ok, msg
 
 
 def test_ordinary_reads_are_not_collateral_damage():

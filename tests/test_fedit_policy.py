@@ -24,6 +24,8 @@ from mcp_connectors import fedit_mcp as f
 from mcp_connectors import policy_file as connector_policy
 from mcp_connectors import policy_shared as shared
 
+from src.core import appdb
+
 DENIED_READ = "may not be read by this connector"
 DENIED_WRITE = "may not be written by this connector"
 EDIT = "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE"
@@ -771,6 +773,54 @@ def test_the_workspace_policy_says_nothing_outside_the_root(tmp_path, ws: Path):
     out = f.read_file(str(secret))
     assert DENIED_READ in out
     assert "secrets/config file" in out and "workspace policy" not in out
+
+
+@pytest.mark.parametrize(
+    "name",
+    [appdb.DB_FILENAME]
+    + [appdb.DB_FILENAME + s for s in appdb.WAL_SIDECAR_SUFFIXES],
+)
+def test_the_settings_store_and_its_sidecars_are_refused_outside_the_root(
+    ws: Path, name: str
+):
+    """D10's connector half, fedit side: the store is unreachable by name.
+
+    The three names are planted in a *sibling* folder, because inside a root the
+    deny-list is bypassed and the workspace policy decides (the split the test
+    above pins for ``.env``). Outside it this floor is the only rule that speaks,
+    and its sentence is the name-based one — it never mentions the workspace
+    policy, because the two lists are separate by rule.
+
+    Reads and writes are both refused: the file holds the model credentials, so
+    disclosing its bytes to a context window is as much the accident as
+    overwriting them.
+    """
+    outside = ws.parent / "sibling-project"
+    outside.mkdir(parents=True, exist_ok=True)
+    target = outside / name
+    target.write_bytes(b"\x00")
+
+    out = f.read_file(str(target))
+    assert DENIED_READ in out, name
+    assert name in out and "workspace policy" not in out, name
+    assert DENIED_WRITE in f.apply_edit(str(target), EDIT_ONE), name
+    # A dry run is not a door: the refusal is the same one apply gives.
+    assert DENIED_WRITE in f.preview_edit(str(target), EDIT_ONE), name
+
+
+def test_an_unrelated_database_outside_the_root_is_still_readable(ws: Path):
+    """The floor names three files, not an extension.
+
+    A project's own ``app.db`` is ordinary data — the reason the entry is a name
+    and not a ``.db`` suffix, which would refuse the very file an agent was
+    asked about.
+    """
+    outside = ws.parent / "sibling-project"
+    outside.mkdir(parents=True, exist_ok=True)
+    target = outside / "app.db"
+    target.write_text("one\n", encoding="utf-8")
+    assert f.read_file(str(target)).startswith("File:")
+    assert f.apply_edit(str(target), EDIT_ONE).startswith("Applied")
 
 
 def test_the_same_named_folder_inside_the_root_is_governed(ws: Path):

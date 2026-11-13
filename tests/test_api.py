@@ -13,9 +13,9 @@ from src.core.models import EndpointsConfig
 from src.api import routes
 from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
+from src.core import appdb
 from src.core import batch as batch_core
 from src.core import editorfs
-from src.core import prompt_helpers
 
 
 def _config() -> EndpointsConfig:
@@ -27,13 +27,21 @@ def _config() -> EndpointsConfig:
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    app = create_app()
+    """The app, with the connection coming from this test's own store.
 
-    monkeypatch.setattr(
-        routes,
-        "load_endpoints_config",
-        lambda: (_config(), None),
+    No seam is stubbed here any more: ``load_endpoints_config`` reads the rows the
+    store fixture seeded, so a route's answer is about real rows rather than
+    about a monkeypatch.
+    """
+    from tests.conftest import neutralise_store
+
+    neutralise_store(
+        monkeypatch,
+        tmp_path,
+        serverUrl="http://localhost:8080/v1",
+        endpoint="model-a",
     )
+    app = create_app()
     # The context-window probe hits the configured LLM server: keep the
     # suite hermetic; the real function is unit-tested directly.
     monkeypatch.setattr(
@@ -46,47 +54,70 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 class TestConfigEndpoint:
+    """``GET /api/config`` answers **per model**, never "the" model (D5)."""
+
     def test_returns_expected_shape(self, client: TestClient):
         body = client.get("/api/config").json()
-        assert body["models"] == ["model-a"]
-        assert body["samplingSummary"] == "defaults"
-        assert body["supportsVision"] is False
+        # A **list**, because which model a view is on is the composer's answer.
+        assert [model["name"] for model in body["models"]] == ["model-a"]
+        model = body["models"][0]
+        assert model["serverUrl"] == "http://localhost:8080/v1"
+        assert model["supportsVision"] is False
         # Hermetic fixture stubs the probe: the key must always be present.
-        assert body["contextWindow"] is None
-        assert set(body) == {
-            "models",
+        assert model["contextWindow"] is None
+        assert set(model) == {
+            "id",
+            "name",
+            "serverId",
+            "serverName",
             "serverUrl",
             "supportsVision",
-            "samplingSummary",
             "contextWindow",
         }
+        # The store-level question, and no answer that would imply "the" model.
+        assert body["store"] == {"usable": True, "sentence": None}
+        assert set(body) == {"models", "store"}
+        for absent in ("serverUrl", "samplingSummary", "supportsVision",
+                       "contextWindow"):
+            assert absent not in body
 
-    def test_supports_vision_reflects_config(self, client, monkeypatch):
-        monkeypatch.setattr(
-            routes,
-            "load_endpoints_config",
-            lambda: (
-                EndpointsConfig(
-                    serverUrl="http://x/v1", endpoint="m", supports_vision=True
-                ),
-                None,
-            ),
-        )
-        assert client.get("/api/config").json()["supportsVision"] is True
+    def test_supports_vision_rides_with_the_model_it_describes(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        from tests.conftest import neutralise_store
 
-    def test_invalid_config_returns_422(self, client, monkeypatch):
-        from pydantic import ValidationError
+        neutralise_store(monkeypatch, tmp_path, supportsVision=True)
 
-        def invalid():
-            try:
-                EndpointsConfig.model_validate({"reasoning": "bogus"})
-            except ValidationError as exc:
-                return None, exc
-            raise AssertionError("expected validation error")
+        body = client.get("/api/config").json()
+        assert body["models"][0]["supportsVision"] is True
 
-        monkeypatch.setattr(routes, "load_endpoints_config", invalid)
+    def test_no_model_configured_answers_an_empty_list_not_a_default(self, client):
+        """A fresh install: nothing is "the" model, so nothing is offered (D5)."""
+        from tests.conftest import clear_store_connection
+
+        clear_store_connection()
+
+        body = client.get("/api/config").json()
+
+        assert body["models"] == []
+        assert body["store"] == {"usable": True, "sentence": None}
+
+    def test_an_unusable_store_answers_422_naming_the_path(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        from src.core import appdb
+
+        def refuse():
+            raise appdb.AppStoreError(
+                "nojae's settings store at /nowhere cannot be read."
+            )
+
+        monkeypatch.setattr(routes.appdb, "load_servers", refuse)
+
         response = client.get("/api/config")
+
         assert response.status_code == 422
+        assert "/nowhere" in response.json()["detail"]
 
 
 class TestContextWindow:
@@ -163,412 +194,48 @@ class TestContextWindow:
         assert routes._context_window("", "none", "model-a") is None
 
 
-class TestSettingsEndpoint:
-    @pytest.fixture(autouse=True)
-    def isolated_settings_env(self, monkeypatch, tmp_path):
-        from src import config as config_module
-        from tests.conftest import neutralise_workspace_settings
+class TestTheSettingsSurfaceIsTheStore:
+    """`GET /api/settings` is gone: the dialog edits the store's own routes (§4.5).
 
-        for key in config_module.SETTING_KEYS:
-            monkeypatch.delenv(key, raising=False)
-        monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
-        # The ``.env`` wipe never reached the workspace store: a settings test
-        # must also own the ``.nojae/nojae-settings.json`` its POST writes and
-        # its GET reads (it is group 1's home since the split). The write runs
-        # before the app boots, so the boot seed finds an existing file and
-        # leaves this one alone (exclusive create, D11).
-        neutralise_workspace_settings(monkeypatch, tmp_path)
-
-    @staticmethod
-    def _payload(**overrides):
-        payload = {
-            "serverUrl": "http://target:8080/v1",
-            "apiKey": "secret-key",
-            "endpoint": "model-a",
-            "sysprompt": "Answer briefly.",
-            "temp": "0.2",
-            "topP": "",
-            "topK": "",
-            "minP": "",
-            "repeatPenalty": "",
-            "presencePenalty": "",
-            "reasoning": "low",
-        }
-        payload.update(overrides)
-        return payload
-
-    def test_get_returns_the_values_of_the_workspace_file(self, client):
-        """The dialog's payload is the workspace file's, plus its state block."""
-        body = client.get("/api/settings").json()
-        # The fixture's own workspace file (conftest helper), not the env.
-        assert body["serverUrl"] == "http://test-server:8080/v1"
-        assert body["endpoint"] == "test-model"
-        # The state block beside the values (D9's report point): one shape to
-        # switch on, carrying the same sentence a chat request would refuse with.
-        state = body["workspaceSettings"]
-        assert set(state) == {"state", "path", "error", "configured", "message"}
-        assert state["state"] == "ok"
-        assert state["configured"] is True
-
-    def test_get_answers_native_json_types_for_group_one(self, client):
-        """The payload types ws-05 reads: numbers are numbers, never strings.
-
-        The dotenv wart D6 ends here: the file holds ``0.2`` and the dialog is
-        answered ``0.2``, while the vision flag is a real boolean.
-        """
-        body = client.get("/api/settings").json()
-        assert body["temp"] == 0.2
-        assert not isinstance(body["temp"], str)
-        assert body["topK"] == 20
-        assert body["supportsVision"] is False
-
-    def test_get_empty_when_nothing_set(self, client):
-        from src.core import workspace_settings
-        from src.core.models import DEFAULT_LLM_SYSPROMPT
-
-        os.remove(workspace_settings.workspace_settings_path())
-        workspace_settings.invalidate_workspace_settings()
-        body = client.get("/api/settings").json()
-        assert body["serverUrl"] == ""
-        assert body["apiKey"] == ""
-        # An absent member means what the spec key map says: no sampling
-        # number at all (null), and the prompt falls back to the built-in
-        # default — which is what the model then receives.
-        assert body["temp"] is None
-        assert body["supportsVision"] is False
-        assert body["sysprompt"] == DEFAULT_LLM_SYSPROMPT
-        assert body["workspaceSettings"]["state"] == "absent"
-
-    def test_save_writes_the_model_connection_to_the_workspace_file_only(
-        self, client
-    ):
-        """The dialog owns one store: the workspace file. ``.env`` keeps what it has."""
-        from src import config as config_module
-        from src.core import workspace_settings
-
-        response = client.post("/api/settings", json=self._payload())
-        assert response.status_code == 200
-        assert response.json()["endpoint"] == "model-a"
-        assert response.json()["temp"] == 0.2
-        assert response.json()["topP"] is None
-
-        # The workspace file holds the model connection.
-        path = workspace_settings.workspace_settings_path()
-        with open(path, encoding="utf-8") as handle:
-            stored = json.load(handle)
-        assert stored["serverUrl"] == "http://target:8080/v1"
-        assert stored["serverApiKey"] == "secret-key"
-        assert stored["endpoint"] == "model-a"
-        assert stored["sysprompt"] == "Answer briefly."
-        assert stored["temperature"] == 0.2
-        assert stored["reasoning"] == "low"
-        # A cleared numeric field leaves its member **absent** in the file —
-        # not ``null``, not ``""``, not the value the file held before.
-        assert "topP" not in stored
-        assert "topK" not in stored
-        assert "SUPPORTS_VISION" not in stored
-
-        # ...and nothing of it reaches ``.env``, whose managed keys the dialog
-        # does not own at all.
-        text = config_module.ENV_PATH.read_text(encoding="utf-8")
-        assert "target:8080" not in text
-        assert "secret-key" not in text
-        assert "TEMPERATURE" not in text
-        assert "SUPPORTS_VISION" not in text
-
-        # ``load_settings`` — the managed ``.env`` view — cannot even answer a
-        # group-1 key (a leftover in the ambient environment is dead bytes, D2,
-        # and reading it is the config suite's test).
-        assert "SERVER_URL" not in config_module.load_settings()
-        assert "REASONING" not in config_module.load_settings()
-        assert "TOP_P" not in config_module.load_settings()
-
-    def test_save_cleared_field_removes_a_member_the_file_held(self, client):
-        """The dialog owns every group-1 member, so clearing one clears it.
-
-        ``save_workspace_settings`` carries members over when they are not
-        given — right for ``post_lsp``, wrong here. The fixture's file holds
-        the template's ``temperature: 0.2``; a save with an empty ``temp``
-        must leave the member absent, and the next GET must answer ``null``.
-        """
-        from src.core import workspace_settings
-
-        response = client.post("/api/settings", json=self._payload(temp=""))
-        assert response.status_code == 200
-        with open(workspace_settings.workspace_settings_path(), encoding="utf-8") as f:
-            stored = json.load(f)
-        assert "temperature" not in stored
-        assert response.json()["temp"] is None
-        # The members the dialog does not own survived the rebuild.
-        assert stored["maxToolIteration"] == 300
-        assert stored["lspEnabled"] == []
-
-    def test_save_supports_vision_is_a_native_boolean(self, client):
-        from src.core import workspace_settings
-
-        # Interim until ws-05 sends a real boolean: the checkbox still sends
-        # the .env spellings, and they become a real ``true`` in the file.
-        response = client.post(
-            "/api/settings", json=self._payload(supportsVision="true")
-        )
-        assert response.status_code == 200
-        assert response.json()["supportsVision"] is True
-        with open(workspace_settings.workspace_settings_path(), encoding="utf-8") as f:
-            assert json.load(f)["supportsVision"] is True
-
-        # An empty box omits the member — absent means false, not ``"0"``.
-        response = client.post(
-            "/api/settings", json=self._payload(supportsVision="")
-        )
-        assert response.status_code == 200
-        assert response.json()["supportsVision"] is False
-        with open(workspace_settings.workspace_settings_path(), encoding="utf-8") as f:
-            assert "supportsVision" not in json.load(f)
-
-    def test_llm_debug_survives_a_save_that_never_mentions_it(
-        self, client, monkeypatch
-    ):
-        """The dialog no longer carries ``LLM_DEBUG`` (spec section 7) — and a
-        save must not switch it off.
-
-        The trap this pins: the dialog's ``.env`` mapping once *always* emitted
-        the key, and the merge beside the write let the emitted ``""`` win over
-        the stored value — so every settings save commented ``LLM_DEBUG`` out
-        and popped it from the environment. The key
-        is hand-edited like ``NOJAE_PYTHON_ROOT`` now; a save that never
-        mentions it re-applies the value the file still has.
-        """
-        import os
-
-        from dotenv import dotenv_values
-
-        from src import config as config_module
-
-        monkeypatch.setenv(config_module.LLM_DEBUG_KEY, "1")
-        applied = []
-        monkeypatch.setattr(
-            config_module, "apply_llm_debug", lambda: applied.append(True)
-        )
-        response = client.post("/api/settings", json=self._payload())
-        assert response.status_code == 200
-        # Stored, live in the environment, and re-applied to the process —
-        # without the dialog ever naming the key.
-        assert dotenv_values(config_module.ENV_PATH)[config_module.LLM_DEBUG_KEY] == "1"
-        assert os.environ[config_module.LLM_DEBUG_KEY] == "1"
-        assert applied == [True]
-        # The field is gone from the API in both directions.
-        assert "llmDebug" not in response.json()
-        assert "llmDebug" not in client.get("/api/settings").json()
-
-    def test_save_unticked_debug_clears_the_legacy_key_too(self, client, monkeypatch):
-        """A save ends the fallback, because the file it writes no longer holds it.
-
-        Boot loaded the legacy key from a hand-written .env; the next save must
-        switch the logging off *now*, not only after a restart that never reads
-        that key again — the dialog no longer carries the switch, so "a save"
-        is any settings save, not one that unticks a box.
-        """
-        import os
-
-        from src import config as config_module
-
-        monkeypatch.setenv(config_module.LEGACY_LLM_DEBUG_KEY, "1")
-        response = client.post("/api/settings", json=self._payload())
-        assert response.status_code == 200
-        assert config_module.LEGACY_LLM_DEBUG_KEY not in os.environ
-        assert "LLM_DEBUG" not in os.environ
-        assert config_module.llm_debug_enabled() is False
-        text = config_module.ENV_PATH.read_text(encoding="utf-8")
-        assert "#LLM_DEBUG=" in text
-        assert config_module.LEGACY_LLM_DEBUG_KEY not in text
-
-    def test_save_emptied_sysprompt_answers_the_default(self, client, monkeypatch):
-        from src import config as config_module
-        from src.core import workspace_settings
-        from src.core.models import DEFAULT_LLM_SYSPROMPT
-
-        assert client.post("/api/settings", json=self._payload()).status_code == 200
-        response = client.post("/api/settings", json=self._payload(sysprompt=""))
-        assert response.status_code == 200
-        with open(workspace_settings.workspace_settings_path(), encoding="utf-8") as f:
-            assert "sysprompt" not in json.load(f)
-        text = config_module.ENV_PATH.read_text(encoding="utf-8")
-        assert "LLM_SYSPROMPT" not in text
-        assert "LLM_SYSPROMPT" not in config_module.load_settings()
-        # An absent sysprompt is reported back as the built-in default, which
-        # is what the model then receives.
-        assert response.json()["sysprompt"] == DEFAULT_LLM_SYSPROMPT
-
-    def test_save_invalid_value_returns_422(self, client):
-        """The gate runs before **either** write (spec section 5)."""
-        from src import config as config_module
-        from src.core import workspace_settings
-
-        path = workspace_settings.workspace_settings_path()
-        with open(path, encoding="utf-8") as handle:
-            before = handle.read()
-        response = client.post("/api/settings", json=self._payload(temp="abc"))
-        assert response.status_code == 422
-        assert not config_module.ENV_PATH.exists()
-        with open(path, encoding="utf-8") as handle:
-            assert handle.read() == before
-
-    def test_save_invalid_reasoning_returns_422(self, client):
-        """A bad ``reasoning`` reaches **neither** disk: one gate, both stores."""
-        from src import config as config_module
-        from src.core import workspace_settings
-
-        path = workspace_settings.workspace_settings_path()
-        with open(path, encoding="utf-8") as handle:
-            before = handle.read()
-        response = client.post("/api/settings", json=self._payload(reasoning="ultra"))
-        assert response.status_code == 422
-        assert not config_module.ENV_PATH.exists()
-        with open(path, encoding="utf-8") as handle:
-            assert handle.read() == before
-
-    def test_saved_settings_are_used_by_config_endpoint(self, client, monkeypatch):
-        """Read-your-write across the split: the POST writes what the model
-        call reads (spec section 5, the acceptance this whole task exists for)."""
-        from src import config as config_module
-
-        monkeypatch.setattr(
-            routes, "load_endpoints_config", config_module.load_endpoints_config
-        )
-        assert client.post("/api/settings", json=self._payload()).status_code == 200
-        body = client.get("/api/config").json()
-        assert body["models"] == ["model-a"]
-        assert "temperature=0.2" in body["samplingSummary"]
-        assert body["serverUrl"] == "http://target:8080/v1"
-
-    def test_save_accepts_json_numbers_and_nulls(self, client):
-        from src.core import workspace_settings
-
-        payload = {
-            "serverUrl": "http://target:8080/v1",
-            "endpoint": "model-a",
-            "temp": 0.2,
-            "topK": 20,
-            "topP": None,
-            "unknownKey": "ignored",
-        }
-        response = client.post("/api/settings", json=payload)
-        assert response.status_code == 200
-        # Numbers arrive as strings through the tolerant mixin and are stored
-        # as native JSON again — the file never holds "0.2" or "20".
-        with open(workspace_settings.workspace_settings_path(), encoding="utf-8") as f:
-            stored = json.load(f)
-        assert stored["temperature"] == 0.2
-        assert stored["topK"] == 20
-        assert "topP" not in stored
-        assert stored["endpoint"] == "model-a"
-        assert "ENDPOINT" not in routes.load_settings()
-
-    def test_save_reasoning_none_is_omitted(self, client):
-        from src.core import workspace_settings
-
-        payload = self._payload(reasoning="none")
-        response = client.post("/api/settings", json=payload)
-        assert response.status_code == 200
-        with open(workspace_settings.workspace_settings_path(), encoding="utf-8") as f:
-            assert "reasoning" not in json.load(f)
-        assert response.json()["reasoning"] == ""
-
-    def test_get_reflects_the_second_workspace_after_a_switch(self, hub_client, tmp_path):
-        """D4's cache invalidation at API level: two roots, one per file.
-
-        The first workspace's saved values must not answer after the app bar
-        has moved to the second one — the cached read is keyed per resolved
-        path and the switch invalidates it (ws-02 placed the seed +
-        invalidation, this proves the settings API follows).
-        """
-        from tests.conftest import write_workspace_settings
-
-        first = tmp_path / "ws-first"
-        first.mkdir()
-        write_workspace_settings(first, serverUrl="http://one.example/v1")
-        second = tmp_path / "ws-second"
-        second.mkdir()
-        write_workspace_settings(second, serverUrl="http://two.example/v1")
-
-        assert (
-            hub_client.post("/api/path-location", json={"path": str(first)}).status_code
-            == 200
-        )
-        assert hub_client.get("/api/settings").json()["serverUrl"] == "http://one.example/v1"
-
-        assert (
-            hub_client.post(
-                "/api/path-location", json={"path": str(second)}
-            ).status_code
-            == 200
-        )
-        body = hub_client.get("/api/settings").json()
-        assert body["serverUrl"] == "http://two.example/v1"
-        assert body["workspaceSettings"]["path"].startswith(str(second))
-
-
-class TestSettingsEndpointInTestMode:
-    """The e2e switch at API level (T-D3, T-D5): the dialog reads and refuses.
-
-    With ``NOJAE_TEST_SETTINGS`` truthy the file **in use** is the suite's
-    own hand-authored ``.nojae/nojae-test-settings.json``, so ``GET /api/settings``
-    names that path and a group-1 save is refused — the dialog cannot rewrite the
-    fixture the next spec depends on.
+    Pinned as an absence rather than left implicit, because a route that kept
+    answering a file the app no longer reads would be a second authority on the
+    connection — and `test_write_surface_isolation.py` already pins that the
+    store's writes are the browser's own.
     """
 
-    @pytest.fixture(autouse=True)
-    def in_test_mode(self, monkeypatch, tmp_path):
-        from src import config as config_module
-        from src.core import workspace_settings as ws
-        from tests.conftest import neutralise_workspace_settings
+    def test_the_old_settings_routes_are_gone(self, client: TestClient):
+        assert client.get("/api/settings").status_code in (404, 405)
+        assert client.post("/api/settings", json={}).status_code in (404, 405)
 
-        for key in config_module.SETTING_KEYS:
-            monkeypatch.delenv(key, raising=False)
-        monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
-        neutralise_workspace_settings(monkeypatch, tmp_path,
-                                      serverUrl="http://dev-live:9/v1")
-        # The switch, flipped per test (T-D2): the production file above now
-        # answers nothing, because the file in use is the test one.
-        monkeypatch.setenv(ws.TEST_SETTINGS_KEY, "1")
-        ws.invalidate_workspace_settings()
+    def test_a_saved_server_is_what_the_config_endpoint_answers(
+        self, client: TestClient
+    ):
+        """Read-your-write across the store: a route's write is a turn's read."""
+        created = client.post(
+            "/api/servers/add",
+            json={"name": "Local", "url": "http://target:8080/v1", "apiKey": ""},
+        )
+        assert created.status_code == 200
+        # The write answers the **whole list**, so the new row is looked up by
+        # the name this test gave it rather than by its position.
+        server_id = next(
+            server["id"]
+            for server in created.json()["servers"]
+            if server["name"] == "Local"
+        )
+        added = client.post(
+            "/api/models/add", json={"serverId": server_id, "name": "model-b"}
+        )
+        assert added.status_code == 200
 
-    def test_get_reports_the_test_file_path(self, client):
-        from src.core import workspace_settings as ws
+        body = client.get("/api/config").json()
 
-        body = client.get("/api/settings").json()
-        state = body["workspaceSettings"]
-        assert state["path"].endswith(ws.WORKSPACE_TEST_SETTINGS_FILENAME)
-        # The app never seeds the test file, so a workspace in this mode really
-        # can be `absent` — the state production cannot reach.
-        assert state["state"] == "absent"
-        assert state["message"]
-        assert ws.WORKSPACE_TEST_SETTINGS_FILENAME in state["message"]
-        # The production file's values answer nothing (T-D3, no fallback).
-        assert body["serverUrl"] == ""
-
-    def test_a_group_one_save_is_refused_and_neither_file_changes(self, client):
-        from src import config as config_module
-        from src.core import workspace_settings as ws
-
-        production = ws.workspace_settings_file_path(str(config_module.path_location()))
-        with open(production, encoding="utf-8") as handle:
-            before = handle.read()
-        test_file = Path(ws.workspace_settings_path())
-        test_file.parent.mkdir(parents=True, exist_ok=True)
-        test_file.write_text('{"serverUrl": "http://suite:9/v1"}\n', encoding="utf-8")
-
-        payload = TestSettingsEndpoint._payload()
-        response = client.post("/api/settings", json=payload)
-        assert response.status_code == 409
-        assert ws.WORKSPACE_TEST_SETTINGS_FILENAME in response.json()["detail"]
-
-        with open(production, encoding="utf-8") as handle:
-            assert handle.read() == before
-        assert test_file.read_text(encoding="utf-8") == '{"serverUrl": "http://suite:9/v1"}\n'
-        # And the refusal lands before the .env write too: one refusal, no
-        # half-applied save.
-        assert not config_module.ENV_PATH.exists()
+        assert [model["name"] for model in body["models"]] == ["model-a", "model-b"]
+        # The new model arrives under the server it belongs to, with that
+        # server's own URL — a model is never offered without its server.
+        added_model = next(m for m in body["models"] if m["name"] == "model-b")
+        assert added_model["serverName"] == "Local"
+        assert added_model["serverUrl"] == "http://target:8080/v1"
 
 
 class TestEnvTrioParity:
@@ -634,8 +301,13 @@ class TestEnvTrioParity:
             _render_env({}),
             (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"),
         ):
-            assert ".nojae/nojae-settings.json" in text
-            assert "nojae-settings.default.json" in text
+            # The comment points at the settings store, which replaced the flat
+            # file, and it names no file that no longer exists. It does not
+            # spell the database's name either: the store module is the only
+            # place that does (§4.1).
+            assert "nojae's settings store" in text
+            assert "nojae-settings.json" not in text
+            assert "nojae-settings.default.json" not in text
 
     def test_required_setting_keys_is_empty(self):
         from src.config import REQUIRED_SETTING_KEYS
@@ -763,13 +435,6 @@ def hub_client(client, monkeypatch, tmp_path):
     from src.core import mcphub
 
     monkeypatch.delenv("NOJAE_PATH_LOCATION", raising=False)
-    # The switch seeds the new root, and seeding is where the one-time lift
-    # looks at the old app-level file. Point that lookup at nothing: this
-    # checkout's ``resources/memory_registration.json`` belongs to the machine
-    # and would make the seeded state ``migrated`` instead of ``created``.
-    monkeypatch.setattr(
-        prompt_helpers, "LEGACY_PROMPT_HELPERS_PATH", tmp_path / "no-legacy.json"
-    )
     empty = tmp_path / "mcp-settings.json"
     empty.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(mcphub.constants, "MCP_SETTINGS_PATH", empty)
@@ -798,24 +463,11 @@ class TestPathLocationEndpoint:
         assert body["key"] == "NOJAE_PATH_LOCATION"
         assert body["path"] == default_path_location()
         assert body["default"] == default_path_location()
-        # am-03/mbl-03: the read half reports each reserved-folder file in the
-        # shape the settings dialog renders. A GET seeds nothing, so the install
-        # dir answers whatever boot left there — the point is the shape, not the
-        # state (that belongs to the seeding suites).
-        modes = body["agentModes"]
-        assert set(modes) == {"state", "path", "error"}
-        assert modes["path"].endswith(
-            agent_modes.POLICY_DIRNAME + os.sep + agent_modes.AGENT_MODES_FILENAME
-        )
-        # mbl-03: the prompt-helpers file is the third block of that answer, and
-        # read-only like the other two.
-        helpers = body["promptHelpers"]
-        assert set(helpers) == {"state", "path", "error"}
-        assert helpers["path"].endswith(
-            prompt_helpers.POLICY_DIRNAME
-            + os.sep
-            + prompt_helpers.PROMPT_HELPERS_FILENAME
-        )
+        # appdb-07 and appdb-10: neither the helpers block nor the modes block is
+        # in that answer any more — the bullets and the agents are rows of the
+        # install's settings store, so a workspace has no such file to report.
+        assert "promptHelpers" not in body
+        assert "agentModes" not in body
 
     def test_post_sets_the_env_and_restarts_both_hubs(self, hub_client, tmp_path):
         target = tmp_path / "other-project"
@@ -830,23 +482,11 @@ class TestPathLocationEndpoint:
         # repaint its panels without a second round-trip.
         assert "connectors" in response.json()["mcp"]
         assert "servers" in response.json()["lsp"]
-        # am-03: the switch seeds the new root's agent-modes file and says so,
-        # beside the policy block (the full seeding behaviour is
-        # tests/test_agent_modes_seed.py; this pins the payload key).
-        modes = response.json()["agentModes"]
-        assert modes["state"] == "created"
-        assert modes["error"] is None
-        # mbl-03: the prompt-helpers file is seeded at the same moment, and its
-        # own state rides back in the same response.
-        helpers = response.json()["promptHelpers"]
-        assert set(helpers) == {"state", "path", "error"}
-        assert helpers["state"] == "created"
-        assert helpers["error"] is None
-        assert helpers["path"].endswith(
-            prompt_helpers.POLICY_DIRNAME
-            + os.sep
-            + prompt_helpers.PROMPT_HELPERS_FILENAME
-        )
+        # appdb-07 and appdb-10: the switch seeds no helpers file and no modes
+        # file, so it reports neither block — the bullets and the agents are the
+        # store's, not the workspace's, and a switch changes nothing in it (D11).
+        assert "promptHelpers" not in response.json()
+        assert "agentModes" not in response.json()
 
     @pytest.mark.requires_symlink(
         "the working-location switch stores the realpath, so a location spelled "
@@ -995,19 +635,23 @@ class TestHubListingsAreModeBlind:
         mcp = hub_client.get("/api/mcp").json()
         lsp = hub_client.get("/api/lsp").json()
         assert set(mcp) == {
-            "installed", "connectors", "maxIterations", "externalsError",
+            "installed", "connectors", "externalsError",
         }
+        # Neither payload carries a tool-loop cap any more: it left the LSP
+        # section with the second gate (D13) and the MCP section with the store
+        # (D9), where it is a per-agent column. A `maxIterations` here would be a
+        # second writer of a value these panels no longer edit.
         assert set(lsp) == {
-            "installed", "servers", "maxIterations", "serversError",
+            "installed", "servers", "serversError",
         }
+        assert "maxIterations" not in mcp
 
     def test_the_mode_flags_are_reported_once_by_the_mode_reader(self, hub_client):
-        # One route answers the mode question: the two booleans are on the mode
-        # objects am-01 resolves, which is all the frontend needs to gray a
-        # panel out — so no hub route has to know about modes.
-        assert set(("mcptools", "lsptools")) <= set(agent_modes.MODE_KEYS)
+        # One route answers the agent question: the two booleans are on the mode
+        # objects this module resolves, which is all the frontend needs to gray a
+        # panel out — so no hub route has to know about agents.
         resolved = agent_modes.resolve_modes()["modes"]
-        assert resolved, "the built-in defaults must always resolve"
+        assert resolved, "the built-in agents must always resolve"
         for mode in resolved:
             assert isinstance(mode.mcptools, bool)
             assert isinstance(mode.lsptools, bool)
@@ -1016,587 +660,330 @@ class TestHubListingsAreModeBlind:
         assert "mode" not in str(hub_client.get("/api/lsp").json()).lower()
 
 
-def _modes_document(agents: Dict[str, Any], default: str = "code") -> Dict[str, Any]:
-    """One well-formed modes document, spelled with its JSON keys."""
-    return {
-        "version": agent_modes.AGENT_MODES_VERSION,
-        "default": default,
-        "agents": agents,
-    }
+# -- the agents routes (appdb-10) -----------------------------------------------
+#
+# The personas are rows of the install's ``nojae.db`` now, so these tests assert
+# what the routes do to those rows: the store's own read, the ``readonly``
+# refusal, the field-naming validations and the pre-delete copy. The seeding
+# itself belongs to ``tests/test_appdb_seed.py`` and ``tests/test_appdb_store.py``.
 
 
-def _write_modes(root: Path, document: Dict[str, Any]) -> Path:
-    """Write ``<root>/.nojae/agent-modes.json`` by hand (the app never does)."""
-    folder = root / agent_modes.POLICY_DIRNAME
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / agent_modes.AGENT_MODES_FILENAME
-    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
-    return path
+def _agent_rows(client) -> Dict[str, Dict[str, Any]]:
+    """Every agent the ``GET /api/agents`` route answers, by id."""
+    body = client.get("/api/agents").json()
+    return {agent["id"]: agent for agent in body["agents"]}
 
 
-@pytest.fixture
-def mode_root(client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """A scratch working location with no modes file, cache forgotten.
+class TestAgentsEndpoint:
+    """``GET /api/agents`` is the app's whole read of the ``agents`` table."""
 
-    Every agent-modes test needs a root it owns: the alternative is answering
-    about the developer's real ``.nojae``, whose contents belong to their
-    machine. The invalidation on both sides keeps another test's cached entry
-    from being read here, and this test's from being read there.
-    """
-    root = tmp_path / "mode-workspace"
-    root.mkdir()
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
-    agent_modes.invalidate_agent_modes_cache()
-    try:
-        yield root
-    finally:
-        agent_modes.invalidate_agent_modes_cache()
-
-
-class TestAgentModesEndpoint:
-    """am-06 §3: ``GET /api/agent-modes`` is the app's only reader of the file."""
-
-    def test_with_no_file_the_four_built_in_modes_answer(self, client, mode_root):
-        response = client.get("/api/agent-modes")
+    def test_the_four_built_ins_answer_in_order(self, client):
+        response = client.get("/api/agents")
         assert response.status_code == 200
         body = response.json()
-        assert [mode["id"] for mode in body["modes"]] == [
+        assert [agent["id"] for agent in body["agents"]] == [
             modes_defaults.CHAT_MODE_ID, modes_defaults.CODE_MODE_ID,
             modes_defaults.ARCHITECT_MODE_ID, modes_defaults.TODO_BUILDER_MODE_ID,
         ]
-        assert [mode["label"] for mode in body["modes"]] == [
+        assert [agent["label"] for agent in body["agents"]] == [
             modes_defaults.CHAT_LABEL, modes_defaults.CODE_LABEL,
             modes_defaults.ARCHITECT_LABEL, modes_defaults.TODO_BUILDER_LABEL,
         ]
-        # D9 as data, not as an id the client hardcodes: the app-owned mode is
-        # last and the only one not editable.
-        assert body["modes"][-1]["editable"] is False
-        assert all(mode["editable"] for mode in body["modes"][:-1])
-        assert body["default"] == modes_defaults.CODE_MODE_ID
-        assert body["findings"] == []
-        # am-03 seeds on demand only: a GET never leaves a file behind.
-        assert body["source"] == {
-            "path": str(mode_root / agent_modes.POLICY_DIRNAME
-                        / agent_modes.AGENT_MODES_FILENAME),
-            "exists": False,
-            "loaded": False,
-            "version": None,
-        }
-        assert not (mode_root / agent_modes.POLICY_DIRNAME).exists()
 
-    def test_the_two_booleans_are_the_hub_gate_the_mode_reports(
-        self, client, mode_root
-    ):
-        # am-05 §4: these four flags are all the frontend needs to gray a hub
-        # panel out, so they have to match the gate ``_chat_tool_kwargs`` applies.
-        client.get("/api/agent-modes")
-        resolved = {mode.id: mode for mode in agent_modes.resolve_modes()["modes"]}
-        body = client.get("/api/agent-modes").json()
-        for mode in body["modes"]:
-            assert mode["mcptools"] is resolved[mode["id"]].mcptools
-            assert mode["lsptools"] is resolved[mode["id"]].lsptools
+    def test_readonly_replaces_editable_and_the_app_owned_agent_is_last(self, client):
+        """§4.4: one flag, and the app-owned agent is now *visible*."""
+        agents = client.get("/api/agents").json()["agents"]
+        assert [agent["readonly"] for agent in agents] == [False, False, False, True]
+        assert "editable" not in json.dumps(agents)
 
-    def test_a_mode_object_carries_exactly_the_five_published_fields(
-        self, client, mode_root
-    ):
-        agent_modes.ensure_agent_modes_file(str(mode_root))
-        for mode in client.get("/api/agent-modes").json()["modes"]:
-            assert set(mode) == {"id", "label", "mcptools", "lsptools", "editable"}
+    def test_the_payload_has_no_default_key(self, client):
+        """D5: a key that always answered "nothing" would be read as meaningful."""
+        assert "default" not in client.get("/api/agents").json()
 
-    def test_the_seeded_file_is_reported_as_loaded_with_no_findings(
-        self, client, mode_root
-    ):
-        state = agent_modes.ensure_agent_modes_file(str(mode_root))
-        assert state["state"] == "created"
-        body = client.get("/api/agent-modes").json()
-        assert body["source"]["exists"] is True
-        assert body["source"]["loaded"] is True
-        assert body["source"]["version"] == agent_modes.AGENT_MODES_VERSION
-        assert body["findings"] == [], "the seeded file must load cleanly"
-        assert body["default"] == modes_defaults.CODE_MODE_ID
+    def test_each_row_says_whether_its_delete_is_offered(self, client):
+        """D4, as a flag: the dialog's Delete is offered per row, not per id.
 
-    def test_a_hand_broken_file_still_answers_200_and_names_the_pointer(
-        self, client, mode_root
-    ):
-        # D11 on the HTTP edge: the dropdown has to render *and* say which
-        # pointer is wrong, so the payload is the defaults plus the findings —
-        # a 4xx/5xx would hide the fix (am-00's open question, settled here).
-        _write_modes(mode_root, _modes_document({
-            "chat": {"label": "Chat", "mcptools": False, "lsptools": False},
-            "code": {"label": "Code", "mcptools": True, "lsptools": True},
-            "architect": {"label": "Architect", "mcptool": True},
-        }))
-        response = client.get("/api/agent-modes")
-        assert response.status_code == 200
-        body = response.json()
-        assert len(body["findings"]) == 1
-        finding = body["findings"][0]
-        assert set(finding) == {"kind", "message"}
-        assert finding["kind"] == "error"
-        assert "agents.architect.mcptool" in finding["message"]
-        assert "unknown key" in finding["message"]
-        # The good entries stand; the bad one is gone; the app-owned mode is
-        # still appended.
-        assert [mode["id"] for mode in body["modes"]] == [
-            "chat", "code", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
+        ``readonly`` cannot answer this — three of the four built-ins refuse
+        deletion without being ``readonly`` — so the payload carries the answer
+        itself and the client never has to hold an agent id to compare against
+        (§5.2, AC-11).
+        """
+        agents = client.get("/api/agents").json()["agents"]
+        assert [agent["deletable"] for agent in agents] == [False, False, False, False]
 
-    def test_the_payload_carries_no_persona_and_no_generated_blocks(
-        self, client, mode_root
-    ):
-        # §3's deliberate absences, checked on the serialised payload rather
-        # than on the dict, so a refactor that adds the fields back by accident
-        # fails here instead of in review.
-        agent_modes.ensure_agent_modes_file(str(mode_root))
-        blob = json.dumps(client.get("/api/agent-modes").json())
-        assert "systemMessage" not in blob
-        assert "instructions" not in blob
-        # And the persona text itself is nowhere, under either spelling.
-        assert modes_defaults.CODE_PERSONA[0] not in blob
-        assert batch_core.DEFAULT_LOT_DIR not in blob
+        client.post("/api/agents/add", json={"id": "scribe", "label": "Scribe"})
+        users = {a["id"]: a for a in client.get("/api/agents").json()["agents"]}
+        assert users["scribe"]["deletable"] is True
 
-    def test_the_route_is_a_reader_and_leaves_nothing_behind(
-        self, client, mode_root
-    ):
-        before = sorted(p.name for p in mode_root.iterdir())
-        for _ in range(3):
-            assert client.get("/api/agent-modes").status_code == 200
-        assert sorted(p.name for p in mode_root.iterdir()) == before
+    def test_each_row_carries_whether_it_can_run(self, client, tmp_path: Path):
+        """The composer's warning reads a field, not a rule over two tables."""
+        from tests.conftest import write_store_connection
 
-    def test_the_route_takes_no_query_parameter(self, client, mode_root):
-        # §4: it answers *about* the file, and a ``?path=`` would turn the one
-        # purpose-built reader into a general way to reach the reserved folder.
+        write_store_connection(tmp_path)
+        agents = _agent_rows(client)
+        assert agents["code"]["modelId"] is not None
+        assert agents["code"]["modelName"] is not None
+
+    def test_an_agent_with_no_model_reports_none(self, client):
+        from tests.conftest import clear_agent_model
+
+        clear_agent_model("chat")
+        assert _agent_rows(client)["chat"]["modelId"] is None
+        assert _agent_rows(client)["chat"]["modelName"] is None
+
+    def test_the_caps_ride_with_the_rows(self, client):
+        body = client.get("/api/agents").json()
+        assert body["caps"]["maxIdChars"] == agent_modes.MAX_MODE_ID_CHARS
+        assert body["caps"]["idPattern"] == agent_modes.MODE_ID_PATTERN
+        assert body["caps"]["maxPersonaBytes"] == (
+            agent_modes.MAX_MODE_SYSTEM_MESSAGE_BYTES
+        )
+        assert body["caps"]["minToolIteration"] == agent_modes.MIN_TOOL_ITERATION
+
+    def test_the_route_takes_no_query_parameter(self, client):
         spec = client.get("/openapi.json").json()["paths"]
-        operation = spec["/api/agent-modes"]["get"]
-        assert {p["name"] for p in operation.get("parameters", [])} == set()
-        assert set(operation["responses"]) == {"200"}
-
-    def test_the_reserved_mode_is_listed_whatever_the_file_says(
-        self, client, mode_root
-    ):
-        # Two different files, both list it (and last, and not editable): the
-        # app-owned mode cannot be removed, renamed or redefined by a file.
-        _write_modes(mode_root, _modes_document(
-            {"planner": {"label": "Planner", "mcptools": True}},
-            default="planner",
-        ))
-        first = client.get("/api/agent-modes").json()
-        assert [mode["id"] for mode in first["modes"]] == [
-            "planner", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
-        assert first["default"] == "planner"
-
-        _write_modes(mode_root, _modes_document({
-            "chat": {"label": "My Chat", "mcptools": False, "lsptools": False},
-            modes_defaults.TODO_BUILDER_MODE_ID: {"label": "Mine"},
-        }, default="chat"))
-        # Only the note about the reserved entry: the file's own modes loaded,
-        # and its ``default`` names one of them (the loader's own rules).
-        second = client.get("/api/agent-modes").json()
-        assert [mode["id"] for mode in second["modes"]] == [
-            "chat", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
-        # The file's entry is ignored, nojae's definition answers (D9),
-        # and the note says so instead of failing the request.
-        builder = second["modes"][-1]
-        assert builder["label"] == modes_defaults.TODO_BUILDER_LABEL
-        assert builder["editable"] is False
-        assert [finding["kind"] for finding in second["findings"]] == ["note"]
-        assert "cannot be set here" in second["findings"][0]["message"]
-
-    def test_the_dropdown_order_is_the_files_order(self, client, mode_root):
-        _write_modes(mode_root, _modes_document({
-            "zulu": {"label": "Zulu"},
-            "alpha": {"label": "Alpha"},
-            "mike": {"label": "Mike"},
-        }, default="mike"))
-        body = client.get("/api/agent-modes").json()
-        assert [mode["id"] for mode in body["modes"]] == [
-            "zulu", "alpha", "mike", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
-        assert body["default"] == "mike"
-
-
-def _modes_file(root: Path) -> Path:
-    """The scratch root's modes file, built from the module's own names."""
-    return root / agent_modes.POLICY_DIRNAME / agent_modes.AGENT_MODES_FILENAME
-
-
-@pytest.fixture
-def mode_backups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A private backup folder, so a modes save never reads the app's real chain.
-
-    The save route hands the writer ``editorfs.backup_for_write``, which resolves
-    ``BACKUP_DIR`` at call time — the same pin ``tests/test_editorfs_write.py``'s
-    ``backups`` fixture uses, so this suite asserts the one chain.
-    """
-    folder = tmp_path / "app-backups"
-    monkeypatch.setattr(editorfs.constants, "BACKUP_DIR", folder)
-    return folder
-
-
-class TestAgentModesDocumentEndpoint:
-    """eds-03: ``GET /api/agent-modes/document`` is the editor's read (D2)."""
-
-    def test_it_takes_no_query_parameter(self, client, mode_root):
-        # The reader's rule, unchanged: a purpose-built reader for one file, never
-        # a way to reach the reserved folder through a parameter.
-        spec = client.get("/openapi.json").json()["paths"]
-        operation = spec["/api/agent-modes/document"]["get"]
+        operation = spec["/api/agents"]["get"]
         assert {p["name"] for p in operation.get("parameters", [])} == set()
 
-    def test_an_absent_file_answers_the_defaults_draft_and_a_null_mtime(
-        self, client, mode_root
-    ):
-        response = client.get("/api/agent-modes/document")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["entries"] == []
-        assert body["default"] is None
-        assert "readme" not in body, "an absent file has no readme to preserve"
-        assert body["findings"] == []
-        assert body["source"] == {
-            "path": str(_modes_file(mode_root)),
-            "exists": False,
-            "loaded": False,
-            "mtime": None,
-        }
-        # D3's one legitimate draft: the built-in document, and the caps the form
-        # enforces — no cap is spelled in the client, so they travel with the file.
-        assert body["defaults"]["agents"]
-        assert body["caps"] == {
-            "maxModes": agent_modes.MAX_MODES,
-            "maxIdChars": agent_modes.MAX_MODE_ID_CHARS,
-            "idPattern": agent_modes.MODE_ID_PATTERN,
-            "maxLabelChars": agent_modes.MAX_MODE_LABEL_CHARS,
-            "maxPersonaBytes": agent_modes.MAX_MODE_SYSTEM_MESSAGE_BYTES,
-            "maxPersonaLines": agent_modes.MAX_MODE_PERSONA_LINES,
-        }
-        # A GET never seeds (the same rule as the dropdown's reader).
-        assert not _modes_file(mode_root).exists()
 
-    def test_the_files_own_entries_answer_in_the_files_order_with_personas(
-        self, client, mode_root
-    ):
-        _write_modes(mode_root, {
-            "version": agent_modes.AGENT_MODES_VERSION,
-            "readme": ["Hand-written prose.", "Preserved verbatim."],
-            "default": "zulu",
-            "agents": {
-                "zulu": {"label": "Zulu", "mcptools": True, "lsptools": False,
-                         "systemMessage": "Zulu persona line."},
-                "alpha": {"label": "Alpha", "mcptools": False, "lsptools": True,
-                          "systemMessage": ["Alpha line one.", "Alpha line two."]},
-            },
+class TestAgentCreate:
+    def test_a_user_created_agent_lands_and_is_editable(self, client):
+        response = client.post("/api/agents/add", json={
+            "id": "scribe", "label": "Scribe", "systemMessage": "Write it down.",
         })
-        body = client.get("/api/agent-modes/document").json()
-        assert [entry["key"] for entry in body["entries"]] == ["zulu", "alpha"]
-        zulu, alpha = body["entries"]
-        # Persona verbatim, in whichever JSON form the file wrote it — never joined.
-        assert zulu["fields"]["systemMessage"] == "Zulu persona line."
-        assert alpha["fields"]["systemMessage"] == ["Alpha line one.", "Alpha line two."]
-        assert zulu["hasForm"] is True and zulu["findings"] == []
-        assert body["default"] == "zulu"
-        assert body["readme"] == ["Hand-written prose.", "Preserved verbatim."]
-        assert body["findings"] == []
-        assert body["source"]["exists"] is True
-        assert body["source"]["loaded"] is True
-        # The token a save compares against, in the string spelling the read hands out.
-        assert body["source"]["mtime"] == str(
-            _modes_file(mode_root).stat().st_mtime_ns
+        assert response.status_code == 200
+        agents = {a["id"]: a for a in response.json()["agents"]}
+        assert agents["scribe"]["label"] == "Scribe"
+        assert agents["scribe"]["readonly"] is False
+        assert agents["scribe"]["systemMessage"] == "Write it down."
+
+    def test_the_cap_defaults_to_the_seeded_number(self, client):
+        client.post("/api/agents/add", json={"id": "a1", "label": "One"})
+        assert _agent_rows(client)["a1"]["maxToolIteration"] == (
+            appdb.SEEDED_MAX_TOOL_ITERATION
         )
 
-    def test_a_hand_broken_file_lists_the_broken_entry_with_its_finding(
-        self, client, mode_root
-    ):
-        # D2's contrast with the dropdown's reader, on the same file: the reader
-        # drops the entry (three modes answer), this read shows it (four entries),
-        # because a dialog fed by the reader would save back three.
-        _write_modes(mode_root, _modes_document({
-            "chat": {"label": "Chat", "mcptools": False, "lsptools": False},
-            "code": {"label": "Code", "mcptools": True, "lsptools": True},
-            "architect": {"label": "Architect", "mcptool": True},
-        }))
-        response = client.get("/api/agent-modes/document")
-        assert response.status_code == 200
-        body = response.json()
-        assert [entry["key"] for entry in body["entries"]] == [
-            "chat", "code", "architect",
-        ]
-        broken = body["entries"][2]
-        assert broken["hasForm"] is True, "the tab is a normal one; the finding holds Save"
-        assert len(broken["findings"]) == 1
-        finding = broken["findings"][0]
-        assert set(finding) == {"kind", "message"}
-        assert finding["kind"] == "error"
-        assert "agents.architect.mcptool" in finding["message"]
-        assert body["findings"] == [finding]
-        # The reader, same file, same moment: the entry is gone from its list.
-        assert [mode["id"] for mode in client.get("/api/agent-modes").json()["modes"]] == [
-            "chat", "code", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
-
-    def test_an_entry_with_no_fields_to_edit_is_still_listed(self, client, mode_root):
-        # D3's raw-key tab: a value that is not an object and a key outside the
-        # pattern both get a tab with Delete only — visible, which is what keeps a
-        # save from quietly dropping them.
-        _write_modes(mode_root, _modes_document({
-            "code": {"label": "Code"},
-            "Broken Id": "not an object",
-        }))
-        body = client.get("/api/agent-modes/document").json()
-        assert [entry["key"] for entry in body["entries"]] == ["code", "Broken Id"]
-        odd = body["entries"][1]
-        assert odd["hasForm"] is False
-        assert odd["fields"] == {}
-        assert [finding["kind"] for finding in odd["findings"]] == ["error"]
-
-    def test_the_document_payload_carries_no_app_owned_entry(self, client, mode_root):
-        # D4: the dialog never learns the reserved id. A hand-written entry for it
-        # keeps today's shape — a note naming the pointer, no tab — and the note is
-        # server data, not something to filter out.
-        agent_modes.ensure_agent_modes_file(str(mode_root))
-        body = client.get("/api/agent-modes/document").json()
-        assert [entry["key"] for entry in body["entries"]] == [
-            modes_defaults.CHAT_MODE_ID, modes_defaults.CODE_MODE_ID,
-            modes_defaults.ARCHITECT_MODE_ID,
-        ]
-
-        _write_modes(mode_root, _modes_document({
-            "chat": {"label": "My Chat"},
-            modes_defaults.TODO_BUILDER_MODE_ID: {"label": "Mine"},
-        }, default="chat"))
-        second = client.get("/api/agent-modes/document").json()
-        assert [entry["key"] for entry in second["entries"]] == ["chat"]
-        assert [finding["kind"] for finding in second["findings"]] == ["note"]
-        assert "cannot be set here" in second["findings"][0]["message"]
-
-    def test_the_document_read_is_not_cached(self, client, mode_root):
-        # The save compares against this token, so a cached mtime would defeat the
-        # conflict guard: a hand-edit between two reads has to move it.
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        first = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        _write_modes(mode_root, _modes_document({
-            "code": {"label": "Code"}, "extra": {"label": "Extra"},
-        }, default="extra"))
-        second = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        assert first != second
-
-
-class TestAgentModesSaveEndpoint:
-    """eds-03: ``POST /api/agent-modes/save`` is the whole-document write."""
-
-    def test_a_save_writes_the_file_and_answers_the_new_verdict(
-        self, client, mode_root, mode_backups
-    ):
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        token = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        response = client.post("/api/agent-modes/save", json={
-            "document": {
-                "default": "reviewer",
-                "agents": {
-                    "code": {"label": "Code", "mcptools": True, "lsptools": True},
-                    "reviewer": {"label": "Reviewer", "mcptools": False,
-                                 "lsptools": False,
-                                 "systemMessage": ["Review carefully."]},
-                },
-            },
-            "mtime": token,
+    @pytest.mark.parametrize("cap", [1, 999])
+    def test_the_cap_floor_is_one_and_there_is_no_ceiling(self, client, cap):
+        """D9, in both directions: 1 is legal, and so is an absurdly large one."""
+        response = client.post("/api/agents/add", json={
+            "id": "capped", "label": "Capped", "maxToolIteration": cap,
         })
         assert response.status_code == 200
-        body = response.json()
-        assert body["saved"] is True and body["created"] is False
-        assert body["backedUp"] is True
-        # D9: the new verdict in the dropdown's shape (the app-owned mode appended
-        # last like every other verdict), so no second round-trip.
-        assert [mode["id"] for mode in body["modes"]] == [
-            "code", "reviewer", modes_defaults.TODO_BUILDER_MODE_ID,
-        ]
-        assert body["default"] == "reviewer"
-        assert body["findings"] == []
-        assert body["source"]["exists"] is True
-        assert body["source"]["mtime"] == str(_modes_file(mode_root).stat().st_mtime_ns)
-        # What landed on disk, and the bytes it replaced.
-        written = json.loads(_modes_file(mode_root).read_text(encoding="utf-8"))
-        assert list(written["agents"]) == ["code", "reviewer"]
-        assert written["version"] == agent_modes.AGENT_MODES_VERSION
-        chain = editorfs.files.list_backups(Path(agent_modes.agent_modes_path()))
-        assert len(chain) == 1
-        assert json.loads(Path(chain[0]).read_text(encoding="utf-8"))["agents"] == {
-            "code": {"label": "Code"}
-        }
+        assert _agent_rows(client)["capped"]["maxToolIteration"] == cap
 
-    def test_a_save_of_an_absent_file_creates_it_exclusively_with_the_readme(
-        self, client, mode_root, mode_backups
-    ):
-        response = client.post("/api/agent-modes/save", json={
-            "document": {"default": "code",
-                         "agents": {"code": {"label": "Code"}}},
-            "mtime": None,
+    def test_a_cap_below_one_is_422_naming_the_field(self, client):
+        response = client.post("/api/agents/add", json={
+            "id": "zero", "label": "Zero", "maxToolIteration": 0,
         })
-        assert response.status_code == 200
-        body = response.json()
-        assert body["created"] is True and body["backedUp"] is False
-        written = json.loads(_modes_file(mode_root).read_text(encoding="utf-8"))
-        assert written["readme"], "a created file gets the built-in readme"
-        assert not editorfs.files.list_backups(Path(agent_modes.agent_modes_path()))
+        assert response.status_code == 422
+        assert "maxToolIteration" in response.json()["detail"]
 
-    def test_a_save_against_a_moved_file_is_409_carrying_both_numbers(
-        self, client, mode_root, mode_backups
+    @pytest.mark.parametrize("bad_id", ["Nope", "9lives", "has space", "x" * 33])
+    def test_an_id_outside_the_slug_pattern_is_422_naming_the_field(
+        self, client, bad_id
     ):
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        stale = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        _write_modes(mode_root, _modes_document({
-            "code": {"label": "Code"}, "someone": {"label": "Else"},
-        }, default="someone"))
-        before = _modes_file(mode_root).read_text(encoding="utf-8")
-
-        response = client.post("/api/agent-modes/save", json={
-            "document": {"default": "code", "agents": {"code": {"label": "Mine"}}},
-            "mtime": stale,
+        response = client.post("/api/agents/add", json={
+            "id": bad_id, "label": "Whatever",
         })
-        assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert detail["reason"] == "stale"
-        assert detail["diskMtime"] == str(_modes_file(mode_root).stat().st_mtime_ns)
-        assert detail["documentMtime"] == stale
-        assert _modes_file(mode_root).read_text(encoding="utf-8") == before
-        assert not editorfs.files.list_backups(Path(agent_modes.agent_modes_path()))
+        assert response.status_code == 422
+        assert "id" in response.json()["detail"]
 
-    def test_a_save_declaring_a_reserved_id_is_422_and_the_disk_is_untouched(
-        self, client, mode_root, mode_backups
-    ):
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        before = _modes_file(mode_root).read_text(encoding="utf-8")
-        token = client.get("/api/agent-modes/document").json()["source"]["mtime"]
+    def test_a_duplicate_id_is_422_naming_the_field(self, client):
+        response = client.post("/api/agents/add", json={
+            "id": "code", "label": "Another coder",
+        })
+        assert response.status_code == 422
+        assert "id" in response.json()["detail"]
 
-        response = client.post("/api/agent-modes/save", json={
-            "document": {
-                "default": "code",
-                "agents": {
-                    "code": {"label": "Code"},
-                    modes_defaults.TODO_BUILDER_MODE_ID: {"label": "Mine"},
-                },
-            },
-            "mtime": token,
+    def test_a_duplicate_label_is_422_in_the_slug_collision_words(self, client):
+        """A label is what the dialog derives the id from, so a clash is refused."""
+        response = client.post("/api/agents/add", json={
+            "id": "another", "label": modes_defaults.CODE_LABEL,
         })
         assert response.status_code == 422
         detail = response.json()["detail"]
-        assert detail["reason"] == "invalid"
-        assert any(modes_defaults.TODO_BUILDER_MODE_ID in item["message"]
-                   for item in detail["findings"])
-        assert _modes_file(mode_root).read_text(encoding="utf-8") == before
+        assert "label" in detail
+        assert modes_defaults.CODE_MODE_ID in detail
+        assert "already exists" in detail
 
-    def test_a_save_of_a_document_the_loader_would_drop_is_422(
-        self, client, mode_root, mode_backups
+    def test_an_empty_label_is_422_naming_the_field(self, client):
+        response = client.post("/api/agents/add", json={"id": "nothing", "label": ""})
+        assert response.status_code == 422
+        assert "label" in response.json()["detail"]
+
+    def test_a_persona_over_the_byte_cap_is_422_naming_the_field(
+        self, client, monkeypatch: pytest.MonkeyPatch
     ):
-        # D3's server-side half: what the reader would drop, the writer refuses —
-        # naming the JSON pointer rather than a Pydantic field path.
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        token = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        response = client.post("/api/agent-modes/save", json={
-            "document": {
-                "default": "code",
-                "agents": {"code": {"label": "Code", "mcptool": True}},
-            },
-            "mtime": token,
+        monkeypatch.setattr(agent_modes, "MAX_MODE_SYSTEM_MESSAGE_BYTES", 16)
+        response = client.post("/api/agents/add", json={
+            "id": "long", "label": "Long", "systemMessage": "x" * 32,
         })
         assert response.status_code == 422
-        detail = response.json()["detail"]
-        assert detail["findings"][0]["kind"] == "error"
-        assert "agents.code.mcptool" in detail["findings"][0]["message"]
-        assert json.loads(_modes_file(mode_root).read_text(encoding="utf-8")) == {
-            "version": agent_modes.AGENT_MODES_VERSION,
-            "default": "code",
-            "agents": {"code": {"label": "Code"}},
-        }
+        assert "systemMessage" in response.json()["detail"]
 
-    def test_a_save_over_bytes_the_reader_refuses_is_422(
-        self, client, mode_root, mode_backups
+    def test_a_create_cannot_make_a_readonly_agent(self, client):
+        """D4: `readonly` is not a body field, so no route may create one."""
+        response = client.post("/api/agents/add", json={
+            "id": "sneaky", "label": "Sneaky", "readonly": True,
+        })
+        assert response.status_code == 200
+        assert _agent_rows(client)["sneaky"]["readonly"] is False
+
+
+class TestAgentUpdate:
+    def test_a_user_created_agent_can_be_edited(self, client):
+        client.post("/api/agents/add", json={"id": "scribe", "label": "Scribe"})
+        response = client.post("/api/agents/save", json={
+            "id": "scribe",
+            "label": "Scribe II",
+            "systemMessage": "Write it twice.",
+            "mcpEnable": False,
+            "lspEnable": True,
+            "maxToolIteration": 7,
+        })
+        assert response.status_code == 200
+        agent = {a["id"]: a for a in response.json()["agents"]}["scribe"]
+        assert (agent["label"], agent["systemMessage"]) == ("Scribe II", "Write it twice.")
+        assert (agent["mcpEnable"], agent["lspEnable"]) == (False, True)
+        assert agent["maxToolIteration"] == 7
+
+    def test_an_unknown_id_is_404_naming_it(self, client):
+        response = client.post("/api/agents/save", json={
+            "id": "ghost", "label": "Ghost",
+        })
+        assert response.status_code == 404
+        assert "ghost" in response.json()["detail"]
+
+    def test_a_readonly_agent_refuses_every_field_but_its_model(self, client, tmp_path: Path):
+        """D4 in both halves, through the route."""
+        before = _agent_rows(client)[modes_defaults.TODO_BUILDER_MODE_ID]
+
+        refused = client.post("/api/agents/save", json={
+            "id": modes_defaults.TODO_BUILDER_MODE_ID,
+            "systemMessage": "my own lot rules",
+        })
+        assert refused.status_code == 422
+        assert appdb.READONLY_AGENT_REFUSAL in refused.json()["detail"]
+        assert _agent_rows(client)[modes_defaults.TODO_BUILDER_MODE_ID] == before
+
+        # ...and the model association is the one field that lands.
+        from tests.conftest import write_store_connection
+
+        write_store_connection(tmp_path)
+        model_id = _agent_rows(client)["code"]["modelId"]
+        allowed = client.post("/api/agents/save", json={
+            "id": modes_defaults.TODO_BUILDER_MODE_ID, "modelId": model_id,
+        })
+        assert allowed.status_code == 200
+        assert _agent_rows(client)[
+            modes_defaults.TODO_BUILDER_MODE_ID
+        ]["modelId"] == model_id
+
+    def test_resending_an_unchanged_field_on_a_readonly_agent_is_still_refused(
+        self, client
     ):
-        # D3: a file-level finding holds the Save button down, and a server that
-        # wrote over those bytes would undo that.
-        folder = mode_root / agent_modes.POLICY_DIRNAME
-        folder.mkdir(parents=True, exist_ok=True)
-        _modes_file(mode_root).write_text("{not json", encoding="utf-8")
-        # The token the document read hands out for those bytes: the guard has to
-        # match before the writer can say anything about what is inside.
-        token = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        response = client.post("/api/agent-modes/save", json={
-            "document": {"default": "code", "agents": {"code": {"label": "Code"}}},
-            "mtime": token,
+        """The refusal is about *what was supplied*, not about what differs."""
+        row = _agent_rows(client)[modes_defaults.TODO_BUILDER_MODE_ID]
+        refused = client.post("/api/agents/save", json={
+            "id": modes_defaults.TODO_BUILDER_MODE_ID, "label": row["label"],
+        })
+        assert refused.status_code == 422
+        assert appdb.READONLY_AGENT_REFUSAL in refused.json()["detail"]
+
+    def test_a_readonly_agent_refuses_deletion_with_one_sentence(self, client):
+        response = client.post("/api/agents/delete", json={
+            "id": modes_defaults.TODO_BUILDER_MODE_ID,
         })
         assert response.status_code == 422
-        assert "is not valid JSON" in response.json()["detail"]["findings"][0]["message"]
-        assert _modes_file(mode_root).read_text(encoding="utf-8") == "{not json"
-        assert not editorfs.files.list_backups(Path(agent_modes.agent_modes_path()))
+        assert appdb.BUILT_IN_AGENT_REFUSAL in response.json()["detail"]
+        assert modes_defaults.TODO_BUILDER_MODE_ID in _agent_rows(client)
 
-    def test_a_malformed_body_is_a_422_never_a_500(self, client, mode_root):
-        # The transport half of the validation discipline: FastAPI's own 422. The
-        # token is the string the document read published, so a body holding a
-        # number or a bool for it is refused here rather than reaching the guard.
-        assert client.post("/api/agent-modes/save", json={"nope": 1}).status_code == 422
-        assert client.post("/api/agent-modes/save", json={
-            "document": ["not", "an", "object"],
-        }).status_code == 422
-        assert client.post("/api/agent-modes/save", json={
-            "document": {"default": "code", "agents": {}}, "mtime": 12345,
-        }).status_code == 422
-        assert client.post("/api/agent-modes/save", json={
-            "document": {"default": "code", "agents": {}}, "mtime": True,
-        }).status_code == 422
-        assert not _modes_file(mode_root).exists()
+    def test_a_duplicate_label_on_an_update_is_refused(self, client):
+        client.post("/api/agents/add", json={"id": "scribe", "label": "Scribe"})
+        response = client.post("/api/agents/save", json={
+            "id": "scribe", "label": modes_defaults.CHAT_LABEL,
+        })
+        assert response.status_code == 422
+        assert "label" in response.json()["detail"]
 
-    def test_a_save_while_a_chat_reply_streams_is_409(
-        self, client, mode_root, mode_backups
+    def test_an_update_may_keep_its_own_label(self, client):
+        client.post("/api/agents/add", json={"id": "scribe", "label": "Scribe"})
+        response = client.post("/api/agents/save", json={
+            "id": "scribe", "label": "Scribe",
+        })
+        assert response.status_code == 200
+
+    def test_clearing_the_model_is_a_legal_save(self, client, tmp_path: Path):
+        """§5.2's empty option: an unrunnable agent is a choice, not an error."""
+        from tests.conftest import write_store_connection
+
+        write_store_connection(tmp_path)
+        response = client.post("/api/agents/save", json={
+            "id": "code", "modelId": None,
+        })
+        assert response.status_code == 200
+        assert _agent_rows(client)["code"]["modelId"] is None
+
+    def test_omitting_the_model_leaves_the_association_alone(self, client, tmp_path: Path):
+        """A body that never mentions `modelId` must not null it by accident."""
+        from tests.conftest import write_store_connection
+
+        write_store_connection(tmp_path)
+        before = _agent_rows(client)["code"]["modelId"]
+        response = client.post("/api/agents/save", json={
+            "id": "code", "systemMessage": "Implement it.",
+        })
+        assert response.status_code == 200
+        assert _agent_rows(client)["code"]["modelId"] == before
+
+
+class TestAgentDelete:
+    def test_a_user_created_agent_can_be_deleted(self, client):
+        client.post("/api/agents/add", json={"id": "scribe", "label": "Scribe"})
+        response = client.post("/api/agents/delete", json={"id": "scribe"})
+        assert response.status_code == 200
+        assert "scribe" not in {a["id"] for a in response.json()["agents"]}
+
+    def test_an_unknown_id_is_404(self, client):
+        response = client.post("/api/agents/delete", json={"id": "ghost"})
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("built_in", [
+        modes_defaults.CHAT_MODE_ID, modes_defaults.CODE_MODE_ID,
+        modes_defaults.ARCHITECT_MODE_ID, modes_defaults.TODO_BUILDER_MODE_ID,
+    ])
+    def test_the_built_ins_refuse_deletion(self, client, built_in):
+        """D4: nojae's own rows cannot be deleted, from the dialog or the route."""
+        response = client.post("/api/agents/delete", json={"id": built_in})
+        assert response.status_code == 422
+        assert appdb.BUILT_IN_AGENT_REFUSAL in response.json()["detail"]
+        assert built_in in _agent_rows(client)
+
+    def test_a_delete_is_preceded_by_a_copy_of_the_database(
+        self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The one place the streaming rule is written, applied to this pair like
-        # every other browser write: a reply is the only other writer.
-        _write_modes(mode_root, _modes_document({"code": {"label": "Code"}}))
-        token = client.get("/api/agent-modes/document").json()["source"]["mtime"]
-        before = _modes_file(mode_root).read_text(encoding="utf-8")
-        cancel_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, threading.Event())
-        try:
-            response = client.post("/api/agent-modes/save", json={
-                "document": {"default": "code", "agents": {"code": {"label": "Mine"}}},
-                "mtime": token,
-            })
-            assert response.status_code == 409
-            assert "while a chat reply is streaming" in response.json()["detail"]
-        finally:
-            routes._clear_chat_handle(cancel_event)
-        assert _modes_file(mode_root).read_text(encoding="utf-8") == before
+        """D12: the store is copied into the app's dated backup folder first."""
+        backups = tmp_path / "app-backups"
+        monkeypatch.setattr(editorfs.constants, "BACKUP_DIR", backups)
+        client.post("/api/agents/add", json={"id": "scribe", "label": "Scribe"})
 
-    def test_the_document_read_leaves_nothing_behind(self, client, mode_root):
-        before = sorted(p.name for p in mode_root.iterdir())
-        for _ in range(3):
-            assert client.get("/api/agent-modes/document").status_code == 200
-        assert sorted(p.name for p in mode_root.iterdir()) == before
+        response = client.post("/api/agents/delete", json={"id": "scribe"})
+        assert response.status_code == 200
 
-    def test_the_modes_file_stays_unreachable_through_the_editor_surface(
-        self, client, mode_root
+        assert editorfs.files.list_backups(appdb.database_path()), (
+            "a destructive write must keep a copy of the whole store"
+        )
+
+    def test_a_delete_of_nothing_takes_no_copy(
+        self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The pair is a purpose-built route for one file; the reservation stands.
-        agent_modes.ensure_agent_modes_file(str(mode_root))
-        rel = f"{agent_modes.POLICY_DIRNAME}/{agent_modes.AGENT_MODES_FILENAME}"
-        read = client.get("/api/fs/file", params={"path": rel})
-        assert read.status_code == 404
-        assert "does not exist" in read.json()["detail"]
-        assert "systemMessage" not in read.text
+        backups = tmp_path / "app-backups"
+        monkeypatch.setattr(editorfs.constants, "BACKUP_DIR", backups)
+        assert client.post("/api/agents/delete", json={"id": "ghost"}).status_code == 404
+        assert not editorfs.files.list_backups(appdb.database_path())
 
-        tree = client.get("/api/fs/tree", params={"path": agent_modes.POLICY_DIRNAME})
-        assert tree.status_code in (404, 422)
-        assert "entries" not in tree.json()
 
-        # A mutation is the one answer that *names* the rule (the same shape
-        # ``tests/test_agent_modes_seed.py`` pins for a create), and it changes
-        # nothing: the seeded bytes are still there, unedited.
-        before = _modes_file(mode_root).read_text(encoding="utf-8")
-        save = client.put("/api/fs/file", json={"path": rel, "text": "x\n"})
-        assert save.status_code == 422
-        assert agent_modes.POLICY_DIRNAME in save.json()["detail"]
-        assert _modes_file(mode_root).read_text(encoding="utf-8") == before
 
 
 class _ChatHubDouble:
@@ -1666,15 +1053,18 @@ def _chat(client, **extra):
 
 
 class TestChatAgentModeField:
-    """am-06 §1-§2: ``ChatIn.agentMode`` selects a mode, and a typo refuses.
+    """``ChatIn.agentMode`` selects an agent, and both refusals are asserted.
 
-    The field and the gate are the same task because a client that could pick a
-    mode which changed the *prompt* but not the *tool set* would get half a mode
-    — so both edges are asserted here, through the hub double's allowlist.
+    Two rules, and D5 made the first new: a **missing** id is a 422 naming the
+    field (there is no server-side default agent to fall back to), and an
+    **unknown** one is a 422 listing what is available. The middle assertion is
+    the one the feature exists for: the agent's two hub flags narrow the tool
+    set, so a client that could pick an agent which changed the *prompt* but not
+    the *tools* would get half an agent.
     """
 
     def test_an_unknown_mode_is_422_naming_it_and_listing_the_real_ones(
-        self, chat_stub, mode_root
+        self, chat_stub
     ):
         client, seen, _hub, _asked = chat_stub
         response = _chat(client, agentMode="nope")
@@ -1687,76 +1077,73 @@ class TestChatAgentModeField:
         # Nothing streamed: the worker never ran.
         assert seen == {}
 
-    def test_a_refused_mode_does_not_own_the_pause_handle(
-        self, chat_stub, mode_root
-    ):
-        # §2: the 422 is raised *before* ``_arm_chat_handle``, so a request that
+    def test_a_missing_agent_mode_is_422_naming_the_field(self, chat_stub):
+        """D5: no server-side default agent any more, so omitting it is a refusal."""
+        client, seen, _hub, asked = chat_stub
+        response = _chat(client)
+        assert response.status_code == 422
+        assert "agentMode" in json.dumps(response.json()["detail"])
+        assert seen == {}
+        assert asked == []
+
+    def test_a_blank_agent_mode_is_the_same_422(self, chat_stub):
+        client, _seen, _hub, _asked = chat_stub
+        assert _chat(client, agentMode="   ").status_code == 422
+
+    def test_a_refused_mode_does_not_own_the_pause_handle(self, chat_stub):
+        # The 422 is raised *before* ``_arm_chat_handle``, so a request that
         # will never stream cannot leave a stale handle for the next one.
         client, _seen, _hub, _asked = chat_stub
         assert routes._CHAT_HANDLE is None
         assert _chat(client, agentMode="nope").status_code == 422
         assert routes._CHAT_HANDLE is None
-        assert _chat(client).status_code == 200
+        assert _chat(client, agentMode="code").status_code == 200
 
-    def test_a_mode_id_of_the_wrong_shape_is_422_from_the_model(
-        self, chat_stub, mode_root
-    ):
+    def test_a_mode_id_of_the_wrong_shape_is_422_from_the_model(self, chat_stub):
         # The *shape* check lives in the model (cheap, static); existence lives
-        # in ``resolve_mode``. An id that could never be a mode id never even
-        # reaches the file lookup.
+        # in ``resolve_mode``. An id that could never be an agent id never even
+        # reaches the store.
         client, seen, _hub, _asked = chat_stub
         for bad in ("Nope", "9lives", "has space", "x" * 33):
             assert _chat(client, agentMode=bad).status_code == 422, bad
         assert seen == {}
-        # It is the *shape* only: none of these reached the loader, so a
-        # ``Literal``/enum would not have been needed either — and none of them
-        # can be repaired by editing the file, unlike the 422 above.
+        # It is the *shape* only: none of these reached the store, so none of
+        # them can be repaired by renaming an agent, unlike the 422 above.
         assert _asked == []
 
-    def test_an_empty_agent_mode_asks_for_the_default_instead_of_refusing(
-        self, chat_stub, mode_root
-    ):
-        # ``resolve_mode`` reads empty as "the file's default"; a client that
-        # sends the field empty gets that, not a shape error.
-        client, _seen, _hub, asked = chat_stub
-        assert _chat(client, agentMode="   ").status_code == 200
-        assert asked == [None]
-
-    def test_no_agent_mode_uses_the_file_default_and_the_old_tool_kwargs(
-        self, chat_stub, mode_root
-    ):
-        # A client predating the feature: the seeded default is ``code``, whose
-        # gate is open, so the tool arguments are exactly what they were before
-        # modes existed. They are *not* identical on ``sysprompt`` — from am-04
-        # the default mode supplies a persona, which is the point of the
-        # feature — so the persona is asserted separately, never as prose.
+    def test_the_selected_agent_supplies_the_old_tool_kwargs(self, chat_stub):
+        # `code` is the agent that behaves as the app always has: its gate is
+        # open, so the tool arguments are exactly what they were before agents
+        # existed. They are *not* identical on ``sysprompt`` — an agent supplies
+        # a persona, which is the point of the feature — so the persona is
+        # asserted separately, never as prose.
         client, seen, hub, asked = chat_stub
-        agent_modes.ensure_agent_modes_file(str(mode_root))
-        assert _chat(client).status_code == 200
-        assert asked == [None]
+        assert _chat(client, agentMode="code").status_code == 200
+        assert asked == ["code"]
         assert set(seen) == {
             "sysprompt", "tools", "tool_executor", "tool_servers",
             "max_tool_iterations",
         }
         assert hub.requested_ids == [["console"]]
         assert seen["tool_servers"] == {"use_console": "console"}
-        # …identical in *content* too, not just in keys: the four tool arguments
-        # an old client got are the four this one gets.
+        # ...identical in *content* too, not just in keys.
         assert seen["tools"] == [
             {"type": "function", "function": {"name": "use_console"}}
         ]
         assert callable(seen["tool_executor"])
-        assert seen["max_tool_iterations"] == routes.max_tool_iteration()
-        # The mode itself, asserted separately from the prose that carries it.
-        default = agent_modes.resolve_mode(None)[0]
-        assert default.id == modes_defaults.CODE_MODE_ID
-        assert seen["sysprompt"] == default.system_message
+        assert seen["max_tool_iterations"] == routes.max_tool_iteration(
+            appdb.resolve_agent("code")[0]
+        )
+        # The agent itself, asserted separately from the prose that carries it.
+        resolved = agent_modes.resolve_mode("code")[0]
+        assert resolved is not None
+        assert resolved.id == modes_defaults.CODE_MODE_ID
+        assert seen["sysprompt"] == resolved.system_message
 
     def test_the_selected_mode_narrows_the_tool_set_as_well_as_the_prompt(
-        self, chat_stub, mode_root
+        self, chat_stub
     ):
         client, seen, hub, asked = chat_stub
-        agent_modes.ensure_agent_modes_file(str(mode_root))
         assert _chat(client, agentMode="chat").status_code == 200
         assert asked == ["chat"]
         # D3: no ``tools`` key at all (never ``tools=[]``), and the hub was
@@ -1772,9 +1159,9 @@ class TestChatAgentModeField:
         assert hub.requested_ids == [[], ["console"]]
 
     def test_the_app_owned_mode_is_reachable_and_its_blocks_arrive(
-        self, chat_stub, mode_root
+        self, chat_stub
     ):
-        # The whole reason the reserved mode is published: a user can pick it.
+        # The whole reason the app-owned agent is published: a user can pick it.
         client, seen, _hub, asked = chat_stub
         response = _chat(client, agentMode=modes_defaults.TODO_BUILDER_MODE_ID)
         assert response.status_code == 200
@@ -1784,21 +1171,23 @@ class TestChatAgentModeField:
         )
         assert modes_defaults.lot_conventions_block() in seen["mode_instructions"]
 
-    def test_a_selected_mode_is_resolved_against_the_file_as_it_is_now(
-        self, chat_stub, mode_root
+    def test_a_selected_agent_is_resolved_against_the_store_as_it_is_now(
+        self, chat_stub
     ):
-        # Hot edit through the HTTP edge: the same client, two files, two
-        # personas — no restart and no second cache.
+        # Hot edit through the HTTP edge: the same client, two saves, two
+        # personas — no restart and no cache (D11).
         client, seen, _hub, _asked = chat_stub
-        _write_modes(mode_root, _modes_document(
-            {"planner": {"label": "Planner", "systemMessage": "PERSONA ONE"}},
-            default="planner",
-        ))
+        model_id = _agent_rows(client)["code"]["modelId"]
+        assert client.post("/api/agents/add", json={
+            "id": "planner", "label": "Planner", "systemMessage": "PERSONA ONE",
+            "modelId": model_id,
+        }).status_code == 200
         assert _chat(client, agentMode="planner").status_code == 200
         assert seen["sysprompt"] == "PERSONA ONE"
-        _write_modes(mode_root, _modes_document(
-            {"planner": {"label": "Planner", "systemMessage": "PERSONA TWO"}},
-            default="planner",
-        ))
+        assert client.post("/api/agents/save", json={
+            "id": "planner", "systemMessage": "PERSONA TWO",
+        }).status_code == 200
         assert _chat(client, agentMode="planner").status_code == 200
         assert seen["sysprompt"] == "PERSONA TWO"
+
+

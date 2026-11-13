@@ -1,5 +1,15 @@
 # Prompt helpers: `.nojae/prompt-helpers.json`, one per workspace
 
+> **Superseded by [`app-settings-db-spec.md`](app-settings-db-spec.md)** (the
+> `appdb` lot). This spec's §1 argument — that a helper is "a habit of one tree",
+> so it must travel with that tree — is reversed: a helper is a habit of the
+> **user**, and the bullets are the install's, held in `nojae.db` and shared by
+> every workspace. `.nojae/prompt-helpers.json` is deleted with its seeder and its
+> state reader, and the fixed count of slots goes with it — a row is a bullet, so
+> add and delete are the normal operations and the count is simply the count.
+> Everything below stays the record of the decisions this document made, and is
+> not to be revised.
+
 **Status**: spec written, implementation not started.
 
 **Surface**: one file moves and is renamed; one new core module takes it over from

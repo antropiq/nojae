@@ -928,7 +928,8 @@ class TestLspLifecycle:
     @pytest.mark.anyio
     async def test_restart_respects_the_enabled_gate(self, hub, tmp_path):
         # A dormant file stays dormant: declared but not enabled means no
-        # spawn (the two-gate rule the startup lifespan applies).
+        # spawn — the one gate the startup lifespan and the restart route both
+        # apply (D13), which the caller hands over as the id list.
         entry = _fake_server_entry(tmp_path)
         await hub.restart([entry], [])
         assert hub.server_status("fake") == "stopped"
@@ -2092,17 +2093,17 @@ class TestLocalReachRefusal:
         from src import config as config_module
         from src.core import mcphub
 
-        from tests.conftest import neutralise_workspace_settings
+        from tests.conftest import neutralise_store
 
         marker = tmp_path / "spawned.flag"
         monkeypatch.delenv("NOJAE_DISABLE_LSP", raising=False)
         for key in config_module.SETTING_KEYS:
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
-        # ``lspEnabled`` is read from the workspace file during the lifespan's
-        # scan, so the pyright gate opens only from there — the old ``LSP_ENABLED``
-        # env key would now be read by nothing.
-        neutralise_workspace_settings(monkeypatch, tmp_path, lspEnabled=["pyright"])
+        # The declaration file written below is the only gate, so the pyright
+        # entry's ``enable: true`` is what puts it on the lifespan's start list
+        # (D13) — the workspace's model-connection file is not consulted for it.
+        neutralise_store(monkeypatch, tmp_path)
         monkeypatch.setattr(
             lsp_constants, "guardrails_speak_here", lambda prefixes=None: False
         )
@@ -2139,7 +2140,7 @@ class TestLocalReachRefusal:
         monkeypatch.setattr(
             routes,
             "load_endpoints_config",
-            lambda: (
+            lambda agent: (
                 SimpleNamespace(
                     serverUrl="http://x/v1", endpoint="m", model_list=lambda: ["m"],
                     to_kwargs=lambda: {}, apiKey="", sysprompt=None,
@@ -2483,18 +2484,17 @@ class FakeLspManager:
 def lsp_client(monkeypatch, tmp_path):
     from src import config as config_module
 
-    from tests.conftest import neutralise_workspace_settings
+    from tests.conftest import neutralise_store
 
     for key in config_module.SETTING_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
     # This class owns its own workspace root, so the model-connection file is
-    # pinned here too: the tool-loop cap at 25 (the template's 300 would make
-    # the ``maxIterations == 25`` assertion below accidental) and no server
-    # activated, so the two-gate tests start from a known state.
-    neutralise_workspace_settings(
-        monkeypatch, tmp_path, maxToolIteration=25, lspEnabled=[]
-    )
+    # pinned here too, with the tool-loop cap at 25 (the template's 300 would
+    # make the cap assertions below accidental). It pins no language server at
+    # all: since D13 the declaration file written below is the only activation
+    # source, so a test's known state is that file's ``enable`` flags.
+    neutralise_store(monkeypatch, tmp_path, maxToolIteration=25)
     # Point the hub at a temp declaration file (fake servers), so the real
     # .nojae/lsp-settings.json stays untouched.
     servers_dir = tmp_path / "lsp_connectors"
@@ -2529,7 +2529,7 @@ def lsp_client(monkeypatch, tmp_path):
     monkeypatch.setattr(
         routes,
         "load_endpoints_config",
-        lambda: (
+        lambda agent: (
             SimpleNamespace(
                 serverUrl="http://x/v1", endpoint="m", model_list=lambda: ["m"],
                 to_kwargs=lambda: {}, apiKey="", sysprompt=None,
@@ -2548,9 +2548,13 @@ class TestLspEndpoints:
         body = client.get("/api/lsp").json()
         assert [s["id"] for s in body["servers"]] == ["pyright", "vue"]
         assert body["servers"][0]["status"] == "stopped"
-        assert body["servers"][0]["active"] is False
+        # The declaration says ``enable: true``, so this server runs here — no
+        # second switch has to agree (D13).
+        assert body["servers"][0]["active"] is True
         assert body["servers"][1]["active"] is False  # enable: false
-        assert body["maxIterations"] == 25
+        # The cap is not this payload's to report: the route that could write it
+        # is gone, and the MCP section is its only editor.
+        assert "maxIterations" not in body
 
     def test_get_never_leaks_env_or_initialization_secrets(self, lsp_client):
         client, _ = lsp_client
@@ -2558,78 +2562,83 @@ class TestLspEndpoints:
         assert "do-not-leak" not in text
         assert "SECRET" not in text
 
-    def test_active_requires_both_gates(self, lsp_client, tmp_path):
-        from tests.conftest import write_workspace_settings
+    def test_the_declaration_alone_decides_which_server_is_active(
+        self, lsp_client, tmp_path
+    ):
+        """D13, inverted from the two-gate pair this test used to be.
+
+        The fixture's declaration file holds ``pyright: enable true`` and
+        ``vue: enable false``, and nothing else is asked: the file is the single
+        source of truth for what runs in this workspace.
+        """
+        from tests.conftest import write_store_connection
 
         client, _ = lsp_client
-        write_workspace_settings(tmp_path, lspEnabled=["pyright"])
-        body = client.get("/api/lsp").json()
-        by_id = {s["id"]: s for s in body["servers"]}
-        assert by_id["pyright"]["active"] is True
-        assert by_id["vue"]["active"] is False  # enable flag still false
-        # The env key is dead bytes now: only the file's array opens the gate.
-        write_workspace_settings(tmp_path, lspEnabled=[])
         body = client.get("/api/lsp").json()
         assert {s["id"]: s["active"] for s in body["servers"]} == {
-            "pyright": False,
+            "pyright": True,
+            "vue": False,
+        }
+        # The workspace's model-connection file cannot open or close the gate:
+        # it is not read for this answer any more, whichever value it holds.
+        write_store_connection(tmp_path, lspEnabled=["vue"])
+        body = client.get("/api/lsp").json()
+        assert {s["id"]: s["active"] for s in body["servers"]} == {
+            "pyright": True,
+            "vue": False,
+        }
+        write_store_connection(tmp_path, lspEnabled=[])
+        body = client.get("/api/lsp").json()
+        assert {s["id"]: s["active"] for s in body["servers"]} == {
+            "pyright": True,
             "vue": False,
         }
 
-    def test_post_persists_lsp_enabled_as_a_json_array_and_reconciles_live(
+    def test_post_writes_the_declaration_flags_and_nothing_else(
         self, lsp_client, tmp_path
     ):
+        """The save's one effect on disk is the ``enable`` flag (D13).
+
+        The assertion that matters is the *file*: the declaration is what the
+        readers answer from, so a save that left it unchanged while writing
+        somewhere else would look green and do nothing.
+        """
         from src import config as config_module
 
-        from src.core import workspace_settings
-        from tests.conftest import write_workspace_settings
+        from src.core import appdb
 
         client, _ = lsp_client
-        write_workspace_settings(tmp_path)  # the file the POST merges into
-        response = client.post(
-            "/api/lsp", json={"enabled": ["pyright"], "maxIterations": 7}
-        )
+        before = appdb.load_servers()
+        response = client.post("/api/lsp", json={"enabled": ["pyright"]})
         assert response.status_code == 200
         body = response.json()
         assert [s["id"] for s in body["servers"] if s["active"]] == ["pyright"]
-        assert body["maxIterations"] == 7
-        # Persisted to the workspace file, as native JSON — not the .env comma
-        # string: ``lspEnabled`` is a real array, ``maxToolIteration`` an integer.
-        stored = json.loads(
-            (
-                tmp_path
-                / workspace_settings.POLICY_DIRNAME
-                / workspace_settings.WORKSPACE_SETTINGS_FILENAME
-            ).read_text(encoding="utf-8")
-        )
-        assert stored["lspEnabled"] == ["pyright"]
-        assert stored["maxToolIteration"] == 7
+        assert "maxIterations" not in body
+        # The store is untouched by this route: the ids are no longer persisted
+        # there, and neither is the cap (an agent column since D9).
+        assert appdb.load_servers() == before
+        agent, _findings = appdb.resolve_agent("code")
+        assert agent["maxToolIteration"] == 25
         # The POST wrote nothing to .env's now-dead keys.
         env_values = dotenv_values(config_module.ENV_PATH)
         assert env_values.get("LSP_ENABLED") is None
         assert env_values.get("MAX_TOOL_ITERATION") is None
-        # enable flag written back for every declared server, both gates move.
+        # The declaration file is where the decision landed, for every declared
+        # server, and the rest of the entry survived the rewrite.
         data = json.loads(lsp_constants.LSP_SETTINGS_PATH.read_text(encoding="utf-8"))
         assert data["pyright"]["enable"] is True
         assert data["vue"]["enable"] is False
         assert data["pyright"]["env"] == {"SECRET": "do-not-leak"}  # keys kept
 
     def test_post_empty_list_deactivates_all(self, lsp_client, tmp_path):
-        from src.core import workspace_settings
-        from tests.conftest import write_workspace_settings
+        from src.core import appdb
 
         client, _ = lsp_client
-        write_workspace_settings(tmp_path)
+        before = appdb.load_servers()
         client.post("/api/lsp", json={"enabled": ["pyright", "vue"]})
         response = client.post("/api/lsp", json={"enabled": []})
         assert response.status_code == 200
-        stored = json.loads(
-            (
-                tmp_path
-                / workspace_settings.POLICY_DIRNAME
-                / workspace_settings.WORKSPACE_SETTINGS_FILENAME
-            ).read_text(encoding="utf-8")
-        )
-        assert stored["lspEnabled"] == []
+        assert appdb.load_servers() == before
         assert not [s for s in response.json()["servers"] if s["active"]]
         data = json.loads(lsp_constants.LSP_SETTINGS_PATH.read_text(encoding="utf-8"))
         assert data["pyright"]["enable"] is False
@@ -2640,10 +2649,24 @@ class TestLspEndpoints:
         assert response.status_code == 422
         assert "ghost" in response.text
 
-    def test_post_invalid_max_iterations_returns_422(self, lsp_client):
+    def test_post_carries_no_tool_loop_cap(self, lsp_client):
+        """``maxIterations`` left this route's payload with the second gate.
+
+        It is *ignored* rather than rejected: the model the route validates
+        against is the declaration's flags, and a stale tab that still posts the
+        old field must not fail on a value nothing reads. What is asserted is
+        that it changes nothing — the cap is an agent column now (D9).
+        """
+        from src.core import appdb
+
         client, _ = lsp_client
-        assert client.post("/api/lsp", json={"maxIterations": 0}).status_code == 422
-        assert client.post("/api/lsp", json={"maxIterations": 9999}).status_code == 422
+        response = client.post(
+            "/api/lsp", json={"enabled": ["pyright"], "maxIterations": 7}
+        )
+        assert response.status_code == 200
+        assert "maxIterations" not in response.json()
+        agent, _findings = appdb.resolve_agent("code")
+        assert agent["maxToolIteration"] == 25
 
     def test_post_reconciles_running_servers(self, lsp_client):
         client, app = lsp_client
@@ -2672,15 +2695,12 @@ class TestLspEndpoints:
         assert by_id["vue"]["status"] == "stopped"
 
     def test_restart_rereads_the_file_and_reapplies_the_gate(
-        self, lsp_client, tmp_path, monkeypatch
+        self, lsp_client, monkeypatch
     ):
-        from tests.conftest import write_workspace_settings
-
         client, app = lsp_client
         # The hub under test is a fake, so spawning is allowed here: the
         # autouse switch would otherwise blank the scan (tested separately).
         monkeypatch.delenv("NOJAE_DISABLE_LSP", raising=False)
-        write_workspace_settings(tmp_path, lspEnabled=["pyright"])
         hub = FakeLspManager()
         app.state.lsp = hub
 
@@ -2690,16 +2710,35 @@ class TestLspEndpoints:
         body = response.json()
         assert {server["id"] for server in body["servers"]} == {"pyright", "vue"}
         assert body["serversError"] is None
-        # Fresh file scan + the two-gate intersection (vue is enable:false).
+        # Fresh file scan + the one gate: the ids handed to the hub are exactly
+        # the entries whose ``enable`` flag is on (vue is enable:false).
         assert len(hub.restarts) == 1
         servers, enabled_ids = hub.restarts[0]
         assert [server["id"] for server in servers] == ["pyright", "vue"]
         assert enabled_ids == ["pyright"]
 
-    def test_restart_keeps_a_dormant_file_dormant(self, lsp_client, monkeypatch):
+    def test_restart_keeps_a_dormant_declaration_dormant(
+        self, lsp_client, monkeypatch
+    ):
+        """A file whose flags are all off still starts nothing (D13).
+
+        One gate does not mean no gate: this is the same file the previous test
+        uses with every ``enable`` flag flipped off, and the hub must be handed
+        no id at all.
+        """
         client, app = lsp_client
         monkeypatch.delenv("NOJAE_DISABLE_LSP", raising=False)
-        # The fixture's file holds ``lspEnabled: []`` — the gate closed.
+        lsp_constants.LSP_SETTINGS_PATH.write_text(
+            _servers_doc(
+                pyright=_entry([sys.executable, FAKE_SERVER], enable=False),
+                vue=_entry(
+                    [sys.executable, FAKE_SERVER],
+                    extensions=[".vue"],
+                    enable=False,
+                ),
+            ),
+            encoding="utf-8",
+        )
         hub = FakeLspManager()
         app.state.lsp = hub
         client.post("/api/lsp/restart")
@@ -2707,13 +2746,12 @@ class TestLspEndpoints:
         assert [server["id"] for server in servers] == ["pyright", "vue"]
         assert enabled_ids == []
 
-    def test_restart_honours_the_disable_switch(self, lsp_client, tmp_path, monkeypatch):
+    def test_restart_honours_the_disable_switch(self, lsp_client, monkeypatch):
         # NOJAE_DISABLE_LSP keeps the endpoints alive but spawns
-        # nothing — the same rule as the app lifespan (tests rely on it).
-        from tests.conftest import write_workspace_settings
-
+        # nothing — the same rule as the app lifespan (tests rely on it). The
+        # fixture's declaration asks for pyright, so the switch is the only
+        # thing that can be holding the hub empty here.
         client, app = lsp_client
-        write_workspace_settings(tmp_path, lspEnabled=["pyright"])
         hub = FakeLspManager()
         app.state.lsp = hub
         client.post("/api/lsp/restart")
@@ -2735,13 +2773,21 @@ class TestLspEndpoints:
 
 
 class TestActiveServerIds:
-    def test_both_gates_must_agree(self, lsp_client, tmp_path):
-        from tests.conftest import write_workspace_settings
+    def test_the_declaration_is_the_only_gate(self, lsp_client, tmp_path):
+        """The inverted pair: the file's ``enable`` flags alone answer.
 
-        write_workspace_settings(tmp_path, lspEnabled=["pyright", "vue"])
+        The fixture's declaration holds ``pyright: enable true`` and
+        ``vue: enable false``, so those are the ids chat may use whichever value
+        the workspace's model-connection file carries — that file no longer
+        holds an LSP gate at all (D13).
+        """
+        from tests.conftest import write_store_connection
+
         assert routes._active_server_ids() == ["pyright"]
-        write_workspace_settings(tmp_path, lspEnabled=[])
-        assert routes._active_server_ids() == []
+        write_store_connection(tmp_path, lspEnabled=["pyright", "vue"])
+        assert routes._active_server_ids() == ["pyright"]
+        write_store_connection(tmp_path, lspEnabled=[])
+        assert routes._active_server_ids() == ["pyright"]
 
 
 # ---------------------------------------------------------------------------
@@ -2784,13 +2830,13 @@ class TestChatLspWiring:
         return captured
 
     def test_lsp_only_lists_every_tool_as_uncapped(self, lsp_client, tmp_path, monkeypatch):
-        from tests.conftest import write_workspace_settings
+        from tests.conftest import write_store_connection
 
         client, app = lsp_client
-        # The gate and the cap both come from the workspace file now.
-        write_workspace_settings(
-            tmp_path, lspEnabled=["pyright"], maxToolIteration=9
-        )
+        # The cap comes from the workspace file; the gate is the declaration
+        # file the fixture wrote (pyright ``enable: true``), so nothing here
+        # opens an LSP gate from the connection file (D13).
+        write_store_connection(tmp_path, maxToolIteration=9)
 
         class Hub(FakeLspManager):
             def active_tool_defs(self, ids):
@@ -2804,7 +2850,8 @@ class TestChatLspWiring:
         app.state.lsp = Hub()
         captured = self._capture_stream(monkeypatch, ("lsp_pyright_hover",))
         response = client.post(
-            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
+                               "agentMode": "code"}
         )
         assert response.status_code == 200
         assert app.state.lsp.ids == ["pyright"]
@@ -2819,9 +2866,8 @@ class TestChatLspWiring:
 
     def test_mcp_and_lsp_merge_into_one_loop(self, lsp_client, monkeypatch):
         client, app = lsp_client
-        monkeypatch.setenv("LSP_ENABLED", "pyright")
-        # The MCP connector comes from the declaration file, whose ``enable``
-        # flag is the only activation source.
+        # Both hubs activate from their declaration file's ``enable`` flag alone
+        # now — the same single gate on either side (D13).
         externals_path = mcphub.constants.mcp_settings_path()
         externals_path.parent.mkdir(parents=True, exist_ok=True)
         externals_path.write_text(
@@ -2852,7 +2898,8 @@ class TestChatLspWiring:
             monkeypatch, ("execute_command", "lsp_pyright_hover")
         )
         response = client.post(
-            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
+                               "agentMode": "code"}
         )
         assert response.status_code == 200
         assert [d["function"]["name"] for d in captured["tools"]] == [
@@ -2867,16 +2914,23 @@ class TestChatLspWiring:
         assert captured["exec_execute_command"] == "mcp:execute_command"
         assert captured["exec_lsp_pyright_hover"] == "lsp:lsp_pyright_hover"
 
-    def test_body_filter_cannot_revive_a_settings_disabled_server(
+    def test_body_filter_cannot_revive_a_deactivated_server(
         self, lsp_client, monkeypatch
     ):
+        """The conversation's allowlist only ever **narrows** the one gate.
+
+        ``vue`` is declared with ``enable: false``, so it runs nowhere; ticking
+        it in the conversation cannot bring it back (AC-9's other half: the
+        conversation-scoped ``lspEnabled`` field is a different axis from the
+        activation gate, and it survives D13 untouched).
+        """
         client, app = lsp_client
 
         class Hub(FakeLspManager):
             def active_tool_defs(self, ids):
                 self.ids = ids
-                return ([_lsp_def("lsp_pyright_hover")],
-                        {"lsp_pyright_hover": "pyright"})
+                return ([_lsp_def("lsp_vue_hover")],
+                        {"lsp_vue_hover": "vue"})
 
         hub = Hub()
         app.state.lsp = hub
@@ -2885,18 +2939,16 @@ class TestChatLspWiring:
             "/api/chat",
             json={
                 "messages": [{"role": "user", "content": "hi"}],
-                "lspEnabled": ["pyright"],  # user toggle on...
+                "lspEnabled": ["vue"],  # user toggle on...
+                "agentMode": "code",
             },
         )
         assert response.status_code == 200
-        # ...but the file's ``lspEnabled`` is empty, so no id reaches the hub.
+        # ...but the declaration's flag is off, so no id reaches the hub.
         assert hub.ids == []
 
-    def test_body_filter_intersects_the_activated_set(self, lsp_client, tmp_path, monkeypatch):
-        from tests.conftest import write_workspace_settings
-
+    def test_body_filter_intersects_the_activated_set(self, lsp_client, monkeypatch):
         client, app = lsp_client
-        write_workspace_settings(tmp_path, lspEnabled=["pyright", "vue"])
 
         class Hub(FakeLspManager):
             def active_tool_defs(self, ids):
@@ -2910,11 +2962,56 @@ class TestChatLspWiring:
         client.post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "hi"}],
-                  "lspEnabled": ["vue"]},
+                  "lspEnabled": ["vue"],
+                  "agentMode": "code"},
         )
-        # vue is Settings-active but toggled off for this conversation;
-        # pyright is on in Settings but not listed in the body filter.
+        # vue is declared but not activated; pyright is activated but not
+        # listed in the body filter. The intersection is empty either way.
         assert hub.ids == []
+
+    def test_an_agent_that_may_not_reach_the_hub_still_cannot(self, lsp_client,
+                                                             monkeypatch):
+        """AC-9's second half: the *persona* axis survives D13.
+
+        ``pyright`` is activated — the declaration says ``enable: true`` and
+        there is no second gate to agree with it — and the conversation ticks it.
+        The agent still gets nothing: ``lsptools`` false is a different fact
+        about a different thing (what a persona may reach, not what this
+        workspace runs), and one gate on the activation axis does not merge the
+        two axes into one.
+        """
+        client, app = lsp_client
+
+        class Hub(FakeLspManager):
+            """Answers from the ids it was *given*, as the real hub does."""
+
+            def active_tool_defs(self, ids):
+                self.ids = list(ids)
+                tools = [
+                    _lsp_def(f"lsp_{server_id}_hover") for server_id in ids
+                ]
+                return (
+                    tools,
+                    {f"lsp_{server_id}_hover": server_id for server_id in ids},
+                )
+
+        hub = Hub()
+        app.state.lsp = hub
+        captured = self._capture_stream(monkeypatch)
+        response = client.post(
+            "/api/chat",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "agentMode": "chat",  # the shipped tools-off persona
+                "lspEnabled": ["pyright"],
+            },
+        )
+        assert response.status_code == 200
+        assert hub.ids == []
+        # The gate empties the list the hub is asked for, so the turn carries no
+        # tool definitions at all — the stub records ``None`` here, which is the
+        # same answer as the route's own "no tools key" shape.
+        assert not captured["tools"]
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ copy of the committed example — and the operator copies it to
 ``lsp-settings.json`` and adapts it.
 
 The template joins the reserved folder's family — ``read-write-policy.json``,
-``agent-modes.json``, ``prompt-helpers.json``, ``mcp-settings.json`` — and
+``mcp-settings.json`` — and
 arrives by the same rule: **seeded by exclusive create at the two moments a
 folder becomes the working location (boot, and ``POST /api/path-location``),
 never overwritten**, and created whenever it is absent (a folder that

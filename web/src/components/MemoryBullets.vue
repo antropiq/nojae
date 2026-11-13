@@ -2,8 +2,9 @@
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
 import {
-  PROMPT_HELPER_DEFAULT_COLOR,
-  PROMPT_HELPER_SLOT_COUNT,
+  bulletColor,
+  bulletNumber,
+  isFilled,
   usePromptHelpers,
 } from '../composables/usePromptHelpers'
 
@@ -13,18 +14,8 @@ const { state } = usePromptHelpers()
 const { appendDraft } = useChat()
 const { state: batch } = useBatch()
 
-// Tooltip preview cap (the full text stays on disk).
+// Tooltip preview cap (the full text stays in the store).
 const TOOLTIP_MAX_CHARS = 150
-
-function slot(index) {
-  return state.slots[index] ?? { color: PROMPT_HELPER_DEFAULT_COLOR, content: '' }
-}
-
-// An empty slot always renders default gray; the stored color is kept but
-// ignored until content comes back.
-function isFilled(data) {
-  return data.content !== ''
-}
 
 // Black or white number by background luminance (ITU-R BT.601 luma).
 function textColor(color) {
@@ -38,7 +29,7 @@ function textColor(color) {
 }
 
 function bulletStyle(data) {
-  const background = isFilled(data) ? data.color : PROMPT_HELPER_DEFAULT_COLOR
+  const background = bulletColor(data)
   return { background, color: textColor(background) }
 }
 
@@ -50,36 +41,57 @@ function tooltip(data) {
 }
 
 // Filled bullet: click appends its text to the draft, Ctrl/Cmd+click (or a
-// click on an empty slot) opens the registration dialog.
-function onClick(event, index) {
+// click on an empty bullet) opens the registration dialog.
+function onClick(event, data) {
   if (batch.active) return
-  const data = slot(index)
   if (isFilled(data) && !event.ctrlKey && !event.metaKey) {
     appendDraft(data.content)
     return
   }
-  emit('configure', index)
+  emit('configure', data.id)
 }
 </script>
 
 <template>
+  <!-- As many bullets as the store holds, numbered by position (§5.3). The row
+       is empty — and so renders nothing — for a user who deleted every bullet,
+       until the dialog's Add puts one back. `.memory-bullets` already wraps
+       rather than overflowing, which is the layout rule a longer list needs. -->
   <div class="memory-bullets" role="group" aria-label="Memory bullets">
     <button
-      v-for="n in PROMPT_HELPER_SLOT_COUNT"
-      :key="n"
+      v-for="(data, index) in state.slots"
+      :key="data.id"
       type="button"
       class="memory-bullet"
-      :style="bulletStyle(slot(n - 1))"
+      :style="bulletStyle(data)"
       :disabled="batch.active"
-      :title="batch.active ? 'Unavailable while a batch runs' : tooltip(slot(n - 1))"
+      :title="batch.active ? 'Unavailable while a batch runs' : tooltip(data)"
       :aria-label="
-        isFilled(slot(n - 1))
-          ? `Memory bullet ${n} (edit with Ctrl+click)`
-          : `Memory bullet ${n} (empty — configure)`
+        isFilled(data)
+          ? `Memory bullet ${bulletNumber(index)} (edit with Ctrl+click)`
+          : `Memory bullet ${bulletNumber(index)} (empty — configure)`
       "
-      @click="onClick($event, n - 1)"
+      @click="onClick($event, data)"
     >
-      {{ n }}
+      {{ bulletNumber(index) }}
+    </button>
+    <!-- The row's one extra affordance, and it exists only in the state the old
+         nine-slot row could never reach: **no bullets at all**. Without it the
+         dialog — where Add lives — would be unreachable, because the only way to
+         open it was to click a bullet. A row that has bullets shows nothing extra,
+         so today's look is unchanged. -->
+    <button
+      v-if="!state.slots.length"
+      type="button"
+      class="memory-bullet-add"
+      :disabled="batch.active"
+      aria-label="Add a memory bullet"
+      :title="
+        batch.active ? 'Unavailable while a batch runs' : 'Add a memory bullet'
+      "
+      @click="emit('configure', null)"
+    >
+      +
     </button>
   </div>
 </template>

@@ -52,6 +52,7 @@ the intent" style as the file-icons sync test.
 import ast
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlsplit
@@ -67,16 +68,36 @@ REPO_ROOT = Path(editorfs.constants.PROJECT_ROOT)
 
 # The write routes, in the exact spelling a caller would use. Chosen so that a
 # docstring naming a route *method* (``GET /api/fs/tree``) stays out of the
-# scan, and a comment or a string naming a write is caught. The modes pair's
-# contribution (eds-04) is its save route only: the verb-and-path shape keeps
-# ``GET /api/agent-modes/document`` — which the document read's own docstrings
-# name, and will keep naming — out of the scan for the same reason ``GET
-# /api/fs`` is.
+# scan, and a comment or a string naming a write is caught. Each family's
+# contribution is its **write** routes only: the verb-and-path shape keeps every
+# read's spelling — ``GET /api/fs``, ``GET /api/agents``, ``GET
+# /api/prompt-helpers`` — out of the scan, because the readers' own docstrings
+# name them and always will.
 WRITE_MARKERS = (
     "PUT /api/fs",
     "POST /api/fs",
     "DELETE /api/fs",
-    "POST /api/agent-modes/save",
+    # appdb-07: the settings store's prompt-helper writes. Same verb-and-path
+    # shape, so the read's spelling (``GET /api/prompt-helpers``) — which the
+    # reader's own docstrings name, and will keep naming — stays out of the scan.
+    "POST /api/prompt-helpers/add",
+    "POST /api/prompt-helpers/save",
+    "POST /api/prompt-helpers/delete",
+    # appdb-08: the settings store's server and model writes. Same shape again, so
+    # the two reads' spellings (``GET /api/servers``, ``GET /api/models``) stay out
+    # of the scan for the same reason.
+    "POST /api/servers/add",
+    "POST /api/servers/save",
+    "POST /api/servers/delete",
+    "POST /api/models/add",
+    "POST /api/models/save",
+    "POST /api/models/delete",
+    # appdb-10: the agents' writes, which replaced the modes file's whole-document
+    # save. Same shape once more, so ``GET /api/agents`` (the dropdown's reader)
+    # stays out of the scan.
+    "POST /api/agents/add",
+    "POST /api/agents/save",
+    "POST /api/agents/delete",
 )
 
 # The app's own route prefix: a URL whose path holds it could address a write
@@ -92,26 +113,30 @@ ALLOWED_HOMES = {
     # Declared with the route, before its caller exists: task mov-03 creates this
     # composable, whose ``fetch`` will name the batch-move route.
     Path("web/src/composables/useEditorMove.js"),    # move batch
-    # Same spirit, same reason (eds-04 declares it with the route): task eds-05
-    # gives this composable the document fetch and the save ``fetch``.
-    Path("web/src/composables/useAgentModes.js"),    # modes document / save
 }
 
-# The modes file's save route on its own, for the checks that ask only about it
-# (the tool listings, the poisoned cases): the marker scan above covers it too,
-# but a tool list is judged against *this* path and nothing else.
-MODES_SAVE_MARKER = "POST /api/agent-modes/save"
+# The agent write surface on its own, for the checks that ask only about it (the
+# tool listings, the poisoned cases): the marker scan above covers them too, but
+# a tool list is judged against *these* paths and nothing else. The agents decide
+# whether a tool is offered at all, so a tool reaching one is the leak no amount
+# of read-only tool design would notice — the same reason the modes file's save
+# was pinned here before task 10 replaced it with these.
+AGENTS_WRITE_MARKERS = (
+    "POST /api/agents/add",
+    "POST /api/agents/save",
+    "POST /api/agents/delete",
+)
 
-# Spellings a connector or a tool description could use for reaching it without
+# Spellings a connector or a tool description could use for reaching one without
 # naming the route verbatim — the same "belt for the prose" the helper names are
 # for the Editor's writes.
-MODES_SAVE_HELPER_SPELLINGS = (
-    "agent_modes_save",
-    "agent-modes-save",
-    "modes_save",
-    "modes-save",
-    "save_agent_modes",
-    "agent-modes/save",
+AGENTS_WRITE_HELPER_SPELLINGS = (
+    "agents/add",
+    "agents/save",
+    "agents/delete",
+    "add_agent",
+    "update_agent",
+    "delete_agent",
 )
 
 # A connector that could speak HTTP could call a route it never names in a
@@ -171,28 +196,31 @@ def offenders_for(markers, roots, allowed=ALLOWED_HOMES) -> List[str]:
     return found
 
 
-def modes_writer_callers(source_root: Path) -> List[str]:
-    """Every file under ``src`` that names the core writer of the modes file.
+def agent_writer_callers(source_root: Path) -> List[str]:
+    """Every file under ``src`` that names the store's agent write accessors.
 
     One implementation, shared by the guard below and by its self-check — the
-    same reason ``offenders_for`` is shared. The writer's own module is skipped
-    (it *defines* the entry point), so what is left is the list of callers: the
-    routes alone, or something that should not be there.
+    same reason ``offenders_for`` is shared. The store module is skipped (it
+    *defines* them), so what is left is the list of callers: the routes alone, or
+    something that should not be there.
+
+    Asserted against ``appdb.`` because the routes reach the store through the
+    module, not through an import of each name — so a hub that bound the function
+    directly would not hide from this.
     """
     found: List[str] = []
     for path in source_root.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
-        if path.name == "agent_modes_write.py":
-            continue  # this *defines* the writer
+        if "__pycache__" in path.parts or path.name == "appdb.py":
+            continue  # this *defines* the writers
         text = path.read_text(encoding="utf-8")
-        if "save_agent_modes_document" in text:
+        if any(f"appdb.{name}(" in text for name in ("add_agent", "update_agent",
+                                                     "delete_agent")):
             found.append(str(path.relative_to(source_root)))
     return sorted(found)
 
 
 def advertisement_offenders(listing: List[Dict[str, Any]]) -> List[str]:
-    """Every advertised tool def that names the modes file's save route.
+    """Every advertised tool def that names one of the agent write routes.
 
     One implementation, shared by the MCP and LSP advertisement guards below and
     by their self-checks — the same reason ``offenders_for`` is shared: a second
@@ -204,10 +232,10 @@ def advertisement_offenders(listing: List[Dict[str, Any]]) -> List[str]:
     found: List[str] = []
     for tool in listing:
         haystack = f"{tool['name']} {tool['description']} {tool['schema']}"
-        if MODES_SAVE_MARKER in haystack:
-            found.append(f"{tool['name']}: {MODES_SAVE_MARKER}")
-            continue
-        for spelling in MODES_SAVE_HELPER_SPELLINGS:
+        for marker in AGENTS_WRITE_MARKERS:
+            if marker in haystack:
+                found.append(f"{tool['name']}: {marker}")
+        for spelling in AGENTS_WRITE_HELPER_SPELLINGS:
             if spelling in haystack:
                 found.append(f"{tool['name']}: {spelling}")
     return found
@@ -456,7 +484,14 @@ class TestNoCodePathCallsThem:
         assert offenders == []
 
     def test_the_write_core_is_called_from_the_routes_and_nowhere_else(self):
-        writers = ("write_file", "backup_for_write", "create_path",
+        # ``backup_for_write`` is asked about separately, and not exempted: the
+        # settings store borrows it for D12's pre-delete copy of ``nojae.db``
+        # (appdb-07), which is one folder and one retention sweep for every
+        # replacement the app makes. Since appdb-10 the store is the **only**
+        # borrower: the routes stopped naming it when the agent writes moved
+        # behind the store's accessors. Every writer of the Editor's surface
+        # still stays the routes' alone, so the borrow cannot widen into a write.
+        writers = ("write_file", "create_path",
                    "rename_path", "move_paths_batch", "trash_path")
         callers: List[str] = []
         for path in (REPO_ROOT / "src").rglob("*.py"):
@@ -466,6 +501,14 @@ class TestNoCodePathCallsThem:
             if any(name in text for name in writers):
                 callers.append(str(path.relative_to(REPO_ROOT)))
         assert callers == [str(Path("src") / "api" / "routes.py")]
+
+        borrowers = sorted(
+            str(path.relative_to(REPO_ROOT))
+            for path in (REPO_ROOT / "src").rglob("*.py")
+            if path.parent.name != "editorfs"
+            and "backup_for_write" in path.read_text(encoding="utf-8")
+        )
+        assert borrowers == [str(Path("src") / "core" / "appdb.py")]
 
 
 class TestTheConnectorsWorkspacePolicyChecksStayInTheirLane:
@@ -550,16 +593,18 @@ class TestTheTerminalStaysHumanOnly:
         ) == []
 
     def test_the_modes_save_is_not_a_side_door_through_the_shell(self):
-        """eds-04: a reserved-folder file became app-writable; the shell is not how.
+        """The agents became app-writable; the shell is not the way in.
 
-        The modes file is now a store the app writes, and the tempting route for a
-        tool to reach it is the one surface that can *edit any file* — the Editor's
-        terminal. It stays a human surface: no hub, chat or batch path names the
-        save route or the writer behind it, and the connectors' own sources carry
-        neither (the marker scan covers those trees, so this asks only the in-process
-        paths that could import the writer an import away).
+        The personas are rows of the install's store now (appdb-10), and the
+        tempting route for a tool to reach them is the one surface that can *edit
+        any file* — the Editor's terminal. It stays a human surface: no hub, chat
+        or batch path names an agent write route or the accessor behind it, and
+        the connectors' own sources carry neither (the marker scan covers those
+        trees, so this asks only the in-process paths that could reach one an
+        import away).
         """
-        markers = (MODES_SAVE_MARKER, "agent_modes_write", "save_agent_modes_document")
+        markers = (*AGENTS_WRITE_MARKERS, "appdb.add_agent", "appdb.update_agent",
+                   "appdb.delete_agent")
         assert offenders_for(
             markers,
             [
@@ -573,78 +618,408 @@ class TestTheTerminalStaysHumanOnly:
         ) == []
 
 
-class TestTheAgentModesRoutesStayPinnedToTheirPaths:
-    """The modes file's routes: one argument-free reader, one pinned editor pair.
+class TestTheAgentRoutesStayPinnedToTheirPaths:
+    """The agents' routes: one argument-free reader, three pinned writes.
 
-    am-06 gave the reserved folder a purpose-built *reader* and this lot gave it
-    an editor pair. The reservation of ``.nojae`` was not lifted — the file is
-    still invisible to ``/api/fs/*`` — so every route that reaches it is one this
-    guard has to name, because none of them is an ``/api/fs`` route and the marker
-    scan above cannot see any of them.
+    The personas moved from a workspace file into the install's store (appdb-10),
+    and that store is invisible to ``/api/fs/*`` — so every route that reaches it
+    is one this guard has to name, because none of them is an ``/api/fs`` route
+    and the marker scan above cannot see any of them.
 
-    What survives am-06's reason is the narrower truth it was always guarding: a
-    **tool** must not reach the switch that decides whether tools exist. The modes
-    file is now a store the app writes, but through the browser only, so what is
-    pinned is (a) the dropdown's reader keeps exactly one verb and zero arguments,
-    (b) the editor pair is exactly two routes with exactly their verbs, and (c) the
-    core writer behind the save has one caller, the routes.
+    What is pinned is the whole surface, path by path and verb by verb: (a) the
+    dropdown's reader keeps exactly one verb and **zero arguments**, (b) the three
+    writes are the store's whole writable reach with exactly their verbs, and
+    (c) the accessors behind them have one caller, the routes. A fourth route —
+    or a second verb on one of these — is a change to the store's reach and has
+    to be made here, on purpose.
     """
 
-    #: The whole surface ``/agent-modes`` may ever answer, path by path. A third
-    #: route — or a second verb on one of these — is a change to the modes file's
-    #: reach, so it has to be made here, on purpose.
-    AGENT_MODES_VERBS = {
-        "/agent-modes": ["get"],
-        "/agent-modes/document": ["get"],
-        "/agent-modes/save": ["post"],
+    #: The whole surface ``/agents`` may ever answer. The reader answers the list
+    #: the dropdown, the dialog and the hub gray-out all read; the three writes
+    #: are create, update and delete (§4.5).
+    AGENT_VERBS = {
+        "/agents": ["get"],
+        "/agents/add": ["post"],
+        "/agents/save": ["post"],
+        "/agents/delete": ["post"],
     }
 
     def _registered(self):
         routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
             encoding="utf-8"
         )
-        return route_registrations(routes_source, "/agent-modes")
+        return route_registrations(routes_source, "/agents")
 
     def test_the_reader_path_has_one_verb_and_no_argument(self):
-        """am-06 §3-§4, unchanged by this lot: the dropdown's read is untouched.
+        """The arity is what pins "no ``?path=``", because a signature cannot hide one.
 
-        The arity is what is pinned rather than "no ``?path=`` string in the
-        file": a query parameter is how a purpose-built reader turns into a
-        general way to reach the reserved folder, and a handler's signature is
-        the one place that cannot hide one.
+        A query parameter is how a purpose-built store reader turns into a general
+        way to reach the database — which is invisible to ``/api/fs`` and to both
+        connectors precisely because its only door is this route.
         """
         handlers = [
-            entry for entry in self._registered() if entry["path"] == "/agent-modes"
+            entry for entry in self._registered() if entry["path"] == "/agents"
         ]
         assert [entry["verb"] for entry in handlers] == ["get"], (
-            "a verb on the dropdown's reader path would put the file that "
-            "decides whether tools exist behind a route no marker scan sees"
+            "a verb on the dropdown's reader path would put the personas that "
+            "decide whether tools exist behind a route no marker scan sees"
         )
-        assert [entry["handler"].name for entry in handlers] == ["get_agent_modes"]
+        assert [entry["handler"].name for entry in handlers] == ["get_agents"]
         assert handlers[0]["handler"].args.args == []
 
-    def test_the_editor_pair_exists_and_is_pinned_to_get_and_post(self):
-        """The pair is the modes file's whole writable reach, verbs and all."""
+    def test_the_writes_are_pinned_to_post_and_take_one_body(self):
+        """The three writes are the store's whole writable reach, verbs and all."""
         registered = self._registered()
         by_path: Dict[str, List[str]] = {}
         for entry in registered:
             by_path.setdefault(entry["path"], []).append(entry["verb"])
-        assert by_path == self.AGENT_MODES_VERBS, (
-            f"the /agent-modes surface is {by_path}, expected "
-            f"{self.AGENT_MODES_VERBS}"
+        assert by_path == self.AGENT_VERBS, (
+            f"the /agents surface is {by_path}, expected {self.AGENT_VERBS}"
         )
+        for entry in registered:
+            if entry["verb"] == "get":
+                continue
+            args = entry["handler"].args.args
+            assert [arg.arg for arg in args] == ["body"], entry["path"]
+            assert len(args) == 1, entry["path"]
 
-    def test_the_save_is_the_only_writer_and_the_routes_are_its_only_caller(self):
-        """The core writer behind the save is reached from the routes alone.
+    def test_the_client_reads_readonly_as_data_never_as_a_reserved_id(self):
+        """``web/src`` holds no reserved id, and ``readonly`` is what drives it.
 
-        Same shape as ``test_the_write_core_is_called_from_the_routes_and_nowhere_else``
-        above, applied to this pair: a hub, a tool or a chat path that imported the
-        writer would be a tool editing the file that decides whether tools exist,
-        and no scan of ``/api/fs`` markers would ever notice.
+        AGENTS.md: "``web/src`` never contains a reserved agent id. The client
+        recognises the app-owned mode by a data flag, not by its name." Two
+        halves, and both are asserted here because the second is the one this
+        task could break by rendering a field from ``id === '…'``:
+
+        * no file under ``web/src`` carries an id ``agent_modes`` marks reserved
+          (read out of the module that owns them, never restated here);
+        * the two files that render an agent's tab decide from the payload's
+          flags — ``readonly``/``deletable`` — and hold no id comparison at all.
+
+        The jsdom suite carries the same scan over ``web/src`` (its own walk,
+        with its extension filter asserted); this half is the backend's, because
+        the ids it guards are *this* package's.
         """
-        assert modes_writer_callers(REPO_ROOT / "src") == [
+        from src.core import agent_modes
+
+        reserved = agent_modes.RESERVED_MODE_IDS
+        assert reserved, "no reserved agent id declared"
+
+        scanned = [
+            path
+            for path in (REPO_ROOT / "web" / "src").rglob("*")
+            if path.is_file() and path.suffix in (".js", ".vue", ".css", ".json")
+        ]
+        assert scanned, "the scan found nothing to scan under web/src"
+        for path in scanned:
+            text = path.read_text(encoding="utf-8")
+            for agent_id in reserved:
+                assert agent_id not in text, (
+                    f"{path.relative_to(REPO_ROOT)} names the reserved agent id "
+                    f"{agent_id!r} — the client must recognise it by `readonly`"
+                )
+
+        for name in ("components/AgentModesDialog.vue",
+                     "composables/useAgentModes.js"):
+            source = (REPO_ROOT / "web" / "src" / name).read_text(encoding="utf-8")
+            assert "readonly" in source, name
+            assert not re.search(r"id\s*===\s*['\"]", source), (
+                f"{name} compares an agent id — `readonly` is the flag that drives "
+                "the rendering"
+            )
+
+    def test_the_store_accessors_are_called_from_the_routes_and_nowhere_else(self):
+        """Nothing under ``src/core`` but the store names an agent write.
+
+        Same shape as ``test_the_store_writers_are_called_from_the_routes_and_nowhere_else``
+        above, applied to the agents: a hub, a tool or a chat path that named one
+        would be a tool editing the personas that decide whether tools exist, and
+        no scan of ``/api/fs`` markers would ever notice.
+        """
+        assert agent_writer_callers(REPO_ROOT / "src") == [
             str(Path("api") / "routes.py")
         ]
+
+
+class TestThePromptHelperRoutesStayPinnedToTheirPaths:
+    """The settings store's bullet routes: one reader, three pinned writes.
+
+    appdb-07 moved the bullets out of ``.nojae/prompt-helpers.json`` and into
+    ``nojae.db``, which is invisible to ``/api/fs/*`` for the same reason the
+    reserved folder is — so these routes are reached by no path parameter, and
+    the ``/api/fs`` marker scan cannot see any of them. What is pinned is the
+    whole surface, path by path and verb by verb: a fourth route, or a second
+    verb on one of these, is a change to the store's reach and has to be made
+    here, on purpose.
+
+    The writes are the browser's alone (D12). Nothing under ``src/core`` but the
+    module that wraps them names a write accessor, so no hub, tool or chat path
+    reaches one — which would be a tool editing the user's bullets mid-turn, and
+    no scan of ``/api/fs`` would ever notice.
+    """
+
+    #: The whole ``/prompt-helpers`` surface. The reader answers the count the
+    #: store holds; the three writes are create, update-one and delete (§4.5).
+    PROMPT_HELPER_VERBS = {
+        "/prompt-helpers": ["get"],
+        "/prompt-helpers/add": ["post"],
+        "/prompt-helpers/save": ["post"],
+        "/prompt-helpers/delete": ["post"],
+    }
+
+    #: Spellings a connector or a tool description could use for reaching the
+    #: writes without naming a route verbatim — the belt the modes save has.
+    HELPER_WRITE_SPELLINGS = (
+        "prompt_helpers.add",
+        "prompt_helpers.delete",
+        "add_prompt_helper",
+        "delete_prompt_helper",
+        "prompt-helpers/add",
+        "prompt-helpers/delete",
+    )
+
+    def _registered(self):
+        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
+            encoding="utf-8"
+        )
+        return route_registrations(routes_source, "/prompt-helpers")
+
+    def test_the_surface_is_exactly_the_reader_and_the_three_writes(self):
+        by_path: Dict[str, List[str]] = {}
+        for entry in self._registered():
+            by_path.setdefault(entry["path"], []).append(entry["verb"])
+        assert by_path == self.PROMPT_HELPER_VERBS, (
+            f"the /prompt-helpers surface is {by_path}, expected "
+            f"{self.PROMPT_HELPER_VERBS}"
+        )
+
+    def test_no_route_under_the_prefix_takes_a_path_or_an_index(self):
+        """The arity is what pins "no ``?path=``", because a signature cannot hide one.
+
+        The reader takes nothing at all; each write takes exactly its body model.
+        A query parameter would turn a purpose-built store route into a general
+        way to reach the database.
+        """
+        for entry in self._registered():
+            args = entry["handler"].args.args
+            if entry["verb"] == "get":
+                assert args == [], entry["path"]
+            else:
+                assert [arg.arg for arg in args] == ["body"], entry["path"]
+                assert len(args) == 1, entry["path"]
+
+    def test_no_tool_advertises_a_prompt_helper_write(self):
+        offenders: List[str] = []
+        for connector_id, listing in connector_tool_lists().items():
+            for tool in listing:
+                haystack = f"{tool['name']} {tool['description']} {tool['schema']}"
+                offenders.extend(
+                    f"{connector_id}: {item}"
+                    for item in self.HELPER_WRITE_SPELLINGS
+                    if item in haystack
+                )
+        for definition in lsp_tool_defs():
+            haystack = json.dumps(definition)
+            offenders.extend(
+                f"lsp:{definition['function']['name']}: {item}"
+                for item in self.HELPER_WRITE_SPELLINGS
+                if item in haystack
+            )
+        assert offenders == [], (
+            f"a tool advertises a prompt-helper write: {offenders}"
+        )
+
+    def test_the_store_writers_are_called_from_the_routes_and_their_wrapper(self):
+        """Nothing under ``src/core`` but the helpers module names the writes.
+
+        ``prompt_helpers.py`` is the wrapper the routes call, and it is the only
+        core module allowed to: a hub, a chat or a batch path naming one of them
+        would be a tool writing the user's bullets, reached through the store
+        rather than through the browser.
+        """
+        names = ("add_prompt_helper", "save_prompt_helper", "delete_prompt_helper")
+        callers: List[str] = []
+        for path in (REPO_ROOT / "src" / "core").rglob("*.py"):
+            if path.name in ("appdb.py", "prompt_helpers.py"):
+                continue  # these *define* the accessors
+            text = path.read_text(encoding="utf-8")
+            if any(name in text for name in names):
+                callers.append(str(path.relative_to(REPO_ROOT)))
+        assert callers == []
+
+    def test_the_verb_guard_catches_a_poisoned_surface(self):
+        """Fed to the same walk the guard uses, so the check above is a guard."""
+        poisoned = (
+            "@router.get(\"/prompt-helpers\")\n"
+            "def get_prompt_helpers():\n"
+            "    return {}\n\n"
+            "@router.post(\"/prompt-helpers\")\n"
+            "def post_prompt_helpers(body: PromptHelperSlotIn):\n"
+            "    return {}\n\n"
+            "@router.post(\"/prompt-helpers/add\")\n"
+            "def post_prompt_helpers_add(body: PromptHelperCreateIn):\n"
+            "    return {}\n\n"
+            "@router.get(\"/prompt-helpers/delete\")\n"
+            "def get_prompt_helpers_delete():\n"
+            "    return {}\n\n"
+            "@router.post(\"/prompt-helpers/delete\")\n"
+            "def post_prompt_helpers_delete(body: PromptHelperDeleteIn):\n"
+            "    return {}\n"
+        )
+        by_path: Dict[str, List[str]] = {}
+        for entry in route_registrations(poisoned, "/prompt-helpers"):
+            by_path.setdefault(entry["path"], []).append(entry["verb"])
+        assert by_path == {
+            "/prompt-helpers": ["get", "post"],
+            "/prompt-helpers/add": ["post"],
+            "/prompt-helpers/delete": ["get", "post"],
+        }
+        with pytest.raises(AssertionError):
+            assert by_path == self.PROMPT_HELPER_VERBS
+        # And the arity guard sees the reader's signature even with a poisoned
+        # neighbour: the read stays argument-free, the writes keep one body.
+        reader = [e for e in route_registrations(poisoned, "/prompt-helpers")
+                  if e["path"] == "/prompt-helpers"]
+        assert reader[0]["handler"].args.args == []
+
+
+class TestTheServerAndModelRoutesStayPinnedToTheirPaths:
+    """The settings store's connection routes: two readers, six pinned writes.
+
+    appdb-08 moved the model connection into ``nojae.db``, so the same discipline
+    that pins the bullets pins the catalogue: no path parameter, no ``/api/fs``
+    route, and every verb on every path stated here. The ``/models`` entry is the
+    **live listing** (``GET /api/models`` — dial a server's URL, read its model
+    ids), which is a read and stays one; the store's model writes are the three
+    under ``/models/``.
+
+    The writes are the browser's alone (D12). Nothing under ``src/core`` but the
+    store module names a write accessor, so no hub, tool or chat path reaches one
+    — which would be a tool editing the connection a turn runs on.
+    """
+
+    #: The whole ``/servers`` and ``/models`` surface, verbs and all.
+    CONNECTION_VERBS = {
+        "/servers": ["get"],
+        "/servers/add": ["post"],
+        "/servers/save": ["post"],
+        "/servers/delete": ["post"],
+        "/models": ["get"],
+        "/models/add": ["post"],
+        "/models/save": ["post"],
+        "/models/delete": ["post"],
+    }
+
+    #: Spellings a connector or a tool description could use for reaching the
+    #: writes without naming a route verbatim — the belt the other two surfaces have.
+    CONNECTION_WRITE_SPELLINGS = (
+        "appdb.add_server",
+        "appdb.delete_server",
+        "appdb.add_model",
+        "appdb.delete_model",
+        "servers/add",
+        "servers/delete",
+        "models/add",
+        "models/delete",
+    )
+
+    def _registered(self):
+        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
+            encoding="utf-8"
+        )
+        return route_registrations(routes_source, "/servers") + (
+            route_registrations(routes_source, "/models")
+        )
+
+    def test_the_surface_is_exactly_the_two_reads_and_the_six_writes(self):
+        by_path: Dict[str, List[str]] = {}
+        for entry in self._registered():
+            by_path.setdefault(entry["path"], []).append(entry["verb"])
+        assert by_path == self.CONNECTION_VERBS, (
+            f"the connection surface is {by_path}, expected "
+            f"{self.CONNECTION_VERBS}"
+        )
+
+    def test_no_route_under_either_prefix_takes_a_path_or_an_id(self):
+        """The arity is what pins "no ``?path=``", because a signature cannot hide one."""
+        for entry in self._registered():
+            args = entry["handler"].args.args
+            if entry["verb"] == "get":
+                # ``GET /api/models`` takes the URL and key to dial; the store's
+                # reader takes nothing at all.
+                assert all(
+                    arg.arg in ("serverUrl", "apiKey") for arg in args
+                ), entry["path"]
+            else:
+                assert [arg.arg for arg in args] == ["body"], entry["path"]
+                assert len(args) == 1, entry["path"]
+
+    def test_no_tool_advertises_a_connection_write(self):
+        offenders: List[str] = []
+        for connector_id, listing in connector_tool_lists().items():
+            for tool in listing:
+                haystack = f"{tool['name']} {tool['description']} {tool['schema']}"
+                offenders.extend(
+                    f"{connector_id}: {item}"
+                    for item in self.CONNECTION_WRITE_SPELLINGS
+                    if item in haystack
+                )
+        for definition in lsp_tool_defs():
+            haystack = json.dumps(definition)
+            offenders.extend(
+                f"lsp:{definition['function']['name']}: {item}"
+                for item in self.CONNECTION_WRITE_SPELLINGS
+                if item in haystack
+            )
+        assert offenders == [], (
+            f"a tool advertises a connection write: {offenders}"
+        )
+
+    def test_the_store_writers_are_called_from_the_routes_and_nowhere_else(self):
+        """Nothing under ``src/core`` names a connection write.
+
+        Unlike the bullets, the connection has no wrapper module: the routes call
+        :mod:`src.core.appdb` directly, so the store module itself is the only
+        core file allowed to name these functions — it *defines* them.
+        """
+        names = ("add_server", "update_server", "delete_server",
+                 "add_model", "update_model", "delete_model")
+        callers: List[str] = []
+        for path in (REPO_ROOT / "src" / "core").rglob("*.py"):
+            if path.name == "appdb.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(f"appdb.{name}(" in text for name in names):
+                callers.append(str(path.relative_to(REPO_ROOT)))
+        assert callers == []
+
+    def test_the_verb_guard_catches_a_poisoned_surface(self):
+        """Fed to the same walk the guard uses, so the check above is a guard."""
+        poisoned = (
+            "@router.get(\"/servers\")\n"
+            "def get_servers():\n"
+            "    return {}\n\n"
+            "@router.post(\"/servers\")\n"
+            "def post_servers(body: ServerIn):\n"
+            "    return {}\n\n"
+            "@router.get(\"/models/delete\")\n"
+            "def get_models_delete():\n"
+            "    return {}\n\n"
+            "@router.post(\"/models/delete\")\n"
+            "def post_models_delete(body: ModelDeleteIn):\n"
+            "    return {}\n"
+        )
+        by_path: Dict[str, List[str]] = {}
+        for entry in route_registrations(poisoned, "/servers") + (
+            route_registrations(poisoned, "/models")
+        ):
+            by_path.setdefault(entry["path"], []).append(entry["verb"])
+        assert by_path == {
+            "/servers": ["get", "post"],
+            "/models/delete": ["get", "post"],
+        }
+        with pytest.raises(AssertionError):
+            assert by_path == self.CONNECTION_VERBS
 
 
 class TestTheSearchReaderStaysARead:
@@ -725,21 +1100,21 @@ class TestTheModelClientCannotReachAWriteRoute:
         Fed to the same walker the guards use (a scratch builder, not an edit
         to ``client.py``), so what is checked is that the *guard* sees the
         drift — the ``TestTheGuardsActuallyFail`` pattern, applied to these.
-        The drifted spelling names the **modes save** (eds-04): the guard is
+        The drifted spelling names the **agent write** surface: the guard is
         shown to see *this* path, not merely some app path, so a builder that
-        drifts onto the one route that decides whether tools exist trips both
+        drifts onto a route that decides whether tools exist trips both
         halves exactly like any other write route.
         """
         def drifted(server_url: str) -> str:
-            return f"{server_url.rstrip('/')}/api/agent-modes/save"
+            return f"{server_url.rstrip('/')}/api/agents/save"
 
         paths = builder_paths(drifted, ["http://host:8080/v1"])
         with pytest.raises(AssertionError):
             assert all(path.endswith("/v1/chat/completions") for path in paths), paths
         with pytest.raises(AssertionError):
             assert not any(APP_ROUTE_PREFIX in path for path in paths), paths
-        assert any(MODES_SAVE_MARKER.split(" ", 1)[1] in path for path in paths), (
-            "the drift named is the modes save itself: the shape guard is shown "
+        assert any("/api/agents/save" in path for path in paths), (
+            "the drift named is an agent write itself: the shape guard is shown "
             "to see this route, not just some app route"
         )
 
@@ -786,32 +1161,30 @@ class TestTheGuardsActuallyFail:
         fake.write_text('URL = "DELETE /api/fs/file"\n', encoding="utf-8")
         assert offenders_for(WRITE_MARKERS, [tmp_path]) == [str(fake)]
 
-    def test_the_marker_scan_catches_a_module_naming_the_modes_save(self, tmp_path):
-        """The new marker has its own teeth: the scan sees *this* route spelled.
+    def test_the_marker_scan_catches_a_module_naming_an_agent_write(self, tmp_path):
+        """The new markers have their own teeth: the scan sees these routes spelled.
 
-        A scratch file under a scratch root spelling the save the way a caller
+        A scratch file under a scratch root spelling a write the way a caller
         would — the same walker the real guard runs over ``src/core``, the two
-        connector trees and ``useChat.js``. The allowed-home entry for
-        ``useAgentModes.js`` is *not* passed here (``allowed=set()``), because
-        what is being proven is that the marker itself is caught, not that a
-        declared caller is excused.
+        connector trees and ``useChat.js``. No allowed home is passed here
+        (``allowed=set()``), because what is being proven is that the marker
+        itself is caught, not that a declared caller is excused.
         """
         fake = tmp_path / "core" / "cheeky.py"
         fake.parent.mkdir(parents=True)
         fake.write_text(
-            'def leak(document, mtime):\n'
-            '    # a core path wired to POST /api/agent-modes/save\n'
-            '    return client.post("/api/agent-modes/save",\n'
-            '                       json={"document": document, "mtime": mtime})\n',
+            'def leak(body):\n'
+            '    # a core path wired to POST /api/agents/save\n'
+            '    return client.post("/api/agents/save", json=body)\n',
             encoding="utf-8",
         )
         assert offenders_for(WRITE_MARKERS, [fake.parent], allowed=set()) == [str(fake)]
         # And the *read* spelling of the pair stays out of the scan, which is what
-        # keeps every document-read docstring from becoming an offender: the same
+        # keeps every agent-read docstring from becoming an offender: the same
         # reason ``GET /api/fs`` is not a marker.
         read = tmp_path / "core" / "reader.py"
         read.write_text(
-            '"""The editor read (``GET /api/agent-modes/document``)."""\n',
+            '"""The dropdown read (``GET /api/agents``)."""\n',
             encoding="utf-8",
         )
         assert offenders_for(WRITE_MARKERS, [tmp_path], allowed=set()) == [str(fake)]
@@ -825,30 +1198,31 @@ class TestTheGuardsActuallyFail:
         )
         assert any(marker in haystack for marker in WRITE_MARKERS)
 
-    def test_the_modes_save_tool_guard_catches_a_poisoned_connector_list(self):
-        """A connector advertising the modes save trips the advertisement guard.
+    def test_the_agent_write_tool_guard_catches_a_poisoned_connector_list(self):
+        """A connector advertising an agent write trips the advertisement guard.
 
         Fed to the same walker the guards use (a scratch listing, not an edit to
-        a connector), so what is checked is that the *guard* sees this route:
-        first the verbatim path, then a helper spelling that names the save
+        a connector), so what is checked is that the *guard* sees these routes:
+        first a verbatim path, then a helper spelling that names the write
         without spelling the verb — the shape the pinned helper list exists to
         catch. A clean listing answers nothing, which is what makes the empty
         answer of the guards above a verdict rather than an absence of checking.
         """
         poisoned = [
-            {"name": "modes_save", "description": f"Call {MODES_SAVE_MARKER}.",
+            {"name": "agents_save", "description": "Call POST /api/agents/save.",
              "schema": "{}"},
-            {"name": "save_modes", "description": "Writes the modes document.",
-             "schema": json.dumps({"helper": "save_agent_modes_document"})},
+            {"name": "save_agent", "description": "Writes a persona.",
+             "schema": json.dumps({"helper": "appdb.update_agent"})},
             {"name": "clean_tool", "description": "Reads a file.", "schema": "{}"},
         ]
         assert advertisement_offenders(poisoned) == [
-            f"modes_save: {MODES_SAVE_MARKER}",
-            "save_modes: save_agent_modes",
+            "agents_save: POST /api/agents/save",
+            "agents_save: agents/save",
+            "save_agent: update_agent",
         ]
 
-    def test_the_modes_save_tool_guard_catches_a_poisoned_lsp_spec(self, monkeypatch):
-        """The LSP half trips too: a poisoned catalogue def names the save route.
+    def test_the_agent_write_tool_guard_catches_a_poisoned_lsp_spec(self, monkeypatch):
+        """The LSP half trips too: a poisoned catalogue def names a write route.
 
         The poisoning goes into a spec the committed template *declares* (every
         server there asks for ``diagnostics``), because the hub publishes the
@@ -859,7 +1233,7 @@ class TestTheGuardsActuallyFail:
             lsp_tools.TOOL_SPECS,
             "diagnostics",
             {**lsp_tools.TOOL_SPECS["diagnostics"],
-             "description": f"Save the modes document ({MODES_SAVE_MARKER})."},
+             "description": "Save an agent (POST /api/agents/save)."},
         )
         listing = [
             {"name": definition["function"]["name"],
@@ -872,51 +1246,54 @@ class TestTheGuardsActuallyFail:
         with pytest.raises(AssertionError):
             assert offenders == [], offenders
 
-    def test_the_modes_writer_caller_scan_catches_a_second_caller(self, tmp_path):
-        """A second caller of the core writer is named by the caller scan.
+    def test_the_agent_writer_caller_scan_catches_a_second_caller(self, tmp_path):
+        """A second caller of a store accessor is named by the caller scan.
 
-        A scratch ``src`` tree with the routes and a hub that imports the writer:
+        A scratch ``src`` tree with the routes and a hub that names the accessor:
         the guard's answer is *both*, which is what makes the real guard's
-        one-entry answer a verdict. The writer module itself is skipped by the
+        one-entry answer a verdict. The store module itself is skipped by the
         shared walker, exactly as it is for the real tree.
         """
         (tmp_path / "api").mkdir()
         (tmp_path / "api" / "routes.py").write_text(
-            "from src.core import agent_modes_write\n\n"
+            "from src.core import appdb\n\n"
             "def route(body):\n"
-            "    return agent_modes_write.save_agent_modes_document(body)\n",
+            "    return appdb.update_agent(body.id, label=body.label)\n",
             encoding="utf-8",
         )
         (tmp_path / "core" / "mcphub").mkdir(parents=True)
         (tmp_path / "core" / "mcphub" / "manager.py").write_text(
-            "from src.core.agent_modes_write import save_agent_modes_document\n\n"
-            "def tool_save(document):\n"
-            "    return save_agent_modes_document(document)\n",
+            "from src.core import appdb\n\n"
+            "def tool_save(agent_id):\n"
+            "    return appdb.delete_agent(agent_id)\n",
             encoding="utf-8",
         )
-        (tmp_path / "core" / "agent_modes_write.py").write_text(
-            "def save_agent_modes_document(document):\n    return {}\n",
+        (tmp_path / "core" / "appdb.py").write_text(
+            "def update_agent(*args, **kwargs):\n    return []\n\n"
+            "def delete_agent(*args, **kwargs):\n    return []\n",
             encoding="utf-8",
         )
-        assert modes_writer_callers(tmp_path) == [
+        assert agent_writer_callers(tmp_path) == [
             str(Path("api") / "routes.py"),
             str(Path("core") / "mcphub" / "manager.py"),
         ]
 
     def test_the_shell_side_door_guard_catches_a_poisoned_hub(self, tmp_path):
-        """A hub naming the modes save trips the terminal-stays-human-only scan.
+        """A hub naming an agent write trips the terminal-stays-human-only scan.
 
         The same walker the guard uses, over a scratch hub file: the point is that
-        the *guard* sees a hub wiring itself to the writer of the file that decides
-        whether tools exist — which is how this class's other checks are proven.
+        the *guard* sees a hub wiring itself to the writers of the personas that
+        decide whether tools exist — which is how this class's other checks are
+        proven.
         """
         fake = tmp_path / "cheeky_hub.py"
         fake.write_text(
-            "# a hub wiring its tools to POST /api/agent-modes/save\n"
-            "from src.core import agent_modes_write\n",
+            "# a hub wiring its tools to POST /api/agents/save\n"
+            "from src.core import appdb\n",
             encoding="utf-8",
         )
-        markers = (MODES_SAVE_MARKER, "agent_modes_write", "save_agent_modes_document")
+        markers = (*AGENTS_WRITE_MARKERS, "appdb.add_agent", "appdb.update_agent",
+                   "appdb.delete_agent")
         assert offenders_for(markers, [tmp_path], allowed=set()) == [str(fake)]
 
     def test_the_http_import_scan_catches_a_poisoned_connector(self, tmp_path):
@@ -977,47 +1354,44 @@ class TestTheGuardsActuallyFail:
              if k != "format_on_save"}
         ) == []
 
-    def test_the_agent_modes_verb_guard_catches_a_poisoned_pair(self):
-        """A verb moved onto either modes path trips the rewritten guard.
+    def test_the_agents_verb_guard_catches_a_poisoned_surface(self):
+        """A verb moved onto any agents path trips the rewritten guard.
 
         Fed to the same walk the guard uses (a string, not an edit to the real
         file), so the check is that the *guard* sees a mutation — which is what
         makes the assertions in the class above guards rather than comments. Two
-        poisonings, because the pair has two halves: a ``post`` on the editor's
-        **read** path (a second way to write the file, on a path the dialog only
-        reads) and a ``get`` on the **save** path (a reader that shares the
-        writer's path, so the pinned verb set is what refuses it).
+        poisonings, because the surface has two halves: a ``post`` on the
+        dropdown's **read** path (a second way to write the store, on a path the
+        dialog only reads) and a ``get`` on a **write** path (a reader that shares
+        a writer's path, so the pinned verb set is what refuses it).
         """
         poisoned = (
-            "@router.get(\"/agent-modes\")\n"
-            "def get_agent_modes():\n"
+            "@router.get(\"/agents\")\n"
+            "def get_agents():\n"
             "    return {}\n\n"
-            "@router.get(\"/agent-modes/document\")\n"
-            "def get_agent_modes_document():\n"
+            "@router.post(\"/agents\")\n"
+            "def post_agents(body: AgentIn):\n"
             "    return {}\n\n"
-            "@router.post(\"/agent-modes/document\")\n"
-            "def post_agent_modes_document(body: ModesIn):\n"
+            "@router.get(\"/agents/save\")\n"
+            "def get_agents_save():\n"
             "    return {}\n\n"
-            "@router.get(\"/agent-modes/save\")\n"
-            "def get_agent_modes_save():\n"
-            "    return {}\n\n"
-            "@router.post(\"/agent-modes/save\")\n"
-            "def post_agent_modes_save(body: ModesIn):\n"
+            "@router.post(\"/agents/save\")\n"
+            "def post_agents_save(body: AgentIn):\n"
             "    return {}\n"
         )
-        registered = route_registrations(poisoned, "/agent-modes")
+        registered = route_registrations(poisoned, "/agents")
         by_path: Dict[str, List[str]] = {}
         for entry in registered:
             by_path.setdefault(entry["path"], []).append(entry["verb"])
         assert by_path == {
-            "/agent-modes": ["get"],
-            "/agent-modes/document": ["get", "post"],
-            "/agent-modes/save": ["get", "post"],
+            "/agents": ["get", "post"],
+            "/agents/save": ["get", "post"],
         }
         with pytest.raises(AssertionError):
-            assert by_path == TestTheAgentModesRoutesStayPinnedToTheirPaths.AGENT_MODES_VERBS
+            assert by_path == TestTheAgentRoutesStayPinnedToTheirPaths.AGENT_VERBS
         # And the arity guard still sees the reader's signature: the dropdown's
         # path stays argument-free even while the poisoned neighbours carry bodies.
-        reader = [entry for entry in registered if entry["path"] == "/agent-modes"]
+        reader = [entry for entry in registered if entry["path"] == "/agents"
+                  and entry["verb"] == "get"]
         assert [entry["handler"].args.args for entry in reader] == [[]]
-        assert registered[2]["handler"].args.args != []
+        assert registered[1]["handler"].args.args != []

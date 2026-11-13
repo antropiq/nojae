@@ -1,5 +1,17 @@
 # E2E test configuration — `.nojae/nojae-test-settings.json`
 
+> **Amended by [`app-settings-db-spec.md`](app-settings-db-spec.md)** (the `appdb`
+> lot, its D14 and §4.6). The file survives, with the same role — the only model
+> connection a spec may use, hand-authored, never written by the app, a missing one
+> stopping the suite — but two of its decisions are overtaken: it is no longer a
+> second copy of the *workspace settings* file (that file is deleted), and it is no
+> longer read as a connection. It is **read once and materialised into a temporary
+> database** the harness owns, as one server row, one model row and the model of
+> every agent row, so the suite resolves a turn exactly the way production does.
+> Its members are therefore the store's column names, nested `server` → `model`,
+> and `lspEnabled` / `maxToolIteration` are gone from it. Everything below stays
+> the record of the decisions this document made, and is not to be revised.
+
 Status: **landed** — implemented as specified, with no change to any decision
 below. The evidence is `src/core/workspace_settings.py` (the switch, the two
 names, the mode-aware read and the write refusal), `tests/test_workspace_settings.py`

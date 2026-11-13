@@ -8,6 +8,7 @@ import pytest
 
 from src.core.llmkit import client as llmkit_client
 from src.core.llmkit import constants as llmkit_constants
+from src.core import appdb
 from src.config import (
     DEFAULT_MAX_TOOL_ITERATION,
     LLM_DEBUG_KEY,
@@ -16,34 +17,46 @@ from src.config import (
     _DebugStreamHandler,
     agent_instructions_block,
     apply_llm_debug,
+    agent_connection_refusal,
     llm_debug_enabled,
-    lsp_enabled_ids,
     load_agent_instructions,
     max_tool_iteration,
     default_path_location,
     load_endpoints_config,
     path_location,
     setup_path_location,
-    workspace_settings_refusal,
 )
-from src.core import workspace_settings
 from src.core.models import DEFAULT_LLM_SYSPROMPT
-from tests.conftest import neutralise_workspace_settings, write_workspace_settings
+from tests.conftest import neutralise_store, write_store_connection
+
+
+def agent_row(agent_id: str = "code") -> Dict[str, Any]:
+    """The store's row for ``agent_id``, as a turn hands it to the seam.
+
+    A turn resolves an agent once, at its start (D7), and the seam takes that
+    row: ``modelId`` says which model answers and ``maxToolIteration`` bounds the
+    tool loop (D9). Every case below asks through this, so a case that wants an
+    agent with **no** model clears the row itself
+    (:func:`tests.conftest.clear_agent_model`).
+    """
+    row, _findings = appdb.resolve_agent(agent_id)
+    assert row is not None, f"the seeded store has no agent {agent_id!r}"
+    return row
 
 
 class TestLoadEndpointsConfig:
-    """The one reader of the workspace's model connection.
+    """The one reader of a **turn's** model connection.
 
-    Every case here points the workspace settings lookup at its own ``tmp_path``
-    (the ``conftest`` helper) and writes its own file, because the alternative —
-    an ambient answer — would make the assertions about this machine's model
-    connection rather than about the function.
+    Every case here points the store at a database of its own (the ``conftest``
+    helper) and writes its own rows, because the alternative — an ambient answer
+    — would make the assertions about this machine's model connection rather
+    than about the function.
     """
 
-    def test_reads_the_model_connection_from_the_file(
+    def test_reads_the_model_connection_from_the_agents_row(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        neutralise_workspace_settings(
+        neutralise_store(
             monkeypatch,
             tmp_path,
             serverUrl="http://localhost:8080/v1",
@@ -55,7 +68,7 @@ class TestLoadEndpointsConfig:
             reasoning="low",
         )
 
-        config, error = load_endpoints_config()
+        config, error = load_endpoints_config(agent_row())
         assert error is None
         assert config is not None
         assert config.serverUrl == "http://localhost:8080/v1"
@@ -70,7 +83,7 @@ class TestLoadEndpointsConfig:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
         """D2: a ``.env`` line left behind is dead bytes — no fallback."""
-        neutralise_workspace_settings(
+        neutralise_store(
             monkeypatch, tmp_path, serverUrl="", serverApiKey="", endpoint=""
         )
         monkeypatch.setenv("SERVER_URL", "http://left-over:9/v1")
@@ -78,150 +91,135 @@ class TestLoadEndpointsConfig:
         monkeypatch.setenv("ENDPOINT", "left-over-model")
         monkeypatch.setenv("TEMPERATURE", "0.9")
 
-        config, error = load_endpoints_config()
+        config, error = load_endpoints_config(agent_row())
         assert error is None
         assert config is not None
         assert config.serverUrl == ""
         assert config.apiKey == ""
         assert config.model_list() == []
-        # The file's own 0.2 answers, never the env's 0.9.
+        # The row's own 0.2 answers, never the env's 0.9.
         assert config.temperature == 0.2
 
-    def test_an_absent_temperature_omits_the_key_from_the_request_body(
+    def test_a_null_sampler_column_omits_the_key_from_the_request_body(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        neutralise_workspace_settings(monkeypatch, tmp_path)
-        path = write_workspace_settings(tmp_path)
-        document: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-        assert "temperature" in document  # the template holds one
-        document.pop("temperature")
-        path.write_text(json.dumps(document), encoding="utf-8")
-        workspace_settings.invalidate_workspace_settings()
+        """§4.2: a ``NULL`` sampler is "unset" and is omitted; a ``0`` is kept."""
+        neutralise_store(monkeypatch, tmp_path)
+        conn = appdb.connection()
+        conn.execute("UPDATE models SET temperature = NULL, top_k = 0")
 
-        config, error = load_endpoints_config()
+        config, error = load_endpoints_config(agent_row())
         assert error is None
         assert config is not None
         assert config.temperature is None
         assert "temperature" not in config.to_kwargs()
+        # The zero is a value someone chose, so it stays in the body.
+        assert config.top_k == 0
+        assert config.to_kwargs()["top_k"] == 0
 
     def test_the_native_vision_flag_is_true(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """D6, the native path: a JSON ``true`` reaches pydantic as ``True``.
-
-        The other half — a string ``"true"`` in the file is a **failed** read,
-        not a truthy one — is the reader's own rule and is asserted in
-        ``tests/test_workspace_settings.py``.
-        """
-        neutralise_workspace_settings(monkeypatch, tmp_path, supportsVision=True)
-        config, error = load_endpoints_config()
+        """The native path: a stored ``1`` reaches pydantic as ``True``."""
+        neutralise_store(monkeypatch, tmp_path, supportsVision=True)
+        config, error = load_endpoints_config(agent_row())
         assert error is None
         assert config is not None
         assert config.supports_vision is True
 
-    def test_an_unusable_file_is_a_sentence_naming_the_path(
+    def test_an_agent_with_no_model_is_a_sentence_naming_the_agent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """D9 (malformed) and D8 (still the seed text) both refuse, never default.
+        """D5/D7: the refusal names the agent, because that is what a user can act on."""
+        neutralise_store(monkeypatch, tmp_path, agents_without_model=("code",))
 
-        A caller that ran on defaults would measure the defaults, and one that
-        dialled the template's sentence would report a transport error quoting
-        prose — so both states come back as ``(None, sentence)``.
-        """
-        neutralise_workspace_settings(monkeypatch, tmp_path, absent=True)
-        path = (
-            tmp_path
-            / workspace_settings.POLICY_DIRNAME
-            / workspace_settings.WORKSPACE_SETTINGS_FILENAME
-        )
-
-        # absent — the reader writes nothing, and the refusal names where it looked
-        config, error = load_endpoints_config()
+        config, error = load_endpoints_config(agent_row())
         assert config is None
-        assert isinstance(error, str) and str(path) in error
+        assert isinstance(error, str)
+        # It names the agent by the human-facing label, which is the part a user
+        # can act on; a sentence about a *default* would describe nothing.
+        assert agent_row()["label"] in error
+        assert "no model" in error
+        # And the single builder answers the same sentence.
+        assert agent_connection_refusal(agent_row()) == error
 
-        # malformed (D9)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('{ "serverUrl": "http://x/v1", ', encoding="utf-8")
-        workspace_settings.invalidate_workspace_settings()
-        config, error = load_endpoints_config()
-        assert config is None
-        assert isinstance(error, str) and str(path) in error
+    def test_an_unusable_store_is_a_sentence_naming_the_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """An unopenable store refuses, never answers on defaults (§4.3)."""
+        neutralise_store(monkeypatch, tmp_path)
+        row = agent_row()
+        # Move the store out from under the read: the file is gone, so every
+        # answer has to come from the named state rather than from empty rows.
+        appdb.database_path().unlink()
+        appdb.close_thread_connection()
 
-        # a seeded file is valid JSON and unusable (D8): reported, not dialled
-        path.unlink()
-        workspace_settings.ensure_workspace_settings_file(str(tmp_path))
-        config, error = load_endpoints_config()
+        config, error = load_endpoints_config(row)
         assert config is None
-        assert isinstance(error, str) and str(path) in error
+        assert isinstance(error, str)
+        assert str(appdb.database_path()) in error
 
     def test_the_refusal_sentence_is_built_in_one_place(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        """``load_endpoints_config`` and ``workspace_settings_refusal`` agree.
+        """``load_endpoints_config`` and ``agent_connection_refusal`` agree.
 
-        ws-04's ``GET /api/settings`` reuses that function; if the two sentences
-        could differ, the dialog and the refusal would disagree about the same
-        file.
+        The Settings dialog and the app bar reuse that function; if the two
+        sentences could differ, they would disagree about the same agent.
         """
-        neutralise_workspace_settings(monkeypatch, tmp_path)
-        assert workspace_settings_refusal() is None
-        assert load_endpoints_config()[1] is None
+        neutralise_store(monkeypatch, tmp_path)
+        assert agent_connection_refusal(agent_row()) is None
+        assert load_endpoints_config(agent_row())[1] is None
 
-        path = write_workspace_settings(tmp_path)
-        path.write_text("{ nope", encoding="utf-8")  # not JSON at all
-        workspace_settings.invalidate_workspace_settings()
-        sentence = workspace_settings_refusal()
+        write_store_connection(tmp_path, endpoint="model-b")
+        neutralise_store(monkeypatch, tmp_path, agents_without_model=("code",))
+        sentence = agent_connection_refusal(agent_row())
         assert sentence
-        assert load_endpoints_config()[1] == sentence
+        assert load_endpoints_config(agent_row())[1] == sentence
 
 
-class TestWorkspaceSourcedConfigHelpers:
-    """``lsp_enabled_ids()`` / ``max_tool_iteration()``: same names, new source."""
+class TestThePerAgentCap:
+    """``max_tool_iteration()`: the resolved agent's column (D9).
 
-    def test_lsp_enabled_deduplicates_and_keeps_the_files_order(
+    Its sibling — the reader of the workspace file's ``lspEnabled`` array — is
+    gone rather than re-pointed: D13 made the declaration file's ``enable`` flag
+    the only LSP gate, so there is no second list of ids for a config helper to
+    read.
+    """
+
+    def test_the_agents_column_wins_over_the_code_default(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
-        neutralise_workspace_settings(
-            monkeypatch, tmp_path, lspEnabled=["vue", "pyright", "vue", "typescript"]
-        )
-        assert lsp_enabled_ids() == ["vue", "pyright", "typescript"]
+        neutralise_store(monkeypatch, tmp_path)
+        conn = appdb.connection()
+        conn.execute("UPDATE agents SET max_tool_iteration = 9 WHERE id = 'code'")
+        assert max_tool_iteration(agent_row()) == 9
 
-    def test_lsp_enabled_is_empty_without_a_file_or_an_env_key(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
-        neutralise_workspace_settings(monkeypatch, tmp_path)
-        monkeypatch.setenv("LSP_ENABLED", "pyright")
-        assert lsp_enabled_ids() == []
-
-    def test_the_files_value_wins_over_the_code_default(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
-        neutralise_workspace_settings(monkeypatch, tmp_path, maxToolIteration=9)
-        assert max_tool_iteration() == 9
-
-    def test_absent_member_falls_back_to_the_code_default(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
-        """The member being *absent* is what defaults; the template holds 300."""
-        path = write_workspace_settings(tmp_path)
-        neutralise_workspace_settings(monkeypatch, tmp_path)
-        document = json.loads(path.read_text(encoding="utf-8"))
-        assert document["maxToolIteration"] == 300
-        assert max_tool_iteration() == 300
-        document.pop("maxToolIteration")
-        path.write_text(json.dumps(document), encoding="utf-8")
-        workspace_settings.invalidate_workspace_settings()
+    def test_no_agent_answers_the_seeded_number(self):
+        """A caller with no turn to speak of gets the number a built-in is seeded with."""
         assert max_tool_iteration() == DEFAULT_MAX_TOOL_ITERATION
 
     def test_zero_or_negative_clamps_to_one(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
+        """A floor of 1 and **no ceiling** — what today's reader already enforces."""
+        neutralise_store(monkeypatch, tmp_path)
+        conn = appdb.connection()
         for value in (0, -5):
-            neutralise_workspace_settings(
-                monkeypatch, tmp_path, maxToolIteration=value
+            conn.execute(
+                "UPDATE agents SET max_tool_iteration = ? WHERE id = 'code'", (value,)
             )
-            assert max_tool_iteration() == 1
+            assert max_tool_iteration(agent_row()) == 1
+
+    def test_a_huge_cap_is_a_value_not_a_limit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """The 500 found in a live file was typed, not imposed; nothing bounds it."""
+        neutralise_store(monkeypatch, tmp_path)
+        appdb.connection().execute(
+            "UPDATE agents SET max_tool_iteration = 5000 WHERE id = 'code'"
+        )
+        assert max_tool_iteration(agent_row()) == 5000
 
     def test_the_env_names_are_ignored(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -232,10 +230,12 @@ class TestWorkspaceSourcedConfigHelpers:
         second was the hand-written-``.env`` escape hatch for a file that no
         longer holds the key, so it stopped being honoured (spec section 5).
         """
-        neutralise_workspace_settings(monkeypatch, tmp_path, maxToolIteration=4)
+        neutralise_store(monkeypatch, tmp_path)
+        conn = appdb.connection()
+        conn.execute("UPDATE agents SET max_tool_iteration = 4 WHERE id = 'code'")
         monkeypatch.setenv("MAX_TOOL_ITERATION", "7")
         monkeypatch.setenv("MAX_MCP_ITERATION", "7")
-        assert max_tool_iteration() == 4
+        assert max_tool_iteration(agent_row()) == 4
 
 
 class TestPathLocation:

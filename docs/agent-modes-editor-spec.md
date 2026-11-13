@@ -1,5 +1,18 @@
 # Agent modes: editing `.nojae/agent-modes.json` from the composer
 
+> **Superseded by [`app-settings-db-spec.md`](app-settings-db-spec.md)** (the
+> `appdb` lot, its D4/D5/D9 and §4.4/§5.2). The dialog this spec built survives,
+> and so does everything it decided about *editing* — one tab per agent, the caps
+> enforced as you type, the browser-only pair of routes, the pencil's reach. What
+> it edits is no longer a file: `.nojae/agent-modes.json` is deleted, the personas
+> are rows of the install's `nojae.db`, and with the file go its seeder, its
+> hand-editing, its mtime token and its conflict guard — the app is the store's
+> only writer. The scope moves too (the agents are the install's, not one
+> workspace's), each agent gains the model it runs on and the tool-loop cap, and
+> the payload's `editable` and `default` are replaced by one `readonly` flag.
+> Everything below stays the record of the decisions this document made, and is
+> not to be revised.
+
 **Status**: **landed** by lot `eds-` (`todos/done/eds-01_document_read.md` …
 `todos/done/eds-10_docs_last.md`) — D2's document read is
 `agent_modes.read_agent_modes_document()` plus the caps constants it publishes

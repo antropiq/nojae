@@ -9,7 +9,7 @@ attribute patch instead of an import dance.
 The declaration itself moved into the workspace: it describes *this*
 folder's connectors, so ``mcp_settings_path()`` is built per call out of
 the active working location — a patched filename or a switched location
-moves the lookup (the ``agent_modes.agent_modes_path()`` precedent). The
+moves the lookup (the ``editorfs.policy_file.policy_path()`` precedent). The
 install-level file beside the connector scripts
 (``mcp_connectors/mcp-settings.default.json``) is no longer read by the
 hub: it is the committed *template* the seed copies when a folder becomes

@@ -1,7 +1,12 @@
 import { computed, reactive, watch } from 'vue'
 import { registerChatBusyGuard, useChat } from './useChat'
 import { registerBatchGuard, useAppShell } from './useAppShell'
-import { agentModesLoaded, modeById, useAgentModes } from './useAgentModes'
+import {
+  agentCanRun,
+  agentModesLoaded,
+  agentNoModelSentence,
+  modeById,
+} from './useAgentModes'
 
 // ---------------------------------------------------------------------------
 // Batch mode: feed a numbered lot of markdown task files to WorkBench, one
@@ -150,14 +155,15 @@ const state = reactive({
   outcomes: [],
   status: 'idle', // idle | running | stopped | failed | finished
   // D13: the agent mode this lot's task turns run in, resolved once at launch
-  // (`LOT_TASK_MODE_ID` against this workspace's modes) and read per turn, so a
-  // dropdown change during task 7 cannot reach task 8. null = unresolved (the
-  // workspace has no `code` mode, or the list never loaded): the task turns ask
-  // the server for its default, and `modeNote` says so.
+  // (`LOT_TASK_MODE_ID` against this workspace's agents) and read per turn, so a
+  // dropdown change during task 7 cannot reach task 8. An unresolved pin is a
+  // **launch refusal** (task 12): D5 removed the server-side default an unpinned
+  // task turn used to lean on, so there is nothing safe to run under. Set only
+  // once `ensurePinnedAgentRunnable` has accepted the pin.
   pinnedMode: null,
-  // One quiet line in the batch status area explaining the pin: either that the
-  // workspace has no `code` mode, or — when the pinned mode closes a hub — what
-  // that means for the tasks. null while nothing needs saying.
+  // A quiet line in the batch status area, kept for a pinned mode's own note
+  // (none today): the unresolved-pin note became a refusal, so a running lot
+  // always has a resolved agent and nothing to explain here. null otherwise.
   modeNote: null,
 })
 
@@ -220,7 +226,6 @@ export function useBatch() {
   // options, and the between-task wipe below must not read like a dialog reset.
   const { state: chat, sendBatchTurn, stop, reset: resetChat } = useChat()
   const { setTab } = useAppShell()
-  const { state: modes } = useAgentModes()
 
   // A refusal about the conversation lands on the WorkBench error line: the
   // dialog is closed by then, so the message has to be visible where the user
@@ -330,8 +335,8 @@ export function useBatch() {
   // snapshot could not load the request carries no filter at all (the server
   // keeps every activated connector), so there is nothing to judge.
   //
-  // The lot's pinned mode belongs to the *same* check (D13): a mode whose
-  // `mcptools` is false makes those connectors unreachable for every task,
+  // The lot's pinned agent belongs to the *same* check: an agent whose
+  // `mcp_enable` is false makes those connectors unreachable for every task,
   // which is the identical failure — one list, one reason, one place the user
   // learns why Launch is disabled. Nothing is pinned here; this only judges.
   function ensureToolsAvailable() {
@@ -353,7 +358,7 @@ export function useBatch() {
       }
     }
     const mode = lotMode()
-    if (mode && mode.mcptools === false) {
+    if (mode && mode.mcpEnable === false) {
       needs.push(
         `a \`${LOT_TASK_MODE_ID}\` mode with MCP tools — this one has none, ` +
           'so a task could not move its own file',
@@ -369,32 +374,46 @@ export function useBatch() {
   }
 
   // The workspace's mode a lot runs its tasks in, or null when there is none to
-  // pin — the modes list could not be read, or this workspace renamed the coding
-  // mode. Never a guess: the id is the app's contract (`LOT_TASK_MODE_ID`), the
-  // list belongs to the workspace.
+  // pin — the agents list could not be read, or this store does not hold the
+  // coding agent. Never a guess: the id is the app's contract
+  // (`LOT_TASK_MODE_ID`), the rows belong to the install.
   function lotMode() {
     return agentModesLoaded() ? modeById(LOT_TASK_MODE_ID) : null
   }
 
-  // D13, step 2: hold that verdict for the whole run. It is read per turn —
-  // never copied into the composer's selection — so a dropdown change during
-  // task 7 cannot reach task 8. An unresolved pin is *not* a refusal: the tasks
-  // then carry no `agentMode` and the server's default answers, which is what a
-  // lot ran under before modes existed, plus one line saying so.
-  function pinLotMode() {
+  // §5.4's new launch gate: the lot must have an agent it can pin, and that
+  // agent must have a model. Two refusals, neither of which existed before —
+  // D5 left no server-side default for an unpinned task turn, and nothing was
+  // unrunnable while one connection answered every agent.
+  //
+  // An unreadable store is the same refusal as a missing agent: the pin is
+  // `code`, built-ins cannot be deleted (D4), so neither surviving state can be
+  // answered by quietly running the lot under another agent.
+  function ensurePinnedAgentRunnable() {
     const mode = lotMode()
-    state.pinnedMode = mode ? LOT_TASK_MODE_ID : null
     if (mode) {
-      state.modeNote = null
-      return
+      if (agentCanRun(mode)) return true
+      fail(agentNoModelSentence(mode))
+      return false
     }
-    // The two ways there is nothing to pin are worth telling apart: a workspace
-    // that renamed the coding mode runs on *its* default, and one whose list
-    // could not be read runs on whatever the server decides.
-    state.modeNote = agentModesLoaded()
-      ? `no "${LOT_TASK_MODE_ID}" mode in this workspace; tasks run in ` +
-        `"${modes.default ?? LOT_TASK_MODE_ID}"`
-      : 'the agent-mode list could not be read; tasks run in the server default'
+    const why = agentModesLoaded()
+      ? `this store has no "${LOT_TASK_MODE_ID}" agent`
+      : 'the agent list could not be read'
+    fail(
+      `Batch mode needs the "${LOT_TASK_MODE_ID}" agent it pins at launch, but ` +
+        `${why} — the lot cannot run without the agent it pins. Fix the agent ` +
+        'list, then launch again.',
+    )
+    return false
+  }
+
+  // Hold the accepted pin for the whole run. It is read per turn — never copied
+  // into the composer's selection — so a dropdown change during task 7 cannot
+  // reach task 8. `ensurePinnedAgentRunnable` ran first, so there is no
+  // unresolved case left to explain.
+  function pinLotMode() {
+    state.pinnedMode = LOT_TASK_MODE_ID
+    state.modeNote = null
   }
 
   // A second, quiet listing of the same lot — the completion check's only
@@ -498,9 +517,9 @@ export function useBatch() {
   //
   // The turn carries the lot's pinned mode (D13), read fresh each turn and
   // never the composer's selection: every task of one lot runs under one set of
-  // rules whatever the dropdown is showing while they stream. A null pin (no
-  // `code` mode in this workspace) sends no `agentMode` at all, so the server's
-  // default answers — see `pinLotMode`.
+  // rules whatever the dropdown is showing while they stream. The pin is always
+  // resolved by the time a turn runs — launch refuses otherwise — so this never
+  // sends a turn without an `agentMode`.
   async function runOneTurn(task, attempt = 0) {
     // The lot's big picture rides on every task turn whenever the listing found
     // one: there is no opt-out — a 00 file is the lot's context, and the per-task
@@ -558,9 +577,13 @@ export function useBatch() {
     if (state.active || !canLaunch.value) return // one batch at a time
     if (!ensureFreshChat()) return
     if (!ensureToolsAvailable()) return
+    // §5.4: an agent with no model cannot run a task, and an unresolved pin
+    // cannot run one either since D5 removed the default an unpinned turn
+    // leaned on. Both stop the lot here, before anything is pinned or sent.
+    if (!ensurePinnedAgentRunnable()) return
     // Resolved once per run, after the refusals (a lot that never launched owns
     // no pin) and read per turn (see `runOneTurn`) — so a dropdown change
-    // during task 7 cannot reach task 8. The D7 lock can never conflict with
+    // during task 7 cannot reach task 8. The D13 lock can never conflict with
     // it: a lot starts on an empty thread and every task turn begins on one,
     // and a thread with no turns holds no lock — so the mode the lot was
     // *authored* in was already released before the first task turn. A lot

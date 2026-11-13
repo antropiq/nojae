@@ -1,10 +1,10 @@
 import { expect, test } from '@playwright/test'
 
 // Task 01 — level: UI state. Nothing here streams: the spec only checks what
-// the app tells the user at boot (endpoint/model, tabs, the app bar's idle
+// the app tells the user at boot (the store's models, tabs, the app bar's idle
 // meters). Therefore every expected string is read from GET /api/config and
 // GET /api/path-location instead of being written in the spec, so the spec
-// follows the configuration (.env.test) instead of hardcoding it.
+// follows the suite's fixture instead of hardcoding it.
 test.describe('App boot: displayed configuration, tabs, idle meters', () => {
   // Reads the live config/path-location the assertions below are built from,
   // then opens the app on its default screen.
@@ -28,14 +28,18 @@ test.describe('App boot: displayed configuration, tabs, idle meters', () => {
     return { config, pathLocation }
   }
 
-  test('app bar names the model and the server it chats with', async ({ page }) => {
+  test('the app bar stays quiet about a configured store', async ({ page }) => {
     const { config } = await bootIdle(page)
 
-    // Two `.brand-sub` lines: the model list, then "on <SERVER_URL>".
-    await expect(page.locator('.brand-sub')).toHaveText([
-      config.models.join(' · '),
-      `on ${config.serverUrl}`,
-    ])
+    // `GET /api/config` answers per model: the suite's fixture is materialised
+    // into the temporary store as one server with one model.
+    expect(config.models.length).toBeGreaterThan(0)
+    expect(config.models[0].name).toBeTruthy()
+    expect(config.models[0].serverName).toBeTruthy()
+    // A usable store that holds at least one model has nothing to say in the
+    // app bar: which model a turn runs on is the composer's answer (D5, §5.4),
+    // and the bar only speaks when the store is unusable or empty.
+    await expect(page.locator('.brand-sub')).toHaveCount(0)
   })
 
   test('two tabs exist, WorkBench selected', async ({ page }) => {
@@ -66,7 +70,7 @@ test.describe('App boot: displayed configuration, tabs, idle meters', () => {
     await page.getByRole('button', { name: 'Open settings' }).click()
     const nav = page.locator('.settings-nav')
     await expect(nav.getByRole('button', { name: /working/i })).toHaveCount(0)
-    await page.locator('.settings-dialog').getByRole('button', { name: 'Cancel' }).click()
+    await page.locator('.settings-dialog').getByRole('button', { name: 'Close' }).click()
   })
 
   // The clock and the two counters belong to the whole app, which has one

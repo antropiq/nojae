@@ -203,6 +203,14 @@ DENY_FILE_PREFIXES: tuple[str, ...] = (".env",)
 DENY_FILENAMES: frozenset[str] = frozenset({
     ".git-credentials", "shadow", "known_hosts", "master.key",
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_sk_ecdsa", "id_sk_ed25519",
+    # nojaé's own settings store and its two WAL sidecars (D10). Listed by
+    # *name* rather than by a ``.db`` prefix or suffix, which would deny every
+    # unrelated database in a project the connector is pointed at. Inside a root
+    # the workspace policy decides, so this is the floor that applies outside it
+    # — and it stays a separate list from level A's rule for the same reason
+    # every other entry here is: merging the two would move secrets into a
+    # per-project file.
+    "nojae.db", "nojae.db-wal", "nojae.db-shm",
 })
 DENY_FILE_SUFFIXES: tuple[str, ...] = (".env", ".pem", ".key", ".p12", ".pfx", ".kdbx")
 

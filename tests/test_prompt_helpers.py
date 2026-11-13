@@ -1,337 +1,299 @@
-"""mbl-01 — ``core/prompt_helpers.py``: the constants, the loader, the writer.
+"""appdb-07 — ``core/prompt_helpers.py``: the table's read and write side.
 
-Everything runs against a throw-away ``tmp_path`` pointed at by
-``NOJAE_PATH_LOCATION`` — the way ``tests/test_agent_modes.py`` does it,
-because the working location is process state and a test that sets it has to set
-it per test. The file itself is written at
-``root/.nojae/prompt-helpers.json`` through the module's own
-``POLICY_DIRNAME`` / ``PROMPT_HELPERS_FILENAME`` attributes, so a rename cannot
-silently stop these tests exercising the real path.
+The module keeps its name and its contract, and its **file half is gone**: there
+is no path, no seeder, no document formatter, no ``SLOT_COUNT`` and no
+"exactly nine" error type. What is asserted here is therefore mostly the
+deletion — the count rule replaced by add/delete — plus the two constants the
+routes still validate against, which are the module's own and not the store's.
 
-Nothing is wired to a route yet (mbl-03 does that), so every assertion here is on
-the module's own accessors. Seeding and the legacy lift (mbl-02) are not tested
-here — they do not exist yet.
+Every case runs on the suite's temporary database (``tests/conftest.py``,
+appdb-04), which the autouse fixture has already created and seeded, so a test
+starts where a first boot leaves the app: nine empty gray rows. Nothing here
+opens a file, and nothing here needs a working location — the rows are
+install-scoped (D11), which is the other thing the last class pins.
 """
 
-import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import List
 
 import pytest
 
-from src.core import prompt_helpers
+from src.core import appdb, editorfs, prompt_helpers
+from tests.conftest import store_guard_root
+
+
+def ids(rows: List[dict]) -> List[int]:
+    return [row["id"] for row in rows]
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """A scratch workspace, set as the active working location."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    yield tmp_path
+def store_root(tmp_path: Path) -> Path:
+    """The temporary install root this test's store lives at (conftest, appdb-04)."""
+    return store_guard_root(tmp_path)
 
 
-def helpers_path(root: Path) -> Path:
-    """The real lookup path for ``root``, built from the module's attributes."""
-    return root / prompt_helpers.POLICY_DIRNAME / prompt_helpers.PROMPT_HELPERS_FILENAME
+@pytest.fixture
+def backup_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The app's dated backup folder, moved into this test's scratch tree.
 
-
-def write_helpers(root: Path, text: str) -> Path:
-    """Put ``text`` at the helpers path, creating the reserved folder."""
-    folder = root / prompt_helpers.POLICY_DIRNAME
-    folder.mkdir(exist_ok=True)
-    path = helpers_path(root)
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
-def document(helpers: List[Any], *, version: Any = prompt_helpers.PROMPT_HELPERS_VERSION,
-             omit_version: bool = False) -> str:
-    """One helpers document as JSON, its list passed through untouched.
-
-    The malformed cases hand it entries that are not objects and a ``version``
-    that is not the accepted one — exactly what the loader has to notice — so the
-    helper does not vouch for what it is given.
+    The same redirect ``tests/test_editorfs_write.py`` makes: the folder is
+    install-scoped, so a suite that leaves copies in it would be writing into the
+    developer's tree.
     """
-    payload: Dict[str, Any] = {}
-    if not omit_version:
-        payload["version"] = version
-    payload["helpers"] = helpers
-    return json.dumps(payload)
+    folder = tmp_path / "editor_backups"
+    monkeypatch.setattr(editorfs.constants, "BACKUP_DIR", folder)
+    return folder
 
 
-def slots(count: int, color: str = "#2ec27e", content: str = "keep") -> List[Dict[str, str]]:
-    return [{"color": color, "content": content} for _ in range(count)]
+class TestTheModuleIsTheTableHalf:
+    """The file half is deleted, **not relaxed** (§4.5)."""
+
+    GONE = (
+        "SLOT_COUNT",
+        "PROMPT_HELPERS_FILENAME",
+        "PROMPT_HELPERS_VERSION",
+        "PromptHelpersFileError",
+        "prompt_helpers_file_path",
+        "prompt_helpers_path",
+        "prompt_helpers_file_state",
+        "default_prompt_helpers",
+        "default_prompt_helpers_text",
+        "ensure_prompt_helpers_file",
+        "LEGACY_PROMPT_HELPERS_PATH",
+        "_write_prompt_helpers",
+        "_document_text",
+        "_normalize_slot",
+        "_self_check",
+    )
+
+    def test_no_path_helper_no_seeder_no_document_formatter_survives(self):
+        assert [name for name in self.GONE if hasattr(prompt_helpers, name)] == []
+
+    def test_the_module_names_no_path_at_all(self):
+        """It asks ``appdb`` for data and never names a file (§4.1)."""
+        source = Path(prompt_helpers.__file__).read_text(encoding="utf-8")
+        for marker in ("open(", "Path(", "os.path", "json.load", "write_text"):
+            assert marker not in source, marker
+
+    def test_the_failure_it_raises_is_the_stores_own(self):
+        """An alias, not a second type: a route catching anything else would be
+        catching a type this module cannot produce."""
+        assert prompt_helpers.AppStoreError is appdb.AppStoreError
+
+    def test_the_constants_the_routes_validate_against_are_still_here(self):
+        assert prompt_helpers.COLOR_RE.match("#2ec27e")
+        assert not prompt_helpers.COLOR_RE.match("green")
+        assert prompt_helpers.CONTENT_MAX_CHARS == 32000
+        assert prompt_helpers.DEFAULT_COLOR == "#808080"
 
 
-class TestAbsentFile:
-    def test_absent_file_answers_defaults_and_writes_nothing(self, workspace: Path):
-        """The read side never creates the folder (D5)."""
-        assert prompt_helpers.load_prompt_helpers() == prompt_helpers.default_prompt_helpers()
-        assert not (workspace / prompt_helpers.POLICY_DIRNAME).exists()
+class TestTheRead:
+    def test_a_first_boot_reads_the_nine_seeded_rows(self):
+        rows = prompt_helpers.load_prompt_helpers()
 
-    def test_absent_folder_answers_defaults_and_writes_nothing(self, workspace: Path):
-        """A workspace with no helpers file is a normal state, not a finding."""
-        loaded = prompt_helpers.load_prompt_helpers()
-        assert len(loaded) == prompt_helpers.SLOT_COUNT
-        assert loaded == prompt_helpers.default_prompt_helpers()
-        assert list(workspace.iterdir()) == []
+        assert len(rows) == 9
+        assert all(row["color"] == "#808080" for row in rows)
+        assert all(row["content"] == "" for row in rows)
+        assert ids(rows) == list(range(1, 10))
 
+    def test_the_payload_carries_the_rows_and_the_caps(self):
+        """No cap is spelled in the client, so the read has to hand it over."""
+        body = prompt_helpers.payload()
 
-class TestWrongCountIsAnError:
-    """D4: eight or ten entries raise, and the bytes on disk stay untouched."""
+        assert set(body) == {"slots", "caps"}
+        assert body["slots"] == prompt_helpers.load_prompt_helpers()
+        assert body["caps"] == {
+            "contentMaxChars": prompt_helpers.CONTENT_MAX_CHARS,
+            "defaultColor": prompt_helpers.DEFAULT_COLOR,
+        }
 
-    @pytest.mark.parametrize("count", (0, 8, 10))
-    def test_wrong_count_raises_naming_the_count(self, workspace: Path, count: int):
-        path = write_helpers(workspace, document(slots(count)))
-        before = path.read_text(encoding="utf-8")
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        message = str(exc.value)
-        assert f"holds {count} helpers" in message
-        assert f"expected exactly {prompt_helpers.SLOT_COUNT}" in message
-        assert str(path) in message
-        assert path.read_text(encoding="utf-8") == before
+    def test_an_unusable_store_is_a_named_state_never_nine_empty_bullets(
+        self, store_root: Path
+    ):
+        """The rule the file reader held for its file, now over the database.
 
-    def test_no_pad_no_truncate_no_rewrite(self, workspace: Path):
-        path = write_helpers(workspace, document(slots(10)))
-        before = path.read_bytes()
-        with pytest.raises(prompt_helpers.PromptHelpersFileError):
-            prompt_helpers.load_prompt_helpers()
-        assert path.read_bytes() == before
-
-
-class TestUnusableDocument:
-    """A file that cannot be used is an error naming the path, never a guess."""
-
-    def test_bad_json(self, workspace: Path):
-        path = write_helpers(workspace, "this is not json {{{")
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert str(path) in str(exc.value)
-        assert path.read_text(encoding="utf-8") == "this is not json {{{"
-
-    def test_missing_version(self, workspace: Path):
-        write_helpers(workspace, document(slots(prompt_helpers.SLOT_COUNT), omit_version=True))
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert "version" in str(exc.value)
-
-    def test_unknown_version(self, workspace: Path):
-        write_helpers(workspace, document(slots(prompt_helpers.SLOT_COUNT), version=2))
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert "2" in str(exc.value)
-
-    @pytest.mark.parametrize("version", (True, "1", "one", None, 1.0))
-    def test_a_version_that_is_not_the_accepted_number(self, workspace: Path, version: Any):
-        """``true`` is an ``int`` in Python, and it is not a version (D4)."""
-        write_helpers(workspace, document(slots(prompt_helpers.SLOT_COUNT), version=version))
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert str(workspace / prompt_helpers.POLICY_DIRNAME) in str(exc.value)
-
-    def test_helpers_not_a_list(self, workspace: Path):
-        write_helpers(workspace, json.dumps({"version": 1, "helpers": {"color": "#ffffff"}}))
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert "helpers" in str(exc.value)
-
-    def test_unreadable_file(self, workspace: Path, monkeypatch: pytest.MonkeyPatch):
-        """An ``OSError`` on the read is the same error, not a 500."""
-        write_helpers(workspace, document(slots(prompt_helpers.SLOT_COUNT)))
-
-        def refuse(*args, **kwargs):
-            raise OSError(13, "Permission denied")
-
-        monkeypatch.setattr(Path, "read_text", refuse)
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert "cannot be read" in str(exc.value)
-
-    def test_document_not_an_object(self, workspace: Path):
-        write_helpers(workspace, json.dumps(slots(prompt_helpers.SLOT_COUNT)))
-        with pytest.raises(prompt_helpers.PromptHelpersFileError) as exc:
-            prompt_helpers.load_prompt_helpers()
-        assert prompt_helpers.POLICY_DIRNAME in str(exc.value)
-
-    def test_a_folder_standing_at_the_path(self, workspace: Path):
-        (workspace / prompt_helpers.POLICY_DIRNAME).mkdir()
-        helpers_path(workspace).mkdir()
-        with pytest.raises(prompt_helpers.PromptHelpersFileError):
-            prompt_helpers.load_prompt_helpers()
-
-
-class TestFieldCoercion:
-    """D4's last paragraph: a bad *field* is still healed, and the fix is stored."""
-
-    def test_bad_color_falls_back_to_gray_and_is_rewritten(self, workspace: Path):
-        path = write_helpers(
-            workspace,
-            document([{"color": "bogus", "content": "first"}]
-                     + slots(prompt_helpers.SLOT_COUNT - 1)),
-        )
-        loaded = prompt_helpers.load_prompt_helpers()
-        assert loaded[0] == {"color": prompt_helpers.DEFAULT_COLOR, "content": "first"}
-        on_disk = json.loads(path.read_text(encoding="utf-8"))
-        assert on_disk["helpers"][0]["color"] == prompt_helpers.DEFAULT_COLOR
-
-    def test_non_string_content_becomes_empty(self, workspace: Path):
-        path = write_helpers(
-            workspace,
-            document([{"color": "#123456", "content": 42}]
-                     + slots(prompt_helpers.SLOT_COUNT - 1)),
-        )
-        loaded = prompt_helpers.load_prompt_helpers()
-        assert loaded[0] == {"color": "#123456", "content": ""}
-        on_disk = json.loads(path.read_text(encoding="utf-8"))
-        assert on_disk["helpers"][0]["content"] == ""
-
-    def test_non_object_entry_is_coerced(self, workspace: Path):
-        write_helpers(
-            workspace,
-            document(["just a string"] + slots(prompt_helpers.SLOT_COUNT - 1)),
-        )
-        loaded = prompt_helpers.load_prompt_helpers()
-        assert loaded[0] == {"color": prompt_helpers.DEFAULT_COLOR, "content": ""}
-
-    def test_coercion_is_idempotent(self, workspace: Path):
-        write_helpers(
-            workspace,
-            document([{"color": "bogus", "content": "first"}]
-                     + slots(prompt_helpers.SLOT_COUNT - 1)),
-        )
-        once = prompt_helpers.load_prompt_helpers()
-        second_bytes = helpers_path(workspace).read_bytes()
-        assert prompt_helpers.load_prompt_helpers() == once
-        assert helpers_path(workspace).read_bytes() == second_bytes
-
-    def test_a_clean_file_is_left_alone(self, workspace: Path):
-        path = write_helpers(workspace, document(slots(prompt_helpers.SLOT_COUNT)))
-        before = path.read_bytes()
-        prompt_helpers.load_prompt_helpers()
-        assert path.read_bytes() == before
-
-
-class TestSeededLiteralRoundTrips:
-    """The pairing test: the bytes a seeder will write parse through this loader."""
-
-    def test_default_text_loads_with_no_error(self, workspace: Path):
-        path = helpers_path(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(prompt_helpers.default_prompt_helpers_text(), encoding="utf-8")
-        assert prompt_helpers.load_prompt_helpers() == prompt_helpers.default_prompt_helpers()
-
-    def test_default_text_carries_the_version_and_the_helpers_key(self):
-        document_body = json.loads(prompt_helpers.default_prompt_helpers_text())
-        assert document_body["version"] == prompt_helpers.PROMPT_HELPERS_VERSION
-        assert len(document_body["helpers"]) == prompt_helpers.SLOT_COUNT
-
-    def test_default_list_is_byte_for_byte_what_config_ships_today(self):
-        """The move changes the file, not a single character of its content.
-
-        Pinned to literals rather than to this module's own constants on
-        purpose: the values are the point — nine gray empty slots, exactly what
-        the feature shipped before it moved into the workspace (mbl-03 deletes
-        the old ``config`` helper outright, so there is nothing left to compare to).
+        The store here is the suite's own temporary one and it is **already**
+        valid, so the damage has to be planted rather than assumed: the bytes are
+        replaced with something that is not a database, and this thread's handle
+        — opened at the good file — is dropped, because a handle is a handle on
+        bytes that are still there.
         """
-        assert prompt_helpers.default_prompt_helpers() == [
-            {"color": "#808080", "content": ""} for _ in range(9)
+        target = store_root / "nojae.db"
+        target.write_bytes(b"not a database at all")
+        appdb.close_thread_connection()
+
+        with pytest.raises(prompt_helpers.AppStoreError) as caught:
+            prompt_helpers.load_prompt_helpers()
+        assert str(target) in str(caught.value)
+        with pytest.raises(prompt_helpers.AppStoreError):
+            prompt_helpers.add_prompt_helper("#ff0000", "x")
+        with pytest.raises(prompt_helpers.AppStoreError):
+            prompt_helpers.delete_prompt_helper(1)
+
+
+class TestAddAndDelete:
+    """The count rule's replacement: a row is a bullet, the count is the count."""
+
+    def test_add_appends_one_row_and_answers_the_whole_list(self):
+        rows = prompt_helpers.add_prompt_helper("#ff0000", "Refactor this file.")
+
+        assert len(rows) == 10
+        assert rows[-1] == {
+            "id": 10,
+            "color": "#ff0000",
+            "content": "Refactor this file.",
+        }
+        assert prompt_helpers.load_prompt_helpers() == rows
+
+    def test_add_never_fills_a_blank_row(self):
+        """Eight of the nine seeded rows are empty, and an add still adds.
+
+        This is the difference between "add" and the file's "save a slot": with
+        no slot to aim at, the user's ninth bullet is a **new** row even though
+        blanks sit beside it.
+        """
+        before = len(prompt_helpers.load_prompt_helpers())
+
+        rows = prompt_helpers.add_prompt_helper("#00ff00", "x")
+
+        assert len(rows) == before + 1
+
+    def test_the_count_is_the_users_business_at_every_number_including_zero(
+        self,
+    ):
+        """§4.5: the "exactly nine or an error" check is deleted, not relaxed."""
+        for row in list(prompt_helpers.load_prompt_helpers()):
+            prompt_helpers.delete_prompt_helper(row["id"])
+        assert prompt_helpers.load_prompt_helpers() == []
+
+        prompt_helpers.add_prompt_helper("#123456", "one")
+        prompt_helpers.add_prompt_helper("#123456", "two")
+        assert [row["content"] for row in prompt_helpers.load_prompt_helpers()] == [
+            "one",
+            "two",
         ]
-        assert (prompt_helpers.DEFAULT_COLOR, prompt_helpers.CONTENT_MAX_CHARS) == (
-            "#808080", 32000,
-        )
-        assert prompt_helpers.COLOR_RE.pattern == r"^#[0-9a-fA-F]{6}$"
+
+    def test_delete_removes_one_row_and_leaves_the_others(self):
+        rows = prompt_helpers.delete_prompt_helper(3)
+
+        assert rows is not None
+        assert 3 not in ids(rows)
+        assert len(rows) == 8
+        assert prompt_helpers.load_prompt_helpers() == rows
+
+    def test_deleting_every_row_is_an_answer_not_an_error(self):
+        for row in list(prompt_helpers.load_prompt_helpers()):
+            prompt_helpers.delete_prompt_helper(row["id"])
+
+        assert prompt_helpers.load_prompt_helpers() == []
+        assert prompt_helpers.payload()["slots"] == []
+
+    def test_a_write_that_addresses_no_row_answers_none(self):
+        """The browser was holding an older list; the route turns that into a 404."""
+        assert prompt_helpers.delete_prompt_helper(999) is None
+        assert prompt_helpers.save_prompt_helper(999, "#ff0000", "x") is None
+        assert len(prompt_helpers.load_prompt_helpers()) == 9
+
+    def test_a_deleted_id_is_never_reused_by_an_add(self):
+        """The id is the handle the browser holds, so a recycled id would edit
+        the wrong bullet on a tab that has not re-read the list."""
+        gone = prompt_helpers.load_prompt_helpers()[0]["id"]
+        prompt_helpers.delete_prompt_helper(gone)
+
+        rows = prompt_helpers.add_prompt_helper("#ff0000", "new")
+
+        assert gone not in ids(rows)
 
 
-class TestSave:
-    def test_save_sets_one_slot_and_keeps_nine(self, workspace: Path):
-        write_helpers(workspace, document(slots(prompt_helpers.SLOT_COUNT)))
-        saved = prompt_helpers.save_prompt_helper(3, "#0000ff", "x")
-        assert len(saved) == prompt_helpers.SLOT_COUNT
-        assert saved[3] == {"color": "#0000ff", "content": "x"}
-        on_disk = json.loads(helpers_path(workspace).read_text(encoding="utf-8"))
-        assert on_disk["version"] == prompt_helpers.PROMPT_HELPERS_VERSION
-        assert len(on_disk["helpers"]) == prompt_helpers.SLOT_COUNT
-        assert on_disk["helpers"][3] == {"color": "#0000ff", "content": "x"}
+class TestTheUpdate:
+    def test_save_rewrites_one_row_and_answers_the_whole_list(self):
+        rows = prompt_helpers.save_prompt_helper(2, "#0000ff", "hello")
 
-    def test_save_creates_the_reserved_folder_it_needs(self, workspace: Path):
-        """A **write** may create the folder; a reader (above) must not.
+        assert rows is not None
+        assert rows[1] == {"id": 2, "color": "#0000ff", "content": "hello"}
+        assert prompt_helpers.load_prompt_helpers() == rows
 
-        This is the ``POST`` half of the story the loader's D5 rule sets up: the
-        user typed a prompt, so it is saved rather than refused over a folder
-        a boot-time seed did not leave behind.
+    def test_empty_content_clears_the_bullet_and_keeps_its_color(self):
+        prompt_helpers.save_prompt_helper(2, "#00ff00", "y")
+
+        rows = prompt_helpers.save_prompt_helper(2, "#00ff00", "")
+
+        assert rows is not None
+        assert rows[1] == {"id": 2, "color": "#00ff00", "content": ""}
+
+    def test_saving_a_row_back_unchanged_is_still_a_save(self):
+        """The row exists, so the write landed — "nothing changed" is not "no row".
+
+        Worth pinning because the answer distinguishes the two by the statement's
+        row count: a database that reported 0 for a write of identical values
+        would make the route answer 404 about a bullet that is sitting there.
         """
-        saved = prompt_helpers.save_prompt_helper(0, "#ff0000", "hello")
-        assert saved[0] == {"color": "#ff0000", "content": "hello"}
-        assert prompt_helpers.load_prompt_helpers()[0] == {"color": "#ff0000", "content": "hello"}
+        first = prompt_helpers.save_prompt_helper(2, "#00ff00", "same")
 
-    def test_save_refuses_a_wrong_count_without_touching_it(self, workspace: Path):
-        path = write_helpers(workspace, document(slots(8)))
-        before = path.read_bytes()
-        with pytest.raises(prompt_helpers.PromptHelpersFileError):
-            prompt_helpers.save_prompt_helper(0, "#ff0000", "hello")
-        assert path.read_bytes() == before
+        again = prompt_helpers.save_prompt_helper(2, "#00ff00", "same")
 
-    def test_save_clears_content_and_keeps_color(self, workspace: Path):
-        prompt_helpers.save_prompt_helper(5, "#00ff00", "y")
-        saved = prompt_helpers.save_prompt_helper(5, "#00ff00", "")
-        assert saved[5] == {"color": "#00ff00", "content": ""}
+        assert again is not None
+        assert again == first
 
 
-class TestPathConstruction:
-    def test_path_is_the_reserved_folder_under_the_active_root(self, workspace: Path):
-        expected = os.path.join(
-            str(workspace), prompt_helpers.POLICY_DIRNAME,
-            prompt_helpers.PROMPT_HELPERS_FILENAME,
-        )
-        assert prompt_helpers.prompt_helpers_path() == expected
+class TestTheBackupBeforeADelete:
+    """D12: "a save backs up what it replaces", and a DELETE is the one thing a
+    user cannot retype."""
 
-    def test_explicit_root_path_does_not_move_with_the_location(self, tmp_path: Path,
-                                                                monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path / "one"))
-        other = str(tmp_path / "two")
-        assert prompt_helpers.prompt_helpers_file_path(other) == os.path.join(
-            other, prompt_helpers.POLICY_DIRNAME, prompt_helpers.PROMPT_HELPERS_FILENAME
+    def test_a_delete_copies_the_whole_store_into_the_dated_backup_folder(
+        self, backup_dir: Path
+    ):
+        prompt_helpers.delete_prompt_helper(1)
+
+        chain = sorted(backup_dir.glob("*.orig"))
+        assert len(chain) == 1, "the delete kept no copy of the store"
+        # The copy is of the **store** — a database file the app made, in the
+        # folder and the naming rule every file replacement already uses.
+        assert chain[0].read_bytes()[:16].startswith(b"SQLite format 3")
+        assert chain[0].name.startswith(
+            editorfs.files.backup_key(appdb.database_path())
         )
 
-    def test_a_patched_filename_moves_the_lookup(self, workspace: Path,
-                                                 monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(prompt_helpers, "PROMPT_HELPERS_FILENAME", "renamed.json")
-        assert prompt_helpers.prompt_helpers_path().endswith("renamed.json")
-        assert prompt_helpers.load_prompt_helpers() == prompt_helpers.default_prompt_helpers()
+    def test_the_retention_sweep_applies_to_the_copy(self, backup_dir: Path):
+        """Reusing the helper means reusing its sweep, so the copy expires."""
+        prompt_helpers.delete_prompt_helper(1)
+        copy = next(iter(backup_dir.glob("*.orig")))
+        # Backdate it past the window the app itself declares, then delete again:
+        # the second delete's sweep is what removes the first copy.
+        stale = copy.stat().st_mtime - (editorfs.constants.BACKUP_PRUNE_DAYS + 1) * 86400
+        os.utime(copy, (stale, stale))
 
-    def test_folder_name_is_not_redeclared_here(self):
-        assert prompt_helpers.POLICY_DIRNAME == ".nojae"
+        prompt_helpers.delete_prompt_helper(2)
+
+        assert copy.exists() is False
+        assert len(list(backup_dir.glob("*.orig"))) == 1
+
+    def test_an_update_takes_no_copy(self, backup_dir: Path):
+        """The row it replaces is a field the user can retype."""
+        prompt_helpers.save_prompt_helper(1, "#ff0000", "edited")
+        prompt_helpers.add_prompt_helper("#ff0000", "added")
+
+        assert not backup_dir.exists()
+
+    def test_a_delete_of_no_row_takes_no_copy(self, backup_dir: Path):
+        """Nothing was destroyed, so there is nothing to keep."""
+        assert prompt_helpers.delete_prompt_helper(999) is None
+
+        assert not backup_dir.exists()
 
 
-class TestSelfCheck:
-    def test_self_check_passes_at_import(self):
-        prompt_helpers._self_check()
+class TestTheStoreIsNotTheWorkspace:
+    """D11: a bullet is a habit of the user, so a switch changes nothing here."""
 
-    def test_self_check_rejects_a_color_that_its_own_pattern_refutes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        monkeypatch.setattr(prompt_helpers, "DEFAULT_COLOR", "not-a-color")
-        with pytest.raises(ValueError):
-            prompt_helpers._self_check()
+    def test_the_rows_survive_a_working_location_switch(self, monkeypatch):
+        prompt_helpers.save_prompt_helper(1, "#ff0000", "mine")
 
-    def test_self_check_rejects_a_non_integer_slot_count(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        monkeypatch.setattr(prompt_helpers, "SLOT_COUNT", "9")
-        with pytest.raises(ValueError):
-            prompt_helpers._self_check()
+        monkeypatch.setenv("NOJAE_PATH_LOCATION", "/somewhere/else")
 
-    def test_self_check_rejects_a_slot_count_the_bullet_row_does_not_draw(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        monkeypatch.setattr(prompt_helpers, "SLOT_COUNT", 10)
-        with pytest.raises(ValueError):
-            prompt_helpers._self_check()
+        assert prompt_helpers.load_prompt_helpers()[0]["content"] == "mine"
 
-    def test_self_check_rejects_an_empty_filename(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        monkeypatch.setattr(prompt_helpers, "PROMPT_HELPERS_FILENAME", "")
-        with pytest.raises(ValueError):
-            prompt_helpers._self_check()
+    def test_nothing_in_the_module_reads_the_working_location(self):
+        source = Path(prompt_helpers.__file__).read_text(encoding="utf-8")
+        assert "path_location" not in source
+        assert "POLICY_DIRNAME" not in source

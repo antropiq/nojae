@@ -10,6 +10,7 @@ suite still runs there.
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -19,10 +20,15 @@ from typing import Callable
 from typing import cast
 from typing import Optional
 from typing import Dict
+from typing import List
+from typing import Mapping
 from typing import Tuple
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 import pytest
 
+from src.core import appdb
 from src.core import editorfs
 from src.core.termhub import drivers as termhub_drivers
 from src.core.termhub import pty_conpty as termhub_conpty
@@ -414,21 +420,31 @@ def _no_lsp_processes(_hermetic: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_test_settings_mode(_hermetic: pytest.MonkeyPatch) -> None:
-    """Pin the e2e settings switch **off** for the whole backend suite (T-D7).
+    """Pin the e2e **store** switch off for the whole backend suite (D14).
 
-    ``NOJAE_TEST_SETTINGS`` makes a process read
-    ``.nojae/nojae-test-settings.json`` instead of the workspace's own settings
-    file. That file is a hand-authored e2e fixture the app never seeds, so an
-    exported ``1`` in the runner's shell would leave the *whole* suite reading a
-    file that is not there and failing en masse for a reason no traceback
-    explains. Clearing it here is what keeps the suite's answer independent of
-    the machine it runs on; the e2e suite is the only thing that turns it on,
-    through ``web/playwright.config.js``. A unit test that wants the mode flips
-    it itself with ``monkeypatch.setenv`` — the switch is read per call.
+    ``NOJAE_TEST_SETTINGS`` puts a process in the e2e suite's mode, where the
+    store is a temporary database materialised from
+    ``.nojae/nojae-test-settings.json`` instead of this install's ``nojae.db``.
+    That fixture is hand-authored and the app never seeds it, so an exported
+    ``1`` in the runner's shell would leave the *whole* suite failing en masse
+    for a reason no traceback explains. Clearing it here is what keeps the
+    suite's answer independent of the machine it runs on; the e2e suite is the
+    only thing that turns it on, through ``web/playwright.config.js``. A unit
+    test that wants the mode flips it itself with ``monkeypatch.setenv`` — the
+    switch is read per call.
     """
-    from src.core import workspace_settings
+    clear_test_settings_mode(_hermetic)
 
-    _hermetic.delenv(workspace_settings.TEST_SETTINGS_KEY, raising=False)
+
+def clear_test_settings_mode(patch: pytest.MonkeyPatch) -> None:
+    """The guard's one line, as a function a test can run against its own export.
+
+    Pulled out of the fixture above so ``tests/test_env_isolation.py`` can ask
+    the question without arranging a module-scoped export: that would be read by
+    :func:`_every_test_gets_its_own_store` too, and the store fixture would boot
+    from this checkout's own hand-authored fixture — the leak being forbidden.
+    """
+    patch.delenv(appdb.TEST_SETTINGS_KEY, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -449,16 +465,15 @@ def _no_trash_of_its_own(_hermetic: pytest.MonkeyPatch,
 
 @pytest.fixture(autouse=True)
 def _no_legacy_tool_cap(_hermetic: pytest.MonkeyPatch) -> None:
-    """Keep the tool-loop cap deterministic for the ``.env`` half.
+    """Keep a stale ``.env`` entry from deciding a test's answer.
 
     ``create_app()`` loads the developer's own ``.env`` once, so a key this file
     *used* to own would leak into every test and depend on the machine it runs
-    on. ``MAX_TOOL_ITERATION`` and ``LSP_ENABLED`` are the two that moved out of
-    ``.env`` into the workspace's ``.nojae/nojae-settings.json`` (so a stale
-    entry in a developer's ``.env`` is now read by nothing); clearing them anyway
-    is what keeps this fixture honest while the ``.env`` template still renders
-    them, and the leak that move opens — the file itself — is closed by
-    :func:`_no_workspace_settings_leak` below.
+    on. ``MAX_TOOL_ITERATION`` became a per-agent column (D9) and ``LSP_ENABLED``
+    the declaration's ``enable`` flag (D13), so a stale entry in a developer's
+    ``.env`` is read by nothing; clearing them is what keeps that true even if a
+    template ever rendered one again. The value a test actually runs on comes
+    from the temporary database :func:`_every_test_gets_its_own_store` pins.
     ``MCP_ENABLED`` is gone from the config entirely (connectors activate only
     through their ``enable`` flag in ``mcp-settings.json``); clearing it keeps a
     stale entry in a developer's ``.env`` from confusing the suite.
@@ -468,46 +483,225 @@ def _no_legacy_tool_cap(_hermetic: pytest.MonkeyPatch) -> None:
     _hermetic.delenv("MCP_ENABLED", raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _no_workspace_settings_leak(
-    _hermetic: pytest.MonkeyPatch, tmp_path: Path
-) -> Iterator[None]:
-    """Point the workspace settings file at a throw-away location for every test.
+# --- the store harness (appdb-04) ---------------------------------------------
+#
+# ``<install root>/nojae.db`` is where the model connection, the agent personas
+# and the prompt helpers live (spec §4.1), so the suite owns a database the same
+# way it owns a ``.env`` and a working location: one autouse fixture gives every
+# test a temporary one, one helper serves the test that owns its own root, and
+# the guard below makes the install's own file **unopenable** rather than merely
+# unlikely to be reached. ``tests/test_store_hermeticity.py`` is that invariant
+# as a test, poisoned on purpose — the same style as the write-surface isolation
+# guard: a guard that cannot fail is not a guard.
 
-    The model connection (server, key, sampling, ``lspEnabled``, the tool-loop
-    cap) lives in ``<working location>/.nojae/nojae-settings.json`` now, so the
-    suite's ``SETTING_KEYS`` wipe loops no longer stand between a test and the
-    developer's own file — live server URL and real API key and every test that
-    reads group 1 would answer with them. Nothing replaces those loops for this
-    store, so the guard is the *location*: unless a test names its own working
-    location, it gets a fresh folder under its ``tmp_path`` rather than this
-    checkout, and the settings lookup can only find a file that test wrote.
+#: The install's own database, captured **at import**. Every fixture below moves
+#: ``appdb.PROJECT_ROOT``, so asking later would ask about the moved path and the
+#: real one would have no name left to refuse it by.
+REAL_DATABASE_PATH: Path = (Path(appdb.PROJECT_ROOT) / appdb.DB_FILENAME).resolve()
+
+#: The store, as the guard has to refuse it: the file **and its WAL sidecars**.
+#: ``appdb`` calls them part of the store — they hold committed bytes and the
+#: write-ahead index — so a test that could open ``nojae.db-wal`` could damage a
+#: developer's settings through a door that does not go near the main file. The
+#: names are spelled here rather than taken from ``appdb.sidecar_paths()``,
+#: because that function answers about the *patched* root the moment a fixture
+#: has moved it, and this tuple must keep naming the real one.
+REAL_STORE_PATHS: Tuple[Path, ...] = (
+    REAL_DATABASE_PATH,
+    *(
+        Path(f"{REAL_DATABASE_PATH}{suffix}").resolve()
+        for suffix in appdb.WAL_SIDECAR_SUFFIXES
+    ),
+)
+
+#: Every database this process **opened** — recorded after the guard's check, so
+#: an attempt it refused is not in here, because it never reached the driver.
+#: ``tests/test_store_hermeticity.py`` reads it: "never opened" is only
+#: assertable if the opens are kept, and a trail that recorded a poisoned call
+#: the test made on purpose would make "none of these is the install's file"
+#: false for the very case that exists to prove the guard works. The trail's own
+#: liveness is asserted separately, so the emptiness of a refused call cannot
+#: hide behind an assertion that passes on nothing.
+SQLITE_OPENS: List[str] = []
+
+
+def opened_path(raw: Any, *, relative_to_cwd: bool = True) -> Optional[Path]:
+    """The file a driver or ``open`` argument names, or ``None`` for no file.
+
+    Both spellings the app uses are handled: the plain path, and the ``file:``
+    URI :func:`src.core.appdb._uri` builds (percent-encoded, with a ``?mode=``
+    query on the end). ``url2pathname`` is the platform's own converter, so the
+    Windows ``file:///C:/...`` form resolves here exactly as SQLite opens it.
+
+    ``relative_to_cwd`` is whether a *relative* name can be judged at all, and
+    it differs by event — which is why the caller passes it rather than this
+    function guessing:
+
+    * ``sqlite3.connect`` resolves a relative filename against the process's own
+      working directory, so resolving it the same way is the faithful answer.
+    * the ``open`` event carries ``(path, mode, flags)`` and **no ``dir_fd``**,
+      so a relative name there is relative to a directory this hook cannot see,
+      and guessing the CWD is wrong in the way that matters: pytest's own
+      temp-dir cleanup walks a leftover ``nojae.db`` with
+      ``os.open(name, ..., dir_fd=...)``, which would then resolve to *this*
+      checkout's file and refuse a file the guard has no business refusing.
+
+    Nothing is lost for the store itself: :func:`src.core.appdb.database_path`
+    is built from a resolved ``PROJECT_ROOT``, so every path the app hands the
+    driver is absolute, and an absolute name is judged on both events.
+    """
+    if isinstance(raw, int):
+        # ``open`` with a dir_fd: the path is relative to a handle this process
+        # already holds, which is not how the store is ever reached.
+        return None
+    text = str(raw)
+    if text.startswith("file:"):
+        text = url2pathname(urlsplit(text).path)
+    if text in ("", ":memory:"):
+        # The driver's two names for "not a file": an anonymous temporary
+        # database and an in-memory one.
+        return None
+    if not relative_to_cwd and not Path(text).is_absolute():
+        return None
+    return Path(text).expanduser().resolve()
+
+
+def refuse_the_real_store(target: Optional[Path]) -> None:
+    """The guard's one question, as a function a test can feed a poisoned path.
+
+    Raises rather than returning a verdict, because the caller is an audit hook
+    on the open itself: the only answer that keeps the file unopened is an
+    exception out of the call that would open it.
+    """
+    if target is not None and target in REAL_STORE_PATHS:
+        raise RuntimeError(
+            "the test suite may not open nojae's own settings store at "
+            f"{target}: tests/conftest.py gives every test a temporary "
+            "database (appdb-04), so reaching this path means the harness was "
+            "bypassed."
+        )
+
+
+def store_guard_audit_hook(event: str, args: Tuple[Any, ...]) -> None:
+    """Refuse the install's own database, at the open and at the create.
+
+    Both events, because :func:`src.core.appdb.prepare` creates the file with
+    ``os.open`` *before* it connects: a guard on the connect alone would let a
+    bypassed harness leave the developer's file behind. The open event's name is
+    ``open``, not ``os.open`` — it is the event ``os.open`` and ``open()`` both
+    fire, so a hook keyed on the function's name would never run and the create
+    would go unwatched. The hook cannot be removed once installed — which is the
+    point: it is not a ``monkeypatch``, so a test's ``undo()`` cannot lift it
+    (the leak ``conftest._hermetic`` exists for is exactly this one).
+
+    The one spelling left unjudged is a **relative** name on the ``open`` event,
+    which the event cannot answer (see :func:`opened_path`). That costs nothing
+    the app can spend: the store is reached only through ``appdb``, whose path
+    comes from a resolved ``PROJECT_ROOT``, and a relative name handed to
+    ``sqlite3.connect`` — the half that would read or write the rows — *is*
+    judged. Refusing a relative name here would instead refuse every unrelated
+    ``nojae.db`` the runner walks, which is a guard that reports the harness as
+    the leak.
+    """
+    if event not in ("sqlite3.connect", "open") or not args:
+        return
+    raw = args[0]
+    if event == "sqlite3.connect":
+        target = opened_path(raw)
+    elif isinstance(raw, int) or appdb.DB_FILENAME not in str(raw):
+        # ``open`` fires for every file the process touches, pytest's own
+        # included, so the cheap name test comes first: resolving a path per
+        # open would make the guard the slowest thing in the suite.
+        return
+    else:
+        target = opened_path(raw, relative_to_cwd=False)
+    refuse_the_real_store(target)
+    if event == "sqlite3.connect":
+        SQLITE_OPENS.append(str(raw))
+
+
+# Installed once, at import, and **never removed**: an audit hook cannot be
+# uninstalled (there is no ``sys.getaudithooks`` to find it with, by design),
+# which is exactly the property the guard needs — it is not a ``monkeypatch``,
+# so a test's ``undo()`` cannot lift it. That is the leak
+# ``tests/test_env_isolation.py``'s last class is about, closed here for the
+# store. ``conftest`` is imported once per run, so the hook is installed once;
+# a second install would cost nothing anyway, since the check it performs is
+# idempotent.
+sys.addaudithook(store_guard_audit_hook)
+
+
+@pytest.fixture(autouse=True)
+def _every_test_gets_its_own_store(_hermetic: pytest.MonkeyPatch,
+                                   tmp_path: Path) -> Iterator[Path]:
+    """A test-owned temporary database, created and seeded, for every test.
+
+    The store's path is the install root's, so without this pin the app's
+    lifespan would bring up — and seed — a real ``nojae.db`` in this checkout on
+    every suite run. The move is the one the module itself offers: patching
+    ``appdb.PROJECT_ROOT`` moves every path answer the module has, because
+    :func:`src.core.appdb.database_path` is where all of them are built.
+
+    It then **boots** the store, so a test starts from what a first boot leaves:
+    the four built-in agents (``todoBuilder`` readonly and capped at 500, the
+    other three capped at 25, every ``model_id`` null) and nine empty
+    prompt-helper rows, and no server or model
+    (§4.3). A test that wants a connection calls :func:`neutralise_store`; one
+    that wants an agent with **no** model clears that row's ``model_id`` itself,
+    which is the only way that state is reachable (D14).
+
+    The root is a **sibling** of ``tmp_path`` rather than a folder inside it:
+    several suites pin that a folder they point at stayed empty
+    (``assert list(workspace.iterdir()) == []`` is how "a reader never writes" is
+    checked), so a guard folder of the fixture's own would falsify the assertion
+    those tests exist to make.
+    """
+    root = store_guard_root(tmp_path)
+    root.mkdir(exist_ok=True)
+    _hermetic.setattr(appdb, "PROJECT_ROOT", root)
+    # A thread's handle is opened *at* a path, so it must not outlive the test
+    # that made it: the next one's store is a different file.
+    appdb.close_thread_connection()
+    state = appdb.boot()
+    assert state["state"] == "ok", (
+        "the suite's temporary store did not come up: "
+        f"{state['sentence'] or state['path']}"
+    )
+    try:
+        yield root
+    finally:
+        appdb.close_thread_connection()
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_path_location(
+    _hermetic: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep the working location off this checkout for every test.
+
+    The store is install-scoped, so it is the guard above that keeps a test off
+    this machine's servers, agents and key (D11). The **working location** is
+    still the developer's own, though: it decides where ``AGENTS.md`` is read
+    from, where the hubs' declaration files are looked for, and where the e2e
+    suite's connection fixture lives. So unless a test names its own location it
+    gets a fresh folder rather than this checkout, and every one of those lookups
+    can only find a file that test wrote.
 
     A test that picks its own location (the folder's own style,
-    ``monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))``) overrides
-    this, because its own fixture or body runs later; one that deliberately
-    clears the key asks for the boot default and gets it. ``tests/conftest`` is
-    the only place this is done, and ``tests/test_env_isolation.py`` is the
-    invariant stated as a test rather than trusted as a fixture.
+    ``monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))``) overrides this,
+    because its own fixture or body runs later; one that deliberately clears the
+    key asks for the boot default and gets it. ``tests/conftest`` is the only
+    place this is done, and ``tests/test_env_isolation.py`` is the invariant
+    stated as a test rather than trusted as a fixture.
 
-    The throw-away root is a **sibling** of ``tmp_path`` rather than a folder
-    inside it: several suites pin that a workspace they point at stayed empty
-    (``assert list(workspace.iterdir()) == []`` is how "a reader never writes"
-    is checked), so a guard folder of the fixture's own would falsify the very
-    assertion those tests exist to make.
+    The throw-away root is a **sibling** of ``tmp_path``, for the reason the
+    fixture above gives for the same choice.
     """
     from src import config as config_module
-    from src.core import workspace_settings
 
-    root = workspace_settings_guard_root(tmp_path)
+    root = workspace_guard_root(tmp_path)
     root.mkdir(exist_ok=True)
     _hermetic.setenv(config_module.PATH_LOCATION_KEY, str(root))
-    # The cache is keyed on the resolved path, so it must be empty on both sides
-    # of a test: an entry made about another workspace's file must never answer
-    # here, and one made here must never answer there.
-    workspace_settings.invalidate_workspace_settings()
-    yield
-    workspace_settings.invalidate_workspace_settings()
 
 
 @pytest.fixture(autouse=True)
@@ -557,76 +751,232 @@ def _no_debug_switch_leak(_hermetic: pytest.MonkeyPatch) -> Iterator[None]:
     llmkit_client.debug_enabled = hook
 
 
-def workspace_settings_guard_root(tmp_path: Path) -> Path:
-    """The throw-away working location :func:`_no_workspace_settings_leak` pins."""
+def store_guard_root(tmp_path: Path) -> Path:
+    """The throw-away install root :func:`_every_test_gets_its_own_store` pins."""
+    return tmp_path.parent / f"{tmp_path.name}-store"
+
+
+def workspace_guard_root(tmp_path: Path) -> Path:
+    """The throw-away working location :func:`_no_ambient_path_location` pins."""
     return tmp_path.parent / f"{tmp_path.name}-workspace"
 
 
-def write_workspace_settings(
-    root: Path, **members: Any
-) -> Path:
-    """Write ``root/.nojae/nojae-settings.json`` from the template plus overrides.
+#: The server name the harness gives the one server row it writes. The store
+#: requires a name (``servers.name`` is unique and the dialog lists servers by
+#: it, §4.2) while the flat file the harness replaces had none, so the value is the
+#: harness's own — no test asserts on it.
+TEST_SERVER_NAME = "test-server"
 
-    The suite's way of saying "this workspace's model connection is these
-    values": the committed template supplies every member (so a test never
-    hand-assembles a document the reader might reject), and ``members`` replaces
-    whichever ones the test is about. ``serverUrl``/``endpoint`` default to real
-    values, because the template's are instruction sentences and a reader would
-    report the file *not configured* (spec D8).
+#: The connection a call that names no values gets. The file-shaped helper
+#: defaulted to these two; they stay the harness's defaults because no test
+#: asserts on them and a case that cares names its own.
+DEFAULT_SERVER_URL = "http://test-server:8080/v1"
+DEFAULT_MODEL_NAME = "test-model"
 
-    The path is built from the module's own ``POLICY_DIRNAME`` /
-    ``active_settings_filename()`` — never a literal — so a test that flips the
-    test-settings mode writes the file that mode reads, and the settings cache is
-    invalidated so the write answers immediately (D4: a hand-write is not a
-    restart).
-    """
-    import json
+#: The member a call site spells → the column that holds it (§4.2 names the
+#: columns; the member names are the app's payload names, which is what a call
+#: site writes).
+_SERVER_MEMBERS: Dict[str, str] = {
+    "serverUrl": "url",
+    "serverApiKey": "api_key",
+}
 
-    from src.core import workspace_settings
+_MODEL_MEMBERS: Dict[str, str] = {
+    "endpoint": "name",
+    "sysprompt": "sys_prompt",
+    "temperature": "temperature",
+    "topP": "top_p",
+    "topK": "top_k",
+    "minP": "min_p",
+    "repeatPenalty": "repeat_penalty",
+    "presencePenalty": "presence_penalty",
+    "reasoning": "reasoning",
+    "supportsVision": "supports_vision",
+}
 
-    raw: Dict[str, Any] = json.loads(
-        workspace_settings.WORKSPACE_SETTINGS_TEMPLATE.read_text(encoding="utf-8")
-    )
-    raw["serverUrl"] = "http://test-server:8080/v1"
-    raw["endpoint"] = "test-model"
+#: The values the six samplers and the prompt default to when a call site names
+#: none — today's file template's numbers, kept so a case that only wants "some
+#: configured connection" measures what it used to.
+DEFAULT_CONNECTION: Dict[str, Any] = {
+    "sysprompt": "You are a helpful assistant.",
+    "temperature": 0.2,
+    "topP": 0.95,
+    "topK": 20,
+    "minP": 0,
+    "repeatPenalty": 1.0,
+    "presencePenalty": 0,
+    "reasoning": "off",
+    "supportsVision": False,
+}
+
+
+def _store_values(members: Mapping[str, Any]) -> Dict[str, Any]:
+    """The defaults, with the caller's overrides on top."""
+    raw = dict(DEFAULT_CONNECTION)
+    raw["serverUrl"] = DEFAULT_SERVER_URL
+    raw["serverApiKey"] = ""
+    raw["endpoint"] = DEFAULT_MODEL_NAME
     raw.update(members)
-    folder = root / workspace_settings.POLICY_DIRNAME
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / workspace_settings.active_settings_filename()
-    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
-    workspace_settings.invalidate_workspace_settings()
-    return path
+    return raw
 
 
-def neutralise_workspace_settings(
+def write_store_connection(root: Path, **members: Any) -> Path:
+    """Say "the model connection is these values", as **rows**.
+
+    The suite's way of saying "the connection is these values": it takes the
+    members a call site spells (a server URL, a key, a model name, the samplers,
+    and — for a case that wants one — ``maxToolIteration``) and writes one
+    ``servers`` row with one ``models`` row under it, pointing **every** agent
+    row at that model. That last part is D14's step 3 and the reason a turn can
+    run at all under D5: an agent with no model refuses.
+
+    ``maxToolIteration`` is a per-agent column (D9), so it lands on every agent
+    row rather than on a connection — which is where the cap lives now.
+
+    Returns ``root``, the working location the rows belong to, so a call site
+    that chains (``neutralise_store`` does) spells the store's home once. The
+    rows themselves come back through :func:`src.core.appdb`'s reads.
+    """
+    raw = _store_values(members)
+
+    conn = appdb.connection()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM models")
+        conn.execute("DELETE FROM servers")
+        columns = ["name", *(_SERVER_MEMBERS[member] for member in _SERVER_MEMBERS)]
+        cursor = conn.execute(
+            f"INSERT INTO servers ({', '.join(columns)}) VALUES "
+            f"({', '.join(['?'] * len(columns))})",
+            [TEST_SERVER_NAME, *(raw[member] for member in _SERVER_MEMBERS)],
+        )
+        server_id = int(cursor.lastrowid or 0)
+        model_values: Dict[str, Any] = {
+            column: raw[member]
+            for member, column in _MODEL_MEMBERS.items()
+            if member in raw
+        }
+        model_values["supports_vision"] = 1 if raw.get("supportsVision") else 0
+        columns = ["server_id", *model_values]
+        placeholders = ", ".join(["?"] * len(columns))
+        cursor = conn.execute(
+            f"INSERT INTO models ({', '.join(columns)}) VALUES ({placeholders})",
+            [server_id, *model_values.values()],
+        )
+        model_id = int(cursor.lastrowid or 0)
+        statement = "UPDATE agents SET model_id = ?"
+        params: List[Any] = [model_id]
+        if isinstance(raw.get("maxToolIteration"), int):
+            statement += ", max_tool_iteration = ?"
+            params.append(max(1, int(raw["maxToolIteration"])))
+        conn.execute(statement, params)
+        conn.execute("COMMIT")
+    except Exception:
+        appdb._rollback(conn)
+        raise
+    return root
+
+
+def clear_agent_model(agent_id: str) -> None:
+    """Put one agent row back to **no model**, deliberately (D14's closing note).
+
+    The harness pins every agent to the model it writes, because D5 made "the
+    agent has a model" the only way a turn can run — so the state a test of the
+    refusal or the composer's warning needs is reachable *only* by clearing this
+    column, which is what makes it a fixture rather than an accident.
+    """
+    conn = appdb.connection()
+    conn.execute("UPDATE agents SET model_id = NULL WHERE id = ?", (agent_id,))
+
+
+def write_agent_row(agent_id: str, label: str = "", **columns: Any) -> None:
+    """Plant one ``agents`` row, so a mode declared outside the store resolves.
+
+    Until the agents table is the modes source (task 10), a mode can be declared
+    in the workspace's modes file. D7 asks the **row** which model a turn runs
+    on, so a mode with no row is an agent with no model — and refuses. A test
+    that wants such a mode to chat therefore plants the row, which is what a
+    seeded store already has for the four built-ins.
+
+    ``columns`` are the schema's own names; ``model_id`` defaults to the single
+    model the harness wrote, so a caller that only cares about the persona does
+    not have to spell it.
+    """
+    conn = appdb.connection()
+    values: Dict[str, Any] = {
+        "id": agent_id,
+        "label": label or agent_id.title(),
+        "max_tool_iteration": appdb.SEEDED_MAX_TOOL_ITERATION,
+        "mcp_enable": columns.pop("mcp_enable", 1),
+        "lsp_enable": columns.pop("lsp_enable", 0),
+        "system_message": columns.pop("system_message", ""),
+        "readonly": columns.pop("readonly", 0),
+        "model_id": columns.pop("model_id", None),
+    }
+    values.update(columns)
+    if values["model_id"] is None:
+        models = conn.execute("SELECT id FROM models ORDER BY id").fetchall()
+        if len(models) == 1:
+            values["model_id"] = int(models[0][0])
+    names = list(values)
+    conn.execute(
+        f"INSERT INTO agents ({', '.join(names)}) VALUES "
+        f"({', '.join(['?'] * len(names))})",
+        [values[name] for name in names],
+    )
+
+
+def clear_store_connection() -> None:
+    """Remove every server and model, leaving every agent unrunnable.
+
+    The state an unconfigured install is in (D5): four agents and no models. A
+    test that wants "the store holds nothing to run" asks this rather than
+    writing a fresh database, so it keeps the agents the boot seeded.
+    """
+    conn = appdb.connection()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM models")
+        conn.execute("DELETE FROM servers")
+        conn.execute("UPDATE agents SET model_id = NULL")
+        conn.execute("COMMIT")
+    except Exception:
+        appdb._rollback(conn)
+        raise
+
+
+def neutralise_store(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    root: Path,
     absent: bool = False,
+    agents_without_model: Tuple[str, ...] = (),
     **members: Any,
 ) -> Path:
-    """Point the workspace settings lookup at ``tmp_path``, on a file it owns.
+    """Point the connection lookups at ``root``, on rows this test owns.
 
-    The twin of what this file does for ``.env`` (``monkeypatch.setattr(
-    config_module, "ENV_PATH", tmp_path / ".env")`` beside the ``SETTING_KEYS``
-    wipe): a test that wants to know what group 1 answers must first make sure it
-    is asking about a file **it** created. The autouse
-    :func:`_no_workspace_settings_leak` already moves the location for every
-    test; this is the same move for a test or fixture that owns its own root,
-    plus the write of the file it will read.
+    For the test or fixture that owns its own working root: the autouse
+    :func:`_every_test_gets_its_own_store` already gives every test a temporary
+    database, and this adds the location pin plus the rows the connection is
+    made of.
 
-    By default that write is a *configured* document (``:func:`write_workspace_settings`
-    — the template plus ``members``), because a test about values needs values:
-    the seed alone would answer "not configured" (D8). ``absent=True`` writes no
-    file at all, which is how a test asks what an unconfigured workspace answers.
+    By default the write is a *configured* connection
+    (:func:`write_store_connection` — the defaults plus ``members``), because a
+    test about values needs values. ``absent=True`` writes nothing at all, which
+    is how a test asks what an unconfigured install answers: no server, no
+    model, and every agent left with a null ``model_id`` — the state D7 refuses
+    with one sentence naming the agent. ``agents_without_model`` is the same
+    state for one row of a configured store, spelled as an argument.
     """
     from src import config as config_module
-    from src.core import workspace_settings
 
-    monkeypatch.setenv(config_module.PATH_LOCATION_KEY, str(tmp_path))
-    workspace_settings.invalidate_workspace_settings()
-    if not absent:
-        write_workspace_settings(tmp_path, **members)
-    return tmp_path
+    monkeypatch.setenv(config_module.PATH_LOCATION_KEY, str(root))
+    if absent:
+        clear_store_connection()
+    else:
+        write_store_connection(root, **members)
+    for agent_id in agents_without_model:
+        clear_agent_model(agent_id)
+    return root
 
 
 @pytest.fixture(autouse=True)

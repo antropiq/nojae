@@ -38,9 +38,9 @@ const EXECUTABLE_PATH =
 // The env file holding the **app-level** keys for the server under test — the
 // debug switch and the connector interpreter, i.e. what `.env` holds
 // (`.env.test` is gitignored, copied from `.env.test.example`). It is *not* the
-// endpoint's home any more: the model connection lives in the workspace's
-// settings file, and the suite has its own one of those (below), so a spec can
-// never talk to the developer's workspace settings.
+// endpoint's home: the model connection lives in nojae's settings store, and the
+// suite materialises its own connection into a temporary one (below), so a spec
+// can never talk to the developer's store.
 // Resolved from this file's own location, not from `cwd`, so the run works from
 // `web/` or root.
 const ENV_FILE =
@@ -60,12 +60,14 @@ if (!existsSync(ENV_FILE)) {
 }
 
 // The suite's own model connection: `.nojae/nojae-test-settings.json` at the
-// working location the server under test boots on — the same 14 members the
-// Settings dialog writes to `nojae-settings.json`, and the only settings file a
-// spec may read. The app never creates or writes it (it is hand-authored, like
-// `.env.test`), and with the switch below on there is no fallback to the
-// workspace file: a missing fixture must stop the suite here rather than look
-// like an app bug — or, worse, silently reach the developer's own server and key.
+// working location the server under test boots on. It is **a store fixture, not
+// a UI payload**, so its member names are the *column* names — one `server`
+// object holding one `model` object, with no ids (the harness assigns both).
+// It is the only connection a spec may use. The app never creates or writes it
+// (it is hand-authored, like `.env.test`), and with the switch below on there is
+// no fallback in either direction: a missing fixture must stop the suite here
+// rather than look like an app bug — or, worse, silently reach the developer's
+// own store and key.
 //
 // Resolved the way the app resolves it: `NOJAE_PATH_LOCATION` when set,
 // else the repo root (the boot default), plus the reserved folder's file name.
@@ -83,9 +85,10 @@ if (!existsSync(TEST_SETTINGS_FILE)) {
   throw new Error(
     `E2E test settings file not found: ${TEST_SETTINGS_FILE}\n` +
       'It is the only model connection a e2e spec may use, and it is authored ' +
-      'by hand — the app never creates it. Write it beside the workspace ' +
-      'policy in that folder (see the "Setting up tests for nojae" ' +
-      'section of the README) and make sure the server it names is reachable.',
+      'by hand — the app never creates it. It describes one server with one ' +
+      'model, using the store\'s column names (see docs/app-settings-db-spec.md ' +
+      '§4.6, and the "Setting up tests for nojae" section of the README), and ' +
+      'the server it names must be reachable.',
   )
 }
 
@@ -197,12 +200,12 @@ export default defineConfig({
       ...TEST_ENV,
       NOJAE_DISABLE_MCP: '1',
       NOJAE_DISABLE_LSP: '1',
-      // The switch that makes the server under test read
-      // `.nojae/nojae-test-settings.json` instead of the workspace's own
-      // settings file — so no spec can reach the developer's live server and
-      // key. Applied last when the server is spawned, exactly like the two
-      // flags above, which is what beats an ambient value inherited from a
-      // running app's process tree.
+      // The switch that puts the server under test in test mode: it never opens
+      // the install's `nojae.db`. It creates a temporary store instead and
+      // materialises `.nojae/nojae-test-settings.json` into it as rows, so no
+      // spec can reach the developer's live server and key. Applied last when
+      // the server is spawned, exactly like the two flags above, which is what
+      // beats an ambient value inherited from a running app's process tree.
       NOJAE_TEST_SETTINGS: '1',
     },
   },

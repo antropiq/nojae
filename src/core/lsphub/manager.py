@@ -157,10 +157,11 @@ class LspManager:
     ) -> None:
         """Spawn only the servers whose id is in ``server_ids``. Never raises.
 
-        The API passes the intersection of the workspace's ``lspEnabled``
-        (``.nojae/nojae-settings.json``) and each entry's ``enable`` flag: a
-        prepared ``.nojae/lsp-settings.json`` can stay entirely dormant until
-        the user asks for it.
+        The API passes the ids whose ``enable`` flag is on in the workspace's
+        ``.nojae/lsp-settings.json`` — the one gate (D13), the same answer
+        :meth:`start_all` reaches by itself, so this form exists for the restart
+        path, which hands over a freshly scanned file. An entry whose flag is
+        off stays stopped until the dialog ticks it.
         """
         await self._start_all_matching(set(server_ids))
 
@@ -1370,11 +1371,10 @@ class LspManager:
         server entry, a changed ``command``, another ``workspaceRoot`` — takes
         effect without restarting the web app.
 
-        ``enabled_ids`` re-applies the two-gate rule (entry ``enable`` flag and
-        the workspace's ``lspEnabled``); ``None`` keeps the startup behaviour
-        of spawning every entry whose flag is on. Never raises: a server that
-        fails to come back up lands in its own ``status``/``error``, exactly as
-        on startup.
+        ``enabled_ids`` re-applies the one gate (the entry's ``enable`` flag)
+        over the fresh scan; ``None`` keeps the startup behaviour of spawning
+        every entry whose flag is on. Never raises: a server that fails to come
+        back up lands in its own ``status``/``error``, exactly as on startup.
         """
         await self.stop_all()
         self._servers = self._index(servers)
