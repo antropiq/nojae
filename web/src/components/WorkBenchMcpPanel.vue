@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
 import { currentMode, modeBlocksHub } from '../composables/useAgentModes'
-import { mcpVisible } from '../lib/chat-hubs'
+import { mcpHasEntries } from '../lib/chat-hubs'
 
 const { state, setChatMcp, restartMcp } = useChat()
 const { state: batch } = useBatch()
@@ -16,9 +16,13 @@ const DOT_CLASS = {
   error: 'chat-mcp-dot--red',
 }
 
-// Hidden while the snapshot is unavailable or nothing is activated in
-// Settings: only Settings-launched connectors may ever appear here.
-const visible = computed(() => mcpVisible(state))
+// The panel is always on screen: it is half of the Chat left column's fixed
+// width, and the reasoning timeline above it is measured against that width.
+// What comes and goes is its switch list — with nothing activated in Settings
+// the panel shows its own empty line instead of leaving a gap in the dock.
+const hasEntries = computed(() => mcpHasEntries(state))
+// Only Settings-launched connectors may ever appear here, so this is also the
+// sentence that says where to declare them.
 // The toggles freeze with the first accepted send anyway; the batch flag covers
 // the between-tasks window, so a lot really does run under one identical tool
 // set (useChat's own guard refuses the change too, so the rule lives in both
@@ -67,11 +71,7 @@ const restartTitle = computed(() => {
 </script>
 
 <template>
-  <aside
-    v-if="visible"
-    class="chat-mcp-panel"
-    aria-label="MCP connectors for this conversation"
-  >
+  <aside class="chat-mcp-panel" aria-label="MCP connectors for this conversation">
     <div class="chat-hub-head">
       <p class="caption chat-mcp-title">MCP tools</p>
       <button
@@ -90,6 +90,10 @@ const restartTitle = computed(() => {
         </svg>
       </button>
     </div>
+    <p v-if="!hasEntries" class="caption chat-hub-empty">
+      No MCP connector is available for this conversation — declare one in
+      <code>.nojae/mcp-settings.json</code> and switch it on in Settings.
+    </p>
     <label
       v-for="connector in state.mcp.connectors"
       :key="connector.id"

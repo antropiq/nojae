@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
 import { currentMode, modeBlocksHub } from '../composables/useAgentModes'
-import { lspVisible } from '../lib/chat-hubs'
+import { lspHasEntries } from '../lib/chat-hubs'
 
 const { state, setChatLsp, restartLsp } = useChat()
 const { state: batch } = useBatch()
@@ -17,11 +17,12 @@ const DOT_CLASS = {
   error: 'chat-mcp-dot--red',
 }
 
-// Hidden while the snapshot is unavailable or nothing is activated in
-// Settings: only Settings-launched language servers may appear here (the
-// restart button lives inside this panel, so with no declared server there is
-// nothing to restart and the column stays hidden, as before).
-const visible = computed(() => lspVisible(state))
+// Always on screen, like the MCP panel beside it: the two are the Chat left
+// column's fixed width, and a workspace that has not written its
+// `.nojae/lsp-settings.json` yet must not cost the reasoning timeline half of
+// it. An empty panel says where the declaration goes, and its restart button
+// is what picks up a file written after the boot scan.
+const hasEntries = computed(() => lspHasEntries(state))
 // Same pair as the MCP panel: the batch flag covers the between-tasks window.
 const locked = computed(
   () => state.lsp.locked || state.phase !== 'idle' || batch.active,
@@ -65,11 +66,7 @@ const restartTitle = computed(() => {
 </script>
 
 <template>
-  <aside
-    v-if="visible"
-    class="chat-lsp-panel"
-    aria-label="LSP language servers for this conversation"
-  >
+  <aside class="chat-lsp-panel" aria-label="LSP language servers for this conversation">
     <div class="chat-hub-head">
       <p class="caption chat-mcp-title">LSP tools</p>
       <button
@@ -88,6 +85,12 @@ const restartTitle = computed(() => {
         </svg>
       </button>
     </div>
+    <p v-if="!hasEntries" class="caption chat-hub-empty">
+      No language server is switched on for this conversation — copy the seeded
+      <code>.nojae/lsp-settings.template.json</code> to
+      <code>.nojae/lsp-settings.json</code>, then switch the servers on in
+      Settings.
+    </p>
     <label
       v-for="server in state.lsp.servers"
       :key="server.id"

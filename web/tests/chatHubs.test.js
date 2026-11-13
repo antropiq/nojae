@@ -1,16 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  anyHub,
-  bothHubs,
+  lspHasEntries,
+  mcpHasEntries,
   hubsSummary,
-  mcpVisible,
 } from '../src/lib/chat-hubs'
 
-// `lib/chat-hubs` is the single source of truth for what the tools dock and
-// the Chat left column's width key on. A mismatch would put the reasoning
-// timeline and the dock out of alignment, so the predicates are worth pinning
-// down rather than re-deriving in three components.
+// `lib/chat-hubs` answers one question now: does a hub hold anything to switch.
+// It no longer answers anything about geometry — both tool panels are always
+// rendered and the Chat left column keeps its two-panel width whatever the
+// answer is (that is pinned by `workbenchToolsColumnWidth.test.js`). A hub with
+// no declared entry is a panel that says so, never a panel that leaves the
+// dock, so what is worth pinning here is that the *contents* verdict stays
+// separate from the *layout* verdict.
 function hubState({ mcpLoaded = true, mcp = [], lspLoaded = true, lsp = [] }) {
   return {
     mcp: {
@@ -29,24 +31,25 @@ function hubState({ mcpLoaded = true, mcp = [], lspLoaded = true, lsp = [] }) {
 const MCP = [{ id: 'console', label: 'Console', on: true }]
 const LSP = [{ id: 'pyright', label: 'Pyright', on: false }]
 
-describe('hub visibility predicates', () => {
-  it('hides a hub whose snapshot never arrived', () => {
-    const state = hubState({ mcpLoaded: false, mcp: MCP })
-    expect(mcpVisible(state)).toBe(false)
-    expect(anyHub(state)).toBe(false)
-  })
-
-  it('hides a hub with no declared entry', () => {
+describe('what each hub holds', () => {
+  it('reports a hub with no declared entry as empty', () => {
     const state = hubState({})
-    expect(anyHub(state)).toBe(false)
-    expect(bothHubs(state)).toBe(false)
+    expect(mcpHasEntries(state)).toBe(false)
+    expect(lspHasEntries(state)).toBe(false)
   })
 
-  it('claims the wide column only when both hubs have entries', () => {
-    expect(bothHubs(hubState({ mcp: MCP, lsp: LSP }))).toBe(true)
-    expect(bothHubs(hubState({ mcp: MCP }))).toBe(false)
-    expect(bothHubs(hubState({ lsp: LSP }))).toBe(false)
-    expect(bothHubs(hubState({}))).toBe(false)
+  it('reports a hub with entries as holding them', () => {
+    expect(mcpHasEntries(hubState({ mcp: MCP }))).toBe(true)
+    expect(lspHasEntries(hubState({ lsp: LSP }))).toBe(true)
+  })
+
+  // The verdict is about the entries the snapshot carries, not about whether
+  // the snapshot arrived: a hub whose GET failed holds nothing, and the panel
+  // beside it is unaffected either way.
+  it('is a per-hub answer, never a shared one', () => {
+    const state = hubState({ mcp: MCP, lspLoaded: false })
+    expect(mcpHasEntries(state)).toBe(true)
+    expect(lspHasEntries(state)).toBe(false)
   })
 })
 

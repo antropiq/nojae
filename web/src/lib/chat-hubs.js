@@ -1,30 +1,19 @@
-// Which of the two tool hubs have anything to show for this conversation.
+// What the two tool hubs hold for this conversation.
 //
-// Four places read this (the MCP panel, the LSP panel, the tools dock's
-// folded summary, and the Chat left column's width modifier), and they must
-// agree: the column is only one panel wide when exactly one hub has entries,
-// otherwise the timeline and the dock would not line up.
+// Two places read this (each panel's own body, and the tools dock's folded
+// summary), and nothing here decides geometry: both panels always render, so
+// the Chat left column keeps its two-panel width whatever the hub declaration
+// files hold (see `.chat-col--left` in theme.css). A hub with no declared
+// entry is a panel that says so, not a panel that disappears — an unconfigured
+// workspace (no `.nojae/lsp-settings.json` yet) must not cost the reasoning
+// timeline half its column.
 
-export function mcpVisible(state) {
-  return state.mcp.loaded && state.mcp.connectors.length > 0
+export function mcpHasEntries(state) {
+  return state.mcp.connectors.length > 0
 }
 
-export function lspVisible(state) {
-  return state.lsp.loaded && state.lsp.servers.length > 0
-}
-
-// The left column keeps its two-panel width only when both hubs have
-// something to show; with one or none it is one panel wide (the same rule the
-// old input-row toggle column and tool panel shared).
-export function bothHubs(state) {
-  return mcpVisible(state) && lspVisible(state)
-}
-
-// Nothing to switch at all (no connector and no language server declared):
-// the dock has no body, so it stays a single strip and the timeline owns the
-// column's height.
-export function anyHub(state) {
-  return mcpVisible(state) || lspVisible(state)
+export function lspHasEntries(state) {
+  return state.lsp.servers.length > 0
 }
 
 // `MCP 2/3 · LSP 1/2`: how many of each hub's tools are switched on, shown

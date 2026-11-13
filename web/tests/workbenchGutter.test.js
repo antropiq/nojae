@@ -162,12 +162,14 @@ describe('the focus gutter', () => {
     expect(window.localStorage.getItem('nojae:chatLeftHidden')).toBe('0')
   })
 
-  // The `chat-col--single` case (one hub or none): a gutter that vanished with
-  // the dock would strand the user in a column they cannot get out of.
+  // A shell whose hub declaration files hold nothing (a fresh workspace: no
+  // `.nojae/lsp-settings.json` yet): the column is still there, still its full
+  // width, and a gutter that vanished with the panels would strand the user in
+  // a column they cannot get out of.
   it('survives a shell with no hubs at all', () => {
     hubs({})
     const w = mount(WorkBenchView)
-    expect(w.find('.chat-col--left.chat-col--single').exists()).toBe(true)
+    expect(w.find('.chat-col--left').exists()).toBe(true)
     expect(buttons(w)).toHaveLength(3)
   })
 
@@ -245,17 +247,19 @@ describe('the state classes on the shell', () => {
     expect(shellClasses(w)).not.toContain('chat-shell--conversation')
   })
 
-  // `chat-col--single` is the column's own variant and a state never rewrites
-  // it: both classes sit on the element at once and the CSS resolves them by
-  // order (the state rules come later in theme.css).
-  it('leaves chat-col--single alone when it enters reasoning', async () => {
+  // The column has no width variant to gain or lose any more: its width is the
+  // two panels' width whatever the hubs hold, and a state adds its class to the
+  // shell, never to a column. `reasoning` out-specifies the column's own flex
+  // basis by order alone (theme.css), which is the half the Playwright spec
+  // measures.
+  it('leaves the column class alone when reasoning enters', async () => {
     hubs({})
     const w = mount(WorkBenchView)
     await buttons(w)[0].trigger('click')
 
     expect(shellClasses(w)).toContain('chat-shell--reasoning')
     const left = w.find('.chat-col--left').element.className
-    expect(left).toContain('chat-col--single')
+    expect(left).toBe('chat-col chat-col--left')
   })
 
   // D8: exactly one element carries the state — the shell — so each state rule
@@ -431,15 +435,16 @@ describe('a walk through the shell, control by control', () => {
   })
 
   // The gutter is the one surface no state hides, and it must not depend on
-  // the dock either: with one hub or none the column is `--single`, the dock is
-  // a bare strip, and the way back still has to be on screen in all three
-  // states — a control that vanished with the panels would strand a column.
-  it('keeps both controls in every state of a single-panel shell', async () => {
+  // the dock either: whatever the hub declaration files hold — one hub, the
+  // other, or neither (a fresh workspace) — the column keeps its width, its
+  // panels and its dock, and the way back still has to be on screen in all
+  // three states. A control that vanished with the panels would strand one.
+  it('keeps both controls in every state of an unconfigured shell', async () => {
     for (const hub of [{ mcp: true }, { lsp: true }, {}]) {
       hubs(hub)
       window.localStorage.clear()
       const w = mount(WorkBenchView)
-      expect(w.find('.chat-col--left').classes()).toContain('chat-col--single')
+      expect(w.find('.chat-col--left').exists()).toBe(true)
 
       // 0 is the focus control, 1 the hide control: reasoning by the upper
       // one, conversation and the way back to normal by the chevron.

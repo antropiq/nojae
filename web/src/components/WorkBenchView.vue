@@ -15,7 +15,6 @@ import { useAutoScroll } from '../composables/useAutoScroll.js'
 import { useAppShell } from '../composables/useAppShell.js'
 import { FOCUS_REASONING, useChatLayout } from '../composables/useChatLayout.js'
 import { useBatch } from '../composables/useBatch.js'
-import { anyHub, bothHubs } from '../lib/chat-hubs.js'
 import WorkBenchToolsDock from './WorkBenchToolsDock.vue'
 import WorkBenchFocusGutter from './WorkBenchFocusGutter.vue'
 
@@ -106,11 +105,15 @@ const {
     <div
       ref="leftCol"
       class="chat-col chat-col--left"
-      :class="{ 'chat-col--single': !bothHubs(state) }"
     >
       <WorkBenchToolPanel />
+      <!-- The bar belongs to the dock's body: folding takes both out of the
+           flow (the dock then sizes itself by its head strip), which is the
+           only thing the dock's contents decide about the layout. The column's
+           width is not one of them — it is the two panels' width whatever the
+           hub declaration files hold. -->
       <div
-        v-if="anyHub(state) && !dockCollapsed"
+        v-if="!dockCollapsed"
         class="pane-resizer chat-resizer chat-col-resizer"
         :class="{ dragging: dockSplit.dragging.value }"
         role="separator"
@@ -127,9 +130,7 @@ const {
       <WorkBenchToolsDock
         ref="dock"
         v-model:collapsed="dockCollapsed"
-        :style="
-          dockCollapsed || !anyHub(state) ? null : dockSplit.bottomStyle.value
-        "
+        :style="dockCollapsed ? null : dockSplit.bottomStyle.value"
       />
     </div>
 

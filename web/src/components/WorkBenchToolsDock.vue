@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import WorkBenchMcpPanel from './WorkBenchMcpPanel.vue'
 import WorkBenchLspPanel from './WorkBenchLspPanel.vue'
 import { useChat } from '../composables/useChat'
-import { anyHub, hubsSummary } from '../lib/chat-hubs'
+import { hubsSummary } from '../lib/chat-hubs'
 
 // Bottom of the Chat left column: the conversation-scoped MCP panel beside
 // the LSP panel (the pair the input row used to carry), plus the control that
@@ -18,11 +18,11 @@ const emit = defineEmits(['update:collapsed'])
 
 const { state, chatBusy } = useChat()
 
-// With neither hub declared there is nothing to switch, so the dock is a
-// plain strip: no body, and no button pretending it has one (the timeline
-// then owns the column's height on its own, exactly as an empty column used
-// to cost nothing in the input row).
-const hasBody = computed(() => anyHub(state))
+// The dock always has its body: the two panels are the Chat left column's
+// fixed width, so an unconfigured workspace still gets the same column and the
+// same dock height, and each panel says what is missing instead of leaving a
+// half-empty strip. The fold is therefore always a real control.
+//
 // The fold is inert while a reply streams. Folding changes the height of the
 // box the reasoning timeline paints into, and that box is measured once per
 // inference and then frozen (WorkBenchToolPanel's pinned window) — so a fold
@@ -31,7 +31,7 @@ const hasBody = computed(() => anyHub(state))
 // `phase`, so a batch between two turns locks it too), and the control stays
 // visible rather than disappearing: a button that vanishes and returns reads
 // as a bug, and the reason is worth a tooltip.
-const expanded = computed(() => hasBody.value && !props.collapsed)
+const expanded = computed(() => !props.collapsed)
 
 // Folded, the strip still answers the one question the panels answered: which
 // hubs are switched on for this conversation. Counts rather than names — the
@@ -48,7 +48,7 @@ const summary = computed(() => hubsSummary(state))
     <div class="chat-tools-dock-head">
       <p class="caption chat-tools-dock-title">Tools</p>
       <span
-        v-if="hasBody && !expanded"
+        v-if="!expanded && summary"
         class="chat-tools-dock-summary"
         role="status"
         title="Tool hubs enabled for this conversation — expand to change them"
@@ -56,7 +56,6 @@ const summary = computed(() => hubsSummary(state))
         {{ summary }}
       </span>
       <button
-        v-if="hasBody"
         class="icon-btn chat-tools-dock-toggle"
         type="button"
         :disabled="chatBusy()"

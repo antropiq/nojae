@@ -1190,15 +1190,12 @@ input.appbar-location-input {
 
 /* The left column is as wide as the two tool panels it stacks under the
    timeline (see --bi-chat-tools-col-width); the conversation takes the rest.
-   `--single` (only one of the two panels has something to show) narrows it to
-   one panel's width — the timeline and the dock both just fill the column. */
+   That width is fixed: both panels are always rendered, so a workspace whose
+   hub declaration files are empty — a fresh one, with no
+   `.nojae/lsp-settings.json` yet — costs the timeline no width at all. */
 .chat-col--left {
   flex: 0 0 var(--bi-chat-tools-col-width);
   gap: 0px;
-}
-
-.chat-col--left.chat-col--single {
-  flex-basis: var(--bi-chat-panel-width);
 }
 
 .chat-col--right {
@@ -1208,8 +1205,8 @@ input.appbar-location-input {
 
 /* The two focalisation controls, in a third flex item between the columns
    (see WorkBenchFocusGutter). A flex item rather than an overlay is the whole
-   point: it never has to know --bi-chat-tools-col-width, the --single variant
-   or the breakpoints below, it only takes its 28px out of the row.
+   point: it never has to know --bi-chat-tools-col-width or the breakpoints
+   below, it only takes its 28px out of the row.
 
    The negative inline margins cancel the two gaps a third child would add —
    the box lands in the gap that already separates the columns, so the visible
@@ -1315,9 +1312,8 @@ input.appbar-location-input {
    CSS also keeps the two splitters, useAutoScroll's ref and the panel's cache
    alive without any help.
 
-   They sit *after* `.chat-col--single` above, which they out-specify only by
-   order: at equal class count the later rule wins, and that is what lets
-   `reasoning` take the row whether the left column is one panel wide or two.
+   `reasoning` out-specifies `.chat-col--left`'s own `flex` basis by order
+   alone — same class count, later rule — which is what lets it take the row.
 
    `reasoning` takes the dock and its bar out with the right column: left in
    the flow the dock would still claim its minimum height, so the timeline
@@ -1827,6 +1823,18 @@ input.appbar-location-input {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* A hub with nothing declared: the panel keeps its box (it is half the Chat
+   left column's fixed width) and fills it with the one sentence that says
+   where the declaration goes. `overflow-wrap` is the load-bearing part: the
+   sentence names `.nojae/lsp-settings.template.json`, a token longer than the
+   narrowest panel (7rem at the smallest breakpoint), and the panel clips
+   sideways (`overflow-x: hidden`) rather than scrolling — without this the
+   tail of the path would be cut off with no sign that anything is missing. */
+.chat-hub-empty {
+  flex: 0 0 auto;
+  overflow-wrap: break-word;
 }
 
 .chat-mcp-row {
