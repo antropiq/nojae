@@ -303,14 +303,20 @@ model is the agent's own field, set in the Agent-modes dialog.
 
 ### The agents — the pencil beside the composer's dropdown
 
-The **Agent-modes** dialog holds the personas the composer offers: per agent a
-label, the two hub switches (whether the MCP tools and the language servers reach
-it at all), the persona, the cap on that agent's tool loop, and the model it runs
-on — plus create and delete. The agents nojae ships with are seeded into the
-store on every boot, so no hand-edit and no damaged file can lose them; the one
-the lot contract pins is **read-only** — it is listed like the others and its
-model is yours to set, but everything else about it is re-asserted from code at
-each start.
+The **Agent-modes** dialog holds the personas the composer offers. It is titled
+**Agents**, and its left column is the agent list under a toolbar of three verbs —
+add, save, delete — each acting on **the selected agent**: a row click shows that
+agent's form, which holds a label, the two hub switches (whether the MCP tools and
+the language servers reach it at all), the persona, the cap on that agent's tool
+loop, and the model it runs on.
+
+Add opens an empty form — a new agent joins the list only when a save succeeds —
+and a save writes just the agent in view, leaving the dialog open. Delete asks
+first, in the toolbar; `Close` is the only way out and asks the same way before
+discarding typed edits. The agents nojae ships with are seeded into the store on
+every boot, so no hand-edit and no damaged file can lose them; the one the lot
+contract pins is **read-only** — it is listed like the others and its model is
+yours to set, but everything else about it is re-asserted from code at each start.
 
 Deleting a server, a model or an agent first copies the whole database into the
 app's dated backup folder (`logs/editor_backups/`, kept as long as every other
@@ -652,15 +658,17 @@ reaches it at all, and names the model the turn runs on; it can only ever narrow
 what Settings already allows. The composer opens on the agent this browser used
 last, like the theme and the other per-browser preferences.
 
-The **pencil** beside that dropdown is the agent editor, over the store's agent
-rows: per agent a label, the two hub switches, the persona, the cap on that
-agent's tool loop and its model, plus create and delete, with the app's caps
-enforced as you type. The four agents nojae ships with are listed there too, and
-the app-owned **Todo builder** is the read-only one: its tab renders, its model is
-yours to set, and everything else about it is re-asserted from code at every boot,
-so no edit — here or anywhere — can drift it. An agent with no model shows a
-warning beside the pencil and cannot be sent to; the fix is either to give it a
-model in that dialog or to pick an agent that has one.
+The **pencil** beside that dropdown opens the **Agents** dialog: the store's agent
+rows in a list under a toolbar of three verbs — add, save, delete — each acting on
+**the selected agent**. A row's form holds a label, the two hub switches, the
+persona, the cap on that agent's tool loop and its model, with the app's caps
+enforced as you type; a save writes just the agent in view and leaves the dialog
+open. The four agents nojae ships with are listed there too, and the app-owned
+**Todo builder** is the read-only one: its tab renders, its model is yours to set,
+and everything else about it is re-asserted from code at every boot, so no edit —
+here or anywhere — can drift it. An agent with no model shows a warning beside the
+pencil and cannot be sent to; the fix is either to give it a model in that dialog
+or to pick an agent that has one.
 
 **Batch mode** works through a folder of task files — `todos/` by default, files
 named `01-slug.md`, `02-slug.md`, …, with `00-…` as the lot's big picture, which

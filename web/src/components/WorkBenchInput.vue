@@ -714,12 +714,12 @@ onBeforeUnmount(() => {
          a reply: a turn resolves its agent once, at its start (§4.5).
 
          `v-if` rather than an always-mounted card: a closed `<dialog>` is still
-         in the DOM, and this one is labelled "Agent modes" — a substring of the
-         select's own accessible name, which the pinned e2e spec queries
-         (`getByLabel('Agent mode')` must answer exactly the select, and a second
-         match is a strict-mode failure). Mounting it only while open keeps the
-         closed card out of every such query, and the card's own watch runs with
-         `immediate`, so mounting it *is* opening it. -->
+         in the DOM and keeps its own accessible name, so the canvas does not
+         carry closed cards around in every query. (The name collision this used
+         to guard — the card titled "Agent modes", a substring of the select's
+         "Agent mode" — is gone: the card is titled `Agents` now, but the habit
+         stands.) The card's own watch runs with `immediate`, so mounting it *is*
+         opening it. -->
     <AgentModesDialog
       v-if="modesDialogOpen"
       :open="modesDialogOpen"

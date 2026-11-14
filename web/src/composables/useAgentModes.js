@@ -512,9 +512,10 @@ function labelTakenBy(draft, entry) {
 }
 
 // Every problem *this entry's form* has, each naming the field it belongs to:
-// `[{field, message}]`. The dialog puts each message next to its field and
-// blocks Save on the list, so the rules are enforced where they can be read
-// rather than discovered through a refused save.
+// `[{field, message}]`. Nothing renders it per field any more (D11): it is read
+// only to build `saveRefusalFor`'s sentence, so the rules are still the ones the
+// server refuses against, said in the card's one message line instead of under
+// the field each one is about.
 //
 // A `readonly` row has one field the user owns, so only the model is judged —
 // every other column is the server's to re-assert (D4).
@@ -547,12 +548,167 @@ export function entryProblems(draft, entry) {
   return problems
 }
 
-// The one answer the dialog renders for its Save button, so the rule is not
-// re-derived in the component: this entry's problems, or a save already in
-// flight.
-export function saveDisabledFor(draft, entry, { saving = false } = {}) {
-  if (!entry || saving) return true
-  return entryProblems(draft, entry).length > 0
+//: The save slot's **enablement**, and nothing else (D1, Q2): is there something
+//: for Save to act on, and is a write already in flight. Those are the only two
+//: reasons the slot is *disabled*.
+//:
+//: An incomplete form is deliberately **not** in here — that was the old
+//: one-verdict Save gate's answer, and this rework drops it: taking the button
+//: away hides the reason, so the click is how the user learns what is missing
+//: (D11). The verdict is renamed rather than reused, because the old name kept
+//: the lie the rework removes.
+//:
+//: The one exception is the **app-owned row** (§5's last paragraph): the model is
+//: the only field of that row the user owns, so a save which could only rewrite
+//: what is already stored has nothing to offer, and the slot stays inert until
+//: that one field changes. That is a rule about one row's one field —
+//: `modelUnchangedFor` reads `modelId` and nothing else — and it is *not* the
+//: general "dirty" test Q2 dropped: no other row and no other field is judged
+//: here, and the whole-form comparison belongs to `closeWouldLoseFor` alone.
+//:
+//: A pending confirmation also lands here (§5's last two rows): one destructive
+//: action is decided at a time, so the verbs go inert while the card waits for
+//: an answer. The card passes the same context to every slot verdict.
+export function writeBlockedFor(entry, context = {}) {
+  const { saving, confirming, closing } = slotContext(context)
+  if (!entry || saving || confirming || closing) return true
+  if (entry.readonly === true) return modelUnchangedFor(entry)
+  return false
+}
+
+//: Why a click on the save slot is refused, or null when this form may be
+//: written: one sentence saying the form must be completed, naming what is
+//: missing. Built by reading `entryProblems` — the per-field wording is not
+//: re-derived here and never reaches the template.
+export function saveRefusalFor(draft, entry) {
+  const problems = entryProblems(draft, entry)
+  if (!problems.length) return null
+  return `The form must be completed before this agent can be saved: ${problems
+    .map((problem) => problem.message)
+    .join(' ')}`
+}
+
+//: ---------------------------------------------------------------------------
+//: The toolbar's five slots (§5), and the two confirmation pairs.
+//:
+//: One function per slot, each answering the same two things: is it inert, and
+//: what does it say — its own name when it is live, the reason when it is not.
+//: The card reads that **one** value as both its accessible name and its tooltip
+//: (`slot.label`), so the two cannot drift (§6.16) and an inert slot always
+//: explains itself (D1). Every situation §5 lists is answered here, including the
+//: ones the card cannot reach yet, so no condition has to be invented in a
+//: template when the toolbar is wired: the card passes its own state as one
+//: context object and renders the answers.
+//: ---------------------------------------------------------------------------
+
+//: The three sentences more than one slot says. Spelled once, because a reason
+//: that reads differently in two tooltips is two reasons.
+const NOT_READ_LABEL = 'The agent list has not been read.'
+const WRITE_IN_FLIGHT_LABEL = 'A write is in flight — wait for it to finish.'
+const CONFIRMATION_PENDING_LABEL = 'A confirmation is pending — answer it first.'
+
+//: The card's state, as every slot verdict reads it: has the list been read, is a
+//: creation form being typed (D4 — a form with no row), is a write in flight, and
+//: is a delete or a close confirmation awaiting its answer. The defaults are the
+//: plainest state the card can be in — read, nothing being typed, nothing asked —
+//: so a caller passes only what it actually holds.
+function slotContext({
+  loaded = true,
+  creating = false,
+  saving = false,
+  confirming = false,
+  closing = false,
+} = {}) {
+  return {
+    loaded: loaded !== false,
+    creating: creating === true,
+    saving: saving === true,
+    confirming: confirming === true,
+    closing: closing === true,
+  }
+}
+
+//: A slot's answer: one string, which is its accessible name when it is live and
+//: the reason it is inert when it is not. There is no second field to keep in
+//: step with, by design.
+function slotLive(label) {
+  return { disabled: false, label }
+}
+
+function slotInert(label) {
+  return { disabled: true, label }
+}
+
+//: **add** — live whenever the list is loaded (D5: adding is not dangerous and
+//: writes nothing). Its two reasons are both said in its tooltip: a creation is
+//: already being typed (pressing add again would empty a form the user may have
+//: started), or a write is in flight. It is the one control that can be inert
+//: while nothing is selected, which is why `creating` is its own argument rather
+//: than a reading of "no selection".
+export function addSlotFor(context = {}) {
+  const { loaded, creating, saving, confirming, closing } = slotContext(context)
+  if (!loaded) return slotInert(NOT_READ_LABEL)
+  if (saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
+  if (confirming || closing) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (creating) return slotInert('Already adding an agent — save it or select one.')
+  return slotLive('Add agent')
+}
+
+//: **save** — `Saving…` while a write is in flight, and that word is the slot's
+//: name *and* its tooltip together, because they are the same value: the pair
+//: moves as one or not at all, which is what keeps §6.16 true while the word is
+//: there. Otherwise it is inert for `writeBlockedFor`'s reasons and nothing else
+//: — an incomplete form is **not** one of them (D11: the click refuses and the
+//: message line says why).
+//:
+//: "Nothing selected" is two states and stays two: in creation mode the card
+//: hands over the creation form as the subject, so save is live; with a list that
+//: came back empty there is no form to type into, so it is not.
+export function saveSlotFor(entry, context = {}) {
+  const ctx = slotContext(context)
+  if (ctx.saving) return slotInert('Saving…')
+  if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
+  if (!writeBlockedFor(entry, ctx)) return slotLive('Save agent')
+  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (!entry) return slotInert('There is no agent selected to save.')
+  return slotInert('Only the model is yours on this agent, and it has not changed.')
+}
+
+//: **delete** — whether it is offered stays `deleteOfferedFor`'s answer (D3:
+//: called unchanged); this adds the reason, the write-in-flight case and the
+//: pending confirmation. The reasons are the store's two flags, so nothing here
+//: names an agent id.
+export function deleteSlotFor(entry, context = {}) {
+  const ctx = slotContext(context)
+  if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
+  if (!entry) return slotInert('Select an agent to delete it.')
+  if (!deleteOfferedFor(entry)) {
+    return slotInert(
+      entry.isNew === true
+        ? 'Save this agent before it can be deleted.'
+        : 'nojae owns this agent, so it cannot be deleted.',
+    )
+  }
+  if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
+  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
+  return slotLive('Delete agent')
+}
+
+//: The delete pair, and whether it is in the DOM at all (§6.17): **absent**, not
+//: hidden, until a delete is being confirmed for a row that can be deleted. Its
+//: two tooltips are the whole question and its two answers (Q7) — no sentence is
+//: added anywhere. A write in flight disables the pair rather than queueing it
+//: (§8), so a pending destructive action never outlives the state it was asked in.
+export function deleteConfirmationFor(entry, context = {}) {
+  const ctx = slotContext(context)
+  if (!ctx.confirming || !deleteOfferedFor(entry)) {
+    return { rendered: false, cancel: null, confirm: null }
+  }
+  return {
+    rendered: true,
+    cancel: ctx.saving ? slotInert(WRITE_IN_FLIGHT_LABEL) : slotLive('Cancel delete'),
+    confirm: ctx.saving ? slotInert(WRITE_IN_FLIGHT_LABEL) : slotLive('Confirm delete'),
+  }
 }
 
 // A tab's caption: the Label field it currently holds, falling back to the id
@@ -596,9 +752,32 @@ export function modelLineFor(entry, servers) {
   return NO_MODEL_LABEL
 }
 
+//: The fields a form holds that the store can answer for, and therefore the only
+//: ones a baseline records. `id` is absent on purpose: a stored row's id is
+//: immutable, so it can never be the thing closing would lose.
+const BASELINE_FIELDS = [
+  'label',
+  'maxToolIteration',
+  'mcpEnable',
+  'lspEnable',
+  'personaText',
+  'modelId',
+]
+
+//: **One baseline per entry** (D8): what the store last said about this row, as
+//: the plain field snapshot the form is compared against. It is captured in the
+//: one place a draft is built from a payload — `entryOfRow`, which the read and
+//: both writes go through — so it is *always* the store's answer and never what
+//: the user typed, which is the whole invariant the close guard rests on.
+function baselineOf(entry) {
+  const snapshot = {}
+  for (const field of BASELINE_FIELDS) snapshot[field] = entry[field] ?? null
+  return snapshot
+}
+
 // One store row as an editable entry: the shape the form holds.
 function entryOfRow(row) {
-  return {
+  const entry = {
     id: row.id,
     isNew: false,
     label: row.label ?? '',
@@ -610,7 +789,155 @@ function entryOfRow(row) {
     deletable: row.deletable !== false,
     modelId: row.modelId ?? null,
     modelName: row.modelName ?? null,
+    // The baseline is the row as the store answered it, taken here and nowhere
+    // else. A write re-baselines by rebuilding the draft from its answer.
+    baseline: null,
   }
+  entry.baseline = baselineOf(entry)
+  return entry
+}
+
+//: **Re-baseline the list on a write's answer without discarding another agent's
+//: typing** (D6, §6.18). A write answers the whole new list and the card adopts
+//: it — that is what makes a refusal, a cascade or a re-asserted built-in visible
+//: without the client knowing the rule. But the card holds one form per agent, so
+//: adopting the answer verbatim would silently throw away what the user typed in
+//: an agent this write did not touch.
+//:
+//: So each incoming row keeps the store's fresh baseline (always the store's
+//: answer, never what was typed — the invariant the close guard rests on), and
+//: the fields the user had changed in the row it replaces are put back. The agent
+//: that was just written is skipped: its stored state is now the truth, and its
+//: form must show that rather than what was sent.
+export function rebaselinedDraft(next, previousDraft, writtenId) {
+  if (!next) return next
+  const held = new Map(
+    (Array.isArray(previousDraft?.entries) ? previousDraft.entries : []).map((entry) => [
+      entry.id,
+      entry,
+    ]),
+  )
+  for (const entry of next.entries) {
+    if (entry.id === writtenId) continue
+    const before = held.get(entry.id)
+    if (!before) continue
+    let modelRestored = false
+    for (const field of BASELINE_FIELDS) {
+      // With no baseline the held row was never read from the store, so nothing
+      // about it is "unchanged" and every field of it is the user's typing.
+      const stored = before.baseline ? before.baseline[field] ?? null : undefined
+      if (stored === undefined || (before[field] ?? null) !== stored) {
+        entry[field] = before[field]
+        if (field === 'modelId') modelRestored = true
+      }
+    }
+    // The model's resolved name travels with its id: a row whose model was put
+    // back must not keep the name of the model the store answered for.
+    if (modelRestored) entry.modelName = before.modelName ?? null
+  }
+  return next
+}
+
+//: The one field of an **app-owned** row the user owns (§5's last paragraph): is
+//: its model still what the store answered? That is the save slot's only dirty
+//: test, and it reads `modelId` alone — never the whole form, which is
+//: `closeWouldLoseFor`'s business. A row with no baseline was never read from the
+//: store, so it is never blocked by this rule.
+export function modelUnchangedFor(entry) {
+  if (!entry?.baseline) return false
+  return (entry.modelId ?? null) === (entry.baseline.modelId ?? null)
+}
+
+//: **Would closing lose something?** (D8) — the close guard's only question, and
+//: the only reader of the baseline. Always yes in creation mode, where nothing was
+//: ever written; otherwise the entry against its baseline.
+//:
+//: This is deliberately *not* the save slot's answer: *may this be saved* is the
+//: form's completeness (`writeBlockedFor` + `saveRefusalFor`), and Q2 dropped any
+//: dirty gate there. Two functions, two questions, and neither reads the other's
+//: input — which is what keeps the baseline from leaking back into the toolbar.
+export function closeWouldLoseFor(entry, { creating = false } = {}) {
+  if (creating === true) return true
+  if (!entry) return false
+  if (!entry.baseline) return true
+  return BASELINE_FIELDS.some(
+    (field) => (entry[field] ?? null) !== (entry.baseline[field] ?? null),
+  )
+}
+
+//: **Would closing *this card* lose something?** (D8) — the card-level reading of
+//: the verdict above, and the only one the footer's guard asks. The card holds one
+//: form per agent, so a keystroke in a row the user has since left behind is still
+//: work that leaving would throw away: the answer is `closeWouldLoseFor` for every
+//: entry the card holds, plus creation mode, and **nothing else** — the baseline is
+//: its only input, and the save slot is consulted nowhere in here (Q2).
+export function closeWouldLoseForDraft(draft, { creating = false } = {}) {
+  if (creating === true) return true
+  return (Array.isArray(draft?.entries) ? draft.entries : []).some((entry) =>
+    closeWouldLoseFor(entry),
+  )
+}
+
+//: The **close** pair, same shape as the delete pair's verdict: absent from the
+//: DOM until a close is being confirmed, and never inert once it is there —
+//: `Keep editing` and `Discard and close` are answers that can always be given.
+export function closeConfirmationFor(context = {}) {
+  const { closing } = slotContext(context)
+  if (!closing) return { rendered: false, cancel: null, confirm: null }
+  return {
+    rendered: true,
+    cancel: slotLive('Keep editing'),
+    confirm: slotLive('Discard and close'),
+  }
+}
+
+//: The row to select once a delete has landed (D7.5): the **next** one in the
+//: order it is given, else the **previous** one when the deleted row was last,
+//: else nothing when the list came back empty. It adds no ordering of its own —
+//: the store's order is the server's (`resolve_agents()`, app-owned row last), so
+//: the card calls it with the list as it held it while the deleted row was still
+//: in it, and then selects the returned row by id in the re-baselined list.
+export function successorAfterDelete(entries, entry) {
+  const list = Array.isArray(entries) ? entries : []
+  if (!list.length) return null
+  const index = list.indexOf(entry)
+  if (index === -1) return null
+  return list[index + 1] ?? list[index - 1] ?? null
+}
+
+//: **What an empty new-agent form holds** (D4): no label, no persona, both hub
+//: switches off, the tool loop at the payload's floor, no model, and the id the
+//: existing slug rule derives from an empty label — a neutral placeholder the Id
+//: field still corrects. The card never assembles a form field-by-field in the
+//: template, and no number is spelled here: the floor is `caps`'s.
+//:
+//: It carries the flags a not-yet-stored row needs — new, not deletable, not
+//: readonly — so the same slot verdicts answer for it: save is live (there is a
+//: form to write), delete is inert with its reason (nothing is stored to delete).
+//: Its baseline is null because nothing was ever written, which is also why the
+//: close guard treats creation mode as unsaved work by definition.
+export function creationFormFor(draft) {
+  return {
+    id: slugForDraft(draft, ''),
+    isNew: true,
+    label: '',
+    maxToolIteration: capsOf(draft).minToolIteration ?? null,
+    mcpEnable: false,
+    lspEnable: false,
+    personaText: '',
+    readonly: false,
+    deletable: false,
+    modelId: null,
+    modelName: null,
+    baseline: null,
+  }
+}
+
+//: **Is a creation being typed?** The one reading of the card's creation state: a
+//: form is held that has no row. Every slot verdict takes that as an argument, and
+//: the close verdict counts it as unsaved work — nothing was ever written.
+export function creationActiveFor(creation) {
+  return !!creation
 }
 
 // The draft from an agent payload: **the list itself** (`state.modes`, already
@@ -626,27 +953,9 @@ export function createAgentDraft(payload) {
   }
 }
 
-// Create agent: append the tab and focus it. **Nothing is written** until the
-// new tab's own Save — the row does not exist yet, which is what `isNew` says.
-// Its id is the slug of its label, editable only while it is new.
-export function addAgentToDraft(draft, label, { modelId = null } = {}) {
-  const entry = {
-    id: slugForDraft(draft, label),
-    isNew: true,
-    label: String(label ?? ''),
-    maxToolIteration: capsOf(draft).minToolIteration ?? null,
-    mcpEnable: false,
-    lspEnable: false,
-    personaText: '',
-    readonly: false,
-    deletable: false,
-    modelId,
-    modelName: null,
-  }
-  draft.entries.push(entry)
-  return entry
-}
-
+// Drop an entry from the in-memory list. The card never appends one (D4: a new
+// agent is a form, not an entry, until a save succeeds), so this is the only
+// draft mutation the editor's shape still answers for.
 export function removeAgentFromDraft(draft, entry) {
   const index = draft.entries.indexOf(entry)
   if (index === -1) return false
@@ -688,7 +997,11 @@ const editorState = reactive({
   open: false,
   loading: false,
   saving: false,
-  error: null,
+  // The two failures the card can meet are told apart because D11's priority
+  // ranks them differently: a refused **write** outranks the incomplete-form
+  // sentence, a failed **read** is under it.
+  readError: null,
+  writeError: null,
   serverFindings: [], // the last refused write's messages, each naming a field
 })
 
@@ -707,19 +1020,64 @@ function describeError(body, fallback) {
   return fallback
 }
 
+//: The store's own sentence about the last refused write, verbatim (D11: a
+//: refusal is said in the store's words, not the client's paraphrase). A refusal
+//: answers either with one `detail` string — kept as a finding — or with a
+//: validation body, which `describeError` turned into `writeError`.
+function storeRefusalSentence() {
+  return editorState.serverFindings[0]?.message || editorState.writeError || null
+}
+
+//: **The card's one message** (D11): everything it has to say — progress, a
+//: refusal from the store, an incomplete form, a failed read, the read's
+//: findings — chosen by this fixed priority and never by recency, so two truths
+//: never fight for the line. The role is part of the answer, because the line is
+//: announced and not just drawn: `alert` for a refusal or a failure, `status` for
+//: progress and for the incomplete-form sentence.
+//:
+//: It always answers an object, so the line is a slot that is *always there*: an
+//: empty `text` means nothing to say, and filling or emptying it reflows nothing
+//: (D10). It clears when its cause goes away because it is derived from the state
+//: that caused it — typing the missing label empties the form sentence, and a
+//: successful write clears the store's.
+export function messageFor(draft, entry) {
+  if (editorState.saving) return { text: 'Saving…', role: 'status' }
+  if (editorState.loading) return { text: 'Reading the agents…', role: 'status' }
+
+  const refusal = storeRefusalSentence()
+  if (refusal) return { text: refusal, role: 'alert' }
+
+  const incomplete = saveRefusalFor(draft, entry)
+  if (incomplete) return { text: incomplete, role: 'status' }
+
+  if (editorState.readError) return { text: editorState.readError, role: 'alert' }
+
+  // The read's findings — the loader's and the server's — are **one** message,
+  // not two lines that would compete for the same slot.
+  const findings = [
+    ...(Array.isArray(draft?.findings) ? draft.findings : []),
+    ...editorState.serverFindings,
+  ]
+    .map((finding) => finding?.message)
+    .filter(Boolean)
+  if (findings.length) return { text: findings.join(' · '), role: 'alert' }
+
+  return { text: '', role: 'status' }
+}
+
 // The read: `GET /api/agents`, which is the *same* payload the dropdown reads —
 // one factsheet for both, so the dialog can never show a list the composer does
 // not offer. The answer also feeds the singleton, so a save made here lands in
 // the dropdown without a second round-trip.
 export async function fetchAgentDraft() {
   editorState.loading = true
-  editorState.error = null
+  editorState.readError = null
   editorState.serverFindings = []
   try {
     const res = await fetch('/api/agents')
     const body = await res.json().catch(() => null)
     if (!res.ok) {
-      editorState.error = describeError(body, `Could not read the agents (${res.status}).`)
+      editorState.readError = describeError(body, `Could not read the agents (${res.status}).`)
       return null
     }
     try {
@@ -730,7 +1088,7 @@ export async function fetchAgentDraft() {
     }
     return createAgentDraft(body)
   } catch (exc) {
-    editorState.error = `Could not reach the API: ${exc}`
+    editorState.readError = `Could not reach the API: ${exc}`
     return null
   } finally {
     editorState.loading = false
@@ -744,7 +1102,7 @@ export async function fetchAgentDraft() {
 async function postAgent(path, payload, fallback) {
   if (editorState.saving) return null
   editorState.saving = true
-  editorState.error = null
+  editorState.writeError = null
   editorState.serverFindings = []
   try {
     const res = await fetch(path, {
@@ -758,7 +1116,7 @@ async function postAgent(path, payload, fallback) {
       if (typeof detail === 'string' && detail) {
         editorState.serverFindings = [{ kind: 'error', message: detail }]
       } else {
-        editorState.error = describeError(body, fallback)
+        editorState.writeError = describeError(body, fallback)
       }
       return null
     }
@@ -769,7 +1127,7 @@ async function postAgent(path, payload, fallback) {
     }
     return createAgentDraft(body)
   } catch (exc) {
-    editorState.error = `Could not reach the API: ${exc}`
+    editorState.writeError = `Could not reach the API: ${exc}`
     return null
   } finally {
     editorState.saving = false

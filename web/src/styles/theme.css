@@ -1061,35 +1061,196 @@ body {
 
 /* -- agent-modes dialog --------------------------------------------------------
 
-   The modes editor (AgentModesDialog.vue) is the Settings card with another
+   The agents editor (AgentModesDialog.vue) is the Settings card with another
    subject, so almost nothing is declared here: its `<article>` shares the
-   settings card rule above, and its body, nav, editor column and footer carry
+   settings card rule above, and its body, list, editor column and footer carry
    the `settings-*` classes and are laid out by those rules. What follows is only
-   what this card has and Settings does not — the create affordance in the nav,
-   the stacked finding lines, the two hub switches, the in-place delete confirm —
-   plus the colours that mark a tab whose entry holds Save. No size is repeated
-   and the `<dialog>` element is never sized (see the settings card note). */
+   what this card has and Settings does not — the toolbar of verbs over the list,
+   the confirmation slots beside it, the two hub switches — plus the colour that
+   marks a row whose entry holds a problem. Every affordance the card used to have
+   outside that — the nav's create field and its button, the findings printed under
+   the fields and at the top, the form's own delete block — is gone with the shape
+   it belonged to, and so is every rule that styled it. No size is repeated and the
+   `<dialog>` element is never sized (see the settings card note). */
 
-/* The editor column scrolls like Settings': an agent tab now holds more fields
-   than the fixed card height can show (the model dropdown is the last of them),
-   so clipping here would hide a control instead of offering it. */
+/* -- the two columns and the toolbar over the list (§3) ----------------------
+
+   The body is the settings grid, and this card places its four parts in it
+   rather than nesting wrappers: the heading, the toolbar and the list take the
+   left column's three rows, and the form spans the **bottom two** of them in the
+   right column. That placement is what §3 asks for and what a wrapper cannot say
+   as well — the form's first field starts at the toolbar's row, so the two share
+   an edge neither column's content can move. The list's row is the only flexible
+   one, so the list scrolls in its own bounded area and the toolbar above it never
+   scrolls away with it. */
+.agent-modes-body {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+/* The form column scrolls like Settings': an agent's form holds more fields than
+   the fixed card height can show (the model dropdown is the last of them), so
+   clipping here would hide a control instead of offering it. */
 .agent-modes-editor {
+  grid-area: 2 / 2 / 4 / 3;
   overflow-y: auto;
 }
 
-/* One finding per line: the dialog renders a list of findings inside a single
-   `<p>`, and each is a `<span>` — without this they would run together as one
-   sentence, which is the opposite of what a list of errors is for. */
-.agent-modes-finding {
-  display: block;
+/* The column's scrollbar sits at its right edge, so the fields need a gap of
+   their own: without it the controls touch the bar. */
+.agent-modes-editor > section {
+  padding-right: 1rem;
 }
 
-/* The lines the card can say about the store as a whole (the read's findings, a
-   refused write's sentence). They sit between the title and the body, so each
-   keeps one tight margin. */
-.agent-modes-file-findings,
-.agent-modes-server-findings {
-  margin: 0 0 var(--bi-space-1);
+/* Label and Max tool iterations on one row: the two short fields side by side,
+   the wide one taking the room, the number field only what its label needs. */
+.agent-modes-fields-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--bi-space-2);
+}
+
+.agent-modes-fields-row > label:first-of-type {
+  flex: 1 1 auto;
+}
+
+.agent-modes-fields-row > label:last-of-type {
+  flex: 0 0 9rem;
+}
+
+/* The small heading over the toolbar (D4.4): it reads `Agents` in every state,
+   which is why it can be a plain always-there line — a heading that changed
+   wording with the card's state would be exactly the reflow D10 forbids. */
+.agent-modes-heading {
+  grid-area: 1 / 1;
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--pico-muted-color);
+}
+
+/* **Five fixed-width slots**, not a row that grows (D1): the three verbs at the
+   left, the confirmation pair's two at the right end — so they land just left of
+   the form rather than at the card's edge. A slot is a box that keeps its size
+   whether or not it holds a button, which is the whole reason revealing a pair
+   moves nothing (D10): the first three buttons keep their exact position and the
+   toolbar's height never changes. */
+.agent-modes-toolbar {
+  grid-area: 2 / 1;
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-1);
+}
+
+.agent-modes-slot {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
+/* The gap between the verbs and the confirmation pair. It is the only flexible
+   item, so a slot's own width is never negotiated with anything. */
+.agent-modes-toolbar-space {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The toolbar's glyphs follow the theme tokens, as every house icon does: the
+   verbs in the icon colour, the destructive answer in red, the confirming one in
+   green. The two confirmation classes are shared by both pairs — the delete one
+   the toolbar asks with and the close one the footer asks with — so the card
+   teaches the idiom once (D7, D8). */
+/* A slot's glyph keeps the icon button's box — **width and padding both**, or the
+   button is not the circle the slot reserves room for. Two shared rules reach in
+   here and each out-weighs a bare `.icon-btn` (0,1,0):
+   - Pico's input-group rules match *any* `role="group"`, which the toolbar
+     carries for ARIA, and `[role="group"] button { width: auto }` (0,1,1)
+     collapses the button to its glyph's width while its height stays 36px;
+   - the footer band's `.settings-actions button { padding-inline }` (0,1,1) puts
+     a text button's padding on a glyph, which — `box-sizing: border-box` — clamps
+     the declared width *up* to that padding plus the border.
+   The slot keeps its own 36px either way, so nothing moves; only the roundness of
+   the glyph inside it is at stake. The memory bullets and the tree meet Pico's
+   rule the same way and reset it the same way (see `.memory-bullets
+   .memory-bullet` and `.tree-group`). */
+.agent-modes-slot .icon-btn {
+  width: 36px;
+  padding: 0;
+}
+
+.agent-modes-slot .icon-btn svg {
+  stroke: var(--bi-icon);
+}
+
+.agent-modes-slot .agent-modes-confirm svg {
+  stroke: var(--bi-success);
+}
+
+.agent-modes-slot .agent-modes-cancel svg {
+  stroke: var(--bi-danger);
+}
+
+/* The list, in its own bounded scroll area under the toolbar: it takes the grid's
+   only flexible row, so it scrolls there and the toolbar above it never scrolls
+   away with it. The shared settings-nav rule starts `align-self: start`, which
+   would shrink the list to its content in a stretched row, so it is stretched. */
+.agent-modes-nav {
+  grid-area: 3 / 1;
+  align-self: stretch;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* -- the footer's reserved band (D11) ----------------------------------------
+
+   The card's **one message** sits on the left of the same band the buttons
+   occupy, so the footer lays out message-then-buttons instead of Settings'
+   right-aligned pair. The line is a flex item that stretches to the band's
+   height — which the buttons set — so it is exactly as tall when it holds
+   nothing as when it holds a sentence, and filling or emptying it moves no
+   control (D10, §6.8). The items are bottom-aligned, so a sentence long enough
+   to wrap grows the band *upward* into the body's space rather than lifting the
+   buttons off the edge they keep. Scoped through the card: every other dialog
+   shares `.settings-actions` and keeps its own footer. */
+.agent-modes-dialog .settings-actions {
+  align-items: flex-end;
+  justify-content: flex-end;
+}
+
+.agent-modes-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--pico-muted-color);
+}
+
+/* The footer's **reserved** confirmation slot (D8, §3): it keeps the pair's
+   width whether or not a pair is in it, so `Close` never moves when the card
+   asks a question — the same reason the toolbar's slots are fixed. Two slots and
+   the gap between them, which is exactly what the close pair occupies when it
+   arrives: the same fixed slot boxes the toolbar uses, so nothing in the band is
+   negotiated with the pair's presence. */
+.agent-modes-footer-slot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-1);
+  width: calc(36px + 36px + var(--bi-space-1));
+  /* The height is reserved too, for the same reason: an empty slot and a slot
+     holding the pair are one box, so the band's height — and therefore `Close`'s
+     vertical position — is the pair's arrival's answer in neither state. */
+  height: 36px;
+}
+
+/* The line's colour follows the role `messageFor` answered with, so the card
+   needs no class-choosing condition of its own. */
+.agent-modes-message[role='alert'] {
+  color: var(--bi-danger);
 }
 
 /* Why a `readonly` agent's fields are disabled. A caption, not an alarm: it
@@ -1104,53 +1265,27 @@ body {
   margin: 0 0 var(--bi-space-2);
 }
 
-/* The nav's create affordance, under the tab list: a labelled field and one
-   button, both as narrow as the column they sit in. */
-.agent-modes-nav {
-  display: flex;
-  flex-direction: column;
-  gap: var(--bi-space-1);
-}
-
-.agent-modes-create {
-  margin: var(--bi-space-1) 0 0;
-  font-size: 0.82rem;
-}
-
-/* Both rules below are scoped through `.settings-nav button` on purpose: the
-   card reuses the settings nav, whose selector weighs (0,1,1) and would
-   otherwise out-rank a bare class here — a Create that looked like an inert
-   tab, and a broken tab whose red never arrived. */
-
-/* Create is an *action*, not another tab: it keeps the nav's width but gets a
-   filled surface and a visible edge, so the list above it stays the list. */
-.settings-nav button.agent-modes-create-button {
-  margin-top: var(--bi-space-1);
-  border-color: var(--bi-border);
-  background-color: var(--bi-surface-2);
-  color: var(--bi-icon);
-  font-size: 0.85rem;
-  text-align: center;
-}
-
-.settings-nav button.agent-modes-create-button:hover:not(:disabled) {
-  border-color: var(--pico-muted-color);
-}
-
-/* A tab whose entry blocks Save. The tab stays clickable — D3 wants the user to
-   *reach* the broken entry, not be blocked from it — so the mark is colour, not
-   a disabled control. It also wins over the active tab's primary colour: an
-   entry that holds Save is the more important thing to say about that tab. */
+/* A row whose entry holds a problem. Scoped through `.settings-nav button` on
+   purpose: the card reuses the settings nav, whose selector weighs (0,1,1) and
+   would otherwise out-rank a bare class here, and the red would never arrive.
+   The row stays clickable — the user must *reach* the entry to fix it, and Save
+   refuses rather than being taken away (D11) — so the mark is colour, not a
+   disabled control. It also wins over the selected row's primary colour: an
+   entry that cannot be saved is the more important thing to say about that row. */
 .settings-nav button.agent-modes-tab--broken {
   color: var(--bi-danger);
   border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
 }
 
 /* The two hub switches side by side, each reading as a sentence rather than a
-   checkbox in a column. */
+   checkbox in a column, and pushed to the row's right end: the field below them
+   is the persona textarea, whose `System prompt` label starts at the left edge,
+   so switches parked there read as belonging to that label. Keeping the row's
+   left edge empty gives the label a line of its own. */
 .agent-modes-switches {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--bi-space-2);
 }
 
@@ -1158,46 +1293,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  margin: 0;
-}
-
-/* A finding printed under the field it names: it belongs to that field, so it
-   must not look like a paragraph of prose between two fields. */
-.agent-modes-field-finding {
-  margin: 0.25rem 0 0;
-  font-size: 0.8rem;
-}
-
-/* The mode tab's action row: Reset and Delete on one line, each as wide as
-   its word — Pico would otherwise stack them full-width. */
-.agent-modes-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--bi-space-1);
-  margin-top: var(--bi-space-2);
-}
-
-.agent-modes-actions button {
-  width: auto;
-  margin-bottom: 0;
-}
-
-/* Under the action row: the refusal sentence when the entry is the default,
-   and the confirm asked *in place* (this card is already the modal, so
-   nothing nests inside it). */
-.agent-modes-delete {
-  margin-top: var(--bi-space-1);
-}
-
-.agent-modes-delete-confirm {
-  display: flex;
-  align-items: center;
-  gap: var(--bi-space-1);
-  margin-top: var(--bi-space-1);
-}
-
-.agent-modes-delete-yes {
-  width: auto;
   margin: 0;
 }
 

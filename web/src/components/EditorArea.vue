@@ -246,6 +246,12 @@ const canSaveActive = computed(
 const dirtyCount = computed(() => files.dirtyCount.value)
 // Names the tab's own kind, so the tooltip does not claim "diff" over a preview
 // (the button itself is already disabled for every non-buffer kind).
+//
+// The no-tab wording is `Nothing to save`, which is this button's own state — the
+// Editor pane holding no buffer at all. It is **not** the agents card's dropped
+// `Nothing to save` state (docs/agents-dialog-rework.md Q2), which was about
+// disabling Save for an agent whose form had not been touched; that verb is the
+// toolbar's and no longer has such a reason.
 const saveButtonTitle = computed(() => {
   const record = tab.value
   if (!record) return 'Nothing to save'

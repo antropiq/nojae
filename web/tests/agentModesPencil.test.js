@@ -102,7 +102,8 @@ function resetAll() {
   const editor = useAgentModes().editor
   editor.loading = false
   editor.saving = false
-  editor.error = null
+  editor.readError = null
+  editor.writeError = null
   editor.serverFindings = []
   appShell.servers = []
   appShell.serversCaps = null
@@ -247,6 +248,42 @@ describe('the pencil beside the mode dropdown', () => {
     // The card retries the read itself, so the failure it was opened for is
     // reported on its own error line rather than inherited from the dropdown.
     expect(calls.filter((call) => call.key === '/api/agents')).toHaveLength(2)
+  })
+
+  it('a close the card is asking about never reaches the pencil', async () => {
+    // The pencil owns the `open` flag and the card's `@close` is the only thing
+    // that clears it. While the close guard holds its question (D8) nothing closes
+    // at all — by button, by Escape or by the backdrop — so that handler is
+    // unreachable and the card stays mounted with its typing intact.
+    stubRoutes()
+    await loadAgentModes()
+    const w = await mountComposer()
+    await pencil(w).trigger('click')
+    await flushPromises()
+
+    const dialog = document.querySelector('dialog.agent-modes-dialog')
+    const label = dialog.querySelector('section[data-tab] input[type="text"]')
+    label.value = 'Typed and not saved'
+    label.dispatchEvent(new window.Event('input', { bubbles: true }))
+    await flushPromises()
+
+    dialog.dispatchEvent(new window.Event('cancel', { bubbles: true, cancelable: true }))
+    await flushPromises()
+
+    // Still mounted, still open, still holding what was typed, and the guard is
+    // asking in the footer.
+    expect(document.querySelector('dialog.agent-modes-dialog')).toBe(dialog)
+    expect(dialog.open).toBe(true)
+    expect(dialog.querySelector('.agent-modes-keep-editing')).not.toBeNull()
+    expect(
+      dialog.querySelector('section[data-tab] input[type="text"]').value,
+    ).toBe('Typed and not saved')
+
+    // Answering `Discard and close` is what finally reaches the pencil.
+    dialog.querySelector('.agent-modes-discard-close').click()
+    await flushPromises()
+    expect(document.querySelector('dialog.agent-modes-dialog')).toBeNull()
+    w.unmount()
   })
 
   it('a turned conversation never stops the agent being switched', async () => {
