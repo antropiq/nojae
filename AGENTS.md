@@ -178,10 +178,10 @@ together:
   the settings-store routes — and the file ones are refused while a chat reply
   streams. Batch mode lists its lot through the shared path policy but never
   reads or writes its contents — only the connectors do.
-- **A lot runs every task in one mode, pinned at launch** — the coding agent, so
-  moving the composer's choice mid-lot reaches no task. A store with no such
-  agent, or with no model on it, stops the lot rather than running it under a
-  stranger.
+- **A lot runs every task in one agent, read from the composer's dropdown at
+  launch** — the same agent a standard session of that choice runs as — so moving
+  the choice mid-lot reaches no task. A selection the app cannot resolve, or one
+  with no model on it, stops the lot rather than running it under a stranger.
 - **A task is finished when its file leaves the lot folder**; that move is the
   agent's own acknowledgement, and re-listing is the only way the loop can see it.
   A file still there is relaunched up to the loop's budget, then the lot aborts.

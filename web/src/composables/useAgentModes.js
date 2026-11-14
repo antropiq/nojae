@@ -120,18 +120,18 @@ export function modeHint(id) {
 export function modeSelectTitle({ batchActive = false } = {}) {
   const hint = modeHint(state.current)
   if (!hint) return ''
-  if (batchActive) return `${hint} — a running batch picks its own mode`
+  if (batchActive) return `${hint} — a running lot keeps the agent it launched with`
   return hint
 }
 
 // Whether the whole `<select>` is inert: a running lot whose mode the runner
-// pinned (D13), and nothing else. A mid-`streaming` switch is *not* in here —
+// took at launch, and nothing else. A mid-`streaming` switch is *not* in here —
 // the server has always accepted an `agentMode` change at any point in a
 // thread, so switching simply cannot reach the turn already in flight.
 //
 // The batch half is a *rendering* rule; the behaviour lives in useBatch, which
-// resolves `LOT_TASK_MODE_ID` once per run into `state.pinnedMode` and reads it
-// per task turn. So the select is disabled while a lot runs for the honest
+// reads this selection once per run into `state.pinnedMode` and sends that id on
+// every task turn. So the select is disabled while a lot runs for the honest
 // reason: changing it can neither move the running lot nor the next task of it,
 // and leaving it live would advertise a power the dropdown does not have over
 // a lot.

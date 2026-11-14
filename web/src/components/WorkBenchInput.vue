@@ -133,8 +133,8 @@ const canRestart = computed(
 // has no effect on the turn already in flight (that request carried the agent
 // chosen when it was sent). **There is no mode lock** any more (§4.4): a thread
 // that has turned can move to any agent, including the app-owned one. What is
-// left of the disabling rules is the running lot, whose agent the runner pinned
-// at launch — a rendering rule the composable owns.
+// left of the disabling rules is the running lot, which took this selection at
+// launch and keeps it for every task — a rendering rule the composable owns.
 const modeTitle = computed(() => modeSelectTitle({ batchActive: batch.active }))
 const modeFindingsLine = computed(() => findingsLine())
 

@@ -24,14 +24,14 @@ const value = computed(() => Math.min(state.index, state.total))
 
 const caption = computed(() => `${state.prefix} · ${state.dir}`)
 
-// D13: one lot, one mode. The bar names the mode its turns run in, and when
-// the workspace has no `code` mode to pin it says so instead of pretending the
-// dropdown has anything to do with the run.
+// One lot, one agent: the one the composer's dropdown showed when the lot
+// launched. The bar names it, and a lot whose agent could not be resolved never
+// launched, so a running one always has an agent to name here.
 const modeCaption = computed(() => {
   if (state.modeNote) return state.modeNote
   if (!state.pinnedMode) return null
-  // The workspace's own label for the id the runner pinned — the dropdown and
-  // this line must not call the same agent by two names.
+  // The list's own label for the id the run holds — the dropdown and this line
+  // must not call the same agent by two names.
   const label = modeById(state.pinnedMode)?.label ?? state.pinnedMode
   return `tasks run in ${label} mode`
 })

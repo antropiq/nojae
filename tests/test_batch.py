@@ -528,9 +528,10 @@ def _chat_stream_stub(monkeypatch: pytest.MonkeyPatch, seen: Dict[str, Any]):
     monkeypatch.setattr(routes, "stream_chat", fake)
 
 
-#: The agent a lot pins at launch (``useBatch.LOT_TASK_MODE_ID``), and the one
-#: every chat turn here names: D5 made ``agentMode`` mandatory, so a request that
-#: intends to stream has to state it — which is exactly what the lot does.
+#: The agent every chat turn here names. A lot runs in the agent the composer's
+#: dropdown shows, so the id reaching the route is the user's choice, not one the
+#: runner picks; ``agentMode`` is mandatory either way, so a request that intends
+#: to stream has to state it.
 LOT_AGENT = "code"
 
 

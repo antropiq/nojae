@@ -680,12 +680,13 @@ is relaunched with a note saying why, up to three times, after which the lot
 aborts. Each relaunch first waits a rising interval (5s, then 15s, then 30s), so
 a slow trailing move or a brief network cut is absorbed rather than costing a
 wasted turn; Stop cuts the wait short. The agent is pinned when the lot launches
-— always **Code**, the agent the lot contract is written for — so moving the
-composer's choice mid-lot reaches no task, and a lot whose Code agent is missing
-or has no model refuses at launch rather than running under a stranger. The
-conversation is reset between tasks, and continuity comes from disk: git and the
-files that moved.
-Batch mode refuses to start unless the connectors it depends on are on.
+— the one the composer's dropdown shows, the same agent a standard session of that
+choice would run as — so moving the composer's choice mid-lot reaches no task, and
+a lot whose selected agent is missing or has no model refuses at launch rather
+than running under an agent nobody chose. The conversation is reset between tasks,
+and continuity comes from disk: git and the files that moved.
+Batch mode refuses to start unless the connectors it depends on are on, and unless
+the selected agent can reach them.
 
 Around the composer: the reasoning and tool panel (every tool call, its result
 and the server that answered), image attach when the model in view accepts images,

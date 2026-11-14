@@ -5,7 +5,7 @@ import {
   agentCanRun,
   agentModesLoaded,
   agentNoModelSentence,
-  modeById,
+  currentMode,
 } from './useAgentModes'
 
 // ---------------------------------------------------------------------------
@@ -94,14 +94,13 @@ export const REQUIRED_MCP_CONNECTORS = [
   { id: 'console', what: 'run mv into todos/done' },
 ]
 
-// The mode a lot runs its tasks in (D13). `code` is the *name* of the contract
-// — a lot executes coding tasks, so its turns must not inherit whatever the
-// composer happens to show, and they must not be at the mercy of a dropdown the
-// user moved while task 4 was streaming. The id is resolved against *this*
-// workspace's modes rather than being sent blind: a workspace whose author
-// renamed the coding mode has no `code`, and would silently get a different
-// agent for its tasks.
-export const LOT_TASK_MODE_ID = 'code'
+// A lot runs its tasks in **the agent the composer's dropdown shows** — one rule
+// for every kind of session, batch included: there is no agent a lot picks for
+// itself. What is pinned at launch (see `pinLotMode`) is that *selection*, so a
+// dropdown the user moves while task 4 is streaming reaches neither that turn nor
+// task 5. The id is read from the loaded agent list rather than sent blind, and
+// an unreadable list or an agent with no model is a **launch refusal**: the lot
+// never runs under an agent nobody chose.
 
 export function taskInstruction(taskLocation) {
   return TASK_INSTRUCTION_TEMPLATE.replace('<task_location>', taskLocation)
@@ -154,16 +153,16 @@ const state = reactive({
   // still there, so the task is relaunched) or null (the check could not run).
   outcomes: [],
   status: 'idle', // idle | running | stopped | failed | finished
-  // D13: the agent mode this lot's task turns run in, resolved once at launch
-  // (`LOT_TASK_MODE_ID` against this workspace's agents) and read per turn, so a
-  // dropdown change during task 7 cannot reach task 8. An unresolved pin is a
-  // **launch refusal** (task 12): D5 removed the server-side default an unpinned
-  // task turn used to lean on, so there is nothing safe to run under. Set only
-  // once `ensurePinnedAgentRunnable` has accepted the pin.
+  // The agent id this lot's task turns run in: the composer's dropdown selection,
+  // read once at launch (`pinLotMode`) and sent per turn from here, so a dropdown
+  // the user moves during task 7 cannot reach task 8. A selection that cannot run
+  // — an unreadable agent list, or an agent with no model — is a **launch
+  // refusal**: there is no other agent a lot may fall back on. Set only once
+  // `ensureSelectedAgentRunnable` has accepted it.
   pinnedMode: null,
-  // A quiet line in the batch status area, kept for a pinned mode's own note
-  // (none today): the unresolved-pin note became a refusal, so a running lot
-  // always has a resolved agent and nothing to explain here. null otherwise.
+  // A quiet line in the batch status area, kept for a run's own note (none
+  // today): a lot that could not resolve its agent never launched, so a running
+  // one always has an agent and nothing to explain here. null otherwise.
   modeNote: null,
 })
 
@@ -335,10 +334,10 @@ export function useBatch() {
   // snapshot could not load the request carries no filter at all (the server
   // keeps every activated connector), so there is nothing to judge.
   //
-  // The lot's pinned agent belongs to the *same* check: an agent whose
-  // `mcp_enable` is false makes those connectors unreachable for every task,
-  // which is the identical failure — one list, one reason, one place the user
-  // learns why Launch is disabled. Nothing is pinned here; this only judges.
+  // The agent the lot will run in — the dropdown's selection — belongs to the
+  // *same* check: an agent whose `mcp_enable` is false makes those connectors
+  // unreachable for every task, which is the identical failure — one list, one
+  // reason, one place the user learns why Launch is disabled. This only judges.
   function ensureToolsAvailable() {
     const needs = []
     const fixes = []
@@ -360,10 +359,10 @@ export function useBatch() {
     const mode = lotMode()
     if (mode && mode.mcpEnable === false) {
       needs.push(
-        `a \`${LOT_TASK_MODE_ID}\` mode with MCP tools — this one has none, ` +
-          'so a task could not move its own file',
+        `agent ${mode.label} to have MCP tools — it has none, so a task could ` +
+          'not move its own file',
       )
-      fixes.push('switch the WorkBench dropdown to a mode that has tools')
+      fixes.push('switch the WorkBench dropdown to an agent that has tools')
     }
     if (!needs.length) return true
     fail(
@@ -373,23 +372,22 @@ export function useBatch() {
     return false
   }
 
-  // The workspace's mode a lot runs its tasks in, or null when there is none to
-  // pin — the agents list could not be read, or this store does not hold the
-  // coding agent. Never a guess: the id is the app's contract
-  // (`LOT_TASK_MODE_ID`), the rows belong to the install.
+  // The agent a lot runs its tasks in — the composer's dropdown selection — or
+  // null when there is none to run as: the agents list could not be read, or the
+  // selection names a row the list no longer holds. Never a guess and never an
+  // agent of the runner's own choosing.
   function lotMode() {
-    return agentModesLoaded() ? modeById(LOT_TASK_MODE_ID) : null
+    return agentModesLoaded() ? currentMode() : null
   }
 
-  // §5.4's new launch gate: the lot must have an agent it can pin, and that
-  // agent must have a model. Two refusals, neither of which existed before —
-  // D5 left no server-side default for an unpinned task turn, and nothing was
-  // unrunnable while one connection answered every agent.
+  // The launch gate for the agent: the lot must have one, and that agent must
+  // have a model. A lot has no agent of its own to fall back on, so both
+  // refusals are about the selection the user is looking at.
   //
-  // An unreadable store is the same refusal as a missing agent: the pin is
-  // `code`, built-ins cannot be deleted (D4), so neither surviving state can be
-  // answered by quietly running the lot under another agent.
-  function ensurePinnedAgentRunnable() {
+  // An unreadable list is the same refusal as an unresolvable selection: either
+  // way the app cannot name the agent the lot would run under, and running the
+  // lot under an agent nobody chose is what the rule forbids.
+  function ensureSelectedAgentRunnable() {
     const mode = lotMode()
     if (mode) {
       if (agentCanRun(mode)) return true
@@ -397,22 +395,23 @@ export function useBatch() {
       return false
     }
     const why = agentModesLoaded()
-      ? `this store has no "${LOT_TASK_MODE_ID}" agent`
+      ? 'the agent selected in the WorkBench dropdown is not one this ' +
+        'installation has'
       : 'the agent list could not be read'
     fail(
-      `Batch mode needs the "${LOT_TASK_MODE_ID}" agent it pins at launch, but ` +
-        `${why} — the lot cannot run without the agent it pins. Fix the agent ` +
-        'list, then launch again.',
+      `Batch mode runs in the agent selected in the WorkBench dropdown, but ` +
+        `${why} — the lot cannot launch without an agent to run it. Fix that, ` +
+        'then launch again.',
     )
     return false
   }
 
-  // Hold the accepted pin for the whole run. It is read per turn — never copied
-  // into the composer's selection — so a dropdown change during task 7 cannot
-  // reach task 8. `ensurePinnedAgentRunnable` ran first, so there is no
-  // unresolved case left to explain.
+  // Hold the accepted agent for the whole run. The composer's selection is read
+  // **once, here**, and each turn sends what was read — so a dropdown change
+  // during task 7 cannot reach task 8. `ensureSelectedAgentRunnable` ran first,
+  // so there is no unresolved case left to explain.
   function pinLotMode() {
-    state.pinnedMode = LOT_TASK_MODE_ID
+    state.pinnedMode = lotMode().id
     state.modeNote = null
   }
 
@@ -515,9 +514,9 @@ export function useBatch() {
   // `attempt` is how many times this task has already been relaunched: it only
   // selects the message text (the retry note), never a different flow.
   //
-  // The turn carries the lot's pinned mode (D13), read fresh each turn and
-  // never the composer's selection: every task of one lot runs under one set of
-  // rules whatever the dropdown is showing while they stream. The pin is always
+  // The turn carries the agent the lot launched with (`pinLotMode` read the
+  // dropdown's selection once): every task of one lot runs under one agent
+  // whatever the dropdown is showing while they stream. That id is always
   // resolved by the time a turn runs — launch refuses otherwise — so this never
   // sends a turn without an `agentMode`.
   async function runOneTurn(task, attempt = 0) {
@@ -577,18 +576,14 @@ export function useBatch() {
     if (state.active || !canLaunch.value) return // one batch at a time
     if (!ensureFreshChat()) return
     if (!ensureToolsAvailable()) return
-    // §5.4: an agent with no model cannot run a task, and an unresolved pin
-    // cannot run one either since D5 removed the default an unpinned turn
-    // leaned on. Both stop the lot here, before anything is pinned or sent.
-    if (!ensurePinnedAgentRunnable()) return
-    // Resolved once per run, after the refusals (a lot that never launched owns
-    // no pin) and read per turn (see `runOneTurn`) — so a dropdown change
-    // during task 7 cannot reach task 8. The D13 lock can never conflict with
-    // it: a lot starts on an empty thread and every task turn begins on one,
-    // and a thread with no turns holds no lock — so the mode the lot was
-    // *authored* in was already released before the first task turn. A lot
-    // never runs as that mode; it runs in this one, which is also why the
-    // composer's select is inert for the whole run (am-07's rendering rule).
+    // An agent with no model — or no agent at all — cannot run a task, so both
+    // refusals stop the lot here, before anything is held or sent.
+    if (!ensureSelectedAgentRunnable()) return
+    // The dropdown's selection is read once per run, after the refusals (a lot
+    // that never launched owns no agent), and each turn sends what was read (see
+    // `runOneTurn`) — so a dropdown change during task 7 cannot reach task 8.
+    // That is also why the composer's select is inert for the whole run: moving
+    // it could reach neither the streaming turn nor the next task of the lot.
     pinLotMode()
 
     const tasks = state.listing.tasks

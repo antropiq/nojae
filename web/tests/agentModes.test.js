@@ -486,13 +486,13 @@ describe('the mode hint', () => {
     expect(modeHint('architect')).toBe('Architect — MCP available')
   })
 
-  it('the select explains the batch pin, and says nothing about a fixed mode', async () => {
+  it('the select explains a running lot, and says nothing about a fixed mode', async () => {
     stubRoutes()
     await loadAgentModes()
     expect(modeSelectTitle()).toBe('Code — MCP and language servers available')
     batch.active = true
     expect(modeSelectTitle({ batchActive: true })).toContain(
-      'a running batch picks its own mode',
+      'a running lot keeps the agent it launched with',
     )
     batch.active = false
     // No agent locks any more (§4.4), so the tooltip has no fixed-mode sentence

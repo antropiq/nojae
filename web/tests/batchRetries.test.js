@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  LOT_TASK_MODE_ID,
   MAX_TASK_RETRIES,
   RETRY_NOTE_TEMPLATE,
   TASK_INSTRUCTION_TEMPLATE,
@@ -270,41 +269,41 @@ function stubRoutes({
   })
 }
 
-async function seedLot(tasks) {
+async function seedLot(tasks, { agent = 'code' } = {}) {
   batch.listing = listingOf(tasks)
-  // A lot now refuses to launch without a resolved pin (task 12), so every case
-  // that intends to run one starts from the readable list its stub answers. A
-  // case that wants the unreadable state loads `modes: null` itself; `loaded`
-  // then stays false and this retry cannot mask it.
+  // A lot runs in the agent the composer's dropdown shows, and refuses to launch
+  // when that agent cannot run, so every case that intends to run one starts
+  // from the readable list its stub answers *and* a selection that has tools and
+  // a model. A case that wants another selection sets it after this call; a case
+  // that wants the unreadable list loads `modes: null` itself, and `loaded` then
+  // stays false so this cannot mask it.
   if (!agentModes.loaded) await loadAgentModes()
+  setAgentMode(agent)
 }
 
 // An agents payload in the shape `GET /api/agents` answers since appdb-10. The
 // app-owned agent is spelled with a stand-in id here too: this file may not name
 // it either, for the same reason `web/src` may not (the scan in
 // agentModes.test.js reads the id out of the Python module).
-function seededModesBody({ codeMcpTools = true, withoutCodeMode = false, codeWithoutModel = false } = {}) {
+function seededModesBody({ noModelFor = null, chatMcpTools = false } = {}) {
   const rows = [
-    { id: 'chat', label: 'Chat', mcpEnable: false, lspEnable: false, readonly: false },
     {
-      id: LOT_TASK_MODE_ID,
-      label: 'Code',
-      mcpEnable: codeMcpTools,
-      lspEnable: true,
+      id: 'chat',
+      label: 'Chat',
+      mcpEnable: chatMcpTools,
+      lspEnable: false,
       readonly: false,
     },
+    { id: 'code', label: 'Code', mcpEnable: true, lspEnable: true, readonly: false },
     { id: 'architect', label: 'Architect', mcpEnable: true, lspEnable: false, readonly: false },
     { id: 'reserved-mode-under-test', label: 'Reserved', mcpEnable: true, lspEnable: false, readonly: true },
   ]
-  // The list the lot's own dropdown reads: `chat` first, so a launch that does
-  // *not* pin would send that one — which is what makes the pin assertions below
-  // mean something (the store has no default agent to fall back on, D5).
+  // The list the composer's dropdown reads: `chat` first, so the agent a lot
+  // runs in is never just "the first row" — `seedLot` has to select one, and the
+  // cases below prove the turn carries *that* selection.
   return {
-    agents: (withoutCodeMode
-      ? rows.filter((row) => row.id !== LOT_TASK_MODE_ID)
-      : rows
-    ).map((row, index) => {
-      const modelId = codeWithoutModel && row.id === LOT_TASK_MODE_ID ? null : index + 1
+    agents: rows.map((row, index) => {
+      const modelId = row.id === noModelFor ? null : index + 1
       return {
         ...row,
         maxToolIteration: 25,
@@ -530,41 +529,53 @@ describe('the loop relaunches a task whose file never left the lot', () => {
 })
 
 // ---------------------------------------------------------------------------
-// D13 — the runner pins its own mode. A lot is authored in the app-owned,
-// contract-owning mode and *executed* by the runner, so its turns run under the
-// workspace's `code` mode regardless of what the composer's dropdown shows — and
-// the dropdown cannot change anything mid-lot.
+// One rule for every session: a lot runs in the agent the composer's dropdown
+// shows. The id is read once at launch and carried by every task turn, so the
+// dropdown cannot change anything mid-lot — and a selection that cannot run is
+// a launch refusal, never a lot that runs under an agent nobody chose.
 
-describe('the lot pins its mode', () => {
+describe('the lot runs in the selected agent', () => {
   beforeEach(reset)
 
-  // Every task request carries the pinned id, and only that one — the loop
-  // reads `state.pinnedMode` per turn rather than the composer's selection.
-  it('launch resolves the mode once and every task turn carries it', async () => {
+  // The reported bug: pick a non-`code` agent in the dropdown, launch a lot.
+  // Every task turn must carry *that* agent — the same persona, model and hub
+  // gating as a standard session of the same selection.
+  it('the agent selected in the dropdown runs every task turn', async () => {
     const sent = []
     const payloads = []
     const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
     stubRoutes({ sent, payloads, tasks })
-    await loadAgentModes()
-    // The user was drafting the lot in another mode before opening Batch.
-    setAgentMode('architect')
-    await seedLot(tasks)
+    await seedLot(tasks, { agent: 'architect' })
 
     await launch()
 
-    expect(batch.pinnedMode).toBe(LOT_TASK_MODE_ID)
+    expect(batch.pinnedMode).toBe('architect')
     expect(batch.modeNote).toBeNull()
     expect(payloads).toHaveLength(2)
     for (const payload of payloads) {
-      expect(payload.agentMode).toBe(LOT_TASK_MODE_ID)
+      expect(payload.agentMode).toBe('architect')
     }
-    // The composer's own selection is untouched by the pin: the select shows
-    // what the *human* picked, and is inert while the lot runs.
-    expect(agentModes.current).toBe('architect')
   })
 
-  // The reason the pin is state and not an argument: a dropdown change between
-  // two turns must not reach the next one.
+  // The selection is never a default either: with nothing chosen by hand, the
+  // list's first row answers — the same selection a standard session sends.
+  it("a lot launched on the list's first agent sends that one", async () => {
+    const sent = []
+    const payloads = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({ sent, payloads, tasks, modes: seededModesBody({ chatMcpTools: true }) })
+    await loadAgentModes()
+    batch.listing = listingOf(tasks) // no setAgentMode: the first row is selected
+    expect(agentModes.current).toBe('chat')
+
+    await launch()
+
+    expect(payloads).toHaveLength(1)
+    expect(payloads[0].agentMode).toBe('chat')
+  })
+
+  // The reason the selection is held in state and not read per turn: a dropdown
+  // change between two turns must not reach the next one.
   it('a dropdown change mid-run cannot reach the next task', async () => {
     const sent = []
     const payloads = []
@@ -573,30 +584,30 @@ describe('the lot pins its mode', () => {
       sent,
       payloads,
       tasks,
-      // Task 1's turn ends; the human switches mode before task 2 is sent.
+      // Task 1's turn ends; the human switches agent before task 2 is sent.
       duringTurn: () => setAgentMode('chat'),
     })
-    await loadAgentModes()
-    await seedLot(tasks)
+    await seedLot(tasks, { agent: 'code' })
 
     await launch()
 
     expect(payloads).toHaveLength(2)
-    expect(payloads[0].agentMode).toBe(LOT_TASK_MODE_ID)
-    expect(payloads[1].agentMode).toBe(LOT_TASK_MODE_ID)
+    expect(payloads[0].agentMode).toBe('code')
+    expect(payloads[1].agentMode).toBe('code')
     expect(agentModes.current).toBe('chat')
   })
 
-  // A store with no coding agent is now a launch refusal: D5 left no
-  // server-side default an unpinned task turn could fall back on, so launching
-  // would only fail on the first task anyway (task 12).
-  it('a store with no code agent refuses to launch, naming the pin', async () => {
+  // A selection naming a row the list does not hold (a remembered id after a
+  // delete) is a refusal: the app cannot name the agent the lot would run under,
+  // and choosing one for the user is exactly what the rule forbids.
+  it('an unresolvable selection refuses to launch', async () => {
     const sent = []
     const payloads = []
     const tasks = [task(1, 'ed-01-a.md')]
-    stubRoutes({ sent, payloads, tasks, modes: seededModesBody({ withoutCodeMode: true }) })
+    stubRoutes({ sent, payloads, tasks })
     await loadAgentModes()
-    await seedLot(tasks)
+    batch.listing = listingOf(tasks)
+    agentModes.current = 'gone-agent'
 
     await launch()
 
@@ -604,20 +615,18 @@ describe('the lot pins its mode', () => {
     expect(payloads).toEqual([])
     expect(batch.active).toBe(false)
     expect(batch.pinnedMode).toBeNull()
-    expect(chat.error).toContain(`"${LOT_TASK_MODE_ID}"`)
-    expect(chat.error).toContain('has no')
+    expect(chat.error).toContain('selected in the WorkBench dropdown')
+    expect(chat.error).toContain('is not one this installation has')
   })
 
-  // The other unresolved pin: a list that could not be read at all. Same
-  // refusal, because the store being unreadable is the only remaining cause
-  // (built-ins cannot be deleted, D4) and running under a stranger is worse.
+  // The other unresolvable selection: a list that could not be read at all.
   it('an unreadable agent list refuses to launch', async () => {
     const sent = []
     const payloads = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, payloads, tasks, modes: null })
     await loadAgentModes()
-    await seedLot(tasks)
+    batch.listing = listingOf(tasks)
 
     await launch()
 
@@ -628,48 +637,46 @@ describe('the lot pins its mode', () => {
     expect(chat.error).toContain('could not be read')
   })
 
-  // New only because nothing was unrunnable before: the pinned agent's model is
-  // the model every task turn runs on (§6), so a null one stops the lot.
-  it('a pinned agent with no model refuses with the sentence naming it', async () => {
+  // The selected agent's model is the model every task turn runs on, so a null
+  // one stops the lot — with the sentence naming that agent.
+  it('a selected agent with no model refuses with the sentence naming it', async () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({
       sent,
       tasks,
-      modes: seededModesBody({ codeWithoutModel: true }),
+      modes: seededModesBody({ noModelFor: 'architect' }),
     })
-    await loadAgentModes()
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: true }
-    await seedLot(tasks)
+    await seedLot(tasks, { agent: 'architect' })
 
     await launch()
 
     expect(sent).toEqual([])
     expect(batch.active).toBe(false)
     expect(batch.pinnedMode).toBeNull()
-    expect(chat.error).toContain('Code')
+    expect(chat.error).toContain('Architect')
     expect(chat.error).toContain('no model')
     expect(chat.error).toContain('assign a model')
   })
 
-  // The §1 clause: the mode gate joins the *existing* connector list rather
-  // than becoming a second guard, so one message explains one dead lot. Here the
-  // connectors are all ticked, so the mode is the only thing wrong.
-  it('a code mode with no MCP tools is reported in the launch guard', async () => {
+  // The agent gate joins the *existing* connector list rather than becoming a
+  // second guard, so one message explains one dead lot. Here the connectors are
+  // all ticked, so the selected agent's own hub switch is the only thing wrong.
+  it('a selected agent with no MCP tools is reported in the launch guard', async () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md')]
-    stubRoutes({ sent, tasks, modes: seededModesBody({ codeMcpTools: false }) })
-    await loadAgentModes()
+    stubRoutes({ sent, tasks })
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: true }
-    await seedLot(tasks)
+    await seedLot(tasks, { agent: 'chat' }) // the tools-off row of the seeded list
 
     await launch()
 
-    expect(chat.error).toContain(LOT_TASK_MODE_ID)
+    expect(chat.error).toContain('Chat')
     expect(chat.error).toContain('MCP tools')
-    // Nothing ran, and no pin was kept for a lot that never launched.
+    // Nothing ran, and no agent was kept for a lot that never launched.
     expect(sent).toEqual([])
     expect(batch.active).toBe(false)
     expect(batch.pinnedMode).toBeNull()
@@ -677,20 +684,19 @@ describe('the lot pins its mode', () => {
 
   // ...and it lands in the same sentence as missing connectors — one list, one
   // reason, one place the user learns why Launch did nothing.
-  it('a missing connector and a tools-off mode are one message', async () => {
+  it('a missing connector and a tools-off agent are one message', async () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md')]
-    stubRoutes({ sent, tasks, modes: seededModesBody({ codeMcpTools: false }) })
-    await loadAgentModes()
+    stubRoutes({ sent, tasks })
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: false }
-    await seedLot(tasks)
+    await seedLot(tasks, { agent: 'chat' })
 
     await launch()
 
     expect(chat.error).toContain('console')
-    expect(chat.error).toContain(LOT_TASK_MODE_ID)
-    // One sentence, not two refusals: the connector list and the mode clause
+    expect(chat.error).toContain('Chat')
+    // One sentence, not two refusals: the connector list and the agent clause
     // are joined by one "and", and both fixes are in the same tail.
     expect(chat.error.match(/Batch mode needs/g)).toHaveLength(1)
     expect(chat.error.indexOf(' and ') < chat.error.indexOf(' — ')).toBe(true)
@@ -700,13 +706,12 @@ describe('the lot pins its mode', () => {
     expect(chat.error).toContain('dropdown')
   })
 
-  // A pinned mode whose hub is open costs nothing: the guard stays quiet about
-  // modes when there is nothing wrong with them.
-  it('a tools-on code mode passes the guard that the connectors alone pass', async () => {
+  // An agent whose hub is open costs nothing: the guard stays quiet about agents
+  // when there is nothing wrong with them.
+  it('a tools-on agent passes the guard that the connectors alone pass', async () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, tasks })
-    await loadAgentModes()
     chat.mcp.loaded = true
     chat.mcp.enabled = { fedit: true, console: true }
     await seedLot(tasks)
@@ -717,17 +722,16 @@ describe('the lot pins its mode', () => {
     expect(sent).toHaveLength(1)
   })
 
-  // The pin belongs to one run: Restart (B15) forgets it, so the next lot
-  // re-resolves it against whatever the modes file says by then.
-  it('clearing a run drops the pin', async () => {
+  // The held agent belongs to one run: Restart (B15) forgets it, so the next lot
+  // reads the dropdown again.
+  it('clearing a run drops the held agent', async () => {
     const sent = []
     const tasks = [task(1, 'ed-01-a.md')]
     stubRoutes({ sent, tasks, movedAfter: { 1: Infinity } })
-    await loadAgentModes()
-    await seedLot(tasks)
+    await seedLot(tasks, { agent: 'code' })
 
     await launch()
-    expect(batch.pinnedMode).toBe(LOT_TASK_MODE_ID)
+    expect(batch.pinnedMode).toBe('code')
 
     useBatch().clearBatchRun()
     expect(batch.pinnedMode).toBeNull()
