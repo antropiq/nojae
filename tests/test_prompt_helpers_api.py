@@ -296,11 +296,15 @@ class TestTheStreamingGateStaysAsItIs:
     D7's resolve-once-at-turn-start makes a mid-turn bullet save harmless by
     construction, so the gate the Editor's writes and the modes save ask does not
     belong here — and no new route gains it.
+
+    The armed entry is a **workspace-keyed** one (clws-04): the in-flight map
+    holds a reply and the folder it is about, and these routes ask that question
+    of no folder at all — they are the installation's.
     """
 
     def test_a_write_lands_while_a_reply_streams(self, client: TestClient):
         armed = object()
-        routes._CHAT_TASKS.add(armed)
+        routes._CHAT_TASKS[armed] = "/some/workspace/in/scope"
         try:
             assert client.post(
                 "/api/prompt-helpers/add", json={"color": "#ff0000", "content": "mid-turn"}
@@ -313,7 +317,7 @@ class TestTheStreamingGateStaysAsItIs:
                 "/api/prompt-helpers/delete", json={"id": 2}
             ).status_code == 200
         finally:
-            routes._CHAT_TASKS.discard(armed)
+            routes._CHAT_TASKS.pop(armed, None)
 
 
 class TestTheFileIsGone:
@@ -329,36 +333,58 @@ class TestTheFileIsGone:
         # writes.
         assert response.status_code in (404, 405)
 
-    def test_the_working_location_payload_carries_no_helpers_block(
+    def test_the_workspace_payload_carries_no_helpers_block(
         self, client: TestClient, tmp_path: Path
     ):
+        """clws-02: the folder read is ``GET /api/workspace``, and it says nothing
+        about the bullets — they are rows of the install's store (D11)."""
+        from tests.conftest import workspace_params
+
         target = tmp_path / "another-project"
         target.mkdir()
 
-        body = client.get("/api/path-location").json()
+        body = client.get(
+            "/api/workspace", params=workspace_params(target)
+        ).json()
         assert "promptHelpers" not in body
 
-        switched = client.post("/api/path-location", json={"path": str(target)})
-        assert switched.status_code == 200
-        assert "promptHelpers" not in switched.json()
+    def test_naming_a_workspace_leaves_no_helpers_file_behind(
+        self, client: TestClient, tmp_path: Path
+    ):
+        """The read half, with no switch in front of it any more.
 
-    def test_a_switch_leaves_no_helpers_file_behind(self, client: TestClient,
-                                                    tmp_path: Path):
-        target = tmp_path / "seeded-project"
+        The route that *set* the working location is gone (clws-02), so the
+        folder is only ever **named** by a request — and naming one is a read
+        that must not leave a file in a project someone meant to browse.
+        """
+        from tests.conftest import workspace_params
+
+        target = tmp_path / "named-project"
         target.mkdir()
 
-        assert client.post("/api/path-location", json={"path": str(target)}).status_code == 200
+        assert (
+            client.get("/api/workspace", params=workspace_params(target)).status_code
+            == 200
+        )
 
         helpers = list(target.rglob("prompt-helpers.json"))
         assert helpers == []
 
     def test_the_bullets_are_the_same_in_every_workspace(self, client: TestClient,
                                                          tmp_path: Path):
-        """D11, at the route: the row is the user's, not the tree's."""
+        """D11, at the route: the row is the user's, not the tree's.
+
+        Two folders named in two requests, and the read answers the same rows
+        both times — the bullets never travel with a workspace.
+        """
+        from tests.conftest import workspace_params
+
         client.post("/api/prompt-helpers/save", json={"id": 1, "color": "#ff0000", "content": "mine"})
-        target = tmp_path / "next-project"
-        target.mkdir()
+        first = tmp_path / "first-project"
+        second = tmp_path / "next-project"
+        first.mkdir()
+        second.mkdir()
 
-        client.post("/api/path-location", json={"path": str(target)})
-
-        assert client.get("/api/prompt-helpers").json()["slots"][0]["content"] == "mine"
+        for root in (first, second):
+            client.get("/api/workspace", params=workspace_params(root))
+            assert client.get("/api/prompt-helpers").json()["slots"][0]["content"] == "mine"

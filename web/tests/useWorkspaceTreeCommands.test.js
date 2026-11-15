@@ -11,6 +11,12 @@ import { useEditorCreate } from '../src/composables/useEditorCreate'
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorRename } from '../src/composables/useEditorRename'
 import { treeMenuItemIds, treeMenuItems } from '../src/lib/tree-menu'
+import {
+  pointTabAt,
+  routeOf,
+  withoutWorkspace,
+  withWorkspace,
+} from './helpers/workspace-url'
 
 // ---------------------------------------------------------------------------
 // The tree as the *place commands are issued from*: one subject (the focused
@@ -43,7 +49,10 @@ const LISTINGS = {
 
 function stubListings(listings = LISTINGS) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
-    const key = String(url)
+    // Matched on the URL **minus** the workspace field, which every request now
+    // carries (clws-02) — the suite spells the field no more than the client
+    // does.
+    const key = withoutWorkspace(url)
     for (const [path, entries] of Object.entries(listings)) {
       if (key === `/api/fs/tree?path=${encodeURIComponent(path)}`) {
         return jsonResponse({ path, workspace: '/w', entries, truncated: false })
@@ -65,7 +74,30 @@ async function loaded() {
   tree.expand('src/core')
 }
 
+// Every listing the tree asks for names **this tab's** folder (clws-02): the
+// field is what makes two tabs on two folders each see their own tree, and the
+// URL a call site builds is the only place that can be asserted client-side.
+describe('the field every request carries', () => {
+  beforeEach(() => {
+    resetState()
+    vi.restoreAllMocks()
+  })
+
+  it('names the tab workspace on every listing it asks for', async () => {
+    const fetchMock = stubListings(LISTINGS)
+    await loaded()
+
+    const asked = fetchMock.mock.calls.filter(([url]) => routeOf(url) === '/api/fs/tree')
+    expect(asked.length).toBeGreaterThan(0)
+    for (const [url] of asked) {
+      expect(url).toBe(withWorkspace(withoutWorkspace(url)))
+    }
+  })
+})
+
 function resetState() {
+  // The tab has a folder, so every request below carries the field (clws-02).
+  pointTabAt('/w')
   tree.state.nodes = {}
   tree.state.expanded = { '': true }
   tree.state.focused = ''
@@ -354,8 +386,9 @@ describe('the children flag: no listing may lie about a folder', () => {
     await loaded()
     const listed = () =>
       fetchMock.mock.calls
-        .filter(([url]) => String(url).startsWith('/api/fs/tree'))
-        .map(([url]) => decodeURIComponent(String(url)).replace('/api/fs/tree?path=', ''))
+        .map(([url]) => withoutWorkspace(url))
+        .filter((url) => url.startsWith('/api/fs/tree'))
+        .map((url) => decodeURIComponent(url).replace('/api/fs/tree?path=', ''))
     const before = listed().length
 
     // src/a.py: the row of `src` lives in the root listing, which the mutation
@@ -384,7 +417,7 @@ describe('the children flag: no listing may lie about a folder', () => {
     tree.state.focused = 'src'
 
     vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
-      if (String(url).startsWith('/api/fs/file') && init?.method === 'DELETE') {
+      if (routeOf(url) === '/api/fs/file' && init?.method === 'DELETE') {
         return jsonResponse({ path: 'src', dir: true, entries: 2, trashedTo: '.nojae/trash/ab/src' })
       }
       return jsonResponse({
@@ -617,7 +650,7 @@ describe('one name input, two modes', () => {
       fetchMock.mock.calls.filter(
         ([url, init]) =>
           init?.method === 'POST' &&
-          (String(url) === '/api/fs/create' || String(url) === '/api/fs/rename'),
+          (routeOf(url) === '/api/fs/create' || routeOf(url) === '/api/fs/rename'),
       ),
     ).toHaveLength(0)
   })

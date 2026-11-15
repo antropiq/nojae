@@ -19,8 +19,8 @@ are not:
 
 The workspace root itself is additionally checked against the LSP
 workspace-root deny-list (``lsp_connectors/restricted-paths.txt``), the same
-guard ``POST /api/path-location`` applies when the location is set — so the
-tree inherits it for free and cannot browse a tree a language server is
+guard :func:`src.core.workspace.resolve` applies to the folder a request names —
+so the tree inherits it for free and cannot browse a tree a language server is
 forbidden to index.
 
 A mutation checks the whole ancestor **chain**, not just the leaf: a write
@@ -63,7 +63,7 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple
 
-from src.config import path_location
+from src.core import workspace
 
 from . import fscase
 from .constants import path_norm, policy_shared as shared
@@ -152,8 +152,19 @@ def hidden_error(normalised: str, *, for_write: bool) -> WorkspacePathError:
 
 
 def workspace_root() -> str:
-    """The active workspace: ``path_location()``, fully resolved."""
-    return os.path.realpath(path_location())
+    """The active workspace: the seam's scope, fully resolved.
+
+    Since clws-01 this is :func:`src.core.workspace.current_root` — the folder
+    the **request** named, not the folder the process holds. Every module of this
+    package already reaches the root through this one accessor, so moving the
+    answer here moved all of them: the tree, the reads, the search, the verdict
+    and the per-root caches (which key on the resolved root, so a second
+    workspace simply gets its own entry).
+
+    The seam hands back a canonical path already, so no ``realpath`` is applied
+    a second time.
+    """
+    return workspace.current_root()
 
 
 def _is_within(parent: str, child: str, *, fold: bool) -> bool:
@@ -225,9 +236,10 @@ def _absolute_parts(text: str) -> Tuple[str, ...]:
 def _check_workspace_root() -> str:
     """The workspace root, refused when it sits on the LSP root deny-list.
 
-    ``POST /path-location`` already refuses such a value, but the environment
-    can also be set by hand before boot — the tree must not become a way to
-    browse a location the app itself would have rejected.
+    :func:`src.core.workspace.resolve` refuses such a folder for every request
+    that names one, but the interim default comes from the environment, which
+    can be set by hand before boot — the tree must not become a way to browse a
+    location the app itself would have rejected.
     """
     # Imported lazily: the editorfs surface must stay usable when the optional
     # [lsp] extra (and so parts of lsphub) are not installed.
@@ -263,7 +275,7 @@ def _qualified_refusal(text: str, rel: Optional[str]) -> WorkspacePathError:
     has to be refused whatever the working location is, and that is the one
     clause the browser and the tests both match on.
     """
-    workspace = path_location()
+    root = workspace_root()
     backslash = "\\"
     # The leading-separator shapes are read off the caller's own text, so a UNC
     # root keeps its name (``canonical_rel`` collapses ``//srv/share`` to a
@@ -295,7 +307,7 @@ def _qualified_refusal(text: str, rel: Optional[str]) -> WorkspacePathError:
     return WorkspacePathError(
         422,
         f"Path must be relative to the workspace: {rel!r} — {reason} "
-        f"(workspace {workspace})",
+        f"(workspace {root})",
     )
 
 
@@ -334,7 +346,7 @@ def normalise_rel(rel: Optional[str]) -> str:
             422,
             f"Path must be relative to the workspace: {rel} — a leading '~' is "
             f"a home directory the workspace does not own, and it is not expanded "
-            f"(workspace {path_location()})",
+            f"(workspace {workspace_root()})",
         )
     normalised = path_norm.canonical_rel(text)
     if normalised in ("", "."):
@@ -352,13 +364,16 @@ def _resolve(normalised: str, *, for_write: bool) -> Path:
     the policy says* about it. An ``ro`` path is a refusal only for a write —
     reading it is the whole point of marking it read-only.
     """
-    workspace = _check_workspace_root()
-    candidate = os.path.realpath(os.path.join(workspace, normalised))
-    if not _is_within(workspace, candidate, fold=fscase.case_folded(workspace)):
+    # ``root``, not ``workspace``: this module imports the seam under that name,
+    # and a local of the same name would shadow it for the whole function — the
+    # kind of bug that reads fine and outlives the function it was safe in.
+    root = _check_workspace_root()
+    candidate = os.path.realpath(os.path.join(root, normalised))
+    if not _is_within(root, candidate, fold=fscase.case_folded(root)):
         raise WorkspacePathError(
             422,
             f"Path is outside the working location: {normalised} "
-            f"(workspace {workspace})",
+            f"(workspace {root})",
         )
     verdict = _verdict(normalised)
     if verdict.mode == shared.HIDDEN:

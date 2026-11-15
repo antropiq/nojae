@@ -25,7 +25,7 @@ from typing import Dict, List
 import pytest
 
 from mcp_connectors import gitbash as probe
-from tests.conftest import selected_shell, shell_probe
+from tests.conftest import scoped, selected_shell, shell_probe
 from src.core.termhub import drivers, shells
 from src.core.termhub import session as terminal_session
 from src.core.termhub.session import TerminalUnsupported
@@ -376,7 +376,6 @@ class TestSpawnAsksTheSeam:
     def test_the_windows_spec_and_environment_reach_popen(
         self, monkeypatch, tmp_path, no_git_on_path
     ):
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         root = fake_git_tree(tmp_path / "Git")
         monkeypatch.setattr(shells, "GIT_INSTALL_CANDIDATES", [str(root)])
         # The session asks select_shell() with no arguments, so the platform the
@@ -408,8 +407,9 @@ class TestSpawnAsksTheSeam:
             pass
 
         live = terminal_session.TerminalSession(emit)
-        with pytest.raises(OSError):
-            live.spawn(cols=100, rows=30)
+        with scoped(tmp_path):
+            with pytest.raises(OSError):
+                live.spawn(cols=100, rows=30)
         # The argv is the seam's spec, flag and all — session.py no longer spells
         # it out, and self.shell (the `open` frame) names the program.
         assert started["argv"] == [os.path.join(str(root), "bin", "bash.exe"), "-i"]

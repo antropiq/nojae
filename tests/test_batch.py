@@ -1,16 +1,19 @@
 """Tests for batch mode's backend surface: the lot listing, ``batchContext``
 and the ``POST /run`` exclusion of a streaming chat reply.
 
-The workspace is always a throw-away ``tmp_path`` pointed at by
-``NOJAE_PATH_LOCATION`` (the pattern ``tests/test_api.py`` uses for the
-hub endpoints), so nothing here reads the repository's own ``todos/``.
+**The lot is one folder's lot** (clws-09, spec §5.7 rule 32): every request here
+names its workspace through :func:`~tests.conftest.workspace_params` — the
+harness's one spelling of the field — so what is measured is the field and never
+the lot's interim environment fallback. The folder is always a throw-away
+``tmp_path`` one, so nothing here reads the repository's own ``todos/``.
 """
 
+import ast
 import json
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +23,40 @@ from src.api.server import create_app
 from src.core import batch as batch_core
 from src.core import chat as chat_core
 from src.core import agent_modes_defaults as modes_defaults
+from src.core import workspace as workspace_seam
+from tests.conftest import WorkspaceClient, workspace_params
+
+#: The checkout, for the one structural case below: it reads ``routes.py`` as
+#: text to check that both batch routes go through the seam's reader. Nothing
+#: here touches this checkout's ``todos/`` — every folder under test is a
+#: ``tmp_path`` one (spec: "tests stay hermetic").
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def route_registrations(source_text: str) -> List[Dict[str, Any]]:
+    """Every route ``routes.py`` registers, as ``{"verb", "path", "handler"}``.
+
+    Read out of the decorator call rather than matched as a substring, so what is
+    judged is the *registration* — a docstring naming a route cannot trip the
+    guard, and a new route cannot hide from it. The same helper
+    ``tests/test_workspace_seam.py`` uses, for the same reason.
+    """
+    found: List[Dict[str, Any]] = []
+    for node in ast.walk(ast.parse(source_text)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            call = decorator if isinstance(decorator, ast.Call) else None
+            if call is None or not isinstance(call.func, ast.Attribute):
+                continue
+            if not call.args or not isinstance(call.args[0], ast.Constant):
+                continue
+            route_path = call.args[0].value
+            if isinstance(route_path, str):
+                found.append(
+                    {"verb": call.func.attr, "path": route_path, "handler": node}
+                )
+    return found
 
 
 def make_lot(
@@ -43,17 +80,33 @@ def make_lot(
 
 
 @pytest.fixture
-def batch_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """App whose working location (and so its lot folder) is ``tmp_path``."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+def batch_client(tmp_path: Path):
+    """The app, naming ``tmp_path`` on every request it makes.
+
+    Wrapped in :class:`~tests.conftest.WorkspaceClient` (clws-09): a suite whose
+    client names its folder cannot send a workspace-scoped request that names
+    none, so what these rows measure is the **field** and never the interim
+    environment fallback. A row that wants a *second* folder passes its own
+    ``workspace`` in ``params`` — the client keeps the caller's value — which is
+    how the two-folder cases below are built.
+    """
     with TestClient(create_app()) as client:
-        yield client
+        yield WorkspaceClient(client, tmp_path)
 
 
-def listing(client: TestClient, prefix: str, dir: Optional[str] = None):
-    params: Dict[str, str] = {"prefix": prefix}
+def listing(
+    client: TestClient,
+    prefix: str,
+    dir: Optional[str] = None,
+    *,
+    about: Any = None,
+):
+    """One ``GET /api/batch/tasks``, about ``about`` when a row names another folder."""
+    params: Dict[str, Any] = {"prefix": prefix}
     if dir is not None:
         params["dir"] = dir
+    if about is not None:
+        params.update(workspace_params(about))
     return client.get("/api/batch/tasks", params=params)
 
 
@@ -216,10 +269,13 @@ class TestTaskListingEndpoint:
         assert body["truncated"] is False
 
 
-def prefixes(client: TestClient, dir: Optional[str] = None):
-    params: Dict[str, str] = {}
+def prefixes(client: TestClient, dir: Optional[str] = None, *, about: Any = None):
+    """One ``GET /api/batch/prefixes``, about ``about`` when a row names another folder."""
+    params: Dict[str, Any] = {}
     if dir is not None:
         params["dir"] = dir
+    if about is not None:
+        params.update(workspace_params(about))
     return client.get("/api/batch/prefixes", params=params)
 
 
@@ -514,6 +570,200 @@ class TestListingPathGuards:
         body = listing(batch_client, "ed-", dir="plans/next/week").json()
         assert body["dir"] == "plans/next/week"
         assert body["tasks"][0]["taskLocation"] == "plans/next/week/ed-01-a.md"
+
+
+class TestTheLotIsTheFoldersOwn:
+    """Spec §5.7 rule 32: two workspaces are two lots, proven side by side.
+
+    The whole change is that the two routes ask the seam which folder the request
+    names (clws-09). What that buys is what these rows measure: two ``tmp_path``
+    folders holding **different** lots — different prefixes, different task
+    counts — each answering about itself, in either order, with ``dir`` staying
+    relative throughout (the folder travels in the field, never in ``dir``).
+    """
+
+    @pytest.fixture
+    def two_lots(self, tmp_path: Path) -> Tuple[Path, Path]:
+        """Two folders whose lots differ in prefix *and* in size.
+
+        A and B differ in both dimensions on purpose: one difference alone could
+        pass on a shallow reading (the same prefix found in two folders, or the
+        same count from two different prefixes), and the point of the pair is
+        that **neither** answer comes from the other folder.
+        """
+        first = tmp_path / "project-a"
+        second = tmp_path / "project-b"
+        for root in (first, second):
+            root.mkdir()
+        make_lot(
+            first,
+            [
+                "alpha-00-big-picture.md",
+                "alpha-01-a.md",
+                "alpha-02-b.md",
+                "alpha-03-c.md",
+            ],
+        )
+        make_lot(second, ["beta-00-big-picture.md", "beta-01-a.md"])
+        return first, second
+
+    def test_each_folder_lists_its_own_lot(
+        self, batch_client: TestClient, two_lots: Tuple[Path, Path]
+    ):
+        first, second = two_lots
+        answers = {}
+        for name, root, prefix in (
+            ("a", first, "alpha-"),
+            ("b", second, "beta-"),
+            ("again-a", first, "alpha-"),
+        ):
+            response = listing(batch_client, prefix, about=root)
+            assert response.status_code == 200, (name, response.text)
+            answers[name] = response.json()
+
+        assert answers["a"]["workspace"] == str(first)
+        assert answers["a"]["prefix"] == "alpha-"
+        assert answers["a"]["taskCount"] == 3
+        assert [task["name"] for task in answers["a"]["tasks"]] == [
+            "alpha-01-a.md", "alpha-02-b.md", "alpha-03-c.md",
+        ]
+        assert answers["b"]["workspace"] == str(second)
+        assert answers["b"]["prefix"] == "beta-"
+        assert answers["b"]["taskCount"] == 1
+        assert [task["name"] for task in answers["b"]["tasks"]] == ["beta-01-a.md"]
+        # The same folder answers the same way twice: no state is left over from
+        # the other one (§5.3 rule 3).
+        assert answers["again-a"] == answers["a"]
+
+    def test_dir_stays_relative_in_both(
+        self, batch_client: TestClient, two_lots: Tuple[Path, Path]
+    ):
+        """The folder travels in the field, so ``dir`` is the same word for both.
+
+        §D9's one-name-one-place rule: ``dir`` is a *folder inside* the workspace,
+        and both workspaces here answer ``todos`` for it while their
+        ``taskLocation``s are relative to their own root — which is what the
+        model's connectors resolve against, so the task a lot sends opens A's file
+        in A and B's in B.
+        """
+        first, second = two_lots
+        body_a = listing(batch_client, "alpha-", about=first).json()
+        body_b = listing(batch_client, "beta-", about=second).json()
+
+        assert body_a["dir"] == body_b["dir"] == "todos"
+        assert body_a["tasks"][0]["taskLocation"] == "todos/alpha-01-a.md"
+        assert body_b["tasks"][0]["taskLocation"] == "todos/beta-01-a.md"
+        assert body_a["workspace"] != body_b["workspace"]
+
+    def test_each_folder_is_offered_its_own_prefixes(
+        self, batch_client: TestClient, two_lots: Tuple[Path, Path]
+    ):
+        """The dialog's dropdown, per folder: A's lots in A, B's in B."""
+        first, second = two_lots
+        body_a = prefixes(batch_client, about=first).json()
+        body_b = prefixes(batch_client, about=second).json()
+
+        assert [item["prefix"] for item in body_a["prefixes"]] == ["alpha-"]
+        assert [item["prefix"] for item in body_b["prefixes"]] == ["beta-"]
+        assert body_a["prefixes"][0]["tasks"] == 3
+        assert body_b["prefixes"][0]["tasks"] == 1
+        # Same relative ``dir``, two absolute workspaces.
+        assert body_a["dir"] == body_b["dir"] == "todos"
+        assert body_a["workspace"] == str(first)
+        assert body_b["workspace"] == str(second)
+
+    def test_a_prefix_from_the_other_folder_lists_nothing(
+        self, batch_client: TestClient, two_lots: Tuple[Path, Path]
+    ):
+        """Asking A for B's prefix is not an error — A simply holds no such lot."""
+        first, second = two_lots
+        body = listing(batch_client, "beta-", about=first).json()
+        assert body["workspace"] == str(first)
+        assert body["taskCount"] == 0
+        assert body["tasks"] == []
+
+    @pytest.mark.parametrize("route", ["tasks", "prefixes"])
+    def test_a_refused_folder_is_the_seams_sentence_from_both_routes(
+        self, batch_client: TestClient, tmp_path: Path, route: str
+    ):
+        """Spec §5.2 rules 10–12: one sentence, whatever is asked about the folder.
+
+        The field is asked **first**, so a folder that was named and refused is a
+        422 carrying the seam's own sentence rather than a listing of the interim
+        default — from the listing and from the dropdown's read alike.
+        """
+        ghost = tmp_path / "gone-project"
+        resolved, sentence = workspace_seam.resolve(str(ghost))
+        assert resolved is None and sentence is not None
+        params: Dict[str, Any] = workspace_params(ghost)
+        if route == "tasks":
+            params["prefix"] = "ed-"
+        response = batch_client.get(f"/api/batch/{route}", params=params)
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == sentence
+
+    @pytest.mark.parametrize(
+        ("bad", "sentence", "names_workspace"),
+        [
+            ("..", "must not contain '..'", False),
+            ("../secrets", "must not contain '..'", False),
+            ("/etc", "must be relative to the workspace", True),
+            ("~/x", "must be relative to the workspace", True),
+        ],
+    )
+    def test_the_lot_folder_still_cannot_escape_another_workspace(
+        self,
+        batch_client: TestClient,
+        tmp_path: Path,
+        bad: str,
+        sentence: str,
+        names_workspace: bool,
+    ):
+        """The three locks are measured against the request's folder, as before.
+
+        ``batch_client``'s folder is a ``tmp_path`` one, i.e. **not** the
+        installation, so this is the shape the rule has to hold in: an absolute
+        ``dir`` or a surviving ``..`` is refused **with the sentence it always
+        was** — moving the folder into the field changes which folder the lock is
+        measured against, never the words a user reads.
+
+        The two absolute forms quote the folder the lock was measured against, so
+        a tab on A is never told about B (spec §5.2 rules 10–12); the ``..``
+        refusal needs none, and the sentence it says is unchanged.
+        """
+        make_lot(tmp_path, ["ed-01-a.md"])
+        response = listing(batch_client, "ed-", dir=bad)
+        assert response.status_code == 422, bad
+        detail = response.json()["detail"]
+        assert sentence in detail, (bad, detail)
+        if names_workspace:
+            assert str(tmp_path) in detail, (bad, detail)
+
+    def test_both_routes_ask_the_one_reader(self):
+        """Structure, as code: neither route can fall back to another folder.
+
+        A route that skipped :func:`require_workspace` would still answer — about
+        whatever folder the process's interim default happens to be — and the
+        cases above would only catch that for the folders they name. The listing
+        and the dropdown are the whole backend surface batch mode has, so the
+        pair is walked rather than sampled. Read as an AST, so a docstring naming
+        the helper cannot satisfy it.
+        """
+        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        handlers = {
+            registration["path"]: registration["handler"]
+            for registration in route_registrations(source)
+            if registration["verb"] == "get"
+            and registration["path"] in ("/batch/tasks", "/batch/prefixes")
+        }
+        assert set(handlers) == {"/batch/tasks", "/batch/prefixes"}
+        for path, handler in handlers.items():
+            called = {
+                node.func.id
+                for node in ast.walk(handler)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            assert "require_workspace" in called, path
 
 
 def _chat_stream_stub(monkeypatch: pytest.MonkeyPatch, seen: Dict[str, Any]):

@@ -27,15 +27,17 @@ except ImportError:  # pragma: no cover - depends on how the app is started
         sys.path.insert(0, root)
     from mcp_connectors import path_policy  # type: ignore[no-redef]
 
-from src.config import path_location
+from src.core import workspace
 
 
 def guardrails_speak_here(prefixes: Optional[Sequence[str]] = None) -> bool:
-    """True when the guardrail prefixes could speak the working location's form.
+    """True when the guardrail prefixes could speak the **workspace's** form.
 
     A prefix matches as *text*, so a list of ``/etc``-shaped entries covers
     nothing once the working location is a ``C:`` tree — every rule stops
-    matching and says nothing about it (roadmap §3). The answer comes from the
+    matching and says nothing about it (roadmap §3). The folder asked about is
+    the seam's scope, so the answer is about *the workspace this call serves* —
+    never about a folder another tab holds. The answer comes from the
     shape of the entries against the shape of the path, not from the platform's
     name, so a deployment that supplies matching prefixes is believed; A added
     the question, target B1 wrote the connector lists (``path_policy`` gains
@@ -58,9 +60,9 @@ def guardrails_speak_here(prefixes: Optional[Sequence[str]] = None) -> bool:
     )
     if not entries:
         return True
-    # ``resolve()``, never ``expanduser()`` (A-D2.3): the working location is a
-    # real folder by the time any hub reads it.
-    resolved = Path(path_location()).resolve().as_posix()
+    # The seam's scope, never ``expanduser()`` (A-D2.3): the workspace is a
+    # canonical real folder by the time any hub reads it.
+    resolved = Path(workspace.current_root()).resolve().as_posix()
     return path_policy.lists_are_meaningful(resolved, prefixes=entries)
 
 

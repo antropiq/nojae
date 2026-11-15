@@ -15,6 +15,7 @@ can be constructed (and its bookkeeping tested) without the ``[mcp]`` extra.
 
 import asyncio
 import threading
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import AsyncExitStack, suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -297,15 +298,41 @@ class McpManager:
         return tools_to_openai_format(tools), tool_to_server
 
     def call_tool_sync(
-        self, connector_id: str, name: str, arguments: Dict[str, Any], timeout: float = 120.0
+        self,
+        connector_id: str,
+        name: str,
+        arguments: Dict[str, Any],
+        timeout: Optional[float] = None,
     ) -> str:
-        """Execute a tool call from a synchronous thread, returning its text result."""
+        """Execute a tool call from a synchronous thread, returning its text result.
+
+        ``timeout`` is the safety net for a connector that never answers at all;
+        ``None`` reads :data:`mcphub.constants.TOOL_CALL_TIMEOUT` at call time
+        (this module's convention for every timeout it owns). It is *not* the
+        length limit of the command: the connector enforces its own ``timeout``
+        argument and returns the output it managed to print, so a long run that
+        is still making progress is left alone.
+
+        Raising on that net is a failure the model cannot act on by itself --
+        the LSP side reads a ``concurrent.futures.TimeoutError``'s empty
+        ``str()`` -- so it is raised with a sentence naming the rule.
+        """
         if self._loop is None:
             raise RuntimeError("McpManager is not started")
+        if timeout is None:
+            timeout = constants.TOOL_CALL_TIMEOUT
         future = asyncio.run_coroutine_threadsafe(
             self._call_tool(connector_id, name, arguments), self._loop
         )
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            raise TimeoutError(
+                f"Tool '{name}' did not answer within {timeout:g} seconds and was "
+                f"abandoned; the connector itself was never reached again. Pass a "
+                f"longer timeout to leave it running."
+            ) from None
 
     async def _call_tool(
         self, connector_id: str, name: str, arguments: Dict[str, Any]

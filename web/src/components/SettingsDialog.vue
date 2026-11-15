@@ -33,6 +33,14 @@ const {
   saveLsp,
 } = useAppShell()
 
+// This dialog edits the **installation's** catalogue — servers, models, the MCP
+// and LSP declarations — and deliberately has **no workspace control**: the
+// folder belongs to the tab and lives in the app bar's field (spec D2, §5.1
+// rule 9). Nothing here imports `useWorkspaceSession`, reads a workspace value
+// or spells one on a request, because a folder field here would say the folder
+// and the catalogue are one setting. The requests this dialog's composables make
+// carry the tab's folder through `withWorkspace`; that is the tab's own field
+// riding along, not a setting this dialog owns.
 const dialogEl = ref(null)
 const activeSection = ref('models')
 
@@ -485,6 +493,9 @@ const storeNotice = computed(() => {
             <p v-if="!state.mcpInstalled" class="caption alert-error" role="alert">
               The mcp package is not installed. Run
               <code>pip install -e ".[mcp]"</code> and restart the app.
+            </p>
+            <p v-if="state.mcpError" class="caption alert-error" role="alert">
+              {{ state.mcpError }}
             </p>
             <p v-if="state.mcpExternalsError" class="caption alert-error mcp-externals-error" role="alert">
               {{ state.mcpExternalsError }}

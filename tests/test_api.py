@@ -16,6 +16,8 @@ from src.core import agent_modes_defaults as modes_defaults
 from src.core import appdb
 from src.core import batch as batch_core
 from src.core import editorfs
+from src.core import workspace as workspace_seam
+from tests.conftest import workspace_params
 
 
 def _config() -> EndpointsConfig:
@@ -420,6 +422,9 @@ class _RecordingHub:
     async def restart(self, *args) -> None:
         self.restarts.append(args)
 
+    async def stop_all(self) -> None:
+        """No processes behind this double; shutdown must still find the hook."""
+
     def status(self) -> List[Dict[str, Any]]:
         return []
 
@@ -428,13 +433,16 @@ class _RecordingHub:
 def hub_client(client, monkeypatch, tmp_path):
     """``client`` with recording hubs and the declaration files redirected.
 
-    ``NOJAE_PATH_LOCATION`` is cleared so each test starts from the boot
-    default (the install dir) rather than a value another test left behind.
+    The two doubles go onto a **test-owned workspace's** set through the pool
+    (clws-06): a hub route now resolves the request's folder and reaches that
+    folder's managers, so the client names that folder on every request and a
+    double the route cannot reach would make every restart assertion below
+    measure nothing.
     """
     from src.core import lsphub
     from src.core import mcphub
+    from tests.conftest import WorkspaceClient, set_workspace_hubs
 
-    monkeypatch.delenv("NOJAE_PATH_LOCATION", raising=False)
     empty = tmp_path / "mcp-settings.json"
     empty.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(mcphub.constants, "MCP_SETTINGS_PATH", empty)
@@ -450,84 +458,87 @@ def hub_client(client, monkeypatch, tmp_path):
     monkeypatch.setattr(
         lsphub.constants, "LSP_RESTRICTED_PATHS", servers_dir / "restricted-paths.txt"
     )
-    client.app.state.mcp = _RecordingHub()
-    client.app.state.lsp = _RecordingHub()
-    return client
+    root = tmp_path / "hub-workspace"
+    root.mkdir()
+    set_workspace_hubs(
+        client.app, root=root, mcp=_RecordingHub(), lsp=_RecordingHub()
+    )
+    return WorkspaceClient(client, root)
 
 
-class TestPathLocationEndpoint:
-    def test_get_defaults_to_the_install_dir(self, hub_client):
-        from src.config import default_path_location
+class TestWorkspaceEndpoint:
+    """``GET /api/workspace`` — the app bar's one read of a folder (clws-02).
 
-        body = hub_client.get("/api/path-location").json()
-        assert body["key"] == "NOJAE_PATH_LOCATION"
-        assert body["path"] == default_path_location()
-        assert body["default"] == default_path_location()
+    The validation half of the retired ``POST /api/path-location`` lives here
+    now, on the field: a folder that is missing, relative, absent or denied is
+    refused with the seam's sentence, and a folder that is a workspace is
+    answered about **itself**. What went with the route are the cases about
+    *setting* the process's location — the environment mutation and the two hub
+    restarts — whose subject moved to the pool's admission (task 05).
+    """
+
+    def test_the_payload_reports_the_folder_and_the_reserved_files(self, hub_client, tmp_path):
+        from src.core import workspace as workspace_seam
+
+        root = tmp_path / "reported"
+        root.mkdir()
+        body = hub_client.get(
+            "/api/workspace", params=workspace_params(root)
+        ).json()
+        assert body["workspace"] == str(root)
+        assert body["default"] == workspace_seam.installation()
+        assert set(body) == {
+            "workspace", "default", "policy", "mcpSettings",
+            "lspSettings", "lspSettingsTemplate", "hubs",
+        }
         # appdb-07 and appdb-10: neither the helpers block nor the modes block is
         # in that answer any more — the bullets and the agents are rows of the
         # install's settings store, so a workspace has no such file to report.
         assert "promptHelpers" not in body
         assert "agentModes" not in body
 
-    def test_post_sets_the_env_and_restarts_both_hubs(self, hub_client, tmp_path):
-        target = tmp_path / "other-project"
-        target.mkdir()
-        response = hub_client.post("/api/path-location", json={"path": str(target)})
-        assert response.status_code == 200
-        assert os.environ["NOJAE_PATH_LOCATION"] == str(target.resolve())
-        assert response.json()["path"] == str(target.resolve())
-        assert len(hub_client.app.state.mcp.restarts) == 1
-        assert len(hub_client.app.state.lsp.restarts) == 1
-        # Both hub payloads ride back in the response so the dialog can
-        # repaint its panels without a second round-trip.
-        assert "connectors" in response.json()["mcp"]
-        assert "servers" in response.json()["lsp"]
-        # appdb-07 and appdb-10: the switch seeds no helpers file and no modes
-        # file, so it reports neither block — the bullets and the agents are the
-        # store's, not the workspace's, and a switch changes nothing in it (D11).
-        assert "promptHelpers" not in response.json()
-        assert "agentModes" not in response.json()
+    @pytest.mark.parametrize("raw", ["", "rel", "not-an-absolute-name"])
+    def test_an_empty_or_relative_field_is_refused(self, hub_client, raw):
+        response = hub_client.get("/api/workspace", params=workspace_params(raw))
+        assert response.status_code == 422
+        _resolved, sentence = workspace_seam.resolve(raw)
+        assert response.json()["detail"] == sentence
+
+    def test_an_absent_folder_is_refused(self, hub_client, tmp_path):
+        ghost = tmp_path / "ghost"
+        response = hub_client.get("/api/workspace", params=workspace_params(ghost))
+        assert response.status_code == 422
+        _resolved, sentence = workspace_seam.resolve(str(ghost))
+        assert response.json()["detail"] == sentence
+
+    def test_a_denied_folder_is_refused(self, hub_client):
+        response = hub_client.get("/api/workspace", params=workspace_params("/etc"))
+        assert response.status_code == 422
+        assert "deny-list" in response.json()["detail"]
 
     @pytest.mark.requires_symlink(
-        "the working-location switch stores the realpath, so a location spelled "
-        "through a link and through `.` lands on one canonical directory"
+        "the field is canonicalised to the realpath, so a folder spelled "
+        "through a link and through `.` is one workspace"
     )
-    def test_post_canonicalises_symlinks_and_dots(self, hub_client, tmp_path):
+    def test_the_field_is_canonicalised_through_links_and_dots(self, hub_client, tmp_path):
         real = tmp_path / "real"
         real.mkdir()
         link = tmp_path / "link"
         link.symlink_to(real, target_is_directory=True)
-        response = hub_client.post("/api/path-location", json={"path": f"{link}/."})
+        response = hub_client.get(
+            "/api/workspace", params=workspace_params(f"{link}/.")
+        )
         assert response.status_code == 200
-        assert response.json()["path"] == str(real.resolve())
+        assert response.json()["workspace"] == str(real.resolve())
 
-    def test_rejects_missing_relative_empty_and_denied(self, hub_client, tmp_path):
-        before = os.environ.get("NOJAE_PATH_LOCATION")
-        assert hub_client.post("/api/path-location", json={"path": ""}).status_code == 422
-        assert hub_client.post("/api/path-location", json={"path": "rel"}).status_code == 422
-        assert (
-            hub_client.post(
-                "/api/path-location", json={"path": str(tmp_path / "ghost")}
-            ).status_code
-            == 422
-        )
-        assert (
-            hub_client.post("/api/path-location", json={"path": "/etc"}).status_code
-            == 422
-        )
-        # Nothing was touched: the hubs never saw a restart, env is unchanged.
-        assert os.environ.get("NOJAE_PATH_LOCATION") == before
-        assert hub_client.app.state.mcp.restarts == []
-        assert hub_client.app.state.lsp.restarts == []
-
-    def test_the_deny_list_expands_at_read_time_for_the_switch_too(
+    def test_the_deny_list_expands_at_read_time_for_the_field_too(
         self, hub_client, tmp_path, monkeypatch
     ):
         r"""Consumer 4 of ``restricted-paths.txt`` honours ``${NAME}`` as well.
 
-        The route calls the same ``restricted_lsp_roots()`` the hub and the tree
+        The seam asks the same ``restricted_lsp_roots()`` the hub and the tree
         call, so the one expansion at read time reaches all three: a line naming
-        this profile's credential store refuses a working location inside it, and
+        this profile's credential store refuses a workspace inside it, and
         refuses nothing outside it.
         """
         from src.core import lsphub
@@ -539,15 +550,15 @@ class TestPathLocationEndpoint:
         list_file.write_text("${NOJAE_TEST_PROFILE}/.ssh\n", encoding="utf-8")
         monkeypatch.setattr(lsphub.constants, "LSP_RESTRICTED_PATHS", list_file)
 
-        refused = hub_client.post("/api/path-location", json={"path": str(store)})
+        refused = hub_client.get(
+            "/api/workspace", params=workspace_params(store)
+        )
         assert refused.status_code == 422
         assert "deny-list" in refused.json()["detail"]
-        assert hub_client.app.state.mcp.restarts == []
-        assert hub_client.app.state.lsp.restarts == []
 
         other = tmp_path / "project"
         other.mkdir()
-        ok = hub_client.post("/api/path-location", json={"path": str(other)})
+        ok = hub_client.get("/api/workspace", params=workspace_params(other))
         assert ok.status_code == 200
 
     @pytest.mark.case_sensitive_volume(
@@ -556,16 +567,15 @@ class TestPathLocationEndpoint:
         "the text; on a volume that folds case the two spellings are one "
         "folder and the exact half of the pair is not the pair's other answer"
     )
-    def test_the_deny_list_compare_folds_for_the_root_being_switched_to(
+    def test_the_deny_list_compare_folds_for_the_folder_being_named(
         self, hub_client, tmp_path, monkeypatch
     ):
-        r"""win-06 §4: the switch asks the same helper as the tree, with the fold.
+        r"""win-06 §4: the field asks the same helper as the tree, with the fold.
 
         A ``restricted-paths.txt`` line naming one spelling of a folder refuses
         the other spelling of it on a volume where they are one folder — and
         refuses nothing where they are two. The probe consulted is the one for
-        the root *being switched to* (``routes.py``), so both halves run against
-        this target folder; the exact half is the Linux answer, unchanged.
+        the folder *being named*, so both halves run against this target.
         """
         from src.core.editorfs import fscase
         from src.core import lsphub
@@ -579,35 +589,121 @@ class TestPathLocationEndpoint:
         monkeypatch.setattr(lsphub.constants, "LSP_RESTRICTED_PATHS", list_file)
 
         monkeypatch.setattr(fscase, "case_folded", lambda _root: True)
-        refused = hub_client.post("/api/path-location", json={"path": str(target)})
+        refused = hub_client.get(
+            "/api/workspace", params=workspace_params(target)
+        )
         assert refused.status_code == 422
         assert "deny-list" in refused.json()["detail"]
-        assert hub_client.app.state.mcp.restarts == []
 
         monkeypatch.setattr(fscase, "case_folded", lambda _root: False)
-        accepted = hub_client.post("/api/path-location", json={"path": str(target)})
+        accepted = hub_client.get(
+            "/api/workspace", params=workspace_params(target)
+        )
         assert accepted.status_code == 200
-        assert os.environ["NOJAE_PATH_LOCATION"] == str(target.resolve())
-        assert len(hub_client.app.state.mcp.restarts) == 1
+        assert accepted.json()["workspace"] == str(target.resolve())
 
-
-    def test_refused_while_a_chat_reply_streams_leaves_env_untouched(
+    def test_two_folders_are_answered_about_themselves_in_either_order(
         self, hub_client, tmp_path
     ):
-        # The switch restarts both hubs, so it must not land on a reply whose
-        # tool calls are waiting on the sessions being torn down.
-        before = os.environ.get("NOJAE_PATH_LOCATION")
-        guard = object()
-        routes._CHAT_TASKS.add(guard)
-        try:
-            response = hub_client.post("/api/path-location", json={"path": str(tmp_path)})
-        finally:
-            routes._CHAT_TASKS.discard(guard)
-        assert response.status_code == 409
-        assert "while a chat reply is streaming" in response.json()["detail"]
-        assert os.environ.get("NOJAE_PATH_LOCATION") == before
-        assert hub_client.app.state.mcp.restarts == []
-        assert hub_client.app.state.lsp.restarts == []
+        """The lot's whole point, at the route: no process state in between.
+
+        Two scratch folders whose reserved files differ, named one after the
+        other **in both orders**, with no environment write anywhere: each
+        request answers about its own folder whichever one ran first.
+        """
+        from src.core.editorfs import constants as editorfs_constants
+
+        first = tmp_path / "first-project"
+        second = tmp_path / "second-project"
+        for root in (first, second):
+            root.mkdir()
+        (first / editorfs_constants.POLICY_DIRNAME).mkdir()
+        (first / editorfs_constants.POLICY_DIRNAME / editorfs_constants.POLICY_FILENAME
+         ).write_text('{"policies": []}\n', encoding="utf-8")
+
+        for order in ((first, second), (second, first)):
+            answers = [
+                hub_client.get("/api/workspace", params=workspace_params(root)).json()
+                for root in order
+            ]
+            assert [answer["workspace"] for answer in answers] == [
+                str(order[0]), str(order[1])
+            ]
+            assert answers[0]["policy"]["state"] == (
+                "existing" if order[0] == first else "absent"
+            )
+            assert answers[1]["policy"]["state"] == (
+                "existing" if order[1] == first else "absent"
+            )
+
+    @pytest.mark.parametrize("verb", ["GET", "POST", "PUT", "DELETE"])
+    def test_the_working_location_route_pair_is_gone(self, hub_client, verb):
+        """Nothing sets the process's folder any more (spec §5.1 rule 7).
+
+        A request to the retired route answers 404 when there is no built SPA to
+        fall back on; with ``web/dist`` present the catch-all static mount
+        answers instead, and a mount accepts no write verb, so 405. Either way
+        nothing sets a folder.
+        """
+        response = hub_client.request(
+            verb, "/api/path-location", json={"path": "/tmp/whatever"}
+        )
+        assert response.status_code in (404, 405)
+
+
+class TestTheAppHoldsTheHubPool:
+    """``app.state.hubpool`` is the singleton, and it is the **only** hub name.
+
+    clws-05 moved the two hubs into a pool keyed by workspace, and the app holds
+    **the pool** — the thing a worker thread's reference must survive. clws-06
+    deleted the interim read-through that kept ``app.state.mcp`` / ``app.state.lsp``
+    answering about the boot workspace: a hub is bound to a folder at birth, so a
+    process-wide name for "the" hub could only ever describe one workspace, and
+    every hub route now asks the pool for the request's own.
+    """
+
+    def test_the_pool_is_built_by_the_lifespan(self, client):
+        from src.core.hubpool import HubPool
+
+        pool = client.app.state.hubpool
+        assert isinstance(pool, HubPool)
+        # The boot workspace is admitted, so the folder a new tab lands on has
+        # its own tools before the first request names it.
+        assert pool.boot_root in pool.roots()
+        assert pool.live(pool.boot_root) is not None
+
+    def test_the_app_state_carries_no_process_wide_hub(self, client):
+        """The shim is gone, and nothing may re-introduce a name for "the" hub.
+
+        Asserted as a refusal rather than a grep: the attribute must not answer,
+        so a route that reached for it would fail loudly instead of quietly
+        serving the boot workspace to a tab that named another folder.
+        """
+        for name in ("mcp", "lsp"):
+            with pytest.raises(AttributeError):
+                getattr(client.app.state, name)
+
+    def test_the_pool_is_stopped_by_the_shutdown_block(self, monkeypatch, tmp_path):
+        """Shutdown tears every workspace down, through the pool."""
+        from src.api.server import create_app
+        from src.core import hubpool as hubpool_module
+        from tests.conftest import make_the_install
+
+        boot = tmp_path / "boot-shutdown"
+        boot.mkdir()
+        # The boot folder is the **installation** (clws-10): no environment
+        # value decides it any more, so the test moves the one source the seam
+        # reads rather than setting the retired variable.
+        make_the_install(monkeypatch, boot)
+        stopped: List[Any] = []
+
+        async def record_stop(self) -> None:
+            stopped.append(self.roots())
+
+        monkeypatch.setattr(hubpool_module.HubPool, "stop_all", record_stop)
+        with TestClient(create_app()):
+            pass
+        assert stopped == [[str(boot.resolve())]]
 
 
 class TestHubListingsAreModeBlind:
@@ -629,20 +725,22 @@ class TestHubListingsAreModeBlind:
             assert names == set(), names
 
     def test_hub_listing_payload_has_no_mode_dependent_field(self, hub_client):
-        # The payload keys are exactly the pre-mode set: the panel's ``active``
-        # flag is the Settings verdict, which a mode can only narrow, so nothing
-        # in here can depend on which mode the composer happens to hold.
+        # The payload keys are exactly the pre-mode set (plus clws-06's ``built``,
+        # which is a fact about the *workspace*, not about a mode): the panel's
+        # ``active`` flag is the Settings verdict, which a mode can only narrow,
+        # so nothing in here can depend on which mode the composer happens to
+        # hold.
         mcp = hub_client.get("/api/mcp").json()
         lsp = hub_client.get("/api/lsp").json()
         assert set(mcp) == {
-            "installed", "connectors", "externalsError",
+            "installed", "connectors", "externalsError", "built",
         }
         # Neither payload carries a tool-loop cap any more: it left the LSP
         # section with the second gate (D13) and the MCP section with the store
         # (D9), where it is a per-agent column. A `maxIterations` here would be a
         # second writer of a value these panels no longer edit.
         assert set(lsp) == {
-            "installed", "servers", "serversError",
+            "installed", "servers", "serversError", "built",
         }
         assert "maxIterations" not in mcp
 
@@ -1006,20 +1104,31 @@ class _ChatHubDouble:
     def call_tool_sync(self, cid, name, args, timeout=30.0):
         return "ok"
 
+    async def stop_all(self) -> None:
+        """No processes behind this double; shutdown must still find the hook."""
+
 
 
 @pytest.fixture
-def chat_stub(client, monkeypatch: pytest.MonkeyPatch):
+def chat_stub(client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """``client`` with a live MCP hub and a ``stream_chat`` that records kwargs.
 
     The recording shape mirrors ``tests/test_chat.py``'s stubs: the five named
     instruction/prompt keywords plus whatever tool kwargs the route passes, so
     the *absence* of a key is as observable as its value — which is the whole
     point of the tool-gate assertions below.
+
+    The client is bound to a **test-owned workspace**: every chat request names
+    its folder now (clws-02), so a call that named none would be the 422 rather
+    than the turn these cases are about. The doubles ride on that same folder's
+    set, so the route reaches them through the pool.
     """
+    from tests.conftest import WorkspaceClient, set_workspace_hubs
+
+    root = tmp_path / "chat-workspace"
+    root.mkdir()
     hub = _ChatHubDouble()
-    client.app.state.mcp = hub
-    client.app.state.lsp = _ChatHubDouble()
+    set_workspace_hubs(client.app, root=root, mcp=hub, lsp=_ChatHubDouble())
     monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
     monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
     seen: Dict[str, Any] = {}
@@ -1043,7 +1152,7 @@ def chat_stub(client, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(routes.agent_modes, "resolve_mode", spy_resolve)
     monkeypatch.setattr(routes, "stream_chat", fake)
-    return client, seen, hub, asked
+    return WorkspaceClient(client, root), seen, hub, asked
 
 
 def _chat(client, **extra):
@@ -1092,12 +1201,17 @@ class TestChatAgentModeField:
 
     def test_a_refused_mode_does_not_own_the_pause_handle(self, chat_stub):
         # The 422 is raised *before* ``_arm_chat_handle``, so a request that
-        # will never stream cannot leave a stale handle for the next one.
+        # will never stream cannot leave a stale handle for the next one. The
+        # slot is keyed per workspace (clws-04), so "no handle" is now "no
+        # workspace holds one" — the same fact, one level up.
         client, _seen, _hub, _asked = chat_stub
-        assert routes._CHAT_HANDLE is None
+        assert routes._CHAT_HANDLES == {}
         assert _chat(client, agentMode="nope").status_code == 422
-        assert routes._CHAT_HANDLE is None
+        assert routes._CHAT_HANDLES == {}
         assert _chat(client, agentMode="code").status_code == 200
+        # The reply that *did* stream cleared its own key on the way out, so the
+        # map is empty again rather than holding a stale entry for its folder.
+        assert routes._CHAT_HANDLES == {}
 
     def test_a_mode_id_of_the_wrong_shape_is_422_from_the_model(self, chat_stub):
         # The *shape* check lives in the model (cheap, static); existence lives

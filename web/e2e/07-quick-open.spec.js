@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Task qop-08 — the quick-open finder as a human performs it, in a real browser.
 //
@@ -14,16 +15,16 @@ import path from 'node:path'
 // `NOJAE_TEST_SETTINGS`) is what the *server* boots with; no spec in this
 // file reads it, and none may.
 //
-// The scratch is a **fixture workspace** of its own, and switching into it is
-// what makes scenario 3 deterministic: the policy file that marks one folder
-// `hidden` and one `ro` is written by this spec, so the two exclusions are
-// facts about a file the spec owns rather than about whatever the developer's
-// checkout happens to contain. It is a top-level folder (gitignored, and
-// visible to the pane) and it is removed with node's `fs`, not through
-// `/api/fs/file`: switching into it seeds a `.nojae/` there, and that folder is
-// reserved — the Editor will not delete a subtree that contains it. Same shape
-// as 03-workspace-switch and 04-agent-modes.
-const SCRATCH = 'e2e-quickopen'
+// The scratch is a **fixture workspace** of its own (clws-12): the page is
+// pointed at it through the app bar's field, and every request names it, so the
+// policy file that marks one folder `hidden` and one `ro` is a fact about a file
+// this spec owns. It is created and removed with node's `fs`; admitting it seeds
+// a `.nojae/` there, and that folder is reserved, so the Editor will not delete
+// the subtree that contains it. Same shape as 03-workspace-switch.
+const SCRATCH = 'e2e-workspace'
+const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+const WS = { workspace: WORKSPACE }
 
 // The fixture's own rules — the two exclusions scenario 3 asserts, and nothing
 // else. `hidden` prunes the folder, so its names are never listed and the
@@ -40,67 +41,27 @@ const POLICY = {
   ],
 }
 
-// The fixture as the **boot** root spells it — what the seeding routes address
-// before the switch, since the working location is still the install directory.
+// The fixture files as the workspace spells them. Every path the app holds is
+// relative to the tab's folder, so the scratch folder's own name is not part of
+// them.
 const SEED = {
-  plain: `${SCRATCH}/visible.txt`,
-  nested: `${SCRATCH}/alpha/nested-target.md`,
-  hidden: `${SCRATCH}/secret/hidden-file.txt`,
-  ro: `${SCRATCH}/vendor/vendored-file.txt`,
+  plain: 'visible.txt',
+  nested: 'alpha/nested-target.md',
+  hidden: 'secret/hidden-file.txt',
+  ro: 'vendor/vendored-file.txt',
 }
 
-// The same files as the **fixture** root spells them — what the finder lists
-// once the working location has moved. Every path the app holds is relative to
-// the working location, so the scratch folder's own name is not part of them.
-const PLAIN = 'visible.txt'
-const NESTED = 'alpha/nested-target.md'
+const PLAIN = SEED.plain
+const NESTED = SEED.nested
 const HIDDEN_DIR = 'secret'
 const RO_DIR = 'vendor'
 
-// The root this server booted on, remembered so a spec that fails between its
-// two switches cannot leave the whole suite pointing at a scratch folder.
-let bootRoot = null
-
-async function currentRoot(request) {
-  return (await (await request.get('/api/path-location')).json()).path
-}
-
-// Removal is over when the path is gone, not when `rmSync` returned. Windows:
-// the unlink of a folder that existed for seconds can fail EPERM while a handle
-// to it is still closing — anything the app ran inside the switched-in root
-// holds its current-directory handle until it is reaped (the terminal's shell
-// cwd, the `git` of a status query) — and `maxRetries`/`retryDelay` is Node's
-// bound for exactly this on a directory. It is not the end of it either: the
-// call can *return* with the folder still on disk, because the last handle
-// closes after it and the name stays in the listing until it does. So the
-// removal is retried until the path is gone, and the answer says which of the
-// two happened — a `beforeEach` that gave up early handed the next spec's
-// `create` a 409 for a folder this suite had just deleted, which is the flake
-// this is here to stop. Same rule as 03-workspace-switch and 04-agent-modes.
-//
-// A folder that still will not go after every attempt is reported by the
-// `beforeEach` that needs it out of the way; the teardown, which owes the next
-// spec nothing, ignores the answer.
-async function removeScratch(root) {
-  const target = path.join(root, SCRATCH)
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 })
-    } catch {
-      // Still held; the attempt below retries while the handle closes.
-    }
-    if (!fs.existsSync(target)) return true
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  return false
-}
-
 async function create(request, target, dir = false) {
-  return request.post('/api/fs/create', { data: { path: target, dir } })
+  return request.post('/api/fs/create', { params: WS, data: { path: target, dir } })
 }
 
 async function diskStat(request, target) {
-  const res = await request.get(`/api/fs/stat?path=${encodeURIComponent(target)}`)
+  const res = await request.get('/api/fs/stat', { params: { ...WS, path: target } })
   return (await res.json()).paths[0]
 }
 
@@ -109,73 +70,77 @@ async function diskStat(request, target) {
 async function seed(request, target, text) {
   expect((await create(request, target)).ok(), `could not create ${target}`).toBe(true)
   const res = await request.put('/api/fs/file', {
+    params: WS,
     data: { path: target, text, ifUnmodifiedSince: (await diskStat(request, target)).mtime },
   })
   expect(res.ok(), `could not seed ${target}: ${await res.text()}`).toBe(true)
 }
 
-// The fixture workspace, seeded the way the other specs seed theirs: the visible
-// tree through the app's own writer, and the one file no Editor route can write
-// through node's `fs`.
-//
-// The policy file goes in **before** the switch, so the seed that a switch
-// performs finds it and leaves it alone (its create is exclusive, `O_EXCL`) —
-// `.nojae` is reserved, and the app never writes this file through an Editor
-// route, so the spec does it from outside with `fs`.
-async function seedFixture(request) {
-  const created = await create(request, SCRATCH, true)
-  expect(created.ok(), `could not create the scratch workspace: ${await created.text()}`).toBe(
-    true,
+// Point the tab at the fixture through the field: this is the user's move, and
+// it is what makes the fixture's policy the live one for that tab. A reload
+// keeps the same tab and folder, so this is a no-op afterwards.
+async function pointTabAt(page) {
+  const field = page.locator('.appbar-location-input')
+  if ((await field.inputValue()) === WORKSPACE) return
+  await field.fill(WORKSPACE)
+  const button = page.locator('.appbar-location-set')
+  await expect(button).toBeEnabled()
+  const applied = page.waitForResponse(
+    (res) =>
+      new URL(res.url()).pathname === '/api/workspace' &&
+      res.request().method() === 'GET' &&
+      res.url().includes('workspace='),
   )
+  await button.click()
+  const res = await applied
+  expect(res.ok(), `could not point the tab at ${WORKSPACE}: ${await res.text()}`).toBe(true)
+  await expect(field).toHaveValue(WORKSPACE)
+}
 
-  const reserved = path.join(bootRoot, SCRATCH, '.nojae')
-  fs.mkdirSync(reserved, { recursive: true })
+// The fixture workspace. The policy file goes in **before** admission, so the
+// seed that admission performs finds it and leaves it alone (its create is
+// exclusive, `O_EXCL`) — `.nojae` is reserved, and the app never writes this file
+// through an Editor route, so the spec does it from outside with `fs`.
+async function seedFixture(request) {
+  fs.rmSync(WORKSPACE, { recursive: true, force: true })
+  fs.mkdirSync(path.join(WORKSPACE, '.nojae'), { recursive: true })
   fs.writeFileSync(
-    path.join(reserved, 'read-write-policy.json'),
+    path.join(WORKSPACE, '.nojae', 'read-write-policy.json'),
     `${JSON.stringify(POLICY, null, 2)}\n`,
     'utf8',
   )
 
-  for (const dir of [`${SCRATCH}/alpha`, `${SCRATCH}/${HIDDEN_DIR}`, `${SCRATCH}/${RO_DIR}`]) {
-    expect((await create(request, dir, true)).ok(), `could not create ${dir}`).toBe(true)
+  // The folders are made from outside the app: the policy is live for this
+  // workspace, so it hides `secret` and makes `vendor` read-only before any
+  // Editor write could create them. The spec owns those bytes.
+  for (const dir of ['alpha', HIDDEN_DIR, RO_DIR]) {
+    fs.mkdirSync(path.join(WORKSPACE, dir), { recursive: true })
   }
   await seed(request, SEED.plain, 'the buffer the pane opens first\n')
   await seed(request, SEED.nested, 'a nested file the finder has to reach\n')
-  await seed(request, SEED.hidden, 'a hidden folder is pruned, so this name is never listed\n')
-  await seed(request, SEED.ro, 'a read-only folder is browsable in the tree, never a candidate\n')
+  fs.writeFileSync(
+    path.join(WORKSPACE, SEED.hidden),
+    'a hidden folder is pruned, so this name is never listed\n',
+    'utf8',
+  )
+  fs.writeFileSync(
+    path.join(WORKSPACE, SEED.ro),
+    'a read-only folder is browsable in the tree, never a candidate\n',
+    'utf8',
+  )
 }
 
 test.beforeEach(async ({ request }) => {
-  bootRoot = await currentRoot(request)
-  // The removal has to be *finished* before `seedFixture`'s own `create` runs,
-  // or that create answers 409 for a folder the previous spec deleted.
-  const cleared = await removeScratch(bootRoot)
-  expect(cleared, `the scratch folder is still in the way: ${SCRATCH}`).toBe(true)
   await seedFixture(request)
-  // The switch is the app's own route — the one the app bar's Set button calls —
-  // and it is what makes the fixture's policy the live one.
-  const moved = await request.post('/api/path-location', {
-    data: { path: path.join(bootRoot, SCRATCH) },
-  })
-  expect(moved.ok(), `could not move the working location: ${await moved.text()}`).toBe(true)
 })
 
-test.afterEach(async ({ request }) => {
-  if (bootRoot === null) return
-  // The *live* location decides, not a remembered flag: a spec that ended its
-  // own switch back owes nothing, and one that died mid-way owes exactly one
-  // restore. A switch restarts both hubs and costs seconds, so the check keeps
-  // that one free — and it cannot drift out of sync the way a flag can.
-  if ((await currentRoot(request)) !== bootRoot) {
-    const res = await request.post('/api/path-location', { data: { path: bootRoot } })
-    expect(res.ok(), `could not restore the working location: ${await res.text()}`).toBe(true)
-  }
-  await removeScratch(bootRoot)
-  bootRoot = null
+test.afterEach(async () => {
+  fs.rmSync(WORKSPACE, { recursive: true, force: true })
 })
 
 async function openEditor(page) {
   await page.goto('/')
+  await pointTabAt(page)
   await page.getByRole('tab', { name: 'Editor' }).click()
   await expect(page.locator('.editor-nav-tree')).toBeVisible()
 }
@@ -306,7 +271,7 @@ test('a hidden or read-only path is never in the list, whatever is typed', async
   page,
   request,
 }) => {
-  const payload = await (await request.get('/api/fs/files')).json()
+  const payload = await (await request.get('/api/fs/files', { params: WS })).json()
 
   // The Contract's key set, on the live route where the real policy applies.
   expect(Object.keys(payload).sort()).toEqual(['fileCount', 'files', 'truncated'])

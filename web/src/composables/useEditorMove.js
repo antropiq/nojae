@@ -4,6 +4,7 @@ import { useEditorFiles } from './useEditorFiles'
 import { useEditorNotices } from './useEditorNotices'
 import { useGitStatus } from './useGitStatus'
 import { registerReRootHandler, useWorkspaceTree } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // The batch move flow: marked rows, one destination folder, one request
@@ -160,7 +161,7 @@ export function useEditorMove() {
       let res
       let body = null
       try {
-        res = await fetch('/api/fs/move-batch', {
+        res = await fetch(withWorkspace('/api/fs/move-batch'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ paths, to_parent: typed }),

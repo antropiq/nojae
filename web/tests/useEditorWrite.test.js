@@ -4,6 +4,7 @@ import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorNotices } from '../src/composables/useEditorNotices'
 import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
+import { pointTabAt, withWorkspace } from './helpers/workspace-url'
 
 // The freshness half of the buffer records: what a `GET /api/fs/stat` answer
 // *means* for an open buffer. The route's own rules (the gate, `exists: false`
@@ -52,6 +53,10 @@ function callsTo(mock, prefix) {
 }
 
 function resetState() {
+  // The tab has a folder, so every request below carries the workspace field
+  // (clws-02) — the stubs match by route prefix, which the appended field does
+  // not disturb.
+  pointTabAt('/w/tab-workspace')
   files.state.open.length = 0
   files.state.active = null
   files.state.message = null
@@ -186,7 +191,8 @@ describe('useEditorFiles: the freshness probe', () => {
     await files.probeOpenFiles()
 
     const [url] = fetchMock.mock.calls.at(-1)
-    expect(url).toBe('/api/fs/stat?path=src%2Fa.py')
+    // The probe's own parameter, plus the tab's workspace field (clws-02).
+    expect(url).toBe(withWorkspace('/api/fs/stat?path=src%2Fa.py'))
   })
 
   it('two overlapping probes issue one request', async () => {

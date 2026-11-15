@@ -1,7 +1,8 @@
 """Tests for the Editor tab's guarded write surface: save, create, and gates.
 
 Same hermetic shape as ``tests/test_editorfs.py``: the workspace is a
-throw-away ``tmp_path`` pointed at by ``NOJAE_PATH_LOCATION``, caps and
+throw-away ``tmp_path`` **named by every request** (``WorkspaceClient``,
+clws-04), caps and
 the backup folder are patched through ``editorfs.constants``, and the
 autouse fixtures in ``tests/conftest.py`` keep the hubs asleep. One test per
 rule of the write path — the gate, the mtime guard, the chat-stream gate, the
@@ -9,6 +10,11 @@ size caps, the backup chain, the never-overwrite rule of a create — plus the
 cross-cutting rows that only make sense stated once for all four routes, and
 the promise that no tool can reach any of it (the wider form of which lives in
 ``tests/test_write_surface_isolation.py``).
+
+Since clws-04 the suite also states the **per-workspace** half of the same rules:
+the folder a write answers about is the folder its request named, the
+"a chat reply is streaming" refusal is a fact about **that** folder, and two
+workspaces' trash and backup chains are two answers.
 
 What the gate answers with, since pol-06: a **policy verdict**, from two levels.
 So the refusals below are arranged by writing rules (``write_policy``), and every
@@ -24,7 +30,7 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,6 +39,12 @@ from src.api import routes
 from src.api.server import create_app
 from src.core import editorfs
 from src.core.editorfs import builtin_policy, policy_file, policy_seed
+from tests.conftest import (
+    WorkspaceClient,
+    make_the_install,
+    scoped,
+    workspace_params,
+)
 
 
 def write_policy(root: Path, rules: List[Dict[str, str]]) -> Path:
@@ -89,15 +101,21 @@ def legacy_trash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A small tree, pointed at as the working location, with the seeded policy.
 
     The file pol-05 leaves behind when a folder becomes the working location is
     what makes these answers the *default* ones — ``.git`` hidden, dependency
     folders read-only — and the workspace is foreign (not the install directory),
     so nojae's own level A is dormant here.
+
+    The yield is wrapped in the seam's **scope** for this folder (clws-04, the
+    same shape ``tests/test_editorfs.py`` uses): a handful of rows here ask a
+    core surface directly — ``trash_dir()``, ``list_backups()``, the gate
+    helpers — and outside a request a call that is not a request has to enter
+    the scope itself. The routes are unaffected: each enters its own, nested
+    inside, from the field its request named.
     """
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
     (tmp_path / "src" / "core").mkdir(parents=True)
     # ``newline=""``: the planted bytes are the bytes the assertions name. The
     # default text mode rewrites ``\n`` to the host's line ending on Windows,
@@ -114,21 +132,33 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "node_modules" / "left-pad").mkdir(parents=True)
     policy_seed.ensure_policy_file(str(tmp_path))
     policy_file.invalidate_policy_cache()
-    return tmp_path
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 @pytest.fixture
 def client(workspace: Path):
+    """The app, naming ``workspace`` on every request it makes (clws-04).
+
+    Wrapped in :class:`~tests.conftest.WorkspaceClient` so the suite measures
+    the **field** and never the interim environment fallback.
+    """
     with TestClient(create_app()) as test_client:
-        yield test_client
+        yield WorkspaceClient(test_client, workspace)
 
 
 def save(client: TestClient, path: str, text: str,
          if_unmodified_since: Optional[float] = None):
+    """``PUT /api/fs/file`` about the folder ``client`` names."""
     body: Dict[str, object] = {"path": path, "text": text}
     if if_unmodified_since is not None:
         body["ifUnmodifiedSince"] = if_unmodified_since
     return client.put("/api/fs/file", json=body)
+
+
+def workspace_of(client: WorkspaceClient) -> str:
+    """The canonical root a :class:`WorkspaceClient` names — its own folder."""
+    return str(Path(client.root).resolve())
 
 
 def token(client: TestClient, path: str) -> float:
@@ -434,6 +464,46 @@ class TestBackups:
         copies = editorfs.files.list_backups(resolved)
         assert copies
         assert Path(copies[0]).stat().st_mtime > 0
+
+    def test_two_workspaces_one_relative_path_are_two_chains(
+        self, workspace: Path, client, backups: Path, tmp_path: Path
+    ):
+        """The backup folder is the install's; the **chain** is the workspace's.
+
+        ``logs/editor_backups`` is one folder on purpose (the app's own journal,
+        never a second copy of a workspace that may be ``$HOME``), so the
+        separation has to come from the key — and the key is the resolved path,
+        which carries the root. Two workspaces holding ``README.md`` therefore
+        leave two chains in one folder, and a revert of one can never offer the
+        other's bytes.
+        """
+        other = tmp_path.parent / f"{tmp_path.name}-backup-twin"
+        other.mkdir()
+        (other / "README.md").write_text("# other\n", encoding="utf-8", newline="")
+        policy_seed.ensure_policy_file(str(other))
+        policy_file.invalidate_policy_cache()
+
+        assert save(client, "README.md", "a1\n", token(client, "README.md")).status_code == 200
+        assert client.put(
+            "/api/fs/file",
+            params=workspace_params(other),
+            json={"path": "README.md", "text": "b1\n"},
+        ).status_code == 200
+
+        first_chain = editorfs.files.list_backups(workspace / "README.md")
+        second_chain = editorfs.files.list_backups(other / "README.md")
+        assert len(first_chain) == 1 and len(second_chain) == 1
+        # Two chains, in the one folder the app keeps.
+        assert len(list(backups.glob("*.orig"))) == 2
+        assert set(first_chain).isdisjoint(second_chain)
+        # Each holds its own workspace's previous bytes.
+        assert Path(first_chain[0]).read_text(encoding="utf-8") == "# hi\n"
+        assert Path(second_chain[0]).read_text(encoding="utf-8") == "# other\n"
+        # And the keys differ because the roots do: the same relative path in a
+        # third spelling of one root is the *same* chain (the digest rule).
+        assert editorfs.files.backup_key(workspace / "README.md") != (
+            editorfs.files.backup_key(other / "README.md")
+        )
 
     def test_the_age_sweep_only_removes_old_copies(
         self, backups: Path, workspace: Path, client
@@ -1981,15 +2051,18 @@ class TestTrashBelongsToTheWorkspace:
         assert not Path(body["trashedTo"]).is_absolute()
         assert (workspace / body["trashedTo"]).is_dir()
 
-    def test_a_switched_in_workspace_gets_its_own_trash(
+    def test_two_workspaces_each_get_their_own_trash(
         self, tmp_path: Path, legacy_trash: Path,
         monkeypatch: pytest.MonkeyPatch
     ):
-        """Defect 2, head-on: two roots, two trashes, and neither sees the other.
+        """Defect 2, head-on — and now **per request**: two roots, two trashes.
 
-        One client spans the switch (as a settings change does), so the second
-        delete *must* land under the second root and must not see — let alone
-        sweep — the first root's batches.
+        One client spans both folders (clws-04): each delete names its own
+        workspace, so each batch lands under **that** root, and neither root's
+        batches are visible to — let alone swept by — the other. There is no
+        switch and no environment write between the two calls: the folder is the
+        field, so two tabs deleting at once are two folders' worth of bytes and
+        never one another's reserved folder.
         """
         monkeypatch.setattr(editorfs.constants, "TRASH_DIR", None)
         first = tmp_path / "one"
@@ -2000,22 +2073,34 @@ class TestTrashBelongsToTheWorkspace:
             policy_seed.ensure_policy_file(str(root))
         policy_file.invalidate_policy_cache()
 
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(first))
-        with TestClient(create_app()) as client:
-            body = trash_path(client, "f.txt").json()
+        with TestClient(create_app()) as http:
+            # A, then B, then A again: the answer follows the **field**, so a
+            # second workspace's delete cannot leave the first one's next
+            # delete filing into the wrong reserved folder.
+            body = trash_path(WorkspaceClient(http, first), "f.txt").json()
             assert (first / body["trashedTo"]).is_dir()
-            assert editorfs.trash_batches()[0].is_relative_to(first / ".nojae")
+            with scoped(first):
+                assert editorfs.trash_batches()[0].is_relative_to(first / ".nojae")
 
-            # The switch: the very next delete files into the *new* root, and
-            # the old root's batch is not this workspace's to list or sweep.
-            monkeypatch.setenv("NOJAE_PATH_LOCATION", str(second))
-            policy_file.invalidate_policy_cache()
-            body = trash_path(client, "f.txt").json()
+            body = trash_path(WorkspaceClient(http, second), "f.txt").json()
             assert (second / body["trashedTo"]).is_dir()
-            batches = editorfs.trash_batches()
-            assert len(batches) == 1
-            assert batches[0].is_relative_to(second / ".nojae")
-            assert not any(batch.is_relative_to(first / ".nojae") for batch in batches)
+            with scoped(second):
+                batches = editorfs.trash_batches()
+                assert len(batches) == 1
+                assert batches[0].is_relative_to(second / ".nojae")
+                assert not any(
+                    batch.is_relative_to(first / ".nojae") for batch in batches
+                )
+
+            with scoped(first):
+                assert len(editorfs.trash_batches()) == 1
+
+            # Two batches, in two folders: the deletes never shared one.
+            assert list((first / ".nojae" / "trash").iterdir())
+            assert list((second / ".nojae" / "trash").iterdir())
+            assert {p.name for p in (first / ".nojae" / "trash").iterdir()} != {
+                p.name for p in (second / ".nojae" / "trash").iterdir()
+            }
 
         assert (first / ".nojae" / "trash").is_dir()
         assert (second / ".nojae" / "trash").is_dir()
@@ -2047,29 +2132,46 @@ class TestTrashBelongsToTheWorkspace:
 
 
 class TestChatStreamGate:
+    """The refusal is a fact about **one workspace** (clws-04, spec §5.3 13–14).
+
+    Every row arms a reply on a folder and then asks a write route about it. The
+    folder is the one the request names — the same canonical root the route
+    resolves it to — because the slot is keyed by that, and a handle armed for
+    another folder must not refuse this one's write (the pair is
+    :class:`TestChatStreamGateIsPerWorkspace`).
+    """
+
     def test_a_save_while_a_reply_streams_is_409(
         self, client, workspace: Path, backups: Path
     ):
         """The reply may be editing these files through its tools right now."""
         cancel_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, threading.Event())
+        routes._arm_chat_handle(str(workspace.resolve()), cancel_event, threading.Event())
         try:
             response = save(client, "src/config.py", "racing edit\n")
             assert response.status_code == 409
-            assert "while a chat reply is streaming" in response.json()["detail"]
+            detail = response.json()["detail"]
+            assert "while a chat reply is streaming" in detail
+            # Rule 14 with the workspace as its subject: the sentence says
+            # **which** folder is busy, so the answer is not ambiguous when two
+            # tabs are open.
+            assert str(workspace.resolve()) in detail
         finally:
-            routes._clear_chat_handle(cancel_event)
+            routes._clear_chat_handle(str(workspace.resolve()), cancel_event)
         assert (workspace / "src" / "config.py").read_text(encoding="utf-8") == "x = 1\n"
 
     def test_the_same_slot_the_pause_endpoint_uses(self, client):
-        """Not a second flag: one in-flight reply, one answer."""
+        """Not a second flag: one in-flight reply per workspace, one answer."""
         cancel_event = threading.Event()
         pause_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, pause_event)
+        root = workspace_of(client)
+        routes._arm_chat_handle(root, cancel_event, pause_event)
         try:
             assert client.post("/api/chat/pause").status_code == 200
+            # The pause reached *this* workspace's reply.
+            assert pause_event.is_set()
         finally:
-            routes._clear_chat_handle(cancel_event)
+            routes._clear_chat_handle(root, cancel_event)
         assert save(client, "src/config.py", "x\n").status_code == 200
 
     def test_a_create_while_a_reply_streams_is_409(
@@ -2077,14 +2179,14 @@ class TestChatStreamGate:
     ):
         """The reply may be writing this very folder through its tools."""
         cancel_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, threading.Event())
+        routes._arm_chat_handle(str(workspace.resolve()), cancel_event, threading.Event())
         try:
             for is_dir in (False, True):
                 response = create(client, "src/new-thing", is_dir=is_dir)
                 assert response.status_code == 409
                 assert "while a chat reply is streaming" in response.json()["detail"]
         finally:
-            routes._clear_chat_handle(cancel_event)
+            routes._clear_chat_handle(str(workspace.resolve()), cancel_event)
         assert not (workspace / "src" / "new-thing").exists()
 
     def test_a_rename_while_a_reply_streams_is_409(
@@ -2092,14 +2194,14 @@ class TestChatStreamGate:
     ):
         """The reply may be editing the source *or* the folder it lands in."""
         cancel_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, threading.Event())
+        routes._arm_chat_handle(str(workspace.resolve()), cancel_event, threading.Event())
         try:
             for frm, to in (("README.md", "notes.md"), ("src", "source")):
                 response = rename(client, frm, to)
                 assert response.status_code == 409
                 assert "while a chat reply is streaming" in response.json()["detail"]
         finally:
-            routes._clear_chat_handle(cancel_event)
+            routes._clear_chat_handle(str(workspace.resolve()), cancel_event)
         assert (workspace / "README.md").is_file()
         assert (workspace / "src" / "config.py").is_file()
         assert not (workspace / "notes.md").exists()
@@ -2111,14 +2213,14 @@ class TestChatStreamGate:
     ):
         """The reply may be reading the very file being removed."""
         cancel_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, threading.Event())
+        routes._arm_chat_handle(str(workspace.resolve()), cancel_event, threading.Event())
         try:
             for path in ("README.md", "src"):
                 response = trash_path(client, path)
                 assert response.status_code == 409
                 assert "while a chat reply is streaming" in response.json()["detail"]
         finally:
-            routes._clear_chat_handle(cancel_event)
+            routes._clear_chat_handle(str(workspace.resolve()), cancel_event)
         assert (workspace / "README.md").is_file()
         assert (workspace / "src" / "config.py").is_file()
         assert not trash.exists()
@@ -2129,17 +2231,250 @@ class TestChatStreamGate:
         """The reply may be writing the source folder *or* the destination."""
         (workspace / "archive").mkdir()
         cancel_event = threading.Event()
-        routes._arm_chat_handle(cancel_event, threading.Event())
+        routes._arm_chat_handle(str(workspace.resolve()), cancel_event, threading.Event())
         try:
             response = move_batch(client, ["README.md", "src/config.py"], "archive")
             assert response.status_code == 409
             assert "while a chat reply is streaming" in response.json()["detail"]
         finally:
-            routes._clear_chat_handle(cancel_event)
+            routes._clear_chat_handle(str(workspace.resolve()), cancel_event)
         assert (workspace / "README.md").is_file()
         assert (workspace / "src" / "config.py").is_file()
         assert not (workspace / "archive" / "README.md").exists()
         assert not backups.exists()
+
+
+class TestChatStreamGateIsPerWorkspace:
+    """Rule 13, head-on: a reply on A obstructs nothing about B.
+
+    One client, two folders, no ordering requirement and no invalidation call
+    between the two halves — the same pair of requests a second tab makes. Before
+    this task the refusal read one process-wide slot, so the second half of every
+    case below was a 409 that had nothing to do with the folder it named.
+    """
+
+    @pytest.fixture
+    def second(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A **second** workspace with the same relative paths as the first.
+
+        Identical shapes on purpose: the case that would have passed by accident
+        is the one where B's ``src/config.py`` is refused because A's reply holds
+        a global flag, so both folders must hold a file of that exact name.
+        """
+        root = tmp_path.parent / f"{tmp_path.name}-second"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "config.py").write_text("other = 1\n", encoding="utf-8",
+                                                newline="")
+        (root / "README.md").write_text("# other\n", encoding="utf-8", newline="")
+        (root / ".git").mkdir()
+        policy_seed.ensure_policy_file(str(root))
+        policy_file.invalidate_policy_cache()
+        return root
+
+    def test_a_reply_on_one_workspace_leaves_the_other_writable(
+        self, client, workspace: Path, second: Path, backups: Path, trash: Path
+    ):
+        """A refused here, a 200 there, in one process, in either order."""
+        cancel_event = threading.Event()
+        routes._arm_chat_handle(str(workspace.resolve()), cancel_event,
+                                threading.Event())
+        try:
+            # A is busy: every write about A is refused.
+            refused = save(client, "src/config.py", "racing edit\n")
+            assert refused.status_code == 409
+            assert str(workspace.resolve()) in refused.json()["detail"]
+
+            # B names itself and answers 200 — the half that used to be a 409.
+            saved = client.put(
+                "/api/fs/file",
+                params=workspace_params(second),
+                json={"path": "src/config.py", "text": "other = 2\n"},
+            )
+            assert saved.status_code == 200, saved.text
+            assert (second / "src" / "config.py").read_text(encoding="utf-8") == (
+                "other = 2\n"
+            )
+            # And A's bytes are untouched by the refusal.
+            assert (workspace / "src" / "config.py").read_text(encoding="utf-8") == (
+                "x = 1\n"
+            )
+
+            # The other four routes, same split.
+            assert create(client, "src/new-thing").status_code == 409
+            assert client.post(
+                "/api/fs/create",
+                params=workspace_params(second),
+                json={"path": "src/new-thing", "dir": False},
+            ).status_code == 200
+
+            assert rename(client, "README.md", "notes.md").status_code == 409
+            assert client.post(
+                "/api/fs/rename",
+                params=workspace_params(second),
+                json={"from": "README.md", "to": "notes.md"},
+            ).status_code == 200
+            assert (second / "notes.md").is_file()
+
+            assert trash_path(client, "README.md").status_code == 409
+            # B's own file, and one B's earlier create just made: A's reply has
+            # nothing to say about either.
+            assert client.request(
+                "DELETE", "/api/fs/file",
+                params={**workspace_params(second), "path": "src/new-thing"},
+            ).status_code == 200
+
+            (second / "archive").mkdir()
+            # A **legal** move on A: the only thing that can refuse it is the
+            # gate, so the 409 below cannot be an unrelated 409.
+            assert move_batch(client, ["README.md"], "src").status_code == 409
+            assert client.post(
+                "/api/fs/move-batch",
+                params=workspace_params(second),
+                json={"paths": ["notes.md"], "to_parent": "archive"},
+            ).status_code == 200
+            assert (second / "archive" / "notes.md").is_file()
+        finally:
+            routes._clear_chat_handle(str(workspace.resolve()), cancel_event)
+
+        # Released: A answers again, and nothing was left armed.
+        assert save(client, "src/config.py", "x = 3\n").status_code == 200
+
+    def test_a_reply_on_one_workspace_does_not_own_the_other_pause(
+        self, client, second: Path
+    ):
+        """The slot is keyed, so B's tab cannot stop A's turn (rule 15's shape).
+
+        Task 10 is where "Pause reaches this tab's reply only" becomes the
+        end-to-end contract with two live streams; this is the bookkeeping fact
+        it stands on, asserted without a model call.
+        """
+        cancel_event = threading.Event()
+        pause_event = threading.Event()
+        routes._arm_chat_handle(str(workspace_of(client)), cancel_event, pause_event)
+        try:
+            response = client.post("/api/chat/pause", params=workspace_params(second))
+            assert response.status_code == 409
+            # The 409 is about the folder this request named, not the process:
+            # A's live reply is never described as B's quiet workspace.
+            assert response.json()["detail"] == (
+                f"No chat reply is streaming on {second.resolve()}"
+            )
+            assert not pause_event.is_set()
+            # And the same request naming A does reach it.
+            assert client.post("/api/chat/pause").status_code == 200
+            assert pause_event.is_set()
+        finally:
+            routes._clear_chat_handle(str(workspace_of(client)), cancel_event)
+
+
+class TestWritesAnswerAboutTheNamedFolder:
+    """Every write answers about **its request's** folder, policy included.
+
+    The gate is the same verdict the reads go through, and since clws-04 it is
+    read from the policy file of the folder the request named. So a rule written
+    in A refuses A's write of a path and leaves B's **identical** path writable
+    — the pair that makes the rule about one workspace's file rather than about
+    a name the whole process agrees on.
+    """
+
+    @pytest.fixture
+    def twin(self, tmp_path: Path) -> Path:
+        """A second workspace with the **same** relative paths as the first."""
+        root = tmp_path.parent / f"{tmp_path.name}-twin"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "config.py").write_text("twin = 1\n", encoding="utf-8",
+                                                newline="")
+        (root / "README.md").write_text("# twin\n", encoding="utf-8", newline="")
+        (root / "vendored").mkdir()
+        (root / "vendored" / "lib.js").write_text("x\n", encoding="utf-8", newline="")
+        policy_seed.ensure_policy_file(str(root))
+        policy_file.invalidate_policy_cache()
+        return root
+
+    def test_a_rule_written_in_one_workspace_refuses_only_its_own_write(
+        self, workspace: Path, client, twin: Path, backups: Path, trash: Path
+    ):
+        """``ro`` in A: A's five writes are 422, B's five identical ones are not."""
+        (workspace / "vendored").mkdir()
+        (workspace / "vendored" / "lib.js").write_text("x\n", encoding="utf-8")
+        write_policy(workspace, [{"path": "vendored/**", "mode": "ro"}])
+
+        # A, refused by A's own rule — and the sentence names A's rule.
+        refused = save(client, "vendored/lib.js", "tampered\n")
+        assert refused.status_code == 422
+        assert '"vendored/**"' in refused.json()["detail"]
+        assert create(client, "vendored/new.js").status_code == 422
+        assert trash_path(client, "vendored/lib.js").status_code == 422
+        assert rename(client, "vendored/lib.js", "lib.js").status_code == 422
+        assert move_batch(client, ["vendored/lib.js"], "src").status_code == 422
+        assert (workspace / "vendored" / "lib.js").read_text(encoding="utf-8") == "x\n"
+        assert not trash.exists()
+
+        # B, the same five paths, answered by B's own (unwritten) rules.
+        assert client.put(
+            "/api/fs/file", params=workspace_params(twin),
+            json={"path": "vendored/lib.js", "text": "edited\n"},
+        ).status_code == 200
+        assert (twin / "vendored" / "lib.js").read_text(encoding="utf-8") == "edited\n"
+        assert client.post(
+            "/api/fs/create", params=workspace_params(twin),
+            json={"path": "vendored/new.js", "dir": False},
+        ).status_code == 200
+        assert client.request(
+            "DELETE", "/api/fs/file",
+            params={**workspace_params(twin), "path": "vendored/new.js"},
+        ).status_code == 200
+        assert client.post(
+            "/api/fs/rename", params=workspace_params(twin),
+            json={"from": "vendored/lib.js", "to": "moved.js"},
+        ).status_code == 200
+        assert (twin / "moved.js").is_file()
+        assert client.post(
+            "/api/fs/move-batch", params=workspace_params(twin),
+            json={"paths": ["moved.js"], "to_parent": "src"},
+        ).status_code == 200
+        assert (twin / "src" / "moved.js").is_file()
+
+    def test_a_write_lands_in_the_folder_it_named(
+        self, workspace: Path, client, twin: Path, backups: Path,
+        legacy_trash: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The plain fact, per route: the bytes move **there**, not here."""
+        # No trash pin: the batch's *location* is part of what is asserted, so
+        # the delete resolves it the way production does — from the workspace in
+        # scope. The legacy folder is pinned by the fixture so the sweep stays
+        # out of this checkout.
+        monkeypatch.setattr(editorfs.constants, "TRASH_DIR", None)
+        assert client.put(
+            "/api/fs/file", params=workspace_params(twin),
+            json={"path": "src/config.py", "text": "twin = 2\n"},
+        ).status_code == 200
+        assert (twin / "src" / "config.py").read_text(encoding="utf-8") == "twin = 2\n"
+        assert (workspace / "src" / "config.py").read_text(encoding="utf-8") == "x = 1\n"
+
+        assert client.post(
+            "/api/fs/create", params=workspace_params(twin),
+            json={"path": "made.py", "dir": False},
+        ).status_code == 200
+        assert (twin / "made.py").is_file()
+        assert not (workspace / "made.py").exists()
+
+        assert client.post(
+            "/api/fs/rename", params=workspace_params(twin),
+            json={"from": "made.py", "to": "renamed.py"},
+        ).status_code == 200
+        assert (twin / "renamed.py").is_file()
+
+        deleted = client.request(
+            "DELETE", "/api/fs/file",
+            params={**workspace_params(twin), "path": "README.md"},
+        )
+        assert deleted.status_code == 200
+        assert not (twin / "README.md").exists()
+        assert (workspace / "README.md").is_file()
+        # And the batch is B's: A's reserved folder holds nothing.
+        assert (twin / deleted.json()["trashedTo"]).is_dir()
+        assert not (workspace / ".nojae" / "trash").exists()
 
 
 class TestMissingAndShape:
@@ -2457,13 +2792,12 @@ class TestTrashIsNotASideDoor:
     """
 
     @pytest.fixture
-    def repo_like(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def repo_like(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         """A workspace whose trash resolves to its own reserved folder."""
         root = tmp_path / "repo"
         (root / ".nojae" / "trash").mkdir(parents=True)
         (root / "src").mkdir()
         (root / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
         monkeypatch.setattr(editorfs.constants, "TRASH_DIR", None)
         monkeypatch.setattr(
             editorfs.constants, "LEGACY_TRASH_DIR", tmp_path / "legacy-trash-absent"
@@ -2473,7 +2807,8 @@ class TestTrashIsNotASideDoor:
         # here it is a rule of this workspace, which is what makes the promise
         # below about the *gate* rather than about a built-in list.
         write_policy(root, [{"path": "**/.env**", "mode": "hidden"}])
-        return root
+        with scoped(root):
+            yield root
 
     # The batch name a delete would produce, minus the digest — a planted one
     # is fine, because the question is what the gate says about a *name*, not
@@ -2496,7 +2831,7 @@ class TestTrashIsNotASideDoor:
     @pytest.fixture
     def repo_client(self, repo_like: Path):
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield WorkspaceClient(test_client, repo_like)
 
     def test_the_default_trash_is_the_workspaces_reserved_folder(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2511,14 +2846,14 @@ class TestTrashIsNotASideDoor:
         """
         root = Path(editorfs.constants.PROJECT_ROOT)
         # Pinned rather than inherited: the resolution is what is asserted, so
-        # the location this process happens to have booted on must not decide it.
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
-        assert editorfs.workspace_root() == os.path.realpath(str(root))
-        assert editorfs.constants.TRASH_DIR is None
-        assert editorfs.trash_dir() == (
-            root / editorfs.constants.POLICY_DIRNAME / editorfs.constants.TRASH_SUBDIR
-        )
-        assert editorfs.constants.BACKUP_DIR == root / "logs" / "editor_backups"
+        # the workspace this process happens to have booted on must not decide it.
+        with scoped(root):
+            assert editorfs.workspace_root() == os.path.realpath(str(root))
+            assert editorfs.constants.TRASH_DIR is None
+            assert editorfs.trash_dir() == (
+                root / editorfs.constants.POLICY_DIRNAME / editorfs.constants.TRASH_SUBDIR
+            )
+            assert editorfs.constants.BACKUP_DIR == root / "logs" / "editor_backups"
 
     def test_a_trashed_copy_of_a_hidden_name_is_still_absent_to_a_read(
         self, repo_client, planted_batch: Path
@@ -2699,13 +3034,13 @@ class TestBuiltInRulesInAppsOwnWorkspace:
     """
 
     @pytest.fixture
-    def app_like(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def app_like(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         """A scratch folder standing in for the install directory.
 
-        Both sides of :func:`is_self_workspace` are read at call time, so moving
-        ``constants.PROJECT_ROOT`` beside the location makes a self workspace out
-        of a temp folder — which is what lets this test exist at all instead of
-        editing the real checkout.
+        Both sides of :func:`is_self_workspace` are read at call time, so
+        :func:`tests.conftest.make_the_install` beside the location makes a self
+        workspace out of a temp folder — which is what lets this test exist at
+        all instead of editing the real checkout.
         """
         root = tmp_path / "app"
         (root / "src").mkdir(parents=True)
@@ -2715,17 +3050,17 @@ class TestBuiltInRulesInAppsOwnWorkspace:
         (root / "web" / "dist").mkdir(parents=True)
         (root / "web" / "dist" / "index.html").write_text("<html></html>\n",
                                                           encoding="utf-8")
-        monkeypatch.setattr(editorfs.constants, "PROJECT_ROOT", root)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+        make_the_install(monkeypatch, root)
         policy_file.invalidate_policy_cache()
-        assert builtin_policy.is_self_workspace() is True
-        yield root
-        policy_file.invalidate_policy_cache()
+        with scoped(root):
+            assert builtin_policy.is_self_workspace() is True
+            yield root
+            policy_file.invalidate_policy_cache()
 
     @pytest.fixture
     def app_client(self, app_like: Path):
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield WorkspaceClient(test_client, app_like)
 
     def test_the_apps_own_env_and_logs_are_writable_by_nobody(
         self, app_like: Path, app_client, trash: Path, backups: Path

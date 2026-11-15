@@ -6,15 +6,15 @@ are still live (the old path stays the live one until pol-06 wires the verdict),
 and a route-level pin that the live path still refuses the app's own ``.env`` —
 this task must not open anything.
 
-The workspace is always pointed at by ``NOJAE_PATH_LOCATION`` — never by
-patching ``path_location`` itself. Stubbing that function would stub away the
-single comparison this task is about (:func:`is_self_workspace`), so a suite that
-patched it could not tell a conditional level A from an unconditional one.
+The workspace is always the seam's **scope** — never the installation stubbed
+away. Stubbing :func:`is_self_workspace` would stub away the single comparison
+this task is about, so a suite that patched it could not tell a conditional
+level A from an unconditional one.
 
-Both sides of that comparison are read at call time (the location from the
-environment, the install dir from ``editorfs.constants``), so the shapes the task
-names — the app's parent, a sibling copy — are built as real paths rather than
-mocked, which is what keeps a live level A and a dormant one tellable apart.
+Both sides of that comparison are read at call time (the scope's root and
+``workspace.installation()``), so the shapes the task names — the app's parent, a
+sibling copy — are built as real paths rather than mocked, which is what keeps a
+live level A and a dormant one tellable apart.
 
 The last class is appdb-05's: the settings store and its WAL sidecars, hidden
 from every file surface (D10). It runs against a scratch folder made "the app"
@@ -25,7 +25,7 @@ the same way, so the three names can be planted as real files — and as real
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,6 +38,7 @@ from src.core import editorfs
 from src.core.editorfs import builtin_policy
 from src.core.editorfs import policy_file, policy_seed
 from src.core.editorfs import policy_modes
+from tests.conftest import WorkspaceClient, make_the_install, scoped
 
 APP_ROOT = os.path.realpath(str(editorfs.constants.PROJECT_ROOT))
 
@@ -54,18 +55,21 @@ STORE_RULE_PATTERN = f"**/{appdb.DB_FILENAME}*"
 
 
 @pytest.fixture
-def app_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The workspace *is* this installation — level A is live."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", APP_ROOT)
+def app_workspace() -> "Iterator[Path]":
+    """The workspace *is* this installation — level A is live.
+
+    clws-10: the workspace is the request scope, not an environment value, so the
+    fixture enters the installation's scope for the test's duration.
+    """
+    with scoped(APP_ROOT):
+        yield Path(APP_ROOT)
 
 
 @pytest.fixture
-def foreign_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
+def foreign_workspace(tmp_path: Path) -> "Iterator[Path]":
     """The workspace is somewhere else — level A is dormant."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    return tmp_path
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 def _root_names(client: TestClient) -> List[str]:
@@ -107,8 +111,8 @@ class TestIsSelfWorkspace:
         rather than the raw environment value."""
         link = tmp_path / "nojae-via-link"
         link.symlink_to(APP_ROOT, target_is_directory=True)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(link))
-        assert builtin_policy.is_self_workspace() is True
+        with scoped(link):
+            assert builtin_policy.is_self_workspace() is True
 
     @pytest.mark.parametrize("which", ["parent", "copy", "near", "tmp"])
     def test_everything_else_is_not_self(
@@ -125,14 +129,15 @@ class TestIsSelfWorkspace:
         ]
         location = dict(candidates)[which]
         assert location is not None
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(location))
-        assert builtin_policy.is_self_workspace() is False
+        with scoped(location):
+            assert builtin_policy.is_self_workspace() is False
 
-    def test_an_unset_location_lands_on_the_app(self, monkeypatch):
-        """``path_location()`` falls back to the install dir, so level A is live
-        from the first request — the mixed state is the normal one."""
-        monkeypatch.delenv("NOJAE_PATH_LOCATION", raising=False)
-        assert builtin_policy.is_self_workspace() is True
+    def test_the_installations_own_scope_is_self(self):
+        """A tab rooted at the installation is the app; no environment decides it."""
+        from src.core import workspace
+
+        with scoped(workspace.installation()):
+            assert builtin_policy.is_self_workspace() is True
 
 
 class TestSelfWorkspaceRules:
@@ -360,10 +365,10 @@ class TestForeignWorkspace:
         """The same file names, in a checkout this process did not boot from:
         dormant. The failing test if level A ever moves back to unconditional."""
         copy = copy_of_the_repo(tmp_path / "nojae-copy")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(copy))
-        assert builtin_policy.is_self_workspace() is False
-        for rel in (".env", "logs/trash/x", "web/dist/index.html"):
-            assert policy_modes.mode_for(rel).mode == shared.READ_WRITE
+        with scoped(copy):
+            assert builtin_policy.is_self_workspace() is False
+            for rel in (".env", "logs/trash/x", "web/dist/index.html"):
+                assert policy_modes.mode_for(rel).mode == shared.READ_WRITE
 
 
 class TestReservedFolderIsUnconditional:
@@ -479,13 +484,25 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         "src/core/models.py",
     ]
 
+    @pytest.fixture
+    def route_client(self, app_workspace: Path):
+        """A client bound to the installation workspace this class asserts about."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def make():
+            with TestClient(create_app()) as http:
+                yield WorkspaceClient(http, app_workspace)
+
+        return make
+
     @pytest.mark.parametrize("rel", ORDINARY)
     def test_an_ordinary_path_of_the_app_is_still_an_ordinary_file(
-        self, app_workspace, rel: str
+        self, app_workspace, route_client, rel: str
     ):
         """The refactor's cost, checked: nothing that was editable got locked."""
         assert policy_modes.mode_for(rel).mode == shared.READ_WRITE
-        with TestClient(create_app()) as client:
+        with route_client() as client:
             body = client.get("/api/fs/file", params={"path": rel})
             assert body.status_code == 200, rel
             listed = client.get("/api/fs/tree").json()
@@ -506,10 +523,10 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         ],
     )
     def test_an_app_owned_path_is_absent_to_a_read_and_named_to_a_write(
-        self, app_workspace, rel: str, pattern: str
+        self, app_workspace, route_client, rel: str, pattern: str
     ):
         """The D8 asymmetry, on nojae's own workspace, at the routes."""
-        with TestClient(create_app()) as client:
+        with route_client() as client:
             read = client.get("/api/fs/file", params={"path": rel})
             assert read.status_code == 404, rel
             assert pattern not in read.text
@@ -525,7 +542,7 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
             assert "nojae's own rules" in detail, rel
 
     def test_the_prompt_helpers_file_is_absent_to_a_read_and_named_to_a_write(
-        self, app_workspace
+        self, app_workspace, route_client
     ):
         """The reservation at the routes, on the file the app no longer owns.
 
@@ -544,7 +561,7 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         """
         rel = ".nojae/prompt-helpers.json"
         reserved = '".nojae"'
-        with TestClient(create_app()) as client:
+        with route_client() as client:
             read = client.get("/api/fs/file", params={"path": rel})
             assert read.status_code == 404
             assert "does not exist" in read.json()["detail"]
@@ -561,13 +578,13 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
 
     @pytest.mark.parametrize("rel", ["web/dist/index.html"])
     def test_an_app_owned_build_or_data_file_is_readable_and_locked_from_writes(
-        self, app_workspace, rel: str
+        self, app_workspace, route_client, rel: str
     ):
         """``ro`` at the routes: the tree and the read keep working, the save does not."""
         verdict = policy_modes.mode_for(rel)
         assert verdict.level == shared.LEVEL_BUILTIN
         assert verdict.mode == shared.READ_ONLY
-        with TestClient(create_app()) as client:
+        with route_client() as client:
             assert client.get("/api/fs/file", params={"path": rel}).status_code == 200
             write = client.put(
                 "/api/fs/file", json={"path": rel, "text": "hand-edited\n"}
@@ -594,7 +611,9 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         assert verdict.level != shared.LEVEL_BUILTIN, rel
         assert verdict.level == shared.LEVEL_WORKSPACE or verdict.mode == shared.READ_WRITE
 
-    def test_the_apps_own_env_is_no_longer_refused_by_a_code_list(self, app_workspace):
+    def test_the_apps_own_env_is_no_longer_refused_by_a_code_list(
+        self, app_workspace, route_client
+    ):
         """The inversion this task exists to make visible.
 
         Before pol-06, the app's ``.env`` was closed by a hardcoded ``.env``
@@ -609,7 +628,7 @@ class TestTheVerdictIsWhatTheRoutesNowAnswerWith:
         assertion is about the workspace *being* the install — the fact the file's
         own fixture exists to declare.
         """
-        with TestClient(create_app()) as client:
+        with route_client() as client:
             read = client.get("/api/fs/file", params={"path": ".env"})
         assert read.status_code == 404
         assert "connector path policy" not in read.text
@@ -664,11 +683,11 @@ class TestTheStoreIsInvisibleToEveryFileSurface:
         for name in STORE_NAMES:
             (root / name).write_text("sqlite format marker\n", encoding="utf-8")
         (root / "keep.py").write_text("needle here\n", encoding="utf-8")
-        monkeypatch.setattr(editorfs.constants, "PROJECT_ROOT", root)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+        make_the_install(monkeypatch, root)
         policy_file.invalidate_policy_cache()
-        assert builtin_policy.is_self_workspace() is True
-        return root
+        with scoped(root):
+            assert builtin_policy.is_self_workspace() is True
+            yield root
 
     @pytest.fixture
     def repo(self, app_like: Path) -> Path:
@@ -679,9 +698,9 @@ class TestTheStoreIsInvisibleToEveryFileSurface:
         return app_like
 
     @pytest.fixture
-    def client(self):
+    def client(self, repo: Path):
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield WorkspaceClient(test_client, repo)
 
     @pytest.mark.parametrize("name", STORE_NAMES)
     def test_the_tree_does_not_list_it(self, repo: Path, client, name: str):
@@ -779,14 +798,15 @@ class TestTheStoreIsInvisibleToEveryFileSurface:
         for name in STORE_NAMES:
             (foreign / name).write_text("sqlite format marker\n", encoding="utf-8")
         (foreign / "keep.py").write_text("needle here\n", encoding="utf-8")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(foreign))
         policy_file.invalidate_policy_cache()
-        assert builtin_policy.is_self_workspace() is False
+        with scoped(foreign):
+            assert builtin_policy.is_self_workspace() is False
         _git(foreign, "init", "-q")
         _git(foreign, "add", "keep.py")
         _git(foreign, "commit", "-qm", "seed")
 
-        with TestClient(create_app()) as client:
+        with TestClient(create_app()) as http:
+            client = WorkspaceClient(http, foreign)
             names = _root_names(client)
             for name in STORE_NAMES:
                 assert name in names, name

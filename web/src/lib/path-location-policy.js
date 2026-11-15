@@ -1,15 +1,17 @@
 // One place to say what the file in the workspace's reserved folder is doing
 // (pol-05's read-write policy).
 //
-// The server reports `{state, path, error}` for it on both working-location
-// endpoints, and the app bar's working-location field is the one surface that
-// speaks about it. It renders only the `warn` sentences, as the one line under
-// its field, and stays silent on the `plain` ones — the bar has room for a
-// warning, not for a caption. It gets its sentences from here rather than
-// inventing them, because the *tone* carries meaning: `failed` is a warning that
-// the switch succeeded and the seed did not, `absent` is a plain fact, `created`
-// is reassurance that the project's own config is readable and editable outside
-// the app.
+// `GET /api/workspace` reports `{state, path, error}` for it, and the app bar's
+// working-location field is the one surface that speaks about it. It renders
+// only the `warn` sentences, as the one line under its field, and stays silent
+// on the `plain` ones — the bar has room for a warning, not for a caption. It
+// gets its sentences from here rather than inventing them, because the *tone*
+// carries meaning: `failed` is a warning that the folder moved and the seed did
+// not, `absent` is a plain fact, `created` is reassurance that the project's own
+// config is readable and editable outside the app.
+//
+// The wording is unchanged by clws-02: the folder is the tab's own now, but
+// what the file is doing is the same question either way.
 //
 // The prompt helpers and the agent modes used to be the other blocks here. Both
 // are rows in ``nojae.db`` now, so a working location has no file to report on

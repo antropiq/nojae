@@ -17,6 +17,7 @@ import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorNotices } from '../src/composables/useEditorNotices'
 import { useEditorRename } from '../src/composables/useEditorRename'
 import { useGitStatus } from '../src/composables/useGitStatus'
+import { pointTabAt, withoutWorkspace } from './helpers/workspace-url'
 
 // ---------------------------------------------------------------------------
 // The combinations that belong to no single route's suite.
@@ -90,7 +91,10 @@ function stubRoutes({ saveAnswer = null, texts = {} } = {}) {
       }))
 
   return vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
-    const key = String(url)
+    // Matched with the workspace field stripped (clws-02): every request the
+    // tab makes names its folder, and the suite spells that field no more than
+    // the client does.
+    const key = withoutWorkspace(url)
     if (key.startsWith('/api/fs/status')) {
       return jsonResponse({ repo: true, entries: [] })
     }
@@ -164,6 +168,9 @@ function stubRoutes({ saveAnswer = null, texts = {} } = {}) {
 }
 
 function resetState() {
+  // The tab has a folder, so every request below carries the workspace field
+  // (clws-02) and the stub above matches it back off.
+  pointTabAt('/w')
   tree.state.nodes = {}
   tree.state.expanded = { '': true }
   tree.state.focused = ''

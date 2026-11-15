@@ -2,6 +2,7 @@ import { reactive } from 'vue'
 
 import { useChat } from './useChat'
 import { registerReRootHandler } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // The Editor pane's language-server state: the stateful half of the feature
@@ -106,7 +107,7 @@ export function useEditorLsp() {
     let res
     let answer = null
     try {
-      res = await fetch('/api/lsp/query', {
+      res = await fetch(withWorkspace('/api/lsp/query'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

@@ -32,8 +32,8 @@ useful parts of the app a vocabulary there:
   than a `cmd` vocabulary, so the same command list behaves the same on both
   systems.
 - The Editor's terminal opens **Git Bash** as its shell, over a pseudo-console.
-  It never falls back to `cmd.exe` or PowerShell: one working location gets one
-  tool vocabulary.
+  It never falls back to `cmd.exe` or PowerShell: one terminal vocabulary,
+  whatever the tab's folder.
 
 The app looks for an installation in the usual places — `git` on `PATH` first,
 then `C:\Program Files\Git`, `%LOCALAPPDATA%\Programs\Git`, Scoop and Chocolatey.
@@ -219,10 +219,11 @@ used to be members are **absent on purpose**: LSP activation is the workspace
 declaration's `enable` flag alone, and the tool-loop cap is a per-agent number a
 spec that needs one sets on its own agent row.
 
-Write it at `<working location>/.nojae/nojae-test-settings.json` — the working
-location the server boots on, which is the repo root unless
-`NOJAE_PATH_LOCATION` says otherwise. The pinned samplers and
-`"reasoning": "off"` are what keep the streaming specs reproducible.
+Write it at the installation folder's `.nojae/nojae-test-settings.json` — the
+app's own checkout, which is the folder a new tab lands on. The suite resolves the
+fixture there, never from a developer's configured folder and never from
+`NOJAE_PATH_LOCATION`. The pinned samplers and `"reasoning": "off"` are what keep
+the streaming specs reproducible.
 
 **A missing file stops the whole suite before a spec runs**, with a message
 naming the path — there is no fallback to this install's store, because a suite
@@ -248,8 +249,8 @@ exists to prevent: a green run measured against someone else's server.
 Two kinds of thing configure the app. The **model connection, the agents and the
 prompt-helper bullets** are rows of one SQLite database — `nojae.db`, at the
 install root, created by the app on first boot and edited from the dialogs. The
-**declarations** stay files, in the working location's reserved `.nojae/`, and
-they are the only settings a folder carries.
+**declarations** stay files, in a workspace's reserved `.nojae/`, and they are the
+only settings a folder carries.
 
 | | Holds | Written by |
 |---|---|---|
@@ -267,8 +268,8 @@ connectors — the protection `.env` already has. A store the app cannot open is
 that names the path, and a chat turn refuses with that same sentence.
 
 The two declaration files may carry API keys too, so they are gitignored and their
-secrets are never returned by the API. Both belong to the **working location**:
-when a folder becomes it, the app seeds the MCP declaration from its committed
+secrets are never returned by the API. Both belong to a workspace: when a folder is
+first admitted, the app seeds the MCP declaration from its committed
 template — with the `console` and `fedit` connectors pre-declared — and leaves the
 LSP *template* beside it, a copy of `lsp_connectors/lsp_servers.example.json`. No
 seed ever overwrites an existing file. The LSP declaration is never seeded as a
@@ -276,10 +277,10 @@ working file — its entries name machine-local paths — you write it yourself 
 the template.
 
 Nothing about the connection, the agents or the bullets travels with the folder:
-point the working location at another project and the same servers, the same
-agents and the same bullets answer there. The store is read afresh at the start of
-every turn, so a dialog save needs no restart at all. `.env` follows the other
-rule: a hand-edit waits for one.
+point a tab at another project and the same servers, the same agents and the same
+bullets answer there. The store is read afresh at the start of every turn, so a
+dialog save needs no restart at all. `.env` follows the other rule: a hand-edit
+waits for one.
 
 ### The model connection — Settings → **Models**
 
@@ -420,7 +421,7 @@ and entirely optional.
 
 ### The LSP setup file — `.nojae/lsp-settings.json`
 
-When a folder becomes the working location, the app leaves
+When a folder is first admitted, the app leaves
 `.nojae/lsp-settings.template.json` in its reserved folder — a copy of the
 committed `lsp_connectors/lsp_servers.example.json`, never overwritten. Copy
 it to `.nojae/lsp-settings.json` and adapt it; the app reads only
@@ -570,32 +571,31 @@ Two more knobs worth knowing:
 
 ### The working location
 
-One value roots every file-touching part of the app — the `--root-dir` of the
-local connectors, every `workspaceRoot`, the Editor's tree and the terminal's
-starting directory: `NOJAE_PATH_LOCATION`. It is seeded with the install
-directory at startup, so a fresh checkout needs no configuration, and it is
-deliberately **not** a `.env` key, so a settings save can neither erase it nor
-resurrect a stale value.
+The working location belongs to **the tab**, not the app: each tab points at one
+folder, holds it in its own `sessionStorage`, and sends it with every request that
+needs it. A reload keeps the folder; a new tab starts on the installation
+directory; the address bar never carries it, so two tabs on the same address can
+work on two folders at once.
 
-The **app bar** holds that value as an editable field: type another folder and
-press **Set** to repoint the MCP and LSP tools, the Editor's tree and new
-terminal sessions at it in one step. Set is inert while a WorkBench reply or a
-batch is running — a session must not have its root moved out from under it.
-The change is process-local, and the next start is back at
-the install directory. Export the variable (or set it in `.env`) to pin it
-permanently. The folder must exist and must not sit under a restricted path. In
-a declaration, reference it as `${NOJAE_PATH_LOCATION}` — the app defines
-it for the connectors and the language servers it starts.
+The **app bar** holds this tab's field: type another folder and press **Set** to
+point that tab's MCP and LSP tools, the Editor's tree and new terminal sessions at
+it in one step. Set is inert while a WorkBench reply or a batch is running **in
+this tab** — a session must not have its root moved out from under it. The folder
+must exist and must not sit under a restricted path. The server resolves the
+folder for each request; no setting holds it. In a declaration, reference it as
+`${NOJAE_PATH_LOCATION}` — the placeholder expands to the workspace being served,
+so one declaration is correct in every tab. `${PROJECT_ROOT}` keeps meaning the
+installation.
 
-That folder gets its own read/write policy in `<working location>/.nojae/read-write-policy.json`,
-which answers one question per file — `rw`, `ro` or `hidden` — for the Editor
-*and* for the agent's file tools: a folder you mark `ro` is not editable by an
-agent either. The file is seeded for you (dependency and build folders come
+That folder gets its own read/write policy in `.nojae/read-write-policy.json`
+inside it, which answers one question per file — `rw`, `ro` or `hidden` — for the
+Editor *and* for the agent's file tools: a folder you mark `ro` is not editable by
+an agent either. The file is seeded for you (dependency and build folders come
 read-only) and edited outside the app — see
 [`docs/POLICY-MANAGEMENT-DOC-EN.md`](docs/POLICY-MANAGEMENT-DOC-EN.md). The
 settings store is deliberately **not** part of that switch: the servers, the
-agents and the bullets are the install's, so a workspace change invalidates only
-the hubs, the policy and the tree caches.
+agents and the bullets are the install's, so moving a tab invalidates only that
+workspace's hubs, policy and tree caches.
 
 ### The install's technical keys — `.env`
 
@@ -709,7 +709,7 @@ the one that copies the whole conversation, as markdown.
 
 ![The Editor tab](docs/editor-tab.png)
 
-The working location as a file tree and a Monaco pane: create, rename, move and
+This tab's folder as a file tree and a Monaco pane: create, rename, move and
 delete, save with a diff against the last commit, git status badges on the rows,
 a search that answers for the same set of files the tree lists, and **one
 terminal per connection**, on the platform's pseudo-terminal — `$SHELL` on
@@ -717,7 +717,7 @@ POSIX, Git Bash on Windows.
 
 Nothing here is destroyed. Every save keeps the bytes it replaced in a backup
 folder, and a delete moves the file into a dated batch under the reserved
-`.nojae/trash/` of the current working location (kept 30 days), so a restore is
+`.nojae/trash/` of the current workspace (kept 30 days), so a restore is
 one `mv` away. `Ctrl`+click a group of rows, right-click, `Move to…`: the set
 moves whole in one request, and a file that is open keeps its tab and its
 unsaved edits at the new path.

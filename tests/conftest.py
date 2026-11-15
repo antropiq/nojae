@@ -674,34 +674,32 @@ def _every_test_gets_its_own_store(_hermetic: pytest.MonkeyPatch,
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_path_location(
-    _hermetic: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep the working location off this checkout for every test.
+def _every_test_runs_in_a_workspace_scope(tmp_path: Path) -> Iterator[Path]:
+    """Give every test a workspace of its own, entered as the seam's scope.
 
-    The store is install-scoped, so it is the guard above that keeps a test off
-    this machine's servers, agents and key (D11). The **working location** is
-    still the developer's own, though: it decides where ``AGENTS.md`` is read
-    from, where the hubs' declaration files are looked for, and where the e2e
-    suite's connection fixture lives. So unless a test names its own location it
-    gets a fresh folder rather than this checkout, and every one of those lookups
-    can only find a file that test wrote.
+    This replaces the interim ``NOJAE_PATH_LOCATION`` pin (clws-10): the folder a
+    call is about is a **request-scoped value** now, not process state, so the
+    guard is a scope rather than an environment variable. The guarantee is the
+    same one, and it is the reason the fixture exists at all: a core-level test
+    that calls a surface directly — the tree, a policy read, a declaration scan —
+    runs inside a scope and can only read a folder this test wrote. No test
+    touches this repository's own ``.nojae``.
 
-    A test that picks its own location (the folder's own style,
-    ``monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))``) overrides this,
-    because its own fixture or body runs later; one that deliberately clears the
-    key asks for the boot default and gets it. ``tests/conftest`` is the only
-    place this is done, and ``tests/test_env_isolation.py`` is the invariant
-    stated as a test rather than trusted as a fixture.
+    A test that wants its own folder enters ``scoped(root)`` inside this one; a
+    scope entered later wins, and each exit restores the outer answer. A route
+    is unaffected either way: it enters its own scope from the field its request
+    named, nested inside this one.
 
     The throw-away root is a **sibling** of ``tmp_path``, for the reason the
-    fixture above gives for the same choice.
+    store fixture above gives for the same choice — several suites assert that a
+    folder they pointed at stayed empty.
     """
-    from src import config as config_module
+    from src.core import workspace as workspace_seam
 
     root = workspace_guard_root(tmp_path)
     root.mkdir(exist_ok=True)
-    _hermetic.setenv(config_module.PATH_LOCATION_KEY, str(root))
+    with workspace_seam.scope(str(root)):
+        yield root
 
 
 @pytest.fixture(autouse=True)
@@ -757,8 +755,198 @@ def store_guard_root(tmp_path: Path) -> Path:
 
 
 def workspace_guard_root(tmp_path: Path) -> Path:
-    """The throw-away working location :func:`_no_ambient_path_location` pins."""
+    """The throw-away workspace :func:`_every_test_runs_in_a_workspace_scope` enters."""
     return tmp_path.parent / f"{tmp_path.name}-workspace"
+
+
+def make_the_install(
+    patch: pytest.MonkeyPatch, root: Path
+) -> Path:
+    """Say "this scratch folder **is** the installation", on both sides of one compare.
+
+    Level A — the app's rules about itself — is live only while the workspace
+    *is* the install directory, so a test that wants a live level A has to move
+    both sides of :func:`src.core.editorfs.builtin_policy.is_self_workspace`
+    onto a folder it can write into. That is the only way to plant ``.env``,
+    ``nojae.db`` or ``logs/`` as real files without touching this checkout.
+
+    Since clws-01 the two sides are read from two places, and a test that moves
+    only one of them gets a dormant level A:
+
+    * the **workspace** side is the seam's scope (the location, or a scope a
+      request entered), so the caller enters the workspace's scope itself;
+    * the **installation** side is :func:`src.core.workspace.installation`, which
+      reads ``src.config.PROJECT_ROOT`` — the one source the seam names.
+      ``editorfs.constants.PROJECT_ROOT`` is moved with it because that is what
+      the package's own path answers (and several assertions here) consult.
+
+    One helper rather than five inline pairs, because a second copy of "which
+    attributes make a folder the app" is how a fixture starts testing a state the
+    app can no longer be in.
+    """
+    from src import config as config_module
+    from src.core import editorfs
+
+    patch.setattr(config_module, "PROJECT_ROOT", root)
+    patch.setattr(editorfs.constants, "PROJECT_ROOT", root)
+    return root
+
+
+def workspace_params(root: Any) -> Dict[str, str]:
+    """The **one** way a test builds the ``workspace`` field of a request.
+
+    Every workspace-scoped route answers about the folder this names (clws-01),
+    and the field's spelling is the API's, not each test's: written by hand in a
+    call site it can drift from the server's name and the test then measures
+    nothing (a query parameter nobody reads answers the same as one that is
+    misspelled). The client has the same rule as a helper, ``withWorkspace``, and
+    this is its twin here — tests keep naming folders **by value**, and never the
+    parameter's name.
+
+    ``root`` is a folder a test owns (a ``tmp_path`` one, never this checkout:
+    a test that names the installation folder as its workspace has escaped its
+    sandbox). ``str`` is applied so a ``Path`` is as easy to name as a text.
+    """
+    return {"workspace": str(root)}
+
+
+class WorkspaceClient:
+    """A ``TestClient`` that names **one folder** on every request it makes.
+
+    The route-level twin of :func:`workspace_params` (clws-03): a suite whose
+    client is this one cannot send a workspace-scoped request that names no
+    folder, so what the tests measure is the **field** and never the interim
+    environment fallback. That distinction is the whole point — a call site that
+    relied on the fallback would keep passing while the field went unread, which
+    is exactly the "query parameter nobody reads" failure the helper above
+    exists to prevent.
+
+    The bound folder is the **default**, not a lock: a call that passes its own
+    ``workspace`` in ``params`` keeps it, which is how one client answers about
+    two folders in turn (the pair every per-workspace case is built from).
+
+    The verb methods **and** ``websocket_connect`` are wrapped, because the
+    workspace is a query-string field on the socket too (spec §8): a terminal
+    test's socket names its folder exactly as an HTTP request does. Everything
+    else a test reaches on a ``TestClient`` (``app``, ``get``, ...) still works
+    through :meth:`__getattr__`.
+    """
+
+    def __init__(self, http: Any, root: Any) -> None:
+        self.http = http
+        self.root = str(root)
+
+    def _with_workspace(self, params: Any) -> Dict[str, Any]:
+        """The field, with the caller's parameters on top of it."""
+        merged = workspace_params(self.root)
+        if isinstance(params, dict):
+            merged.update(params)
+        elif params:
+            # The list-of-pairs form: keep the caller's entries, add ours.
+            return list(params) + list(merged.items())
+        return merged
+
+    def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        kwargs["params"] = self._with_workspace(kwargs.get("params"))
+        return self.http.request(method, url, **kwargs)
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs: Any) -> Any:
+        return self.request("PUT", url, **kwargs)
+
+    def delete(self, url: str, **kwargs: Any) -> Any:
+        return self.request("DELETE", url, **kwargs)
+
+    def websocket_connect(self, url: str, **kwargs: Any) -> Any:
+        kwargs["params"] = self._with_workspace(kwargs.get("params"))
+        return self.http.websocket_connect(url, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.http, name)
+
+
+def workspace_hubs(app: Any, root: Any = None) -> Any:
+    """The live :class:`~src.core.hubpool.HubSet` of one workspace, or ``None``.
+
+    The pool is the only thing the app holds for its tools (clws-06 deleted the
+    ``app.state.mcp`` / ``app.state.lsp`` read-through), so a test that wants to
+    know which managers a route will reach asks the pool the same question the
+    route asks. ``root`` defaults to the folder the app admitted at boot, which
+    is the one a request that names no workspace is answered about.
+    """
+    pool = app.state.hubpool
+    return pool.live(root if root is not None else pool.boot_root)
+
+
+#: :func:`set_workspace_hubs`' "this hub is not there at all" answer, distinct
+#: from leaving the argument out: a test asks for ``NO_HUB`` to say "the route
+#: must degrade as if the hub were missing", which is a different situation from
+#: "this test has no opinion about that hub".
+NO_HUB = object()
+
+
+def set_workspace_hubs(
+    app: Any,
+    root: Any = None,
+    *,
+    mcp: Any = None,
+    lsp: Any = None,
+) -> Any:
+    """Hand one workspace's live set a test's manager doubles.
+
+    The replacement a hub test needs now that no route reads ``app.state`` for a
+    manager: the double is put on the **workspace's own** :class:`HubSet`, so the
+    route under test reaches it through the same path a real request would.
+    ``HubSet.mcp`` / ``HubSet.lsp`` are public attributes for exactly this — the
+    pool owns the map, the set owns the pair.
+
+    Pass :data:`NO_HUB` for a manager that must be **absent** (the degradation
+    cases), and nothing at all for the one this test does not care about.
+
+    A folder that is not alive yet is **admitted** first — the same thing the
+    first request naming it does — so a test can name a second workspace and put
+    a double on its own set. That needs the app's loop to be running, i.e. the
+    call happens inside ``with TestClient(app)``.
+    """
+    pool = app.state.hubpool
+    named = str(root) if root is not None else pool.boot_root
+    entry = pool.live(named)
+    if entry is None:
+        acquired = pool.acquire_sync(named)
+        if acquired.refusal is not None or acquired.hub_set is None:
+            raise AssertionError(
+                f"the pool would not admit {named}: {acquired.refusal}"
+            )
+        entry = acquired.hub_set
+    if mcp is not None:
+        entry.mcp = None if mcp is NO_HUB else mcp
+    if lsp is not None:
+        entry.lsp = None if lsp is NO_HUB else lsp
+    return entry
+
+
+def scoped(root: Any) -> Any:
+    """``workspace.scope`` for a test that calls a **core** surface directly.
+
+    The seam has no default folder (spec §5.2 rule 12), so a call that is not
+    inside a request has to enter the scope itself — the same rule the lot's
+    big picture states for a script. Used as a context manager::
+
+        with scoped(tmp_path):
+            assert editorfs.git_status()["repo"] is True
+
+    Tests are the only caller: a route is answered from the scope the
+    router-level dependency entered, and a core module that entered its own
+    scope would be the second mechanism the guard test refuses.
+    """
+    from src.core import workspace
+
+    return workspace.scope(str(root))
 
 
 #: The server name the harness gives the one server row it writes. The store
@@ -956,8 +1144,7 @@ def neutralise_store(
 
     For the test or fixture that owns its own working root: the autouse
     :func:`_every_test_gets_its_own_store` already gives every test a temporary
-    database, and this adds the location pin plus the rows the connection is
-    made of.
+    database, and this adds the rows the connection is made of.
 
     By default the write is a *configured* connection
     (:func:`write_store_connection` — the defaults plus ``members``), because a
@@ -966,10 +1153,13 @@ def neutralise_store(
     model, and every agent left with a null ``model_id`` — the state D7 refuses
     with one sentence naming the agent. ``agents_without_model`` is the same
     state for one row of a configured store, spelled as an argument.
-    """
-    from src import config as config_module
 
-    monkeypatch.setenv(config_module.PATH_LOCATION_KEY, str(root))
+    ``root`` stays the argument it always was — the folder the call site believes
+    it is working on — but nothing process-wide is pinned any more (clws-10): the
+    workspace a core surface answers about is the **scope** it runs in, and
+    :func:`_every_test_runs_in_a_workspace_scope` is what puts every test in one.
+    A case that wants a folder of its own wraps its body in :func:`scoped`.
+    """
     if absent:
         clear_store_connection()
     else:

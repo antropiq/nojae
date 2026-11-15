@@ -535,8 +535,11 @@ onBeforeUnmount(() => {
           v-if="state.editing?.parent === ROOT"
           :key="`${state.editing.mode}:${ROOT}:${state.editing.path ?? ''}:${state.editing.isDir}`"
         />
+        <!-- The tab's own folder, by name: the payload at the root row's
+             `title` is the absolute path, and a bare "the working location" here
+             would leave a reader unable to tell which folder they are in. -->
         <p v-if="!state.nodes[ROOT]?.loading && !(state.nodes[ROOT]?.entries?.length) && !state.editing" class="caption editor-nav-empty">
-          The working location is empty.
+          {{ rootLabel() }} is empty.
         </p>
       </template>
     </div>

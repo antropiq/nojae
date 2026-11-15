@@ -26,11 +26,14 @@ discriminate against another process on the same machine anyway (it could just
 open the socket).
 
 Deliberately *not* here: a path from the client. The shell's ``cwd`` is
-``path_location()`` and the server never takes a directory (or any path) from
-the frame stream — ``cd`` inside the shell is the user's business, which is the
-point of a terminal, but there is nothing for the tree/editor path policy to
-inject-guard on this surface. The routes that *do* take a path are gated by
-``editorfs.policy`` instead.
+the workspace in scope when the session was born
+(``src.core.workspace.current_root``) — and that scope was entered from the
+socket's own ``workspace`` query field, resolved by the one validator in
+:mod:`src.core.workspace`, so the folder *does* come from the client: as a named
+**workspace**, once, when the socket opens, never as a path in the frame stream.
+``cd`` inside the shell is the user's business, which is the point of a terminal,
+but there is nothing for the tree/editor policy to inject-guard on this surface.
+The routes that *do* take a path are gated by ``editorfs.policy`` instead.
 """
 
 import ipaddress

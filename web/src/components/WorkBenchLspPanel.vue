@@ -85,6 +85,10 @@ const restartTitle = computed(() => {
         </svg>
       </button>
     </div>
+    <!-- Same rule as the MCP panel: the route's sentence, verbatim. -->
+    <p v-if="state.lsp.error" class="caption alert-error chat-hub-error" role="alert">
+      {{ state.lsp.error }}
+    </p>
     <p v-if="!hasEntries" class="caption chat-hub-empty">
       No language server is switched on for this conversation — copy the seeded
       <code>.nojae/lsp-settings.template.json</code> to

@@ -87,9 +87,9 @@ class _Entry:
 
 # Keyed on the **workspace root**, and that is the whole point of the key:
 #
-# 1. ``NOJAE_PATH_LOCATION`` is hot-swapped by ``POST /api/path-location``,
-#    so a cache keyed on ``(mtime, size)`` alone would run the newly opened
-#    project under the previous project's rules;
+# 1. the workspace of a request changes from one call to the next, so a cache
+#    keyed on ``(mtime, size)`` alone would run the newly opened project under
+#    the previous project's rules;
 # 2. two roots routinely hold same-sized config files, and a same-size edit is
 #    entirely possible (a pattern renamed to an equal-length one), so a stamp
 #    cannot identify a file across roots;

@@ -38,13 +38,14 @@ from src.api.server import create_app
 from src.core import lsphub
 from src.core.lsphub import constants, seed
 from src.core.lsphub.discovery import load_lsp_servers, set_lsp_enabled
+from tests.conftest import make_the_install, scoped
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """A scratch working location with no declaration file yet."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    yield tmp_path
+def workspace(tmp_path: Path) -> Iterator[Path]:
+    """A scratch workspace with no declaration file yet."""
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 def seeded_template(root: Path) -> Path:
@@ -74,13 +75,13 @@ class TestTheResolver:
                 json.dumps({server_id: _entry(root)}), encoding="utf-8"
             )
 
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(first))
-        servers, errors = load_lsp_servers()
+        with scoped(first):
+            servers, errors = load_lsp_servers()
         assert [server["id"] for server in servers] == ["alpha"]
         assert errors == []
 
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(second))
-        servers, errors = load_lsp_servers()
+        with scoped(second):
+            servers, errors = load_lsp_servers()
         assert [server["id"] for server in servers] == ["beta"]
         assert errors == []
 
@@ -219,45 +220,78 @@ def seed_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     root = tmp_path / "boot-root"
     root.mkdir()
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+    make_the_install(monkeypatch, root)
     with TestClient(create_app()) as client:
-        client.app.state.mcp = _RecordingHub()
-        client.app.state.lsp = _RecordingHub()
+        # The doubles ride on the **boot workspace's** set: a hub route resolves
+        # the folder its request named and reaches that folder's managers
+        # (clws-06 deleted the ``app.state.mcp`` read-through).
+        from tests.conftest import set_workspace_hubs
+
+        set_workspace_hubs(client.app, root, mcp=_RecordingHub(), lsp=_RecordingHub())
         yield client, root
 
 
-class TestTheTwoEntryPoints:
+class TestTheEntryPoints:
+    """The route half of the entry points, as clws-02 leaves them.
+
+    The switch that seeded a folder and restarted both hubs in one call is gone:
+    nothing sets the process's working location any more, so no route seeds.
+    Boot is the only entry point until task 05 makes the pool's **admission** of
+    a workspace the second. What the switch used to answer — the two blocks of
+    the folder it moved to — is now what the read answers about the folder a
+    request **names**, which is the same promise with a different subject.
+    """
+
     def test_boot_leaves_the_template_behind(self, seed_client):
+        from tests.conftest import workspace_params
+
         client, root = seed_client
         assert seeded_template(root).is_file()
-        body = client.get("/api/path-location").json()
+        body = client.get(
+            "/api/workspace", params=workspace_params(root)
+        ).json()
         assert body["lspSettingsTemplate"]["state"] == "existing"
         # And the declaration is not seeded — boot has none, and says so.
         assert body["lspSettings"]["state"] == "absent"
 
-    def test_get_never_seeds(self, seed_client, tmp_path: Path, monkeypatch):
+    def test_the_read_never_seeds(self, seed_client, tmp_path: Path):
+        """A tab may name a folder it only wants to browse, twice or a hundred
+        times, and the folder stays as it was."""
+        from tests.conftest import workspace_params
+
         client, _ = seed_client
         other = tmp_path / "browsed"
         other.mkdir()
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(other))
         for _ in range(2):
-            body = client.get("/api/path-location").json()
+            body = client.get(
+                "/api/workspace", params=workspace_params(other)
+            ).json()
             assert body["lspSettingsTemplate"]["state"] == "absent"
             assert body["lspSettings"]["state"] == "absent"
         assert not seeded_template(other).exists()
         assert not other.joinpath(constants.POLICY_DIRNAME).exists()
 
-    def test_switch_seeds_the_template(self, seed_client, tmp_path: Path):
+    def test_the_read_reports_a_seeded_template_and_no_declaration(
+        self, seed_client, tmp_path: Path
+    ):
+        """The payload shape the Settings → LSP panel renders, per workspace."""
+        from tests.conftest import workspace_params
+
+        from src.core.lsphub import ensure_lsp_settings_template
+
         client, _ = seed_client
         target = tmp_path / "fresh-root"
         target.mkdir()
+        assert ensure_lsp_settings_template(str(target))["state"] == "created"
 
-        response = client.post("/api/path-location", json={"path": str(target)})
-        assert response.status_code == 200
-        body = response.json()
+        body = client.get(
+            "/api/workspace", params=workspace_params(target)
+        ).json()
         expanded = os.path.realpath(str(target))
+        # ``existing``, not ``created``: the read reports the file the seed
+        # landed, it did not land it itself (the read-never-writes rule above).
         assert body["lspSettingsTemplate"] == {
-            "state": "created",
+            "state": "existing",
             "path": os.path.join(
                 expanded,
                 constants.POLICY_DIRNAME,
@@ -276,9 +310,11 @@ class TestTheTwoEntryPoints:
             constants.LSP_SETTINGS_TEMPLATE.read_bytes()
         )
 
-    def test_switch_reports_an_existing_template_and_declaration_untouched(
+    def test_the_read_reports_an_existing_template_and_declaration_untouched(
         self, seed_client, tmp_path: Path
     ):
+        from tests.conftest import workspace_params
+
         client, _ = seed_client
         target = tmp_path / "owned-root"
         (target / constants.POLICY_DIRNAME).mkdir(parents=True)
@@ -287,27 +323,35 @@ class TestTheTwoEntryPoints:
         seeded_template(target).write_text(template_text, encoding="utf-8")
         settings_file(target).write_text(declaration_text, encoding="utf-8")
 
-        response = client.post("/api/path-location", json={"path": str(target)})
-        assert response.status_code == 200
-        body = response.json()
+        body = client.get(
+            "/api/workspace", params=workspace_params(target)
+        ).json()
         assert body["lspSettingsTemplate"]["state"] == "existing"
         assert body["lspSettings"]["state"] == "existing"
         assert seeded_template(target).read_text(encoding="utf-8") == template_text
         assert settings_file(target).read_text(encoding="utf-8") == declaration_text
 
     def test_a_failing_seed_is_a_note_not_a_refusal(self, seed_client, tmp_path: Path):
+        """A folder whose template could not land is still a workspace.
+
+        The read answers 200 and says ``failed``: the panel gets its sentence,
+        and nothing about the folder is refused because one file could not be
+        written.
+        """
+        from tests.conftest import workspace_params
+
+        from src.core.lsphub import ensure_lsp_settings_template
+
         client, _ = seed_client
         target = tmp_path / "locked-root"
         target.mkdir()
         (target / constants.POLICY_DIRNAME).mkdir()
         seeded_template(target).mkdir()  # a folder where the template belongs
+        assert ensure_lsp_settings_template(str(target))["state"] == "failed"
 
-        response = client.post("/api/path-location", json={"path": str(target)})
+        response = client.get(
+            "/api/workspace", params=workspace_params(target)
+        )
         assert response.status_code == 200
         assert response.json()["lspSettingsTemplate"]["state"] == "failed"
-        # The switch itself succeeded: the environment moved and the hubs
-        # restarted — a seeding hiccup is a note, never a rollback.
-        assert os.environ["NOJAE_PATH_LOCATION"] == os.path.realpath(
-            str(target)
-        )
-        assert len(client.app.state.lsp.restarts) >= 1
+        assert response.json()["lspSettingsTemplate"]["error"]

@@ -12,7 +12,7 @@ Three locks bound the one path the caller controls, implemented here rather
 than delegated to the (not yet existing) editor code:
 
 * no absolute path and no ``..`` component;
-* a ``realpath`` prefix check against ``config.path_location()``;
+* a ``realpath`` prefix check against the workspace in scope;
 * the shared connector deny-list (``mcp_connectors/path_policy``) -- the same
   list both file-touching connectors use. Without it, ``?dir=../.ssh`` would
   make batch mode a GUI for reading a secret tree.
@@ -23,7 +23,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config import PROJECT_ROOT, path_location
+from src.config import PROJECT_ROOT
+from src.core import workspace as workspace_seam
 
 # The one containment rule of the path locks (A-D2.2, win-06), imported from
 # the Editor's gate rather than re-spelled here: this module already answers its
@@ -239,7 +240,7 @@ def resolve_lot_dir(raw: Optional[str]) -> Tuple[str, Path]:
         raise BatchListingError(
             422,
             f"Batch folder must be relative to the workspace: {raw} "
-            f"(workspace {path_location()})",
+            f"(workspace {workspace_seam.current_root()})",
         )
     # Both separators in, ``/`` out (win-04 / A-D1): a Windows user typing
     # ``todos\drafts`` gets the same folder as ``todos/drafts``, and every
@@ -262,7 +263,7 @@ def resolve_lot_dir(raw: Optional[str]) -> Tuple[str, Path]:
             f"Batch folder must be a named folder inside the workspace: {raw}",
         )
 
-    workspace = Path(path_location()).resolve()
+    workspace = Path(workspace_seam.current_root()).resolve()
     resolved = os.path.realpath(workspace / normalised)
     if not _is_within(
         str(workspace), resolved, fold=fscase.case_folded(str(workspace))
@@ -351,7 +352,7 @@ def task_prefixes(raw_dir: Optional[str] = None) -> Dict[str, Any]:
 
     return {
         "dir": normalised,
-        "workspace": str(Path(path_location()).resolve()),
+        "workspace": str(Path(workspace_seam.current_root()).resolve()),
         "doneFolder": done_folder,
         "prefixes": [item for item in found.values() if item["tasks"] > 0],
     }
@@ -487,7 +488,7 @@ def task_lot(prefix: str, raw_dir: Optional[str] = None) -> Dict[str, Any]:
 
     return {
         "dir": normalised,
-        "workspace": str(Path(path_location()).resolve()),
+        "workspace": str(Path(workspace_seam.current_root()).resolve()),
         "prefix": prefix,
         "taskCount": max((task["number"] for task in tasks), default=0),
         "doneFolder": done_folder,

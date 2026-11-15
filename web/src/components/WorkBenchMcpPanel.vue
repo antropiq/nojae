@@ -90,6 +90,11 @@ const restartTitle = computed(() => {
         </svg>
       </button>
     </div>
+    <!-- The route's refusal, verbatim: the ceiling's sentence is the same one
+         the app bar shows, and a panel that asked must not look merely empty. -->
+    <p v-if="state.mcp.error" class="caption alert-error chat-hub-error" role="alert">
+      {{ state.mcp.error }}
+    </p>
     <p v-if="!hasEntries" class="caption chat-hub-empty">
       No MCP connector is available for this conversation — declare one in
       <code>.nojae/mcp-settings.json</code> and switch it on in Settings.

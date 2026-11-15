@@ -49,10 +49,12 @@ def clean_case_cache() -> Iterator[None]:
 
 
 @pytest.fixture
-def location(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """``tmp_path`` as the active working location, with a file in it."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    return tmp_path
+def location(tmp_path: Path) -> Iterator[Path]:
+    """``tmp_path`` as the active workspace, with a file in it."""
+    from tests.conftest import scoped
+
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 class TestTheProbeAnswers:
@@ -242,7 +244,12 @@ class TestTheCache:
 
 
 class TestTheSwitchForgetsIt:
-    """AGENTS.md: *"a switch invalidates them all at once"* (win-05 §1)."""
+    """AGENTS.md: *"a switch invalidates them all at once"* (win-05 §1).
+
+    Since clws-02 the "switch" is a tab naming a different folder per request,
+    not a process re-rooting itself, so what invalidates is the cache's own
+    per-root key rather than a route clearing it.
+    """
 
     def test_the_seeder_invalidates_it_alongside_the_policy_cache(
         self, tmp_path: Path
@@ -255,84 +262,43 @@ class TestTheSwitchForgetsIt:
         assert policy_seed.ensure_policy_file(str(target))["state"] == "created"
         assert fscase._CACHE == {}
 
-    def test_the_settings_route_invalidates_it(self, location: Path,
-                                               monkeypatch: pytest.MonkeyPatch):
-        """``POST /api/path-location`` — the moment the tree re-roots.
+    def test_a_second_workspace_is_judged_by_its_own_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """clws-02: the switch that re-rooted the process is gone, so the
+        invalidation it did is now the cache's own key.
 
-        The recording hubs are the pattern ``tests/test_editorfs_policy_seed.py``
-        uses, so the switch's restarts stay hers and her declaration files her
-        own.
+        The old route moved one process-wide folder and had to forget every
+        remembered fold answer so the new workspace was judged by a probe of its
+        own volume. With the workspace a per-request value, two folders are
+        simply two cache keys: naming a second one never reads the first's
+        answer, and a folder the process has never probed is *probed*, not
+        answered from another's memory (gb-01b: what is pinned is the fresh
+        probe, not which answer this runner's volume gives).
         """
-        from fastapi.testclient import TestClient
+        from src.core import workspace
 
-        from src.core import lsphub, mcphub
-        from src.api.server import create_app
+        first = tmp_path / "first-project"
+        second = tmp_path / "second-project"
+        first.mkdir()
+        second.mkdir()
+        # A remembered answer for the first workspace, and none for the second.
+        fscase._CACHE[str(first)] = True
+        probe_calls: List[str] = []
+        real_probe = probe_shared._probe
 
-        class _RecordingHub:
-            installed = True
+        def counting(root: str) -> bool:
+            probe_calls.append(root)
+            return real_probe(root)
 
-            def __init__(self) -> None:
-                self.restarts: List[object] = []
-
-            async def restart(self, *args: object) -> None:
-                self.restarts.append(args)
-
-            def status(self) -> List[Dict[str, object]]:
-                return []
-
-        monkeypatch.setattr(mcphub.constants, "MCP_SETTINGS_PATH",
-                            location / "mcp-settings.json")
-        servers_dir = location / "lsp_connectors"
-        servers_dir.mkdir()
-        (servers_dir / "restricted-paths.txt").write_text("/etc\n", encoding="utf-8")
-        monkeypatch.setattr(lsphub.constants, "LSP_CONNECTORS_DIR", servers_dir)
-        monkeypatch.setattr(
-            lsphub.constants, "LSP_SETTINGS_PATH", servers_dir / "lsp-settings.json"
-        )
-        monkeypatch.setattr(
-            lsphub.constants, "LSP_RESTRICTED_PATHS",
-            servers_dir / "restricted-paths.txt",
-        )
-
-        target = Path(os.environ["NOJAE_PATH_LOCATION"]) / "switched-to"
-        target.mkdir()
-        app = create_app()
-        with TestClient(app) as test_client:
-            test_client.app.state.mcp = _RecordingHub()
-            test_client.app.state.lsp = _RecordingHub()
-            # A remembered answer for a root the process has already probed,
-            # plus a planted answer for the one it is about to open: the switch
-            # has to forget *both*, so the new workspace is judged by a probe of
-            # its own volume.
-            fscase._CACHE[str(target)] = True
-            response = test_client.post(
-                "/api/path-location", json={"path": str(target)}
-            )
-            assert response.status_code == 200
-            assert fscase._CACHE == {}
-            # The planted answer is gone and the new root is *re-probed*, not
-            # answered from memory (gb-01b: what is pinned is the fresh probe,
-            # not which answer this runner's volume gives).
-            probe_calls: List[str] = []
-            real_probe = probe_shared._probe
-
-            def counting(root: str) -> bool:
-                probe_calls.append(root)
-                return real_probe(root)
-
-            monkeypatch.setattr(probe_shared, "_probe", counting)
-            fscase.case_folded(os.environ["NOJAE_PATH_LOCATION"])
-            assert probe_calls == [os.environ["NOJAE_PATH_LOCATION"]]
-
-            # A second switch to a root that is *already seeded*: the seeder
-            # writes nothing there and so never reaches its own invalidation,
-            # which is why the route says it explicitly (routes.py). Planting a
-            # wrong answer first is what makes that visible.
-            fscase._CACHE[str(target)] = True
-            again = test_client.post("/api/path-location", json={"path": str(target)})
-            assert again.status_code == 200
-            assert again.json()["policy"]["state"] == "existing"
-            assert fscase._CACHE == {}
+        monkeypatch.setattr(probe_shared, "_probe", counting)
+        # The second workspace is asked about inside its own scope: it is
+        # probed, and the first's remembered answer is neither consulted nor
+        # cleared.
+        with workspace.scope(str(second)):
+            fscase.case_folded(workspace.current_root())
+        assert probe_calls == [str(second)]
+        assert fscase._CACHE[str(first)] is True
 
 
 class TestTheVerdictUsesTheProbe:

@@ -12,6 +12,12 @@ nameable*. ``list_sessions`` reports pid/cwd/started/bytes so a shell that
 somehow outlived its socket can be seen; ``stop_all`` kills any such session on
 shutdown, and every session also tears itself down when its socket ends, so the
 registry never accumulates on the normal path.
+
+**One registry, one cap, every workspace** (spec §3.1: "the registry is shared").
+Sessions are not per workspace: two tabs on two folders are two sessions in this
+one map, each carrying the folder it was **born in**, so the listing answers two
+``cwd``s and the cap stays the app's. Nothing here is keyed by a folder, and
+there is no second registry to keep in step.
 """
 
 import asyncio

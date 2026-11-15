@@ -4,8 +4,8 @@
 connectors (see :mod:`mcphub.constants`). It joins the reserved folder's
 family — ``read-write-policy.json`` —
 and arrives by the same rule: **seeded by
-exclusive create at the two moments a folder becomes the working location
-(boot, and ``POST /api/path-location``), never overwritten**.
+exclusive create when a folder is admitted as a workspace (today: at boot; from
+task 05, when the hub pool admits it), never overwritten**.
 
 The seeded bytes are the committed template
 (``mcp_connectors/mcp-settings.default.json``) copied verbatim. Nothing is
@@ -66,9 +66,9 @@ def mcp_settings_file_path(root: str) -> str:
     """Where the declaration file goes under ``root`` — one level of the reserved folder.
 
     ``constants.mcp_settings_path()`` is the *active* root (what the loader
-    reads); this takes the root explicitly, because the workspace switch
-    seeds the folder it is moving to before ``path_location()`` is what the
-    rest of the app sees.
+    reads); this takes the root explicitly, because the workspace switch seeds
+    the folder it is moving to before that folder is the workspace the rest of
+    the app sees (the seam's scope still names the old one).
     """
     return os.path.join(root, constants.POLICY_DIRNAME, constants.MCP_SETTINGS_FILENAME)
 
@@ -163,12 +163,12 @@ def _ensure_mcp_settings(root: str) -> Dict[str, Any]:
 def mcp_settings_file_state(root: str) -> Dict[str, Any]:
     """What a **reader** may say about the declaration file, writing nothing.
 
-    ``GET /api/path-location`` asks this instead of
-    :func:`ensure_mcp_settings_file` — the working location is read far more
-    often than a workspace is switched, and a read that leaves a folder in
-    someone's project is the mistake the seeding rules forbid. ``absent`` is
-    a normal answer here: a workspace whose seed failed, or one that
-    predates the file, simply has no MCP connectors.
+    ``GET /api/workspace`` asks this instead of
+    :func:`ensure_mcp_settings_file` — a workspace is read far more often than
+    it is admitted, and a read that leaves a folder in someone's project is the
+    mistake the seeding rules forbid. ``absent`` is a normal answer here: a
+    workspace whose seed failed, or one that predates the file, simply has no
+    MCP connectors.
     """
     path = mcp_settings_file_path(root)
     try:

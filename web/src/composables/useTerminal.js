@@ -1,5 +1,6 @@
 import { reactive, watch } from 'vue'
 import { useTheme } from './useTheme'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // Editor terminal bridge: the state behind EditorTerminal.vue.
@@ -20,6 +21,11 @@ import { useTheme } from './useTheme'
 // `open`/`output`/`exit`/`error` in, all as JSON text. The server owns the
 // shell, the PTY and the process-tree teardown; this layer only relays frames
 // and reflects the connection to the header.
+//
+// The socket's URL is the one place this composable names a workspace, and it
+// goes through `withWorkspace` — the field's name is never written here (spec
+// §8, D9). A shell is born in the folder the tab holds when the socket opens
+// and keeps it; a folder change reaches the *next* shell, never an open one.
 // ---------------------------------------------------------------------------
 
 const CLOSE_POLICY = 4403
@@ -102,8 +108,21 @@ function connect() {
   state.shell = ''
   setStatus('connecting', 'Starting a shell…')
 
+  // A socket has no per-request body, so the tab's folder is supplied **when
+  // the socket opens** — the same query parameter, on the socket's URL, built
+  // by `withWorkspace` from the session composable's *current* value at this
+  // instant (spec §8). Read here, not captured at module load: this tab may
+  // have been pointed somewhere else since.
+  //
+  // That is the whole mechanism, and its limit is deliberate: a folder change
+  // does **not** touch a live shell. It keeps the folder it was born in, and
+  // only the next `connect()` — this pane's New session, or a reconnect after
+  // a drop — starts somewhere else. The pane's docstring says so too, so the
+  // next reader does not "fix" it.
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  socket = new WebSocket(`${proto}://${location.host}/api/terminal`)
+  socket = new WebSocket(
+    withWorkspace(`${proto}://${location.host}/api/terminal`),
+  )
 
   socket.onopen = () => {
     // The socket is up but the shell is not yet announced — stay `connecting`
@@ -161,8 +180,18 @@ function connect() {
     if (disposed) return
     // A refused upgrade names itself with a close code; surface it instead of a
     // generic "connection closed".
+    //
+    // The workspace refusal is the one case that arrives **twice**: the server
+    // sends the seam's sentence in an `error` frame and then closes with the
+    // same words as the reason — bounded, because a close reason is capped at
+    // 123 bytes. The frame is therefore the fuller text and already on screen,
+    // so the close must not overwrite it with the truncated form. (Status is
+    // `connecting` until a frame lands, so this cannot swallow the close of a
+    // refused Origin, which never accepted and so never sent a frame.)
     if (event.code === CLOSE_POLICY) {
-      setStatus('error', `Connection refused: ${event.reason || 'origin not allowed'}`)
+      if (!(state.status === 'error' && state.message)) {
+        setStatus('error', `Connection refused: ${event.reason || 'origin not allowed'}`)
+      }
     } else if (event.code === CLOSE_CAPACITY) {
       setStatus('error', event.reason || 'Too many terminal sessions — close one and retry.')
     } else if (event.code === CLOSE_UNSUPPORTED) {
@@ -207,6 +236,10 @@ function kill() {
 // A fresh shell in the same pane: reset the scrollback (the old one belonged to
 // a dead process) and open a new socket, which the server answers with a new
 // session. The old socket's close tears its shell down server-side.
+//
+// This — not a folder change — is what moves a shell: `connect()` reads the
+// tab's workspace as it is *now*, so the new session is born in the folder the
+// tab is currently on, while the old one kept the folder it was born in.
 function newSession() {
   term?.reset()
   connect()

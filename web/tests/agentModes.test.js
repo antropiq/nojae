@@ -61,6 +61,7 @@ import {
   parseSessionFile,
   useChat,
 } from '../src/composables/useChat'
+import { AGENT_STORAGE_KEY } from '../src/composables/useWorkspaceSession'
 import { useBatch } from '../src/composables/useBatch'
 import { useAppShell } from '../src/composables/useAppShell'
 
@@ -192,7 +193,10 @@ function resetAll() {
   editor.readError = null
   editor.writeError = null
   editor.serverFindings = []
-  window.localStorage.clear()
+  // The agent is a **tab** thing now (§5.5 rule 26), so a fresh test starts on
+  // `sessionStorage` — the storage the selection actually lives in. Clearing
+  // only `localStorage` would let the previous case's choice leak in.
+  window.sessionStorage.clear()
 }
 
 async function typeAndSend(text) {
@@ -287,6 +291,62 @@ describe('the remembered agent (D5, §5.4)', () => {
     // user is now working in it.
     expect(rememberedAgentId()).toBe('chat')
   })
+
+  // The requirement of this task (spec D5, §5.5 rule 26): the remembered agent
+  // is **the tab's**, so it lives where the tab's folder lives.
+  it('writes the remembered id to sessionStorage, never to localStorage', async () => {
+    stubRoutes()
+    await loadAgentModes()
+    setAgentMode('architect')
+
+    expect(window.sessionStorage.getItem(AGENT_STORAGE_KEY)).toBe('architect')
+    expect(window.localStorage.getItem(AGENT_STORAGE_KEY)).toBeNull()
+    expect(rememberedAgentId()).toBe('architect')
+  })
+
+  // A value an older build left browser-wide is **not** inherited: the new key is
+  // a new place, and reading the old one would re-share a choice this lot exists
+  // to make per tab.
+  it('does not read a localStorage value from an older build', async () => {
+    window.localStorage.setItem(AGENT_STORAGE_KEY, 'architect')
+    window.localStorage.setItem('nojae:agent-mode', 'architect')
+    stubRoutes()
+    await loadAgentModes()
+
+    expect(rememberedAgentId()).toBeNull()
+    expect(agentModes.current).toBe('code')
+  })
+
+  it("forgets the choice when the tab's storage is cleared", async () => {
+    rememberAgent('architect')
+    window.sessionStorage.clear()
+    expect(rememberedAgentId()).toBeNull()
+  })
+
+  it('tolerates a storage that throws, on both ends', () => {
+    const original = Object.getOwnPropertyDescriptor(window, 'sessionStorage')
+    Object.defineProperty(window, 'sessionStorage', {
+      value: {
+        getItem: () => {
+          throw new Error('storage blocked')
+        },
+        setItem: () => {
+          throw new Error('storage blocked')
+        },
+        removeItem: () => {
+          throw new Error('storage blocked')
+        },
+      },
+      configurable: true,
+    })
+    try {
+      expect(rememberedAgentId()).toBeNull()
+      expect(() => rememberAgent('architect')).not.toThrow()
+      expect(() => rememberAgent(null)).not.toThrow()
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', original)
+    }
+  })
 })
 
 describe('the payload of a real send', () => {
@@ -329,6 +389,49 @@ describe('the payload of a real send', () => {
     expect(sent).toHaveLength(0)
     expect(chat.messages).toHaveLength(0)
     expect(chat.draft.raw).toBe('hello')
+  })
+
+  // Two tabs, each answering as its own agent (§5.5 rules 25–26, spec §1.2).
+  //
+  // **The second tab is simulated by resetting this module's state and handing
+  // the storage the two tabs would each hold.** A jsdom test has one `window`
+  // and therefore one `sessionStorage`, so it cannot have two real tabs — the
+  // real two-tab run is the e2e suite's (task 12). What is asserted here is the
+  // part the unit suite *can* own: the payload each tab posts carries the id
+  // its own storage held, and one tab's choice never reaches the other's.
+  it('two tabs post two different agentMode ids, and neither reads the other', async () => {
+    const sent = []
+    stubRoutes({ sent })
+
+    // Tab A: it picks Architect from its own dropdown and sends.
+    await loadAgentModes()
+    setAgentMode('architect')
+    await typeAndSend('from A')
+    expect(rememberedAgentId()).toBe('architect')
+    const tabAStorage = window.sessionStorage.getItem(AGENT_STORAGE_KEY)
+
+    // A second tab starts with **no** memory of its own: fresh module state, and
+    // a storage holding none of A's key. It lands on the list's first entry.
+    agentModes.modes = []
+    agentModes.current = null
+    agentModes.loaded = false
+    window.sessionStorage.removeItem(AGENT_STORAGE_KEY)
+    await loadAgentModes()
+    expect(agentModes.current).toBe('code')
+    setAgentMode('chat')
+    await typeAndSend('from B')
+    expect(rememberedAgentId()).toBe('chat')
+
+    expect(sent.map((body) => body.agentMode)).toEqual(['architect', 'chat'])
+
+    // Tab A comes back (a reload of the *same* tab): its own storage answers, not
+    // the value B left behind.
+    window.sessionStorage.setItem(AGENT_STORAGE_KEY, tabAStorage)
+    agentModes.modes = []
+    agentModes.current = null
+    agentModes.loaded = false
+    await loadAgentModes()
+    expect(agentModes.current).toBe('architect')
   })
 })
 

@@ -1,5 +1,7 @@
 import { computed, reactive } from 'vue'
 
+import { withWorkspace } from './useWorkspaceSession'
+
 // ---------------------------------------------------------------------------
 // Git status: which files of the working location are unstaged.
 //
@@ -86,7 +88,7 @@ async function load({ force = false } = {}) {
   const run = (async () => {
     const askedAt = generation
     try {
-      const res = await fetch('/api/fs/status')
+      const res = await fetch(withWorkspace('/api/fs/status'))
       const body = await res.json().catch(() => null)
       if (askedAt !== generation) {
         // The location moved while this was in flight: the answer — good or

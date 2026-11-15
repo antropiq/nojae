@@ -116,7 +116,7 @@ def repo_info() -> Optional[Dict[str, str]]:
     if len(lines) < 3 or lines[2].strip() != "true":
         return None  # inside a .git dir, or a bare repo: no worktree to mark
     # ``realpath``, not git's own spelling: every absolute path this app reports
-    # is resolved (``policy.workspace_root``, the path-location payload), and git
+    # is resolved (``policy.workspace_root``, the workspace payload), and git
     # hands back the text of the environment it ran in — on Windows the drive
     # letter can come back in either case. The compare against the workspace is
     # case-folded by ``policy._is_within``; what reaches a payload is canonical.

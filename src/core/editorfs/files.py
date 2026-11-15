@@ -279,6 +279,13 @@ def backup_key(resolved: Path) -> str:
     two mount names of one tree share a chain — the same reasoning the fedit
     connector's backups use (two spellings, two chains, and ``revert`` answers
     "never edited" about a file that was).
+
+    The resolved path **carries the workspace root**, which is what makes the
+    chain a workspace's own (clws-04): the folder is the installation's
+    ``logs/editor_backups`` — the app's journal, deliberately not the
+    workspace's — but ``<A>/src/config.py`` and ``<B>/src/config.py`` digest
+    differently, so two workspaces holding one relative path never share a
+    chain and one tab's ``revert`` can never offer the other's bytes.
     """
     return hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:12]
 

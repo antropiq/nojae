@@ -3,11 +3,13 @@ import { expect, test } from '@playwright/test'
 // Task 01 — level: UI state. Nothing here streams: the spec only checks what
 // the app tells the user at boot (the store's models, tabs, the app bar's idle
 // meters). Therefore every expected string is read from GET /api/config and
-// GET /api/path-location instead of being written in the spec, so the spec
-// follows the suite's fixture instead of hardcoding it.
+// GET /api/workspace instead of being written in the spec, so the spec follows
+// the suite's fixture instead of hardcoding it.
 test.describe('App boot: displayed configuration, tabs, idle meters', () => {
-  // Reads the live config/path-location the assertions below are built from,
-  // then opens the app on its default screen.
+  // Reads the live config/workspace the assertions below are built from, then
+  // opens the app on its default screen. The workspace read names **no** folder:
+  // a fresh tab remembers none, and the answer is the installation folder it
+  // lands on (spec D4). The app bar then shows that same canonical value.
   async function bootIdle(page) {
     const configRes = await page.request.get('/api/config')
     expect(
@@ -16,16 +18,16 @@ test.describe('App boot: displayed configuration, tabs, idle meters', () => {
     ).toBe(true)
     const config = await configRes.json()
 
-    const pathRes = await page.request.get('/api/path-location')
+    const workspaceRes = await page.request.get('/api/workspace')
     expect(
-      pathRes.ok(),
-      `GET /api/path-location should succeed, got ${pathRes.status()}`,
+      workspaceRes.ok(),
+      `GET /api/workspace should succeed, got ${workspaceRes.status()}`,
     ).toBe(true)
-    const pathLocation = (await pathRes.json()).path
+    const workspace = await workspaceRes.json()
 
     await page.goto('/')
 
-    return { config, pathLocation }
+    return { config, workspace }
   }
 
   test('the app bar stays quiet about a configured store', async ({ page }) => {
@@ -56,14 +58,16 @@ test.describe('App boot: displayed configuration, tabs, idle meters', () => {
   // The working location is *editable* here, not just displayed: the field and
   // its Set button live in the app bar, and the settings dialog has no part in
   // the switch (it has no section for it at all).
-  test('app bar shows the active working location, and offers to move it', async ({
+  test('app bar shows the tab\'s workspace, and offers to move it', async ({
     page,
   }) => {
-    const { pathLocation } = await bootIdle(page)
+    const { workspace } = await bootIdle(page)
 
     const field = page.locator('.appbar-location-input')
-    await expect(field).toHaveValue(pathLocation)
-    // Nothing is pending, so there is nothing to apply.
+    await expect(field).toHaveValue(workspace.workspace)
+    // A fresh tab has no stored folder, so the field is the server's `default`
+    // — the installation folder — and nothing is pending to apply.
+    await expect(field).toHaveValue(workspace.default)
     await expect(page.locator('.appbar-location-set')).toBeDisabled()
 
     // The dialog no longer carries that row of its own.

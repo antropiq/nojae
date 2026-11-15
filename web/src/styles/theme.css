@@ -1363,9 +1363,10 @@ input.appbar-location-input {
   white-space: nowrap;
 }
 
-/* One line for the answer to a switch (a refusal, or a seed that did not
-   land). The bar is one fixed row tall, so the sentence is truncated and
-   carried whole in its `title`. */
+/* One line for the answer to a switch: a refusal (the server's or the pool's
+   ceiling), a seed that did not land, or the workspace's tools coming back. The
+   bar is one fixed row tall, so the sentence is truncated and carried whole in
+   its `title`. */
 .appbar-location-note {
   margin: 0;
   font-size: 0.65rem;
@@ -1378,6 +1379,12 @@ input.appbar-location-input {
 
 .appbar-location-note--error {
   color: var(--bi-danger);
+}
+
+/* The restarting line is a status, not a warning: the tools are coming back and
+   nothing is wrong, so it reads in the informational colour. */
+.appbar-location-note--status {
+  color: var(--bi-info);
 }
 
 /* The app bar's three cells cannot be squeezed forever: the grid's `1fr` side

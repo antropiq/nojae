@@ -4,164 +4,81 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The working location is what every workspace-relative path in the app is
-// measured from, so moving it invalidates all of them at once — including the
-// file an Editor tab is showing. The bug this spec pins: after a switch the tab
-// strip kept the README.md of the *previous* root while the tree had moved on,
-// so the two halves of the Editor disagreed about which project was open. A
-// switch now closes the tabs of the root it leaves.
+// measured from, so moving **a tab's** folder invalidates all of them at once —
+// including the file an Editor tab is showing. The bug this spec pins: after a
+// move the tab strip kept the README.md of the *previous* root while the tree
+// had moved on, so the two halves of the Editor disagreed about which project
+// was open. A move now closes the tabs of the root it leaves.
 //
-// The other half of the same rule, and the point of the app-level store: a
-// switch changes **nothing** about the model connection, the agents or the
-// prompt helpers. Those are rows of the installation's `nojae.db`, so the
-// servers, models, agents and bullets a user built once are there in every
-// workspace with no setup step (D11, AC-1) — and a fresh workspace's `.nojae/`
-// holds only what is genuinely workspace-declared (D2, AC-2).
+// **The move is a tab's, not the process's** (clws-12). The gesture is the app
+// bar's field and its Set button; the tab adopts the server's canonical answer
+// and every workspace-scoped request of that tab carries it. There is no
+// process-wide location to restore, so the teardown only removes the scratch
+// folder: a reload keeps the tab's folder, and a new tab enters on the
+// installation folder because this one never wrote a browser-wide value.
+//
+// The other half of the same rule, and the point of the app-level store: a move
+// changes **nothing** about the model connection, the agents or the prompt
+// helpers. Those are rows of the installation's `nojae.db`, so the servers,
+// models, agents and bullets a user built once are there in every workspace with
+// no setup step (D11, AC-1) — and a fresh workspace's `.nojae/` holds only what is
+// genuinely workspace-declared (D2, AC-2).
 //
 // No LLM call is needed except in the one streaming check at the end. The new
-// root is a top-level scratch folder (gitignored and out of the way of the
-// repo's own files), and the location is restored afterwards so the other specs
-// still see the boot-time root. It is *not* under `logs/` any more: nojae's own
-// rules hide that tree from the Editor, so a folder in it could not be created
-// through the API at all.
-//
-// The scratch root is removed with node's `fs`, not through `/api/fs/file`:
-// switching into it seeds a `.nojae/read-write-policy.json` there (pol-05), and
-// that folder is reserved — the Editor will not delete a subtree that contains
-// it, by design. So the spec cleans up the way a user would, from outside the
-// app.
+// root is a scratch folder under the repo, created and removed by this spec with
+// node's `fs` — not through `/api/fs/file`: admitting it seeds a `.nojae/` there,
+// and that folder is reserved, so the Editor will not delete the subtree that
+// holds it.
 const SCRATCH = 'e2e-ws-root'
+const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+const WS = { workspace: WORKSPACE }
 
 // The app-level bullet this spec adds and removes again. It is the witness that
 // the prompt helpers are the installation's, not the workspace's.
-const SENTINEL_HELPER = 'the install store survives a switch'
+const SENTINEL_HELPER = 'the install store survives a move'
 
-async function create(request, path, dir = false) {
-  return request.post('/api/fs/create', { data: { path, dir } })
+// The folder a new tab lands on: `GET /api/workspace` with no field answers the
+// installation, and that answer is the boot root this spec moves away from and
+// back to. **No process state is read or written** — the field on each request is
+// the only thing that decides which folder an answer is about.
+async function installationRoot(request) {
+  const res = await request.get('/api/workspace')
+  expect(res.ok(), `GET /api/workspace failed: ${await res.text()}`).toBe(true)
+  return (await res.json()).workspace
 }
 
-async function currentRoot(request) {
-  return (await (await request.get('/api/path-location')).json()).path
-}
-
-// Windows: the unlink of a folder that existed for seconds can fail EPERM
-// while a handle to it is still closing — anything the app (or the OS) ran
-// inside the switched-in root holds its current-directory handle until it is
-// reaped: the `git` of a status query (`editorfs/gitstatus.py`), the indexer,
-// the scan of the freshly seeded files. `maxRetries`/`retryDelay` is Node's
-// bound for exactly this on a directory (EPERM/EBUSY/ENOTEMPTY) — but it is
-// not the end of it: `rmSync` can also *return* with the folder still on disk,
-// because the last handle closes after the call and the name stays in the
-// listing until it does. So removal is over only when the path is gone, and it
-// is retried until then; the answer says which of the two happened. Waiting
-// matters: a `beforeEach` that gave up early handed the next spec's `create` a
-// 409 for a folder this suite had just deleted — a failure naming nothing, and
-// the flake this is here to stop.
-//
-// A folder that still will not go after every attempt is reported by the
-// `beforeEach` that needs it out of the way; the teardown, which owes the next
-// spec nothing, ignores the answer — the folder is gitignored, and one genuinely
-// in the way then fails loudly at that spec's own `create` (409).
-async function removeScratch(root) {
-  const target = path.join(root, SCRATCH)
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      fs.rmSync(target, {
-        recursive: true,
-        force: true,
-        maxRetries: 10,
-        retryDelay: 300,
-      })
-    } catch {
-      // Still held; the attempt below retries while the handle closes.
-    }
-    if (!fs.existsSync(target)) return true
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  // Still held after every attempt: the caller decides whether that is a note
-  // (the teardown's) or a failure (the next spec's, which cannot start).
-  return false
-}
-
-// The scratch root as a switch target: the boot root (`GET /api/path-location`,
-// the app's own witness, so already canonical) plus the folder's name. Folded
-// to `/` because the app normalises a `\`-shaped input anyway (win-03) — the
-// value only has to *reach* the root, its spelling is the host's.
-function expectedPath(root, rel) {
-  return path.join(root, rel).replaceAll(path.sep, '/')
-}
-
-// The install root, from this file's own `../../..` — the way
-// `playwright.config.js` locates the repo, and the same join that file uses to
-// find the suite's settings fixture.
-const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
-
-// The suite's own model connection: the flat fixture the server under test
-// materialises into its temporary database at boot, because
-// `playwright.config.js` exports `NOJAE_TEST_SETTINGS` and refuses to start the
-// suite without it. Read from disk with `node:fs` — the folder is reserved, so
-// no Editor route can see it — and resolved the way the app resolves it:
-// `NOJAE_PATH_LOCATION` when set, else the repo root.
-//
-// This is the assertion that pins "the suite talks to the fixture, never to
-// wherever the app happens to be pointed": the store's one server and model are
-// compared to *this file's* values, so a spec that started reaching the
-// developer's configured connection fails instead of passing.
-const TEST_SETTINGS_FILE = path.join(
-  (process.env.NOJAE_PATH_LOCATION || '').trim() || REPO_ROOT,
-  '.nojae',
-  'nojae-test-settings.json',
-)
-function testSettingsDocument() {
-  return JSON.parse(fs.readFileSync(TEST_SETTINGS_FILE, 'utf8'))
-}
-
-// The app's own spelling of a path — `os.path.realpath`'s answer, which spells
-// the host separator (win-01: the shape is the OS's, never a name check). A
-// comparison with a `/`-shaped value folds both sides, which is what lets one
-// assertion work whatever the host.
-const fold = (p) => p.replaceAll('\\', '/')
-
-// The switch as a user performs it: the app bar's working-location field, then
-// its Set button. There is nothing to close afterwards — the field *is* the
-// location, and Set is an apply, so the bar shows the new root as soon as the
-// server has answered.
-//
-// The wait is for the **response**, not for the field. Polling the field alone
-// waits for nothing: `fill()` has already put `target` there, so the poll is
-// satisfied on its first attempt whether or not the server has answered, and
-// the switch is still in flight when the helper returns. That is what made the
-// seeding assertion below race: the route seeds the MCP declaration and the
-// policy *before* the two hub restarts and the LSP template *after* them, so a
-// caller that did not wait for the answer read the folder mid-switch and found
-// exactly those two. The response is the last thing the route produces, so it
-// is the one moment all three seeds are on disk.
-//
-// `target` is always absolute: the route refuses anything else with 422, so a
-// relative one would leave the location exactly where it was while the page
-// looked like it had moved. The assertion folds the separators on both sides —
-// the sentence these lines are here for is "the app bar moved to the root this
-// switch asked for", the app's behaviour, and the host's spelling of a path may
-// not decide it.
+// The move as a user performs it: the app bar's field, then its Set button. The
+// wait is for the **response**, not for the field — `fill()` has already put the
+// target there, so polling the field alone would be satisfied whether or not the
+// server answered. A refused move leaves the field holding what was typed, so the
+// status is checked and its sentence reported.
 async function setRoot(page, target) {
   const field = page.locator('.appbar-location-input')
   await field.fill(target)
   const button = page.locator('.appbar-location-set')
   await expect(button).toBeEnabled()
-  // Armed before the click, so the response it resolves on cannot be missed.
   const applied = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === '/api/path-location' &&
-      response.request().method() === 'POST',
+    (res) =>
+      new URL(res.url()).pathname === '/api/workspace' &&
+      res.request().method() === 'GET' &&
+      res.url().includes('workspace='),
   )
   await button.click()
-  // A refused switch leaves the field holding what was typed, so the poll below
-  // would pass anyway and the spec would fail later, somewhere else, for a
-  // reason that names nothing. Say which refusal this was.
   const res = await applied
-  expect(res.ok(), `the working-location switch failed: ${await res.text()}`).toBe(true)
+  expect(res.ok(), `the workspace move failed: ${await res.text()}`).toBe(true)
   await expect
     .poll(async () => fold(await field.inputValue()))
     .toContain(fold(target))
+}
+
+// Admitting a folder is what seeds its reserved files. The hub route is the
+// panel's read, named for the tab's folder; it starts no process with the suite's
+// two disable flags on. A read of `GET /api/workspace` deliberately seeds nothing,
+// so a spec that wants the seeded state asks the same question a panel does.
+async function admit(request) {
+  const res = await request.get('/api/mcp', { params: WS })
+  expect(res.ok(), `could not admit the scratch workspace: ${await res.text()}`).toBe(true)
 }
 
 // A failed run must not leave the install's bullet list changed for the specs
@@ -178,54 +95,85 @@ async function removeSentinelHelper(request) {
   }
 }
 
-test.beforeEach(async ({ request }) => {
-  // The removal has to be *finished* before the spec's own `create` runs, or
-  // that create answers 409 for a folder this suite deleted a moment ago.
-  const cleared = await removeScratch(await currentRoot(request))
-  expect(cleared, `the scratch folder is still in the way: ${SCRATCH}`).toBe(true)
+// The suite's own model connection: the flat fixture the server under test
+// materialises into its temporary database at boot, because
+// `playwright.config.js` exports `NOJAE_TEST_SETTINGS` and refuses to start the
+// suite without it. It lives at the **installation** folder's reserved subfolder —
+// the folder the server boots on and a new tab lands on, so no developer's
+// working location decides where it is found.
+const TEST_SETTINGS_FILE = path.join(REPO_ROOT, '.nojae', 'nojae-test-settings.json')
+function testSettingsDocument() {
+  return JSON.parse(fs.readFileSync(TEST_SETTINGS_FILE, 'utf8'))
+}
+
+// The app's own spelling of a path — `os.path.realpath`'s answer, which spells
+// the host separator (win-01). A comparison with a `/`-shaped value folds both
+// sides, which is what lets one assertion work whatever the host.
+const fold = (p) => p.replaceAll('\\', '/')
+
+// The reserved folder is kept **between the tests of this file**: one admission
+// seeds it, and the later tests assert about moves and deletes rather than about a
+// fresh seed. Everything the tests created beside it is cleared; the folder
+// itself is removed by the suite's teardown, once the pool no longer needs it.
+function clearVisibleEntries() {
+  fs.mkdirSync(WORKSPACE, { recursive: true })
+  for (const entry of fs.readdirSync(WORKSPACE)) {
+    if (entry === '.nojae') continue
+    fs.rmSync(path.join(WORKSPACE, entry), { recursive: true, force: true })
+  }
+}
+
+test.beforeAll(() => {
+  fs.rmSync(WORKSPACE, { recursive: true, force: true })
 })
 
-// The root this server booted on, remembered so a spec that fails between its
-// two switches cannot leave the whole suite pointing at a scratch folder.
-let bootRoot = null
+test.beforeEach(async () => {
+  clearVisibleEntries()
+})
 
 test.afterEach(async ({ request }) => {
   await removeSentinelHelper(request)
-  if (bootRoot === null) return
-  // The *live* location decides, not a remembered flag: a spec that ended its
-  // own switch back owes nothing, and one that died mid-way owes exactly one
-  // restore. A switch restarts both hubs and costs seconds, so the check keeps
-  // that one free — and it cannot drift out of sync the way a flag can.
-  if ((await currentRoot(request)) !== bootRoot) {
-    const res = await request.post('/api/path-location', { data: { path: bootRoot } })
-    expect(res.ok(), `could not restore the working location: ${await res.text()}`).toBe(true)
-  }
-  await removeScratch(bootRoot)
+  clearVisibleEntries()
 })
 
-test('a switch closes the tabs of the root it leaves', async ({ page, request }) => {
-  const original = await currentRoot(request)
-  bootRoot = original
-  expect((await create(request, SCRATCH, true)).ok()).toBe(true)
-  // The same relative name on both sides of the switch, so a surviving tab
-  // cannot be mistaken for a correctly re-opened one.
-  expect((await create(request, `${SCRATCH}/README.md`)).ok()).toBe(true)
-  const scratchAbs = expectedPath(original, SCRATCH)
+
+test('a move closes the tabs of the root it leaves', async ({ page, request }) => {
+  const original = await installationRoot(request)
+  // The same relative name on both sides of the move, so a surviving tab cannot
+  // be mistaken for a correctly re-opened one.
+  fs.writeFileSync(path.join(WORKSPACE, 'README.md'), '# scratch\n', 'utf8')
 
   await page.goto('/')
   await page.getByRole('tab', { name: 'Editor' }).click()
   await expect(page.locator('.editor-nav-tree')).toBeVisible()
 
-  await setRoot(page, scratchAbs)
+  // The panels read this tab's folder like every other surface: the move fires
+  // both hub reads, and their answers are about the folder just adopted. Armed
+  // before the gesture, so the responses cannot be missed. The read is also what
+  // admits the folder — the moment the pool seeds it (spec §5.4, rule 23).
+  const panelMcp = page.waitForResponse(
+    (res) =>
+      new URL(res.url()).pathname === '/api/mcp' &&
+      new URL(res.url()).searchParams.get('workspace') === WORKSPACE,
+  )
+  const panelLsp = page.waitForResponse(
+    (res) =>
+      new URL(res.url()).pathname === '/api/lsp' &&
+      new URL(res.url()).searchParams.get('workspace') === WORKSPACE,
+  )
+  await setRoot(page, WORKSPACE)
+  const [mcpAnswer, lspAnswer] = await Promise.all([panelMcp, panelLsp])
+  expect(mcpAnswer.ok(), `the MCP panel read failed: ${await mcpAnswer.text()}`).toBe(true)
+  expect(lspAnswer.ok(), `the LSP panel read failed: ${await lspAnswer.text()}`).toBe(true)
 
-  // The acceptance for the reserved folder's seeding, on the real switch and the
+  // The acceptance for the reserved folder's seeding, on the real move and the
   // real disk. A brand-new workspace ends up with exactly the files that are
-  // genuinely workspace-declared: the policy (pol-05), the MCP declaration
-  // (from the committed template), and the LSP *template* only (the declaration
-  // itself is hand-written, so it must not appear here). The model connection,
-  // the agents and the prompt helpers are rows of the install's store now, so
-  // there is no settings, modes or helpers file to seed (D2, AC-2).
-  expect(fs.readdirSync(path.join(scratchAbs, '.nojae')).sort()).toEqual([
+  // genuinely workspace-declared: the policy (pol-05), the MCP declaration (from
+  // the committed template), and the LSP *template* only (the declaration itself
+  // is hand-written, so it must not appear here). The model connection, the
+  // agents and the prompt helpers are rows of the install's store, so there is no
+  // settings, modes or helpers file to seed (D2, AC-2).
+  expect(fs.readdirSync(path.join(WORKSPACE, '.nojae')).sort()).toEqual([
     'lsp-settings.template.json',
     'mcp-settings.json',
     'read-write-policy.json',
@@ -246,37 +194,37 @@ test('a switch closes the tabs of the root it leaves', async ({ page, request })
   // The bug this spec exists for: the tab used to survive this, still showing
   // the file of the root that was just left.
   await expect(tabs).toHaveCount(0)
-  await expect(page.locator('.editor-body .stream-empty-title')).toHaveText('Open a file')
+  await expect(page.locator('.editor-body .stream-empty-title')).toContainText(
+    'Open a file',
+  )
   // The old root is re-rooted too, and listed for real — the forget is not a
   // blank tree.
   await expect(rootRow).toHaveAttribute('title', new RegExp(path.basename(original)))
 
-  // The scratch folder the spec created is back in the listing (it is a
-  // top-level folder of this workspace, and no policy rule names it). What the
-  // root can *not* list is `.nojae` — reserved, and holding this workspace's
-  // policy and its trash — and `logs`, which nojae's own rules hide as the
-  // app's backups.
-  await expect(page.locator('.tree-row[data-path="e2e-ws-root"]')).toBeVisible()
+  // The scratch folder the spec created is back in the listing (it is a top-level
+  // folder of this workspace, and no policy rule names it). What the root can
+  // *not* list is `.nojae` — reserved, and holding this workspace's policy and its
+  // trash — and `logs`, which nojae's own rules hide as the app's backups.
+  await expect(
+    page.locator(`.tree-row[data-path="${path.basename(WORKSPACE)}"]`),
+  ).toBeVisible()
   await expect(page.locator('.tree-row[data-path="logs"]')).toHaveCount(0)
   await expect(page.locator('.tree-row[data-path=".nojae"]')).toHaveCount(0)
 })
 
-// AC-1 and AC-2, in one place: a switch is a change of *folder*, never of the
+// AC-1 and AC-2, in one place: a move is a change of *folder*, never of the
 // installation's settings. The servers and their models, the agents and the
-// prompt helpers are read from `nojae.db`, so they are the same rows on both
-// sides of the switch — with no setup step — while the new workspace's
-// `.nojae/` holds no store file at all.
+// prompt helpers are read from `nojae.db`, so they are the same rows on both sides
+// of the move — with no setup step — while the new workspace's `.nojae/` holds no
+// store file at all.
 //
-// The reads are the app's own routes, not the database's bytes: a spec that
-// opens the store is a second authority on it (§4.6).
-test('a switch leaves the store unchanged and seeds no store files', async ({
+// The reads are the app's own routes, not the database's bytes: a spec that opens
+// the store is a second authority on it (§4.6).
+test('a move leaves the store unchanged and seeds no store files', async ({
   page,
   request,
 }) => {
-  const original = await currentRoot(request)
-  bootRoot = original
-  expect((await create(request, SCRATCH, true)).ok()).toBe(true)
-  const scratchAbs = expectedPath(original, SCRATCH)
+  const original = await installationRoot(request)
   const fixture = testSettingsDocument()
 
   // The suite is speaking to its own fixture materialised into the temporary
@@ -289,8 +237,8 @@ test('a switch leaves the store unchanged and seeds no store files', async ({
   expect(agentsBefore.agents.length).toBeGreaterThan(0)
 
   // One bullet added through the app's own writer while the boot root is the
-  // active workspace. It belongs to the install, so it has to be there after
-  // the switch — and it is the read route, never a file, that says so.
+  // active workspace. It belongs to the install, so it has to be there after the
+  // move — and it is the read route, never a file, that says so.
   const addedRes = await request.post('/api/prompt-helpers/add', {
     data: { color: '#2ec27e', content: SENTINEL_HELPER },
   })
@@ -304,10 +252,11 @@ test('a switch leaves the store unchanged and seeds no store files', async ({
   const optionLabels = await select.getByRole('option').allTextContents()
   await expect(page.locator(`.memory-bullet[title="${SENTINEL_HELPER}"]`)).toHaveCount(1)
 
-  await setRoot(page, scratchAbs)
+  await setRoot(page, WORKSPACE)
+  await admit(request)
 
-  // AC-1: every row the store answers with is unchanged, and the composer and
-  // the bullet row did not move either — a switch reloads neither (D11).
+  // AC-1: every row the store answers with is unchanged, and the composer and the
+  // bullet row did not move either — a move reloads neither (D11).
   expect(await (await request.get('/api/servers')).json()).toEqual(serversBefore)
   expect(await (await request.get('/api/agents')).json()).toEqual(agentsBefore)
   expect(
@@ -319,9 +268,9 @@ test('a switch leaves the store unchanged and seeds no store files', async ({
   )
   await expect(page.locator(`.memory-bullet[title="${SENTINEL_HELPER}"]`)).toHaveCount(1)
 
-  // The Settings dialog is an editor over the same store in the new workspace:
-  // its Models section names the fixture's server and model, with no file to
-  // find and no setup step.
+  // The Settings dialog is an editor over the same store in the new workspace: its
+  // Models section names the fixture's server and model, with no file to find and
+  // no setup step.
   const loadedServers = page.waitForResponse(
     (response) => new URL(response.url()).pathname === '/api/servers',
   )
@@ -335,67 +284,72 @@ test('a switch leaves the store unchanged and seeds no store files', async ({
   await expect(modelsSection).toContainText(fixture.server.model.name)
   await page.locator('.settings-dialog').getByRole('button', { name: 'Close' }).click()
 
-  // AC-2: a fresh workspace carries only the workspace-declared files — no
-  // model connection, agent or helper store file at all — and nothing in the
-  // app looks for them: the path-location payload carries the location, the
-  // policy and the two hub declarations, and no per-workspace store block.
-  expect(fs.readdirSync(path.join(scratchAbs, '.nojae')).sort()).toEqual([
+  // AC-2: a fresh workspace carries only the workspace-declared files — no model
+  // connection, agent or helper store file at all — and nothing in the app looks
+  // for them: the workspace payload carries the folder, the default, the policy
+  // and the two hub declarations, and no per-workspace store block.
+  expect(fs.readdirSync(path.join(WORKSPACE, '.nojae')).sort()).toEqual([
     'lsp-settings.template.json',
     'mcp-settings.json',
     'read-write-policy.json',
   ])
-  const location = await (await request.get('/api/path-location')).json()
+  const location = await (
+    await request.get('/api/workspace', { params: WS })
+  ).json()
   expect(Object.keys(location).sort()).toEqual([
     'default',
-    'key',
+    'hubs',
     'lspSettings',
     'lspSettingsTemplate',
     'mcpSettings',
-    'path',
     'policy',
+    'workspace',
   ])
+  expect(location.workspace).toBe(fold(WORKSPACE))
+  expect(location.default).toBe(fold(original))
 })
 
-// The other half of "one value moves everything": the trash moves with the
-// root too. Deleting inside a switched-in workspace must file its batch under
-// *that* workspace's reserved folder — not under the install directory the app
-// booted from, where a foreign project's deleted bytes have no business being.
-test('a delete in a switched-in workspace trashes under that workspace', async ({
+// The other half of "one value moves everything": the trash moves with the root
+// too. Deleting inside a moved-in workspace must file its batch under *that*
+// workspace's reserved folder — not under the installation folder the app booted
+// from, where a foreign project's deleted bytes have no business being.
+test('a delete in a moved workspace trashes under that workspace', async ({
   page,
   request,
 }) => {
-  const original = await currentRoot(request)
-  bootRoot = original
-  expect((await create(request, SCRATCH, true)).ok()).toBe(true)
-  expect((await create(request, `${SCRATCH}/gone.txt`)).ok()).toBe(true)
-  const scratchAbs = expectedPath(original, SCRATCH)
+  const original = await installationRoot(request)
+  fs.writeFileSync(path.join(WORKSPACE, 'gone.txt'), 'to be deleted\n', 'utf8')
 
   await page.goto('/')
-  await setRoot(page, scratchAbs)
+  await setRoot(page, WORKSPACE)
+  await admit(request)
 
-  const res = await request.delete('/api/fs/file?path=gone.txt')
+  const res = await request.delete('/api/fs/file', {
+    params: { ...WS, path: 'gone.txt' },
+  })
   expect(res.ok(), await res.text()).toBe(true)
   const body = await res.json()
   // Working-location-relative, the digest-and-stamp batch name the delete
   // invents — and this time the location it is relative to is the new root.
   // `/`-joined on every host (A §7): a payload field never carries `\`.
   expect(body.trashedTo).toMatch(/^\.nojae\/trash\/[0-9a-f]{12}_/)
-  // The batch lives under the *switched-in* root, layout and all, and the
-  // install directory gained nothing.
-  expect(fs.existsSync(path.join(scratchAbs, body.trashedTo))).toBe(true)
-  expect(fs.existsSync(path.join(scratchAbs, body.trashedTo, 'gone.txt'))).toBe(true)
+  // The batch lives under the *moved-in* root, layout and all, and the
+  // installation directory gained nothing.
+  expect(fs.existsSync(path.join(WORKSPACE, body.trashedTo))).toBe(true)
+  expect(fs.existsSync(path.join(WORKSPACE, body.trashedTo, 'gone.txt'))).toBe(true)
+  expect(fs.existsSync(path.join(original, body.trashedTo))).toBe(false)
 })
 
-test('unsaved edits are reported when the switch closes their tab', async ({ page, request }) => {
-  const original = await currentRoot(request)
-  bootRoot = original
-  expect((await create(request, SCRATCH, true)).ok()).toBe(true)
-  expect((await create(request, `${SCRATCH}/note.txt`)).ok()).toBe(true)
-  const scratchAbs = expectedPath(original, SCRATCH)
+test('unsaved edits are reported when the move closes their tab', async ({
+  page,
+  request,
+}) => {
+  const original = await installationRoot(request)
+  fs.writeFileSync(path.join(WORKSPACE, 'note.txt'), '', 'utf8')
 
   await page.goto('/')
   await page.getByRole('tab', { name: 'Editor' }).click()
-  await setRoot(page, scratchAbs)
+  await setRoot(page, WORKSPACE)
   await page.locator('.tree-row[data-path="note.txt"]').first().click()
   await expect(page.locator('.editor-tab')).toHaveCount(1)
 
@@ -405,24 +359,24 @@ test('unsaved edits are reported when the switch closes their tab', async ({ pag
 
   await setRoot(page, original)
 
-  // Closing a dirty tab is the switch's doing, not the user's gesture, so the
-  // loss gets a line rather than the confirm whose Save answer no longer has a
-  // path to write to.
+  // Closing a dirty tab is the move's doing, not the user's gesture, so the loss
+  // gets a line rather than the confirm whose Save answer no longer has a path to
+  // write to.
   await expect(page.locator('.editor-tab')).toHaveCount(0)
   const notice = page.locator('.editor-notice--warn').first()
   await expect(notice).toContainText('1 tab closed with unsaved changes')
 })
 
-// A WorkBench reply at the boot root, so the suite is proven *configured* and
-// not merely readable: with the test switch on, a mispointed or malformed
-// fixture refuses with the store's own sentence naming the file, which is a far
-// more honest failure than a timeout. Nothing is asserted about the wording —
-// the endpoint is a real server, so only the shape of the stream is.
-test('the boot root streams a reply from the test settings file', async ({
+// A WorkBench reply at the installation folder, so the suite is proven
+// *configured* and not merely readable: with the test switch on, a mispointed or
+// malformed fixture refuses with the store's own sentence naming the file, which
+// is a far more honest failure than a timeout. Nothing is asserted about the
+// wording — the endpoint is a real server, so only the shape of the stream is.
+test('the installation folder streams a reply from the test settings file', async ({
   page,
   request,
 }) => {
-  bootRoot = await currentRoot(request)
+  await installationRoot(request)
 
   await page.goto('/')
   await page.getByRole('tab', { name: 'WorkBench' }).click()
@@ -438,19 +392,14 @@ test('the boot root streams a reply from the test settings file', async ({
   await expect(replies).toHaveCount(1)
   // Wait for the reply to **finish**: the composer swaps Send for Stop while one
   // streams, so Send being back is the stream's own end. Leaving it in flight
-  // would make the next spec's working-location switch — or any other mutation —
-  // answer 409 for a reason that has nothing to do with what it asserts.
+  // would make the next spec's write — or any other mutation — answer 409 for a
+  // reason that has nothing to do with what it asserts.
   //
   // The bound is the test's own, not the 30 s expect default: this is the only
-  // spec that streams, and it is the first thing to ask the model after the
-  // server booted, so a cold server's first reply carries its load/warm-up time
-  // — measured here at ~31 s against a 2 s warm one. Bounding that wait at 30 s
-  // is a flake that costs the *next* spec too: the reply is still in flight, so
-  // the shared afterEach's restore of the working location answers 409 and an
-  // unrelated spec fails. Nothing is weakened — the stream must still end, and
-  // the refusal below still fires well inside the bound. Kept under the test's
-  // own 120 s budget (playwright.config.js), which is the wait that actually
-  // fails the spec.
+  // spec that streams, and it is the first thing to ask the model after the server
+  // booted, so a cold server's first reply carries its load/warm-up time —
+  // measured here at ~31 s against a 2 s warm one. Kept under the test's own 120 s
+  // budget (playwright.config.js), which is the wait that actually fails the spec.
   await expect(page.locator('.chat-send:not(.chat-stop)')).toBeVisible({
     timeout: 90_000,
   })

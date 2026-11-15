@@ -12,9 +12,9 @@ copy of the committed example — and the operator copies it to
 
 The template joins the reserved folder's family — ``read-write-policy.json``,
 ``mcp-settings.json`` — and
-arrives by the same rule: **seeded by exclusive create at the two moments a
-folder becomes the working location (boot, and ``POST /api/path-location``),
-never overwritten**, and created whenever it is absent (a folder that
+arrives by the same rule: **seeded by exclusive create when a folder is
+admitted as a workspace (today: at boot; from task 05, when the hub pool admits
+it), never overwritten**, and created whenever it is absent (a folder that
 gained ``.nojae`` by other means is offered the template too).
 
 The seeded bytes are the committed example
@@ -73,9 +73,9 @@ def lsp_settings_template_file_path(root: str) -> str:
     """Where the template file goes under ``root`` — one level of the reserved folder.
 
     ``constants.lsp_settings_path()`` is the *active* root (what the loader
-    reads); this takes the root explicitly, because the workspace switch
-    seeds the folder it is moving to before ``path_location()`` is what the
-    rest of the app sees.
+    reads); this takes the root explicitly, because the workspace switch seeds
+    the folder it is moving to before that folder is the workspace the rest of
+    the app sees (the seam's scope still names the old one).
     """
     return os.path.join(
         root, constants.POLICY_DIRNAME, constants.LSP_SETTINGS_TEMPLATE_FILENAME
@@ -177,12 +177,12 @@ def _ensure_lsp_settings_template(root: str) -> Dict[str, Any]:
 def lsp_settings_template_state(root: str) -> Dict[str, Any]:
     """What a **reader** may say about the template file, writing nothing.
 
-    ``GET /api/path-location`` asks this instead of
-    :func:`ensure_lsp_settings_template` — the working location is read far more
-    often than a workspace is switched, and a read that leaves a folder in
-    someone's project is the mistake the seeding rules forbid. ``absent`` is
-    a normal answer here: a workspace whose seed failed, or one that
-    predates the file, simply has no template.
+    ``GET /api/workspace`` asks this instead of
+    :func:`ensure_lsp_settings_template` — a workspace is read far more often
+    than it is admitted, and a read that leaves a folder in someone's project is
+    the mistake the seeding rules forbid. ``absent`` is a normal answer here: a
+    workspace whose seed failed, or one that predates the file, simply has no
+    template.
     """
     path = lsp_settings_template_file_path(root)
     try:

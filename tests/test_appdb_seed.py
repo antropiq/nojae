@@ -716,7 +716,9 @@ class TestTheBootLeavesTheReservedFolderAlone:
 
         target = tmp_path / "booted-project"
         target.mkdir()
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(target))
+        from tests.conftest import make_the_install
+
+        make_the_install(monkeypatch, target)
         create_app()
         folder = target / policy_shared.POLICY_DIRNAME
         assert sorted(name.name for name in folder.iterdir()) == sorted(
@@ -772,14 +774,12 @@ class TestTheSeedingPassStaysInsideTheStore:
         re-seed, re-assert or refill anything — the second boot answers exactly
         as if nothing had moved.
         """
-        from src import config as config_module
+        from tests.conftest import scoped
 
         first = appdb.boot()
-        monkeypatch.setenv(
-            config_module.PATH_LOCATION_KEY, str(seeded / "another-workspace")
-        )
-
-        second = appdb.boot()
+        (seeded / "another-workspace").mkdir(exist_ok=True)
+        with scoped(seeded / "another-workspace"):
+            second = appdb.boot()
 
         assert second["created"] is False
         assert second["agents"] == {"inserted": 0, "reasserted": 1}

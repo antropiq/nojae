@@ -43,7 +43,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 import anyio
 
-from src.config import path_location
+from src.core import workspace
 from src.core import proctree
 from src.core import proctree_jobs
 
@@ -97,6 +97,11 @@ class TerminalSession:
         # answers ``None`` — where the shell's own session is the scope, so
         # the Linux path is exactly what it was.
         self.job: Optional[proctree_jobs.ProcessJob] = None
+        # The folder this session is **born in**, set once by :meth:`spawn` and
+        # never moved afterwards: the child's ``cwd``, the ``open`` frame's
+        # ``cwd`` and the ``cwd`` ``GET /api/terminal`` lists are all this one
+        # value, so two sessions born in two workspaces report two folders and a
+        # tab re-pointing moves neither.
         self.cwd = ""
         self.shell = ""
         self.started_at = time.time()
@@ -138,6 +143,13 @@ class TerminalSession:
         a process's creation, which is why the shell and the console helper
         are assigned as soon as the driver reports them and no command can
         reach the shell before they are (C-D5).
+
+        Where the shell starts is the workspace **in scope**, read once here:
+        the route entered that scope from the socket's own query string before
+        calling this, so a shell opened by a tab on folder A starts in A. This
+        is the only time the folder is read — the session then keeps what it
+        was born in, and nothing later (this tab re-pointing, another tab's
+        socket) moves it.
         """
         driver_module = drivers.selected_driver()
         if driver_module is None:
@@ -147,7 +159,14 @@ class TerminalSession:
         # raises the same ``TerminalUnsupported`` the driver absence does — one
         # refusal shape, and its sentence names what was looked for.
         shell = shells.select_shell()
-        self.cwd = path_location()
+        # **The folder this shell is born in**, read from the seam exactly once
+        # and then owned by the session for its whole life: it is the ``cwd``
+        # the child is spawned with, the ``open`` frame reports and
+        # ``GET /api/terminal`` lists. Nothing later in the app may move it — a
+        # tab re-pointing at another folder leaves this shell where it is, and
+        # only a **new** session (a fresh socket) starts somewhere else
+        # (spec §8: "a live shell keeps the folder it was born in").
+        self.cwd = workspace.current_root()
         self.shell = shell[0]
         # The tree's boundary exists before anything is started, on every
         # platform: where the platform has no jobs this object is inert and

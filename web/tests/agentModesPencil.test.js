@@ -107,7 +107,9 @@ function resetAll() {
   editor.serverFindings = []
   appShell.servers = []
   appShell.serversCaps = null
-  window.localStorage.clear()
+  // The remembered agent lives in the tab's storage (§5.5 rule 26), so a fresh
+  // case clears `sessionStorage` — the storage the selection actually uses.
+  window.sessionStorage.clear()
 }
 
 let host = null

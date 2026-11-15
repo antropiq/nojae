@@ -27,31 +27,37 @@ the index for its last-match-wins step), which is why this is a tuple of tuples
 and not a dict.
 """
 
-import os
 from typing import List, Tuple
 
 from . import constants
 from .constants import policy_glob
 from .constants import policy_shared as shared
 from .policy import workspace_root
+from src.core import workspace as workspace_seam
 
 
 def is_self_workspace() -> bool:
     """True when the active workspace IS the nojae install directory.
 
-    One comparison, and :func:`editorfs.policy.workspace_root` already does the
-    resolving: ``realpath(path_location()) == realpath(PROJECT_ROOT)``. Everything
+    One comparison of two things the seam already resolves: the **scope** (the
+    folder this request is about — :func:`editorfs.policy.workspace_root`) and
+    the **installation** (:func:`src.core.workspace.installation`). Everything
     level A owns hangs on this, so it gets one function and one docstring rather
     than an inline ``==`` at each rule.
+
+    Since clws-01 the left-hand side is the scope rather than a process-wide
+    value, which is what makes spec §5.6 rule 30 a **per-workspace** fact: a tab
+    rooted at the install directory is stricter than a tab rooted elsewhere, and
+    the two answers coexist in one process.
 
     The comparison is **exact**, not a prefix: the app's own parent directory, or
     a copy of the repo somewhere else, is not the app — the file that copy
     regenerates is not the one this process reads.
     """
-    # ``constants.PROJECT_ROOT`` (the install dir as this package sees it) rather
-    # than a second import of ``src.config``, and read at call time so a test can
-    # move either side of the comparison.
-    return workspace_root() == os.path.realpath(str(constants.PROJECT_ROOT))
+    # Read at call time on both sides, so a test can move either one — the
+    # installation through ``src.config.PROJECT_ROOT``, the workspace through the
+    # seam's scope (or, while the interim fallback is on, through the location).
+    return workspace_root() == workspace_seam.installation()
 
 
 # ``(pattern, mode, reason)`` in evaluation order. Each reason is echoed verbatim

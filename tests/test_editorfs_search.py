@@ -23,7 +23,7 @@ counted. The scope root alone raises; a file inside the scope never does.
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, Iterator, List, Tuple, Union
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,6 +40,7 @@ from src.core.editorfs.search import (
     search_workspace,
 )
 
+from tests.conftest import WorkspaceClient, scoped, workspace_params
 from tests.test_editorfs import write_policy
 
 
@@ -68,19 +69,23 @@ def write(root: Path, rel: str, body: str) -> None:
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """An empty tree pointed at as the working location, seeded like a real one.
+def workspace(tmp_path: Path) -> Iterator[Path]:
+    """An empty tree the scan is asked about, seeded like a real one.
 
     Re-declared rather than imported: pytest fixtures do not travel between test
     modules. Each test writes exactly the files its assertion is about, so an
     expected sequence here is a complete answer rather than a subset of a
     decoration. The seeded policy is what makes ``node_modules`` ``ro`` and
     ``.git`` ``hidden`` the way a project a user opened would be.
+
+    Yielded inside the seam's **scope** for the folder: most rows here call the
+    core walk directly, and a call that is not a request has to say which folder
+    it is about (the routes enter their own scope, nested inside this one).
     """
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
     policy_seed.ensure_policy_file(str(tmp_path))
     policy_file.invalidate_policy_cache()
-    return tmp_path
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 @pytest.fixture
@@ -89,9 +94,13 @@ def client(workspace: Path):
 
     Re-declared rather than imported from ``tests/test_editorfs.py`` for the same
     reason as the fixture above: pytest does not move fixtures between modules.
+
+    Wrapped in :class:`~tests.conftest.WorkspaceClient` (clws-03), so every
+    request this suite's route rows make **names** the folder it is answered
+    about — the field is what is measured, never the interim environment value.
     """
     with TestClient(create_app()) as test_client:
-        yield test_client
+        yield WorkspaceClient(test_client, workspace)
 
 
 def git(repo: Path, *args: str) -> None:
@@ -118,7 +127,7 @@ def git(repo: Path, *args: str) -> None:
 
 
 @pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """The seeded workspace of ``workspace``, made into a git repository.
 
     Only the repository is added, so a row about the ignore filter differs from
@@ -126,20 +135,28 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ``GIT_CEILING_DIRECTORIES`` is what makes "this folder is the repository" a
     fact about the fixture rather than about where the suite happened to run —
     without it, a checkout above ``tmp_path`` would answer for the folder.
+
+    Scoped like ``workspace`` above, for the same reason.
     """
     root = tmp_path / "checkout"
     root.mkdir()
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     policy_seed.ensure_policy_file(str(root))
     policy_file.invalidate_policy_cache()
     git(root, "init", "-q")
     git(root, "commit", "-qm", "empty baseline", "--allow-empty")
-    return root
+    with scoped(root):
+        yield root
 
 
-def search(client: TestClient, **params: Any):
-    """One ``GET /api/fs/search``, params spelled as they go on the wire."""
+def search(client: TestClient, about: Any = None, **params: Any):
+    """One ``GET /api/fs/search``, params spelled as they go on the wire.
+
+    ``about`` names a workspace **other** than the client's own — the shape a
+    second tab's request has.
+    """
+    if about is not None:
+        params.update(workspace_params(about))
     return client.get("/api/fs/search", params=params)
 
 
@@ -1158,3 +1175,44 @@ class TestRoute:
         """405, not a route that was quietly added: this is a read (D16)."""
         response = getattr(client, verb)("/api/fs/search", params={"q": "verb"})
         assert response.status_code == 405
+
+    @pytest.mark.parametrize("first", ["a", "b"], ids=["a-first", "b-first"])
+    def test_two_named_folders_are_searched_one_by_one(
+        self, tmp_path: Path, client: TestClient, first: str
+    ):
+        """Two tabs, two searches, one process, no environment write between them.
+
+        The same needle in both folders and a file only one of them holds: each
+        answer names **its own** workspace's rows, in either request order. The
+        per-root caches key on the resolved root, so nothing is invalidated here
+        — and nothing may be, or one folder's answer would depend on the other's
+        traffic.
+        """
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for root in (alpha, beta):
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "shared.py").write_text("needle\n", encoding="utf-8")
+        (alpha / "src" / "only-alpha.py").write_text("needle\n", encoding="utf-8")
+        (beta / "src" / "only-beta.py").write_text("needle\n", encoding="utf-8")
+
+        order = (alpha, beta) if first == "a" else (beta, alpha)
+        for root in order:
+            own = "src/only-alpha.py" if root is alpha else "src/only-beta.py"
+            other = "src/only-beta.py" if root is alpha else "src/only-alpha.py"
+            payload = search(client, about=root, q="needle").json()
+            found = [row["path"] for row in payload["matches"]]
+            assert found == sorted([own, "src/shared.py"], key=str.lower)
+            # And never the other folder's row: the answer is about one root.
+            assert other not in found
+            assert payload["filesScanned"] == 2
+
+    def test_a_refused_folder_is_422_from_the_search_route(
+        self, client: TestClient, tmp_path: Path
+    ):
+        """The seam's sentence, before the walk: a refused folder is never opened."""
+        ghost = tmp_path / "not-a-project"
+        response = search(client, about=ghost, q="needle")
+        assert response.status_code == 422
+        assert str(ghost) in response.json()["detail"]
+        assert "not an existing directory" in response.json()["detail"]

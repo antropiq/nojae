@@ -4,14 +4,25 @@ import { mount } from '@vue/test-utils'
 import BatchModeDialog from '../src/components/BatchModeDialog.vue'
 import { NO_BATCH_ITEMS_MESSAGE, useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
+import { pointTabAt, workspaceOf } from './helpers/workspace-url'
 
 // The lot is *chosen*, not typed: the dialog offers one option per prefix that
 // has a task in the lot folder, so a lot that cannot launch is never offered.
 // The prefix list is therefore the server's answer (GET /api/batch/prefixes),
 // and the dialog keeps no prefix knowledge of its own.
+//
+// **The folder is the tab's** (clws-09): both reads name it on the query string,
+// so opening the dialog in tab A lists A's lot and a folder B tab offers B's. The
+// dialog re-reads on open, and that re-read is what keeps a stale lot from being
+// launched after the tab has moved (spec §5.7 rule 32).
 
 const batch = useBatch().state
 const chat = useChat().state
+
+//: The folder the tab in this file is on. Every numbered case starts here; the
+//: two-folder cases point the tab somewhere else and prove the list followed.
+const TAB_A = '/w/project-a'
+const TAB_B = '/w/project-b'
 
 function prefixEntry(prefix, tasks, hasLot = false) {
   return { prefix, tasks, hasLot }
@@ -69,6 +80,9 @@ function stubRoutes({ prefixes = [], listing = null, prefixCalls = [], taskCalls
 
 function reset() {
   vi.restoreAllMocks()
+  // Every batch request names the tab's folder, so each case says which one it
+  // is on before it asks anything (spec §5.7 rule 32).
+  pointTabAt(TAB_A)
   chat.phase = 'idle'
   chat.messages = []
   chat.error = null
@@ -82,6 +96,8 @@ function reset() {
   batch.error = null
   batch.active = false
   batch.status = 'idle'
+  batch.pinnedMode = null
+  batch.pinnedWorkspace = null
 }
 
 describe('the prefix dropdown', () => {
@@ -188,6 +204,94 @@ describe('the prefix dropdown', () => {
     expect(wrapper.find('select').exists()).toBe(false)
     expect(wrapper.find('button[type="submit"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
+  })
+})
+
+describe("the dialog lists the tab's folder", () => {
+  beforeEach(reset)
+
+  it('both reads name the tab workspace on the query string', async () => {
+    const prefixCalls = []
+    const taskCalls = []
+    // The prefix survives the re-fetch, so both reads really happen: the option
+    // list first, then the lot the surviving selection names.
+    stubRoutes({ prefixes: [prefixEntry('doc-', 1)], prefixCalls, taskCalls })
+    batch.prefix = 'doc-'
+    const { refreshLot } = useBatch()
+    await refreshLot()
+
+    // The folder travels as a query parameter, never in `dir` (spec D9): `dir`
+    // is a folder *inside* the workspace, and the two are different fields.
+    expect(prefixCalls).toHaveLength(1)
+    expect(workspaceOf(prefixCalls[0])).toBe(TAB_A)
+    expect(prefixCalls[0]).toContain('dir=todos')
+    expect(taskCalls).toHaveLength(1)
+    expect(workspaceOf(taskCalls[0])).toBe(TAB_A)
+    expect(taskCalls[0]).toContain('dir=todos')
+  })
+
+  it('a folder B tab offers B prefixes, never A ones', async () => {
+    const prefixCalls = []
+    stubRoutes({ prefixes: [prefixEntry('beta-', 2)], prefixCalls })
+    pointTabAt(TAB_B)
+    const { refreshLot } = useBatch()
+    await refreshLot()
+
+    expect(workspaceOf(prefixCalls[0])).toBe(TAB_B)
+    expect(batch.prefixes.map((item) => item.prefix)).toEqual(['beta-'])
+  })
+
+  it('a folder change re-reads instead of reusing the list', async () => {
+    const prefixCalls = []
+    // A on the first read, B on the second: one stub, two folders.
+    let call = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const key = String(url)
+      if (!key.startsWith('/api/batch/prefixes')) {
+        throw new Error(`unexpected fetch: ${key}`)
+      }
+      prefixCalls.push(key)
+      call += 1
+      const prefixes = call === 1
+        ? [prefixEntry('alpha-', 3, true)]
+        : [prefixEntry('beta-', 1)]
+      return { ok: true, json: async () => ({ dir: 'todos', prefixes }) }
+    })
+    const { refreshLot, openDialog } = useBatch()
+
+    // Tab A opens the dialog: A's lots.
+    openDialog()
+    await vi.waitFor(() => expect(batch.prefixes).toHaveLength(1))
+    expect(batch.prefixes[0].prefix).toBe('alpha-')
+    expect(workspaceOf(prefixCalls[0])).toBe(TAB_A)
+
+    // The user points the tab at B and opens the dialog again. The list is
+    // re-read — it is not carried across the folder change, which is what keeps
+    // a stale lot from being launched off a list belonging to another folder.
+    pointTabAt(TAB_B)
+    await refreshLot()
+    expect(workspaceOf(prefixCalls[1])).toBe(TAB_B)
+    expect(batch.prefixes.map((item) => item.prefix)).toEqual(['beta-'])
+  })
+
+  it('a launch pins the folder it started on, and a later change lists the new one', async () => {
+    const prefixCalls = []
+    stubRoutes({ prefixes: [prefixEntry('doc-', 1)], prefixCalls })
+    const { refreshLot } = useBatch()
+    await refreshLot()
+
+    // Pinned by a launch: every later read of the lot names A, even though the
+    // tab has moved to B in the meantime (spec §5.7 rule 33).
+    batch.pinnedWorkspace = TAB_A
+    pointTabAt(TAB_B)
+    await refreshLot()
+    expect(workspaceOf(prefixCalls[1])).toBe(TAB_A)
+
+    // Once the run is over the pin is gone, so the dialog lists the tab's own
+    // folder again — B — and offers B's lot (spec §5.7 rule 32).
+    batch.pinnedWorkspace = null
+    await refreshLot()
+    expect(workspaceOf(prefixCalls[2])).toBe(TAB_B)
   })
 })
 

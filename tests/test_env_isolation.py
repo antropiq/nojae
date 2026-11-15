@@ -8,10 +8,11 @@ guard that stops each:
   :func:`_every_test_gets_its_own_store` points it at a temporary file and
   asserts the install's own path can never be opened;
   ``tests/test_store_hermeticity.py`` is that invariant as a test.
-* **the working location** — ``NOJAE_PATH_LOCATION``, which decides where
+* **the working location** — the seam's request scope, which decides where
   ``AGENTS.md``, the hubs' declarations and the e2e suite's connection fixture
-  are looked for. The autouse :func:`_no_ambient_path_location` points it at a
-  throw-away root.
+  are looked for. The autouse
+  :func:`_every_test_runs_in_a_workspace_scope` enters a throw-away root, so no
+  core surface reads this checkout.
 * **the environment** — ``SETTING_KEYS`` is the two technical keys,
   ``LLM_DEBUG`` and ``NOJAE_PYTHON_ROOT``, and the wipe loops in the app's
   fixtures must keep protecting exactly those, because those keys *stay* in the
@@ -45,17 +46,29 @@ def agent_row(agent_id: str = "code") -> dict:
 
 
 class TestTheWorkingLocationGuardPointsOffThisCheckout:
-    """The autouse guard neutralises the location, by the module's own accessor."""
+    """The autouse guard enters a scope, and the installation stays the install."""
 
-    def test_the_working_location_is_the_guard_root(self, tmp_path: Path):
+    def test_the_installation_is_the_install_and_the_guard_is_not(
+        self, tmp_path: Path
+    ):
+        """clws-10: the install folder is ``workspace.installation()``.
+
+        The autouse scope is a throw-away folder; the installation is the app's
+        own checkout, read from ``config.PROJECT_ROOT``. The two must not
+        converge — that is what keeps the installation-scoped catalogue honest
+        while a tab works on another folder.
+        """
+        from src.core import workspace
+
         guard_root = workspace_guard_root(tmp_path)
+        current = os.path.normcase(workspace.current_root())
+        install = os.path.normcase(workspace.installation())
 
-        assert os.path.normcase(config_module.path_location()) == os.path.normcase(
-            str(guard_root)
+        assert current == os.path.normcase(os.path.realpath(str(guard_root)))
+        assert install == os.path.normcase(
+            os.path.realpath(str(config_module.PROJECT_ROOT))
         )
-        assert os.path.normcase(str(guard_root)) != os.path.normcase(
-            str(config_module.PROJECT_ROOT)
-        )
+        assert current != install
 
     def test_the_e2e_connection_fixture_is_looked_for_under_the_guard_root(
         self, tmp_path: Path
@@ -147,6 +160,7 @@ class TestThePerAgentCapIsNeutralToo:
         """
         from src.api import routes
         from src.core import lsphub
+        from src.core import workspace
         from src.core.lsphub import constants as lsp_constants
 
         monkeypatch.setenv("LSP_ENABLED", "pyright,typescript")
@@ -154,7 +168,7 @@ class TestThePerAgentCapIsNeutralToo:
         # root's, not this checkout's — and that file is not there, so the
         # scan finds nothing to activate.
         assert lsp_constants.lsp_settings_path().is_relative_to(
-            Path(config_module.path_location())
+            Path(workspace.current_root())
         )
         assert lsphub.constants.LSP_SETTINGS_PATH is None
         assert routes._active_server_ids() == []
@@ -269,24 +283,23 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
     def test_the_working_location_stays_off_the_install_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        guard_root = workspace_guard_root(tmp_path)
-        assert os.path.normcase(config_module.path_location()) == os.path.normcase(
-            str(guard_root)
+        from src.core import workspace
+
+        guard_root = os.path.normcase(
+            os.path.realpath(str(workspace_guard_root(tmp_path)))
         )
+        assert os.path.normcase(workspace.current_root()) == guard_root
 
         # Prove the undo actually ran: a patch this test made itself is gone.
         monkeypatch.setenv("NOJAE_UNDO_PROBE", "1")
         monkeypatch.undo()
         assert "NOJAE_UNDO_PROBE" not in os.environ
 
-        # And the guard's own patch is not: the location never fell back to this
-        # checkout, which is the leak that made a mode-list assertion machine-dependent.
-        assert os.path.normcase(config_module.path_location()) == os.path.normcase(
-            str(guard_root)
-        )
-        assert os.path.normcase(config_module.path_location()) != os.path.normcase(
-            str(config_module.PROJECT_ROOT)
-        )
+        # And the guard's own scope is not: it is a context, not a monkeypatch,
+        # so undoing the test's patches cannot fall back to this checkout — the
+        # leak that made a mode-list assertion machine-dependent.
+        assert os.path.normcase(workspace.current_root()) == guard_root
+        assert os.path.normcase(workspace.installation()) != guard_root
 
     def test_the_agents_lookup_still_answers_the_guard_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -7,48 +7,51 @@ import json
 import re
 import threading
 from contextlib import suppress
-from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Union, get_args
-
-import os
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    get_args,
+)
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from src.api.events import sse_format
 from src.config import (
-    PATH_LOCATION_KEY,
     agent_instructions_block,
     load_endpoints_config,
     max_tool_iteration,
-    path_location,
-    default_path_location,
 )
 from src.core.mcphub import (
-    ensure_mcp_settings_file,
     load_externals,
     mcp_settings_file_state,
     set_externals_enabled,
 )
 from src.core.lsphub import (
     all_servers,
-    ensure_lsp_settings_template,
     lsp_settings_file_state,
     lsp_settings_template_state,
-    restricted_lsp_roots,
     set_lsp_enabled,
 )
 from src.core import editorfs
-from src.core.editorfs import fscase, policy_seed
-from src.core.editorfs.policy import _is_within
+from src.core.editorfs import policy_seed
 from src.core import agent_modes
 from src.core import appdb
+from src.core import hubpool
 from src.core import prompt_helpers
 from src.core import termhub
 from src.core.termhub import policy as term_policy
 from src.core.termhub import drivers as term_drivers
 from src.core import batch as batch_core
+from src.core import workspace as workspace_seam
 from src.core.chat import stream_chat
 from src.core.llmkit.client import models_url
 from src.core.llmkit.sanitize import sanitize_content
@@ -74,12 +77,6 @@ class SettingsFieldsMixin(BaseModel):
         if isinstance(value, (str, int, float)):
             return str(value)
         raise ValueError("expected a string or number")
-
-
-class PathLocationIn(SettingsFieldsMixin):
-    """Working-location change as sent by the app bar's location field."""
-
-    path: str = ""
 
 
 class PromptHelperFields(BaseModel):
@@ -830,16 +827,21 @@ class ChatIn(BaseModel):
 
 
 # Strong references to in-flight chat pump tasks (the event loop only keeps
-# weak references to bare tasks).
-_CHAT_TASKS: set = set()
+# weak references to bare tasks), **keyed with the workspace each reply is
+# about**. The value is the reply's canonical root, so "is a reply streaming"
+# can be asked *of a workspace* — which is the only form of the question that
+# means anything now that two folders are served at once.
+_CHAT_TASKS: Dict[Any, str] = {}
 
 
 class ChatHandle:
-    """The one in-flight chat reply, so another request can pause it.
+    """One in-flight chat reply, so another request can pause it.
 
     ``POST /api/chat/pause`` is a separate HTTP request from the reply's own
-    stream, so the pause flag has to live in a process-wide slot. Mono-user
-    app, one tab: one handle, no chat id.
+    stream, so the pause flag has to live somewhere the two requests share. It
+    is **keyed by workspace** (clws-04), not held in one process-wide slot: the
+    reply a tab may pause is the reply running on *that tab's* folder, and a
+    second tab's turn is nobody else's to stop.
     """
 
     def __init__(self, pause_event: threading.Event, cancel_event: threading.Event) -> None:
@@ -847,42 +849,94 @@ class ChatHandle:
         self.cancel_event = cancel_event
 
 
-# Set for the duration of one streaming reply (cleared when its SSE generator
-# ends), so a finished or aborted reply can never be paused afterwards.
-_CHAT_HANDLE: Optional[ChatHandle] = None
+# One handle per workspace, set for the duration of that workspace's streaming
+# reply (cleared when its SSE generator ends), so a finished or aborted reply can
+# never be paused afterwards. Two workspaces therefore hold two replies at the
+# same time — nothing here serialises them, and nothing may: spec §5.3 rule 16
+# is that the app does not queue turns across tabs.
+_CHAT_HANDLES: Dict[str, ChatHandle] = {}
 
 
-def _arm_chat_handle(cancel_event: threading.Event, pause_event: threading.Event) -> None:
-    """Publish the in-flight reply so /chat/pause can reach it."""
-    global _CHAT_HANDLE
-    _CHAT_HANDLE = ChatHandle(pause_event=pause_event, cancel_event=cancel_event)
+def _arm_chat_handle(
+    root: str, cancel_event: threading.Event, pause_event: threading.Event
+) -> None:
+    """Publish this workspace's in-flight reply so /chat/pause can reach it."""
+    _CHAT_HANDLES[root] = ChatHandle(pause_event=pause_event, cancel_event=cancel_event)
 
 
-def _clear_chat_handle(cancel_event: threading.Event) -> None:
-    """Retire the handle, but only if it is still this reply's (a newer
-    conversation must never be un-registered by an old stream's ``finally``)."""
-    global _CHAT_HANDLE
-    if _CHAT_HANDLE is not None and _CHAT_HANDLE.cancel_event is cancel_event:
-        _CHAT_HANDLE = None
+def _clear_chat_handle(root: str, cancel_event: threading.Event) -> None:
+    """Retire a workspace's handle, but only if it is still this reply's.
 
-
-def _refuse_if_chat_streaming(what: str) -> None:
-    """409 while a chat reply is in flight — the one place that rule is written.
-
-    A reply is the only other writer of the workspace, so a mutation landing in
-    the middle of one races the model's own tool edits. The check is the same
-    process-wide slot ``POST /api/chat/pause`` uses; the client-side rule in
-    ``useEditorMode`` is the *display* of this and the server is the enforcement.
-
-    (The hub-restart and path-location routes ask the wider question instead —
-    ``_CHAT_TASKS``, which also covers a reply whose handle is not armed yet —
-    because they tear down what that reply is using. A file write only needs to
-    know a reply is streaming.)
+    Per key, with the rule the process-wide slot already had: a newer
+    conversation on the same folder must never be un-registered by an old
+    stream's ``finally``, and a reply on another folder is not this one's to
+    clear either.
     """
-    if _CHAT_HANDLE is not None:
+    handle = _CHAT_HANDLES.get(root)
+    if handle is not None and handle.cancel_event is cancel_event:
+        _CHAT_HANDLES.pop(root, None)
+
+
+def _chat_reply_handle(root: str) -> Optional[ChatHandle]:
+    """The reply a request about ``root`` may pause, or ``None``."""
+    return _CHAT_HANDLES.get(root)
+
+
+def _chat_streaming_on(root: str) -> bool:
+    """Is a reply streaming **on this workspace**? (Not: anywhere.)
+
+    The wider question the hub-restart routes ask — it covers a reply whose
+    handle is not armed yet, because those routes tear down what that reply is
+    using. Keyed by the same canonical root the reply was armed under, so a
+    reply on A never holds B's hub still.
+    """
+    return root in _CHAT_TASKS.values()
+
+
+def workspace_is_busy(root: str) -> bool:
+    """The pool's **veto** (clws-05, spec §4.4): is this workspace mid-work?
+
+    Handed to :meth:`src.core.hubpool.HubPool.set_busy_predicate` at startup, so
+    the pool can refuse to let go of a workspace whose tools are in use without
+    importing this layer — the same injected-callable shape the core's ``emit``
+    argument is. The answer is the workspace's, never the process's: a reply on
+    A says nothing about B.
+
+    A **running batch** is covered by the same fact, because batch mode has no
+    server-side run: every task of a lot is a chat turn on the workspace the lot
+    was launched from, so a lot in progress keeps this answer true for the whole
+    time it is working. What it does not cover is the pause between two relaunches
+    of a task, which is a few seconds and costs a rebuild of a folder the tab is
+    still pointed at — and task 09, which makes "a batch is running" a
+    per-workspace fact the API holds, joins its answer here.
+
+    The wider question (``_chat_streaming_on``) is the one to ask, not the armed
+    handle: the pool would be tearing down the very hub that reply is about to
+    call.
+    """
+    return _chat_streaming_on(root)
+
+
+def _refuse_if_chat_streaming(what: str, root: str) -> None:
+    """409 while a chat reply is in flight **on ``root``** — the one place.
+
+    A reply is the only other writer of *its* workspace, so a mutation landing
+    in the middle of one races the model's own tool edits. The rule is
+    unchanged; its **subject** is (spec §5.3 rules 13–14): the folder the
+    request names, so a save in B is not refused by a reply streaming against A.
+    The check is the same per-workspace slot ``POST /api/chat/pause`` reads; the
+    client-side rule in ``useEditorMode`` is the *display* of this and the
+    server is the enforcement.
+
+    (The hub-restart routes ask the wider question instead —
+    :func:`_chat_streaming_on`, which also covers a reply whose handle is not
+    armed yet — because they tear down what that reply is using. A file write
+    only needs to know a reply is streaming.)
+    """
+    if _chat_reply_handle(root) is not None:
         raise HTTPException(
             status_code=409,
-            detail=f"Cannot {what} while a chat reply is streaming",
+            detail=f"Cannot {what} while a chat reply is streaming on {root}",
         )
 
 
@@ -984,11 +1038,17 @@ def _allowed_server_ids(enabled: Optional[List[str]]) -> List[str]:
 
 
 def _mcp_tool_kwargs(
-    request: Request,
+    manager: Any,
     enabled: Optional[List[str]] = None,
     agent: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Extra ``stream_chat`` kwargs when MCP connectors are active for chat.
+
+    ``manager`` is **this workspace's** connector manager — the one the turn's
+    :class:`~src.core.hubpool.HubSet` holds, resolved once at the turn's start —
+    or ``None`` when the workspace has none. It is handed in rather than looked up
+    here because the answer belongs to a folder, and the only thing that knows
+    which folder is the caller that resolved the request's workspace.
 
     ``enabled`` is the conversation-scoped connector allowlist from the chat
     body (the Chat tab's per-conversation MCP toggles); it is intersected
@@ -1002,7 +1062,6 @@ def _mcp_tool_kwargs(
     tool-loop cap comes from (D9) — the cap is a per-agent column now, so a save
     that lands mid-turn cannot move the number the loop is running with.
     """
-    manager = getattr(request.app.state, "mcp", None)
     if manager is None:
         return {}
     connector_ids = _active_connector_ids()
@@ -1034,15 +1093,18 @@ LSP_TOOL_TIMEOUT = 90.0
 
 
 def _lsp_tool_kwargs(
-    request: Request, enabled: Optional[List[str]] = None
+    manager: Any, enabled: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """Extra ``stream_chat`` kwargs when language servers are active for chat.
+
+    ``manager`` is this workspace's language-server manager, for the same reason
+    :func:`_mcp_tool_kwargs` takes its own: which folder a turn is about is the
+    caller's answer, not this one's.
 
     Same conversation-scoped filter as MCP: ``enabled`` is intersected with
     the Settings-activated ids, so a server disabled in Settings can never
     leak back into a running conversation. ``{}`` when nothing is active.
     """
-    manager = getattr(request.app.state, "lsp", None)
     if manager is None:
         return {}
     server_ids = _allowed_server_ids(enabled)
@@ -1066,13 +1128,19 @@ def _lsp_tool_kwargs(
 
 
 def _chat_tool_kwargs(
-    request: Request,
+    hub_set: Any,
     mcp_enabled: Optional[List[str]] = None,
     lsp_enabled: Optional[List[str]] = None,
     mode: Optional[agent_modes.AgentMode] = None,
     agent: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The single tool loop of ``stream_chat``, fed by both hubs.
+
+    ``hub_set`` is **the turn's workspace's** :class:`~src.core.hubpool.HubSet`
+    (or ``None``), resolved once at the turn's start like the agent's row and
+    the connection: a turn's tools belong to the folder it was asked about, and
+    they stay that folder's for the whole turn whatever another tab does to the
+    pool afterwards.
 
     Three levels gate the tools that reach that loop and they only ever
     **intersect**: **Settings** (``_active_connector_ids`` /
@@ -1106,8 +1174,10 @@ def _chat_tool_kwargs(
         mcp_enabled = []
     if mode is not None and not mode.lsptools:
         lsp_enabled = []
-    mcp_kwargs = _mcp_tool_kwargs(request, mcp_enabled, agent)
-    lsp_kwargs = _lsp_tool_kwargs(request, lsp_enabled)
+    mcp_kwargs = _mcp_tool_kwargs(
+        getattr(hub_set, "mcp", None), mcp_enabled, agent
+    )
+    lsp_kwargs = _lsp_tool_kwargs(getattr(hub_set, "lsp", None), lsp_enabled)
     if not mcp_kwargs and not lsp_kwargs:
         return {}
     if not lsp_kwargs:
@@ -1147,9 +1217,136 @@ def _chat_tool_kwargs(
     }
 
 
+# --- the workspace of a request (clws-01) -------------------------------------
+
+#: The one name the folder travels under, and the one place it is spelled. A
+#: query parameter **everywhere**, including the routes that take a body: the
+#: client then has one helper and the server one reader, and a folder whose name
+#: is not latin-1 survives (a header would not). No route spells it, and nothing
+#: else carries it — not a body field, not a header, not the address bar
+#: (spec D9).
+WORKSPACE_QUERY = "workspace"
+
+#: The routes whose answer is the **installation's** and which therefore must
+#: keep answering even while a tab's folder has gone away (spec §4.2). Listed
+#: here so the invariant is a fact of this module rather than of a habit, and
+#: asserted by ``tests/test_workspace_seam.py``.
+INSTALLATION_SCOPED_PATHS = (
+    "/api/config",
+    "/api/prompt-helpers",
+    "/api/servers",
+    "/api/models",
+    "/api/agents",
+)
+
+
+async def _workspace_scope(
+    # ``Request``/``WebSocket`` annotated bare and defaulted to ``None``, so the
+    # one dependency serves both kinds of connection: FastAPI recognises those
+    # two annotations and injects whichever the route is, and the default is what
+    # lets the same signature be valid for the other. ``Optional[...]`` here is
+    # **not** an option — it turns the parameter into a pydantic field and the
+    # router refuses to build ("Invalid args for response field"), which is what
+    # the terminal's WebSocket route would fail on at import.
+    request: Request = None,
+    websocket: WebSocket = None,
+    workspace: Optional[str] = Query(
+        default=None, alias=WORKSPACE_QUERY, include_in_schema=False
+    ),
+):
+    """Resolve the request's workspace and enter the seam's scope for it.
+
+    The router's **one** dependency, so no route can forget the field and no
+    route can spell it. It reads the raw text, resolves it through
+    :func:`src.core.workspace.resolve`, keeps all three answers on the
+    connection's ``state``, and enters the scope for the duration of the request
+    (cleared afterwards, whatever the route did — including a streaming reply,
+    whose worker thread inherited a *copy* of the context).
+
+    It **never refuses**. Two reasons, and both are invariants:
+
+    * a refusal costs 422 only where a folder is actually needed, which is
+      :func:`require_workspace`'s call — the installation-scoped routes above must
+      answer even when the folder a tab named has been deleted;
+    * an invalid value is still an answer the caller deserves verbatim, so it is
+      kept as a sentence rather than turned into a status here.
+
+    A request that names **no** folder is refused in the seam's own words, so the
+    sentence is the same one an empty or absent folder draws everywhere (spec
+    §5.2 rule 10). There is no default folder any more: the interim environment
+    fallback died with clws-10, and no surface answers about a folder it was not
+    given (rule 12).
+    """
+    connection = request if request is not None else websocket
+    # The **boot read**: a tab that remembers no folder has nothing to name, so
+    # ``GET /api/workspace`` with no field answers about the installation folder
+    # — the folder a new tab lands on (spec D4). It is the one route that may be
+    # asked without a field, because it is how the client learns which folder to
+    # name next; every other workspace-scoped route still refuses an absent one
+    # (spec §5.2 rule 12). The answer is the same ``Workspace`` every other
+    # request gets, and the scope is entered for it, so the reserved-folder and
+    # hub blocks are read about the installation and nothing else.
+    if workspace is None and connection.url.path == "/api/workspace":
+        workspace = workspace_seam.installation()
+    connection.state.workspace_raw = workspace
+    resolved, refusal = workspace_seam.resolve(workspace)
+    connection.state.workspace_refusal = refusal
+    if resolved is None:
+        # Named, and refused: **no scope is entered**. Entering one for another
+        # folder would be the substitution rule 12 forbids, and a
+        # workspace-scoped route cannot get past ``require_workspace`` to use it
+        # anyway. An installation-scoped route answers with no scope, which is
+        # exactly what it needs to keep working about a folder that has gone.
+        yield None
+        return
+    # ``workspace`` is what ``require_workspace`` hands a route: the folder this
+    # request is about. A folder that was named and refused never reaches here.
+    connection.state.workspace = resolved
+    with workspace_seam.scope(resolved.root):
+        yield resolved
+
+
+def workspace_refusal(connection: Union[Request, WebSocket]) -> Optional[str]:
+    """The sentence the connection's field drew, or ``None`` when it was accepted.
+
+    The one reader of the resolver's refusal, so the routes that answer with a
+    *status* (:func:`require_workspace`) and the one that answers with a socket
+    close (the terminal) cannot describe the same wrong folder differently.
+    """
+    return getattr(connection.state, "workspace_refusal", None)
+
+
+def require_workspace(connection: Union[Request, WebSocket]) -> workspace_seam.Workspace:
+    """The resolved workspace of this request, or the refusal as a 422.
+
+    Called by every **workspace-scoped** route and by no installation-scoped one.
+    The sentence is the seam's — built once, in
+    :func:`src.core.workspace.resolve`, so the same wrong folder is described the
+    same way wherever it is asked about (spec §5.2 rule 10) — and the status is
+    this layer's choice, which is why the seam answers sentences and never
+    statuses.
+
+    It never substitutes a folder for the one that was refused (rule 12): a
+    caller that gets an exception has no answer at all, which is the point.
+    """
+    refusal = workspace_refusal(connection)
+    if refusal:
+        raise HTTPException(
+            status_code=422,
+            detail=refusal,
+        )
+    return connection.state.workspace
+
+
 def build_router() -> APIRouter:
     """Create the API router."""
-    router = APIRouter(prefix="/api")
+    # The router's **one** dependency: every route under this prefix resolves the
+    # ``workspace`` field of its request and answers inside that scope, so no
+    # route can forget the field, spell its name, or enter the scope itself. It
+    # covers the WebSocket route too (the terminal's socket carries the field in
+    # its query string), and it never refuses — refusing is
+    # :func:`require_workspace`'s job, asked by the workspace-scoped routes only.
+    router = APIRouter(prefix="/api", dependencies=[Depends(_workspace_scope)])
 
     def _agent_row_for(mode: agent_modes.AgentMode) -> Dict[str, Any]:
         """The store's row for the agent a turn selected, as the seam wants it.
@@ -1591,15 +1788,89 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return _connection_write(servers, "deleted", body.id)
 
+    # -- the workspace's own tools, reached only through the pool ---------------
+
+    def _hub_pool(request: Request) -> hubpool.HubPool:
+        """The app's one pool — the only thing a hub route reaches for tools.
+
+        The two process-wide hub names on the app's state are gone: a hub is
+        bound to a folder at birth, so a route that wanted "the" hub was asking
+        a question that no longer has one answer (spec §5.4 rule 20).
+        """
+        pool = getattr(request.app.state, "hubpool", None)
+        if pool is None:
+            raise HTTPException(
+                status_code=503, detail="the workspace hub pool is not available"
+            )
+        return pool
+
+    def _acquire_hub_set(request: Request) -> Tuple[Optional[Any], bool]:
+        """This workspace's :class:`~src.core.hubpool.HubSet`, admitting it.
+
+        ``(hub_set, built)``: the flag is the **visible restart** (rule 23) —
+        true when this request is the one that brought the folder's tools up, so
+        the panel that renders the payload can say its tools are coming back
+        instead of leaving the tab to infer it from an empty list.
+
+        Called from a **synchronous** route, which FastAPI runs in a worker
+        thread: the admission is dispatched onto the pool's own loop and waited
+        for here, which is what :meth:`src.core.hubpool.HubPool.acquire_sync` is
+        for. An async route awaits :func:`_acquire_hub_set_async` instead —
+        blocking the loop the admission runs on would be a deadlock.
+        """
+        resolved = require_workspace(request)
+        pool = _hub_pool(request)
+        acquired = pool.acquire_sync(resolved.root)
+        if acquired.refusal is not None:
+            raise HTTPException(status_code=429, detail=acquired.refusal)
+        return acquired.hub_set, acquired.built
+
+    async def _acquire_hub_set_async(
+        request: Request,
+    ) -> Tuple[Optional[Any], bool]:
+        """:func:`_acquire_hub_set` for a route that already runs on the loop."""
+        resolved = require_workspace(request)
+        pool = _hub_pool(request)
+        acquired = await pool.acquire(resolved.root)
+        if acquired.refusal is not None:
+            raise HTTPException(status_code=429, detail=acquired.refusal)
+        return acquired.hub_set, acquired.built
+
+    def _read_hub_set(request: Request) -> Tuple[Optional[Any], bool]:
+        """The workspace's set **without admitting it** — a read asks, not builds.
+
+        ``GET /api/workspace`` is the app bar's read of a folder and the tab's
+        field asks it before adopting what was typed, so it must leave a folder
+        someone only meant to browse exactly as it was: no reserved folder, no
+        connector process, no language-server index. It therefore reads the
+        pool's already-live set (which may be none) and answers the ceiling's
+        sentence when the pool could not admit the folder at all — the refusal a
+        read is entitled to, without the write a read must not do.
+        """
+        resolved = require_workspace(request)
+        pool = _hub_pool(request)
+        refusal = pool.admission_refusal(resolved.root)
+        if refusal is not None:
+            raise HTTPException(status_code=429, detail=refusal)
+        return pool.live(resolved.root), False
+
     def _mcp_payload(
-        request: Request, extra_errors: Optional[List[str]] = None
+        manager: Any,
+        built: bool,
+        extra_errors: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Connector list (live ``.nojae/mcp-settings.json`` scan) merged with manager status.
 
         Connectors are active on their file ``enable`` flag — the single
         source of truth. Secret material (``headers``/``env``) is stripped.
+
+        The scan is a read of **the workspace in scope**, so the rows are this
+        folder's declaration and the statuses come from this folder's manager —
+        A's panel can never show B's connectors (spec §10's item 5). ``manager``
+        is ``None`` when the folder has no live set, which is the honest
+        "nothing is running here" answer rather than an empty list pretending to
+        be a declaration.
         """
-        manager = getattr(request.app.state, "mcp", None)
         statuses = {s["id"]: s for s in (manager.status() if manager else [])}
         connectors, errors = load_externals()
         if extra_errors:
@@ -1623,12 +1894,14 @@ def build_router() -> APIRouter:
             "installed": bool(manager and manager.installed),
             "connectors": payload_connectors,
             "externalsError": "\n".join(errors) if errors else None,
+            "built": built,
         }
 
     @router.get("/mcp")
     def get_mcp(request: Request) -> Dict[str, Any]:
-        """List the declared MCP connectors with live status."""
-        return _mcp_payload(request)
+        """List **this workspace's** declared MCP connectors with live status."""
+        hub_set, built = _acquire_hub_set(request)
+        return _mcp_payload(hub_set.mcp if hub_set else None, built)
 
     @router.post("/mcp")
     def post_mcp(body: McpIn, request: Request) -> Dict[str, Any]:
@@ -1642,7 +1915,15 @@ def build_router() -> APIRouter:
         settings file (D9): it is an agent column now, edited on that agent's tab
         in the Agent-modes dialog, so this section carries no ``maxIterations``
         in either direction.
+
+        The declaration it writes is **the request's workspace's** — the path is
+        built per call from the scope the router entered — and the connectors it
+        hot-starts or stops are that workspace's own. Like every other
+        ``enable``-flag write it is not gated on a streaming reply: the file is
+        the only activation source, and a turn resolves its tools once, at its
+        start, so a toggle cannot reach a reply already running.
         """
+        hub_set, built = _acquire_hub_set(request)
         requested = [item.strip() for item in body.enabled if item.strip()]
         connectors, _errors = load_externals()
         connector_ids = {connector["id"] for connector in connectors}
@@ -1658,7 +1939,7 @@ def build_router() -> APIRouter:
             if connector_ids
             else []
         )
-        manager = getattr(request.app.state, "mcp", None)
+        manager = hub_set.mcp if hub_set is not None else None
         if manager is not None and hasattr(manager, "start_connector"):
             for connector in connectors:
                 connector_id = connector["id"]
@@ -1667,37 +1948,11 @@ def build_router() -> APIRouter:
                     manager.start_connector(connector_id)
                 elif connector_id not in enabled and current in ("running", "starting"):
                     manager.stop_connector(connector_id)
-        return _mcp_payload(request, extra_errors=write_errors)
-
-    async def _restart_mcp_hub(request: Request) -> Dict[str, Any]:
-        """Tear the MCP hub down and rebuild it from a fresh file scan.
-
-        Shared by ``POST /mcp/restart`` and the working-location endpoint: a
-        changed ``${NOJAE_PATH_LOCATION}`` only takes effect once every
-        connector is relaunched with the new argv.
-        """
-        if _CHAT_TASKS:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot restart the MCP hub while a chat reply is streaming",
-            )
-        manager = getattr(request.app.state, "mcp", None)
-        if manager is None or not hasattr(manager, "restart"):
-            raise HTTPException(status_code=503, detail="MCP hub is not available")
-        if os.environ.get("NOJAE_DISABLE_MCP"):
-            # Same dev/test switch the app lifespan honours: endpoints stay
-            # usable but nothing is connected.
-            connectors = []
-        else:
-            connectors, _errors = load_externals()
-        await manager.restart(connectors)
-        # The payload re-scans the file, so it re-derives the same validation
-        # errors — they must not be passed as extra_errors or they appear twice.
-        return _mcp_payload(request)
+        return _mcp_payload(manager, built, extra_errors=write_errors)
 
     @router.post("/mcp/restart")
     async def post_mcp_restart(request: Request) -> Dict[str, Any]:
-        """Restart the MCP hub: re-read ``.nojae/mcp-settings.json`` and reconnect.
+        """Restart **this workspace's** MCP hub: reconnect from its own declaration.
 
         Everything is torn down (client sessions and, with them, every local
         stdio child process) and rebuilt from a fresh scan of the declaration
@@ -1706,14 +1961,38 @@ def build_router() -> APIRouter:
         Validation problems do not abort the restart: the connectors that did
         parse come back up and the errors are returned in ``externalsError``.
 
+        The rebuild is the workspace's own: :meth:`src.core.hubpool.HubSet.restart_mcp`
+        re-scans inside *that* folder's scope, so a restart in A leaves B's
+        connectors, sessions and statuses exactly as they were (spec §5.3 rule
+        13). The gate is the per-workspace one too — only a reply streaming on
+        **this** folder holds these connectors still.
+
         Awaited, so the response carries the real post-restart status of every
         connector (a failing one burns its whole retry window — the button
         stays busy while that happens).
         """
-        return await _restart_mcp_hub(request)
+        resolved = require_workspace(request)
+        if _chat_streaming_on(resolved.root):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot restart the MCP hub while a chat reply is streaming on {resolved.root}",
+            )
+        hub_set, _built = await _acquire_hub_set_async(request)
+        manager = hub_set.mcp if hub_set is not None else None
+        if manager is None or not hasattr(manager, "restart"):
+            raise HTTPException(status_code=503, detail="MCP hub is not available")
+        await hub_set.restart_mcp()
+        # The payload re-scans the file, so it re-derives the same validation
+        # errors — they must not be passed as extra_errors or they appear twice.
+        # ``built`` is true because this request really did rebuild the tools:
+        # the flag means "these tools were just rebuilt", which an admission and
+        # a restart both answer, and never "the list happens to be empty".
+        return _mcp_payload(manager, True)
 
     def _lsp_payload(
-        request: Request, extra_errors: Optional[List[str]] = None
+        manager: Any,
+        built: bool,
+        extra_errors: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Language-server list (file scan + validation errors) + live status.
 
@@ -1721,11 +2000,16 @@ def build_router() -> APIRouter:
         (D13), the same answer ``_mcp_payload`` gives for a connector. Secret
         material (``env``) is stripped.
 
+        The scan reads **the workspace in scope** and the statuses come from
+        that workspace's own manager, so A's panel lists A's servers and B's
+        lists B's. A declared-but-unconnected server is still published from its
+        declared tools (the manager answers that from its declaration), which is
+        unchanged by being asked per workspace.
+
         There is no ``maxIterations`` here: the cap was never the LSP section's
         knob to edit, and the route that could write it is gone. The MCP payload
         still carries it until the cap becomes a per-agent value.
         """
-        manager = getattr(request.app.state, "lsp", None)
         statuses = {s["id"]: s for s in (manager.status() if manager else [])}
         servers, errors = all_servers()
         if extra_errors:
@@ -1750,12 +2034,14 @@ def build_router() -> APIRouter:
             "installed": bool(manager and manager.installed),
             "servers": payload_servers,
             "serversError": "\n".join(errors) if errors else None,
+            "built": built,
         }
 
     @router.get("/lsp")
     def get_lsp(request: Request) -> Dict[str, Any]:
-        """List declared language servers with live status."""
-        return _lsp_payload(request)
+        """List **this workspace's** declared language servers with live status."""
+        hub_set, built = _acquire_hub_set(request)
+        return _lsp_payload(hub_set.lsp if hub_set else None, built)
 
     @router.post("/lsp")
     def post_lsp(body: LspIn, request: Request) -> Dict[str, Any]:
@@ -1769,7 +2055,12 @@ def build_router() -> APIRouter:
         The route no longer touches the workspace's model-connection file, and
         no longer carries the tool-loop cap: the cap is not an LSP setting, and
         it is on its way to being a per-agent value.
+
+        The declaration written is the **request's workspace's**, and the servers
+        hot-started or stopped are that workspace's own; like the MCP toggle
+        above, this write is never gated on a streaming reply.
         """
+        hub_set, built = _acquire_hub_set(request)
         requested = [item.strip() for item in body.enabled if item.strip()]
         servers, _errors = all_servers()
         known_ids = {server["id"] for server in servers}
@@ -1785,7 +2076,7 @@ def build_router() -> APIRouter:
             if known_ids
             else []
         )
-        manager = getattr(request.app.state, "lsp", None)
+        manager = hub_set.lsp if hub_set is not None else None
         if manager is not None and hasattr(manager, "start_server"):
             for server in servers:
                 server_id = server["id"]
@@ -1799,53 +2090,46 @@ def build_router() -> APIRouter:
                     manager.start_server(server_id)
                 elif server_id not in enabled and current in ("running", "starting"):
                     manager.stop_server(server_id)
-        return _lsp_payload(request, extra_errors=write_errors)
-
-    async def _restart_lsp_hub(request: Request) -> Dict[str, Any]:
-        """Tear the LSP hub down and rebuild it from a fresh file scan.
-
-        Shared by ``POST /lsp/restart`` and the working-location endpoint: a
-        changed ``${NOJAE_PATH_LOCATION}`` only takes effect once every
-        language server is respawned on the new ``workspaceRoot``.
-        """
-        if _CHAT_TASKS:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot restart the LSP hub while a chat reply is streaming",
-            )
-        manager = getattr(request.app.state, "lsp", None)
-        if manager is None or not hasattr(manager, "restart"):
-            raise HTTPException(status_code=503, detail="LSP hub is not available")
-        if os.environ.get("NOJAE_DISABLE_LSP"):
-            # Same dev/test switch the app lifespan honours: endpoints stay
-            # usable but nothing is spawned.
-            servers, active_ids = [], []
-        else:
-            servers, _errors = all_servers()
-            # Same single gate as the startup lifespan, kept in one place.
-            active_ids = _active_server_ids()
-        await manager.restart(servers, active_ids)
-        # The payload re-scans the file, so it re-derives the same validation
-        # errors — they must not be passed as extra_errors or they appear twice.
-        return _lsp_payload(request)
+        return _lsp_payload(manager, built, extra_errors=write_errors)
 
     @router.post("/lsp/restart")
     async def post_lsp_restart(request: Request) -> Dict[str, Any]:
-        """Restart the LSP hub: re-read ``.nojae/lsp-settings.json`` and respawn.
+        """Restart **this workspace's** LSP hub: respawn from its own declaration.
 
-        Every language server is shut down (``shutdown``/``exit``, then
-        SIGTERM/SIGKILL) and respawned from a fresh scan of the declaration
-        file, so a hand-edited entry — a new server, a changed ``command``,
-        another ``workspaceRoot`` — takes effect without restarting the web
-        app. The one activation gate (the entry's ``enable`` flag) is re-applied
-        exactly as at startup, so a declaration whose flags are all off stays
-        dormant. Invalid entries never spawn: the valid ones come back up and
-        the problems are reported in ``serversError``.
+        Every language server of the folder the request names is shut down
+        (``shutdown``/``exit``, then SIGTERM/SIGKILL) and respawned from a fresh
+        scan of **that folder's** declaration file, so a hand-edited entry — a
+        new server, a changed ``command``, another ``workspaceRoot`` — takes
+        effect without restarting the web app. The one activation gate (the
+        entry's ``enable`` flag) is re-applied exactly as at admission, so a
+        declaration whose flags are all off stays dormant. Invalid entries never
+        spawn: the valid ones come back up and the problems are reported in
+        ``serversError``.
+
+        The rebuild is the workspace's own
+        (:meth:`src.core.hubpool.HubSet.restart_lsp`), so a restart in A leaves
+        B's servers running and their statuses untouched (spec §5.3 rule 13),
+        and the gate is the per-workspace one: only a reply streaming on **this**
+        folder holds these servers still.
 
         Awaited, so the response carries real post-restart status (a cold
         language-server start is multi-second — the button stays busy).
         """
-        return await _restart_lsp_hub(request)
+        resolved = require_workspace(request)
+        if _chat_streaming_on(resolved.root):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot restart the LSP hub while a chat reply is streaming on {resolved.root}",
+            )
+        hub_set, _built = await _acquire_hub_set_async(request)
+        manager = hub_set.lsp if hub_set is not None else None
+        if manager is None or not hasattr(manager, "restart"):
+            raise HTTPException(status_code=503, detail="LSP hub is not available")
+        await hub_set.restart_lsp()
+        # The payload re-scans the file, so it re-derives the same validation
+        # errors — they must not be passed as extra_errors or they appear twice.
+        # ``built`` true, for the same reason as the MCP restart above.
+        return _lsp_payload(manager, True)
 
     @router.post("/lsp/query")
     def post_lsp_query(body: LspQueryIn, request: Request) -> Dict[str, Any]:
@@ -1870,8 +2154,12 @@ def build_router() -> APIRouter:
         therefore not refused while a chat reply streams. A file no server
         claims is a quiet answer (``server: null`` with a reason), never an
         error — the gesture falls through to whatever Monaco would have done.
+
+        The servers asked are **the tab's workspace's own**, so a pane on A
+        never gets an answer out of B's index (spec §5.4 rule 20).
         """
-        manager = getattr(request.app.state, "lsp", None)
+        hub_set, _built = _acquire_hub_set(request)
+        manager = hub_set.lsp if hub_set is not None else None
         if manager is None:
             # The hub is disabled in tests and in a hermetic e2e run: the pane
             # must degrade to the status quo, so this is the quiet envelope
@@ -1894,216 +2182,111 @@ def build_router() -> APIRouter:
             allowed_ids=_allowed_server_ids(body.lspEnabled),
         )
 
-    def _path_location_payload() -> Dict[str, Any]:
-        return {
-            "key": PATH_LOCATION_KEY,
-            "path": path_location(),
-            "default": default_path_location(),
-        }
-
-    def _policy_block() -> Dict[str, Any]:
+    def _policy_block(root: str) -> Dict[str, Any]:
         """What the workspace's policy file looks like, **read-only**.
 
-        pol-05 seeds a default ``.nojae/read-write-policy.json`` at the two
-        moments a folder becomes the working location (boot, and the switch
-        below), so a GET must not write one: the app bar reads the location far
-        more often than a workspace is switched, and a read that leaves a folder
-        in someone's project is the mistake the seeding rules forbid. ``state``
-        is ``existing`` / ``absent`` / ``failed`` here, and the app bar leaves
+        pol-05 seeds a default ``.nojae/read-write-policy.json`` when a folder
+        becomes a workspace (today: at boot; from task 05, when the pool admits
+        it), so this reader must not write one: the app bar reads a workspace far
+        more often than a folder is admitted, and a read that leaves a folder in
+        someone's project is the mistake the seeding rules forbid. ``state`` is
+        ``existing`` / ``absent`` / ``failed`` here, and the app bar leaves
         ``absent`` as the plain fact it is.
-        """
-        return policy_seed.policy_file_state(path_location())
 
-    def _mcp_settings_block() -> Dict[str, Any]:
+        ``root`` is the folder being reported on, spelled by the caller: the
+        workspace of the request.
+        """
+        return policy_seed.policy_file_state(root)
+
+    def _mcp_settings_block(root: str) -> Dict[str, Any]:
         """What the workspace's MCP declaration file looks like, **read-only**.
 
-        The third reserved-folder reader: the MCP seed runs at the two
-        moments a folder becomes the working location, so a GET reports the
-        file instead of leaving one behind. ``absent`` is a plain fact — a
-        workspace whose seed failed has no MCP connectors, and the Settings →
-        MCP panel says so.
+        The third reserved-folder reader: the MCP seed runs when a folder becomes
+        a workspace, so a GET reports the file instead of leaving one behind.
+        ``absent`` is a plain fact — a workspace whose seed failed has no MCP
+        connectors, and the Settings → MCP panel says so.
         """
-        return mcp_settings_file_state(path_location())
+        return mcp_settings_file_state(root)
 
-    def _lsp_settings_block() -> Dict[str, Any]:
+    def _lsp_settings_block(root: str) -> Dict[str, Any]:
         """What the workspace's LSP declaration file looks like, **read-only**.
 
         The declaration is hand-written — only its *template* is seeded (its
         entries are per-machine) — so this report is the panel's way to say
         "no language servers declared yet" and point at the template below.
         """
-        return lsp_settings_file_state(path_location())
+        return lsp_settings_file_state(root)
 
-    def _lsp_template_block() -> Dict[str, Any]:
+    def _lsp_template_block(root: str) -> Dict[str, Any]:
         """What the workspace's LSP template file looks like, **read-only**.
 
-        The fifth reserved-folder reader: the LSP template seed runs at the
-        two moments a folder becomes the working location, so a GET reports
-        the file instead of leaving one behind. ``absent`` is a plain fact —
-        the example is still committed, the workspace just lost the copy-me
-        shortcut.
+        The fifth reserved-folder reader: the LSP template seed runs when a
+        folder becomes a workspace, so a GET reports the file instead of leaving
+        one behind. ``absent`` is a plain fact — the example is still committed,
+        the workspace just lost the copy-me shortcut.
         """
-        return lsp_settings_template_state(path_location())
+        return lsp_settings_template_state(root)
 
-    @router.get("/path-location")
-    def get_path_location() -> Dict[str, Any]:
-        """Effective working location of the MCP/LSP hubs.
+    @router.get("/workspace")
+    def get_workspace(request: Request) -> Dict[str, Any]:
+        """Report **one workspace**: the folder, and the four reserved files in it.
 
-        The value ``${NOJAE_PATH_LOCATION}`` expands to in the
-        workspace's ``.nojae/mcp-settings.json`` and in the workspace's
-        ``.nojae/lsp-settings.json`` — read live from the environment,
-        so it reflects a change made through ``POST /path-location`` rather
-        than a stale startup snapshot.
+        The app bar's only read of a folder, and the one the tab's field asks
+        before adopting what it typed. It
+        answers about the folder the request names — which is the whole point of
+        the seam, and what makes two tabs on two folders each see their own
+        policy and their own declarations. It is a **read**: it validates and
+        reports, and seeds nothing (the same rule every reserved-folder reader
+        here holds — a folder someone only meant to browse is left as it was).
+
+        ``{"workspace", "default", "policy", "mcpSettings", "lspSettings",
+        "lspSettingsTemplate", "hubs"}``: ``workspace`` is the resolved root,
+        ``default`` the installation folder a new tab lands on (spec D4), the four
+        blocks the reserved folder's read-only state, and ``hubs`` the pool's
+        answer about this folder — the two hub payloads of **this workspace's**
+        own set plus :meth:`src.core.hubpool.HubPool.summary`, the live
+        workspaces and whether the ceiling has been reached.
+
+        The hub half is a **read of the pool, not an admission**: this route is
+        asked far more often than a folder is admitted (the app bar reads it, and
+        the tab's field asks it before adopting what was typed), and admission
+        seeds a reserved folder and starts processes. A folder whose tools are not
+        alive is therefore answered with an empty catalogue and
+        ``installed: false`` — which is a different answer from the ceiling's
+        sentence, and the two must not be merged (spec §4.4 rule 22). The panel
+        routes themselves do admit, which is where a returning tab's tools come
+        back visibly (rule 23).
+
+        A folder that cannot be a workspace answers 422 with the seam's sentence
+        and nothing else: no answer here is ever about a *different* folder
+        (spec §5.2 rule 12). A folder the pool cannot admit answers 429 with the
+        pool's sentence, from here as from the hub routes.
         """
-        return _path_location_payload() | {
-            "policy": _policy_block(),
-            "mcpSettings": _mcp_settings_block(),
-            "lspSettings": _lsp_settings_block(),
-            "lspSettingsTemplate": _lsp_template_block(),
+        resolved = require_workspace(request)
+        root = resolved.root
+        hub_set, built = _read_hub_set(request)
+        return {
+            "workspace": root,
+            "default": workspace_seam.installation(),
+            "policy": _policy_block(root),
+            "mcpSettings": _mcp_settings_block(root),
+            "lspSettings": _lsp_settings_block(root),
+            "lspSettingsTemplate": _lsp_template_block(root),
+            "hubs": {
+                "mcp": _mcp_payload(hub_set.mcp if hub_set else None, built),
+                "lsp": _lsp_payload(hub_set.lsp if hub_set else None, built),
+                "pool": _hub_pool(request).summary(),
+            },
         }
 
-    @router.post("/path-location")
-    async def post_path_location(
-        body: PathLocationIn, request: Request
-    ) -> Dict[str, Any]:
-        """Point both hubs at another directory and reload their tools.
-
-        Sets ``NOJAE_PATH_LOCATION`` in this process' environment, then
-        restarts the MCP and LSP hubs so both declaration files are re-read and
-        every connector/language server is relaunched against the new value —
-        the same effect as the refresh buttons, in one call.
-
-        The value is deliberately *not* persisted: it is process state, and the
-        next boot always re-seeds it to the install directory (see
-        ``config.setup_path_location``), so a machine move can never be broken
-        by a remembered path. Rejected with 422 when the directory is missing
-        or sits on the LSP workspace-root deny-list (a language server indexing
-        a secret tree would hand its contents to the model); in that case the
-        environment is left untouched and nothing is restarted.
-        """
-        # Every precondition of the two restarts is checked *before* the
-        # environment is touched: an env value the hubs never picked up is the
-        # worst possible outcome (the panel would disagree with the tools).
-        if _CHAT_TASKS:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot change the working location while a chat reply is streaming",
-            )
-        for attr, label in (("mcp", "MCP"), ("lsp", "LSP")):
-            hub = getattr(request.app.state, attr, None)
-            if hub is None or not hasattr(hub, "restart"):
-                raise HTTPException(
-                    status_code=503, detail=f"{label} hub is not available"
-                )
-        raw = (body.path or "").strip()
-        if not raw:
-            raise HTTPException(
-                status_code=422, detail="Working location must not be empty"
-            )
-        if not os.path.isabs(raw):
-            raise HTTPException(
-                status_code=422, detail="Working location must be an absolute path"
-            )
-        # Expanduser + realpath: a '~' or a symlinked checkout must land on the
-        # same canonical prefix the hubs compare against, and what the panel
-        # shows must be what the declaration files expand to.
-        expanded = os.path.realpath(os.path.expanduser(raw))
-        if not os.path.isdir(expanded):
-            raise HTTPException(
-                status_code=422, detail=f"Working location does not exist: {raw}"
-            )
-        # The same deny-list question ``editorfs.policy._check_workspace_root``
-        # asks for the tree, so both entry points answer with one rule
-        # (A-D2.2, win-06) — folded by the probe of the root being *set*, since
-        # that is the volume the denied entry would sit on here. The fold answer
-        # is asked *after* the existence check above and is best-effort: a root
-        # the probe cannot write to answers ``False``, which is the strict side.
-        fold = fscase.case_folded(expanded)
-        for denied in restricted_lsp_roots():
-            entry = os.path.realpath(denied)
-            if _is_within(entry, expanded, fold=fold):
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Working location is on the deny-list: {denied}",
-                )
-        previous = os.environ.get(PATH_LOCATION_KEY)
-        os.environ[PATH_LOCATION_KEY] = expanded
-        # The workspace's MCP declaration file is seeded here — *before* the
-        # two restarts — for one reason: the declaration now lives inside the
-        # new root's ``.nojae``, so the MCP restart re-scans the very file
-        # this seeds. Seeding it after the restart would rebuild the hub over
-        # an unseeded folder and leave the new workspace on **zero**
-        # connectors until the next restart. This breaks the "all seeds after
-        # the restarts" rule the three below still follow only because it is
-        # safe: ``ensure_mcp_settings_file`` answers a dict and raises
-        # nothing, so a seeding hiccup cannot be mistaken for a hub failure
-        # and cannot trip the rollback below.
-        mcp_settings_block = ensure_mcp_settings_file(expanded)
-        try:
-            mcp = await _restart_mcp_hub(request)
-            lsp = await _restart_lsp_hub(request)
-        except BaseException:
-            # Guards above mean a refusal can no longer happen here, so this
-            # only fires on an unexpected hub failure: put the environment back
-            # so the panel and the next file scan agree. (If the MCP restart
-            # already landed, its live sessions keep the new argv until the
-            # next restart — a restart button or a reboot re-aligns them.)
-            if previous is None:
-                os.environ.pop(PATH_LOCATION_KEY, None)
-            else:
-                os.environ[PATH_LOCATION_KEY] = previous
-            raise
-        # Seed the new root's default policy file here — the second of pol-05's
-        # two entry points (the other is boot, ``api/server.py``). It goes
-        # *after* the two hub restarts on purpose: a seeding hiccup must not be
-        # mistaken for a hub failure, because the except above would then roll
-        # the environment back for a reason that has nothing to do with the
-        # switch. And it goes before the response is built, so the Editor's
-        # tree re-roots onto a workspace whose rules already exist.
-        #
-        # A failure is a note in the payload, never an error: an unseeded
-        # workspace opens fine, it just has no level-B rules to filter it.
-        #
-        # The mode files are **not** seeded here any more, and that is the
-        # switch's whole rule since appdb-10: the agents live in the install's
-        # settings store, so a workspace switch invalidates nothing in them (D11)
-        # — the dropdown offers the same agents in every workspace, which is the
-        # point of the move.
-        policy_block = policy_seed.ensure_policy_file(expanded)
-        # And the workspace's case-folding answer (win-05): it is cached per root
-        # exactly as the policy file's rules are, so the same switch that makes
-        # the tree re-root must make the verdict forget which filesystem it
-        # probed — otherwise a workspace opened after a switch would be judged
-        # with the previous volume's case semantics.
-        fscase.invalidate_case_cache()
-        # The LSP template seed (the fourth of the reserved folder's files, and
-        # the fifth counting the LSP declaration itself, which is *not* seeded
-        # — its entries are per-machine, so the app only ever hands out the
-        # copy-me template). Same moment, same rule as the seeds above: after
-        # the restarts, so a seeding hiccup is a note in the payload and
-        # cannot be mistaken for a hub failure; and no scan reads the
-        # template, so nothing in the restart waits on this write.
-        lsp_template_block = ensure_lsp_settings_template(expanded)
-        return (
-            _path_location_payload()
-            | {
-                "mcp": mcp,
-                "lsp": lsp,
-                "policy": policy_block,
-                "mcpSettings": mcp_settings_block,
-                "lspSettings": lsp_settings_file_state(expanded),
-                "lspSettingsTemplate": lsp_template_block,
-            }
-        )
-
     @router.get("/fs/tree")
-    def get_fs_tree(path: str = "") -> Dict[str, Any]:
-        """One directory level of the active workspace, for the Editor tab.
+    def get_fs_tree(request: Request, path: str = "") -> Dict[str, Any]:
+        """One directory level of **this request's** workspace, for the Editor tab.
 
-        ``path`` is relative to ``NOJAE_PATH_LOCATION`` ("" is its root)
-        — the same working location both hubs point at, so the tree browses
-        exactly what the tools are working on. One level per call keeps the
-        first paint at one ``listdir`` however big the checkout is.
+        ``path`` is relative to the folder the request named ("" is its root) —
+        the same folder the tab's other requests name, so the tree browses
+        exactly what that tab's tools are working on. One level per call keeps
+        the first paint at one ``listdir`` however big the checkout is.
 
         All the rules live in ``core/editorfs`` (the three locks on the path,
         the entry cap, and one policy verdict per path — built in for the app's
@@ -2114,20 +2297,25 @@ def build_router() -> APIRouter:
         the same verdict, belongs to the browser alone, and no hub or tool may
         ever gain one.
         """
+        # Asked before anything touches disk: a folder that was named and refused
+        # answers 422 with the seam's sentence and is never browsed (spec §5.2
+        # rules 10–12). The root itself is not an argument — the scope this
+        # request entered is what ``core/editorfs`` resolves against.
+        require_workspace(request)
         try:
             return editorfs.list_dir(path)
         except editorfs.WorkspacePathError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.get("/fs/file")
-    def get_fs_file(path: str) -> Dict[str, Any]:
+    def get_fs_file(request: Request, path: str) -> Dict[str, Any]:
         """The whole text of one workspace-relative file, for the Editor tab.
 
         The same gate as the tree — ``editorfs`` resolves the path inside the
-        working location and asks the policy verdict — so a name the listing
-        pruned answers this read as absent (404), never as a refusal that would
-        confirm it exists. One verdict, every surface that touches disk. Past
-        ``editorfs.constants.MAX_EDITOR_BYTES``
+        folder this request named and asks the policy verdict — so a name the
+        listing pruned answers this read as absent (404), never as a refusal that
+        would confirm it exists. One verdict, every surface that touches disk.
+        Past ``editorfs.constants.MAX_EDITOR_BYTES``
         the answer is 413 naming the size; a binary file answers ``binary: true``
         with no ``text`` key rather than an error, so the pane can label it.
 
@@ -2137,6 +2325,7 @@ def build_router() -> APIRouter:
         It is also what the freshness probe (``/api/fs/stat``) compares for the
         open buffers. This route reads; the write routes are browser-only.
         """
+        require_workspace(request)
         try:
             return editorfs.read_file(path)
         except editorfs.WorkspacePathError as exc:
@@ -2144,12 +2333,13 @@ def build_router() -> APIRouter:
 
     @router.get("/fs/search")
     def get_fs_search(
+        request: Request,
         path: str = "",
         q: str = "",
         caseSensitive: bool = False,
         regex: bool = False,
     ) -> Dict[str, Any]:
-        """Every match of one query inside one scope of the active workspace.
+        """Every match of one query inside one scope of **this request's** workspace.
 
         ``path`` is the scope and uses the tree's convention — workspace-relative,
         with "" meaning the whole workspace — so the row a gesture was made on is
@@ -2165,13 +2355,14 @@ def build_router() -> APIRouter:
         refuses to open, the four caps and the single footer sentence the payload
         carries. This route only turns the core's two errors into their HTTP
         status: 400 for a pattern that is not a pattern (carrying ``re``'s own
-        message), 422 for a scope outside the working location or refused by a
+        message), 422 for a scope outside the workspace or refused by a
         lock, 404 for a scope that is absent or hidden.
 
         This route reads. It opens files and reports their lines, and changes
         nothing on disk — the write routes below the divider are the ones the
         guard suite isolates.
         """
+        require_workspace(request)
         try:
             return editorfs.search_workspace(
                 path, query=q, case_sensitive=caseSensitive, regex=regex
@@ -2182,12 +2373,13 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.get("/fs/files")
-    def get_fs_files() -> Dict[str, Any]:
+    def get_fs_files(request: Request) -> Dict[str, Any]:
         """Every candidate path of the quick-open finder (``GET /api/fs/files``).
 
-        No parameters: the scope is always the whole working location. The list
-        is fetched once per dialog open and filtered per keystroke in the
-        browser, so this is one bounded walk per open, not per keystroke.
+        No parameters of its own: the scope is always the whole workspace the
+        request named. The list is fetched once per dialog open and filtered per
+        keystroke in the browser, so this is one bounded walk per open, not per
+        keystroke.
 
         All the rules live in
         :func:`src.core.editorfs.quickopen.list_workspace_files`: the tree's
@@ -2201,12 +2393,13 @@ def build_router() -> APIRouter:
         This route reads. It changes nothing on disk — the write routes below
         the divider are the ones the guard suite isolates.
         """
+        require_workspace(request)
         return editorfs.list_workspace_files()
 
     # -- the guarded write surface (browser-only) ------------------------------
 
     @router.put("/fs/file")
-    def put_fs_file(body: FileSaveIn) -> Dict[str, Any]:
+    def put_fs_file(request: Request, body: FileSaveIn) -> Dict[str, Any]:
         """One whole editor buffer, back to disk (``PUT /api/fs/file``).
 
         The rules all live in :func:`src.core.editorfs.files.write_file` —
@@ -2220,14 +2413,21 @@ def build_router() -> APIRouter:
 
         Refused while a chat reply streams: that reply may be editing these
         very files through its tools, so a save landing in the middle of one
-        would race the model. The payload answers the new ``size``/``mtime``
-        so the caller re-baselines on the server's truth.
+        would race the model — and the refusal is about **this request's**
+        workspace (clws-04, spec §5.3 rules 13–14): a reply streaming against
+        another folder does not lock this one's files. The payload answers the
+        new ``size``/``mtime`` so the caller re-baselines on the server's truth.
 
         This is a **browser** surface. No MCP connector, LSP tool or chat code
         path may call it — the tools stay read-only by design, and the guard
         suite in ``tests/test_editorfs_write.py`` asserts exactly that.
         """
-        _refuse_if_chat_streaming("save")
+        # Asked before anything else: the folder is what the write resolves
+        # against, and it is what the streaming refusal is about. Nothing below
+        # re-reads it, so a save cannot answer about a folder other than the one
+        # that was named (spec §5.2 rule 12).
+        resolved = require_workspace(request)
+        _refuse_if_chat_streaming("save", resolved.root)
         try:
             return editorfs.write_file(
                 body.path, body.text, if_unmodified_since=body.ifUnmodifiedSince
@@ -2240,7 +2440,7 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.post("/fs/create")
-    def post_fs_create(body: FileCreateIn) -> Dict[str, Any]:
+    def post_fs_create(request: Request, body: FileCreateIn) -> Dict[str, Any]:
         """One new file or folder inside the working location.
 
         The rules live in :func:`src.core.editorfs.mutate.create_path` — the
@@ -2259,7 +2459,8 @@ def build_router() -> APIRouter:
         Browser-only, like ``PUT /api/fs/file``: no connector or LSP tool may
         reach a route under ``/fs`` that mutates disk.
         """
-        _refuse_if_chat_streaming("create a file or folder")
+        resolved = require_workspace(request)
+        _refuse_if_chat_streaming("create a file or folder", resolved.root)
         try:
             return editorfs.create_path(body.path, is_dir=body.dir)
         except editorfs.WorkspacePathExists as exc:
@@ -2268,7 +2469,7 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.delete("/fs/file")
-    def delete_fs_file(path: str) -> Dict[str, Any]:
+    def delete_fs_file(request: Request, path: str) -> Dict[str, Any]:
         """One file or one whole folder, moved to the trash (``DELETE /api/fs/file``).
 
         The rules live in :func:`src.core.editorfs.mutate.trash_path` — the
@@ -2279,8 +2480,10 @@ def build_router() -> APIRouter:
         subtree check**: one hidden or read-only descendant refuses the whole
         delete, naming that descendant, and nothing at all moves. What is
         deleted is never ``unlink``ed — it lands in
-        ``.nojae/trash/<batch>/<the relative path>`` of the **current** working
-        location (so a switch moves the trash with it) and is swept after
+        ``.nojae/trash/<batch>/<the relative path>`` of the **request's**
+        workspace (so two workspaces' deletes are two folders, and a tab's
+        delete never files its bytes inside another's reserved folder) and is
+        swept after
         ``TRASH_RETENTION_DAYS``, which is why the payload names the batch.
         That folder is reserved, so the pane cannot list or open it: the batch is
         restored with ``mv`` in a terminal.
@@ -2292,14 +2495,15 @@ def build_router() -> APIRouter:
         Browser-only, like the other write routes: no connector or LSP tool may
         reach a route under ``/fs`` that mutates disk.
         """
-        _refuse_if_chat_streaming("delete a file or folder")
+        resolved = require_workspace(request)
+        _refuse_if_chat_streaming("delete a file or folder", resolved.root)
         try:
             return editorfs.trash_path(path)
         except editorfs.WorkspacePathError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.post("/fs/rename")
-    def post_fs_rename(body: FileRenameIn) -> Dict[str, Any]:
+    def post_fs_rename(request: Request, body: FileRenameIn) -> Dict[str, Any]:
         """One path to another path — a rename, which is also a move.
 
         The rules live in :func:`src.core.editorfs.mutate.rename_path`: **both
@@ -2320,7 +2524,8 @@ def build_router() -> APIRouter:
         Browser-only, like the other write routes: no connector or LSP tool may
         reach a route under ``/fs`` that mutates disk.
         """
-        _refuse_if_chat_streaming("rename a file or folder")
+        resolved = require_workspace(request)
+        _refuse_if_chat_streaming("rename a file or folder", resolved.root)
         try:
             return editorfs.rename_path(body.frm, body.to)
         except editorfs.WorkspacePathExists as exc:
@@ -2329,7 +2534,7 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.post("/fs/move-batch")
-    def post_fs_move_batch(body: FileMoveBatchIn) -> Dict[str, Any]:
+    def post_fs_move_batch(request: Request, body: FileMoveBatchIn) -> Dict[str, Any]:
         """Several files into one existing folder — one request, or nothing moves.
 
         The rules live in :func:`src.core.editorfs.mutate.move_paths_batch`,
@@ -2356,7 +2561,8 @@ def build_router() -> APIRouter:
         Browser-only, like the other write routes: no connector or LSP tool may
         reach a route under ``/fs`` that mutates disk.
         """
-        _refuse_if_chat_streaming("move files")
+        resolved = require_workspace(request)
+        _refuse_if_chat_streaming("move files", resolved.root)
         try:
             return editorfs.move_paths_batch(body.paths, body.to_parent)
         except editorfs.WorkspacePathExists as exc:
@@ -2365,38 +2571,42 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.get("/fs/stat")
-    def get_fs_stat(path: List[str] = Query(default_factory=list)) -> Dict[str, Any]:
+    def get_fs_stat(
+        request: Request, path: List[str] = Query(default_factory=list)
+    ) -> Dict[str, Any]:
         """``mtime``/``size``/``exists`` for a handful of exact paths.
 
         The freshness probe: the client names the files it has open, so nothing
         has to poll a tree or run a file watcher. Every path goes through the
-        same gate as the tree.
+        same gate as the tree, measured from the folder this request named.
         """
+        require_workspace(request)
         try:
             return {"paths": editorfs.stat_paths(path)}
         except editorfs.WorkspacePathError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.get("/fs/status")
-    def get_fs_status() -> Dict[str, Any]:
-        """Which files of the working location git considers unstaged.
+    def get_fs_status(request: Request) -> Dict[str, Any]:
+        """Which files of **this request's** workspace git considers unstaged.
 
         One call for the whole tree (not one per row), so the navigator can mark
         the modified and untracked files of every branch it has on screen. The
-        answer is workspace-relative, and a working location that is not a git
+        answer is workspace-relative, and a workspace that is not a git
         repository answers ``repo: false`` with an empty list — the silent,
         non-error case the UI is expected to ignore.
 
         Read-only like the rest of ``/api/fs``: the query is ``git status``, and
         ``GIT_OPTIONAL_LOCKS=0`` keeps even it from touching the index on disk.
         """
+        require_workspace(request)
         try:
             return editorfs.git_status()
         except editorfs.WorkspacePathError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.get("/fs/diff")
-    def get_fs_diff(path: str) -> Dict[str, Any]:
+    def get_fs_diff(request: Request, path: str) -> Dict[str, Any]:
         """The two sides of one file: ``original`` as of ``HEAD``, ``modified``
         as it sits on disk.
 
@@ -2407,6 +2617,7 @@ def build_router() -> APIRouter:
         no committed side (added, untracked) gets an empty ``original``; the UI
         does not offer the item for one.
         """
+        require_workspace(request)
         try:
             return editorfs.file_diff(path)
         except editorfs.WorkspacePathError as exc:
@@ -2419,7 +2630,17 @@ def build_router() -> APIRouter:
         """The live terminal sessions (pid, cwd, started, bytes) — for the
         settings panel. Mirrors ``GET /api/mcp``: an orphan must be nameable, so
         whatever the WebSocket registry holds is reported here. Read-only; the
-        shells themselves are driven by the WS, never by this route."""
+        shells themselves are driven by the WS, never by this route.
+
+        One registry, every workspace: the sessions are the **app's**, not a
+        folder's (spec §3.1, "the registry is shared"), so this lists them all
+        and each row names the folder that session was **born in** — two live
+        shells in two tabs report two ``cwd``s, and neither moves when a tab
+        re-points.
+        """
+        # A workspace-scoped route, like every other one (the mechanism's list):
+        # a refused folder is the seam's sentence, never a silent substitution.
+        require_workspace(request)
         hub = getattr(request.app.state, "terminal", None)
         return {"sessions": hub.list_sessions() if hub is not None else []}
 
@@ -2429,16 +2650,25 @@ def build_router() -> APIRouter:
 
         Guards, in order, each refusing *before* any process is spawned:
         the Origin check (the app has no CORS/CSRF layer, so this is the one
-        cheap defence against a random page reaching a shell), the driver
-        check (a session needs an available pseudo-terminal driver — the
-        seam's capability answer in ``termhub.drivers``, not a platform
-        name), and the concurrent-session cap. A real shell can change
-        anything the app's user can — which is why it is *never* an MCP or
-        LSP tool, only this route,
-        used by the SPA. The tools stay read-only; a shell is a human surface.
+        cheap defence against a random page reaching a shell), **the
+        workspace** — the folder the socket's own query string names, resolved
+        by the router-level dependency through :mod:`src.core.workspace` — the
+        driver check (a session needs an available pseudo-terminal driver — the
+        seam's capability answer in ``termhub.drivers``, not a platform name),
+        and the concurrent-session cap. A real shell can change anything the
+        app's user can — which is why it is *never* an MCP or LSP tool, only
+        this route, used by the SPA. The tools stay read-only; a shell is a
+        human surface.
 
-        ``cwd`` is always ``path_location()``; the server takes no path from the
-        client. Frames are JSON text (``input``/``resize``/``kill`` in,
+        A socket has no per-request body, so its folder arrives **when the
+        socket opens**, as the same query parameter every workspace-scoped
+        request carries (spec §8). ``cwd`` is therefore the folder the socket
+        named — the tab's own — and a live shell keeps the folder it was born
+        in whatever the tab later points at: this route never re-roots, kills or
+        relaunches an open session, and a **new** shell (this pane's reconnect)
+        starts in the tab's current folder. The frame stream still carries no
+        path: ``cd`` inside the shell is the user's own business. Frames are
+        JSON text (``input``/``resize``/``kill`` in,
         ``open``/``output``/``exit``/``error`` out); the session owns the
         framing and teardown, this route only adapts the socket to it.
         """
@@ -2452,6 +2682,23 @@ def build_router() -> APIRouter:
         if not allowed:
             await websocket.close(
                 termhub.CLOSE_CODE_POLICY, f"Origin refused: {reason}"
+            )
+            return
+
+        # The folder this shell will be born in. A refused one is answered with
+        # the seam's sentence — the same words the 422 routes use — in an
+        # ``error`` frame (the pane's own error line) and as the policy close
+        # reason. Nothing is reserved and nothing spawns: the refusal comes
+        # before ``hub.create``, so the registry and the cap are untouched.
+        refusal = workspace_refusal(websocket)
+        if refusal:
+            await websocket.accept()
+            await websocket.send_json({"type": "error", "message": refusal})
+            # A close reason is capped at 123 bytes by the protocol, so the
+            # sentence is bounded here (`termhub.close_reason`) rather than
+            # letting the close frame fail and the pane see a bare 1006.
+            await websocket.close(
+                termhub.CLOSE_CODE_POLICY, termhub.close_reason(refusal)
             )
             return
 
@@ -2517,8 +2764,14 @@ def build_router() -> APIRouter:
 
     @router.get("/lsp/log")
     def get_lsp_log(request: Request, server: str = "") -> Dict[str, Any]:
-        """Tail of one language server's log file (for the settings panel)."""
-        manager = getattr(request.app.state, "lsp", None)
+        """Tail of one language server's log file (for the settings panel).
+
+        The log is the **request's workspace's** server's: two workspaces can
+        declare the same id, and the panel that shows one must not tail the
+        other's file.
+        """
+        hub_set, _built = _acquire_hub_set(request)
+        manager = hub_set.lsp if hub_set is not None else None
         if manager is None or not server:
             raise HTTPException(status_code=404, detail="No LSP log available")
         log = manager.log_tail(server) if hasattr(manager, "log_tail") else ""
@@ -2551,8 +2804,10 @@ def build_router() -> APIRouter:
         return {"models": _model_ids(payload)}
 
     @router.get("/batch/tasks")
-    def get_batch_tasks(prefix: str = "", dir: str = "") -> Dict[str, Any]:
-        """List the numbered task lot of ``prefix`` in the workspace's ``dir``.
+    def get_batch_tasks(
+        request: Request, prefix: str = "", dir: str = ""
+    ) -> Dict[str, Any]:
+        """List the numbered task lot of ``prefix`` in **this request's** ``dir``.
 
         The whole backend surface batch mode has: names, sizes, the first
         heading and the big-picture body — never a task body (the model opens
@@ -2560,15 +2815,24 @@ def build_router() -> APIRouter:
         route here). All the rules (prefix shape, the three folder locks,
         numbering, caps) live in ``core/batch.py``; this route only turns a
         :class:`core.batch.BatchListingError` into its HTTP status.
+
+        **The lot is the folder the request names** (clws-09): ``dir`` stays
+        relative, exactly as it is, because the folder travels in the field and
+        never in the path — so the three locks, the numbering and the caps are
+        all measured against the request's own folder (spec §5.7 rule 32). The
+        field is asked for *first*, so a folder that was named and refused is a
+        422 carrying the seam's sentence rather than a listing of the interim
+        default (spec §5.2 rule 12).
         """
+        require_workspace(request)
         try:
             return batch_core.task_lot(prefix, dir)
         except batch_core.BatchListingError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     @router.get("/batch/prefixes")
-    def get_batch_prefixes(dir: str = "") -> Dict[str, Any]:
-        """Every task prefix available in the workspace's ``dir``.
+    def get_batch_prefixes(request: Request, dir: str = "") -> Dict[str, Any]:
+        """Every task prefix available in **this request's** workspace's ``dir``.
 
         The batch dialog's dropdown: it lists the lots the folder actually
         holds, so a prefix is chosen rather than typed. One ``scandir`` of the
@@ -2576,7 +2840,11 @@ def build_router() -> APIRouter:
         and the same "is a lot file" rule -- so a prefix is offered exactly when
         listing it would return a non-empty lot. No file content is read here
         either (B13): names only.
+
+        Same field, same refusal: two tabs on two folders are offered two
+        different dropdowns (spec §5.7 rule 32).
         """
+        require_workspace(request)
         try:
             return batch_core.task_prefixes(dir)
         except batch_core.BatchListingError as exc:
@@ -2851,7 +3119,22 @@ def build_router() -> APIRouter:
         While the reply streams, its events are also *pausable*: the handle
         registered here lets ``POST /api/chat/pause`` arm ``pause_event``, which
         ``core.chat.stream_chat`` checks at its next message boundary.
+
+        **The turn is workspace-scoped** (clws-02): the folder the request names
+        is the one whose ``AGENTS.md`` is injected and whose tools are offered,
+        so a folder that was named and refused is a 422 here rather than an
+        answer about somebody else's project (spec §5.2 rule 12).
+
+        **The reply occupies its workspace's slot, not the process's** (clws-04):
+        the pause handle and the in-flight bookkeeping are keyed by the folder
+        this request named, so a turn on A neither blocks a write on B nor is
+        paused by B's tab. Two workspaces therefore stream at the same time, and
+        nothing here queues them (spec §5.3 rule 16).
         """
+        # Asked first: a turn must not arm the pause handle for a workspace that
+        # was refused, and the project-instructions block read below is the
+        # scope this request entered.
+        resolved = require_workspace(request)
         # The active agent mode contributes exactly two things to the system
         # message: its persona replaces the model's own ``sys_prompt`` (D8),
         # and its generated blocks append after AGENTS.md. It is resolved
@@ -2895,13 +3178,20 @@ def build_router() -> APIRouter:
         queue: asyncio.Queue = asyncio.Queue()
         cancel_event = threading.Event()
         pause_event = threading.Event()
-        _arm_chat_handle(cancel_event, pause_event)
+        # **The turn's tools are resolved once, at its start**, beside its agent
+        # and its connection (D7): the workspace's own set, admitted by this
+        # request because a turn is the clearest possible sign that a tab is
+        # working on that folder. A folder the pool cannot serve is refused here
+        # — before the pause handle is armed — rather than running the turn with
+        # nobody's tools.
+        hub_set, _built = await _acquire_hub_set_async(request)
+        _arm_chat_handle(resolved.root, cancel_event, pause_event)
         # The same mode decides the hub gate (D3/D4): a mode whose flag is false
         # contributes no tool schemas to the request at all, so the persona and
         # the affordance can never disagree. Order of the three levels does not
         # matter — they intersect.
         tool_kwargs = _chat_tool_kwargs(
-            request, body.mcpEnabled, body.lspEnabled, mode=mode, agent=agent
+            hub_set, body.mcpEnabled, body.lspEnabled, mode=mode, agent=agent
         )
 
         def emit(event: Any) -> None:
@@ -2953,8 +3243,11 @@ def build_router() -> APIRouter:
                 emit(None)  # sentinel: worker finished
 
         task = asyncio.create_task(pump())
-        _CHAT_TASKS.add(task)
-        task.add_done_callback(_CHAT_TASKS.discard)
+        # Keyed with the workspace, so the question the hub restarts ask is
+        # "is a reply streaming *here*". The dict is also what keeps the task
+        # alive: the event loop holds only weak references to bare tasks.
+        _CHAT_TASKS[task] = resolved.root
+        task.add_done_callback(lambda _done: _CHAT_TASKS.pop(task, None))
 
         async def event_stream() -> AsyncIterator[str]:
             seq = 0
@@ -2976,7 +3269,7 @@ def build_router() -> APIRouter:
                 # Client gone (or terminal event): stop the worker thread,
                 # which closes the upstream LLM stream.
                 cancel_event.set()
-                _clear_chat_handle(cancel_event)
+                _clear_chat_handle(resolved.root, cancel_event)
 
         return StreamingResponse(
             event_stream(),
@@ -2989,17 +3282,32 @@ def build_router() -> APIRouter:
         )
 
     @router.post("/chat/pause", status_code=200)
-    async def post_chat_pause() -> Dict[str, Any]:
+    async def post_chat_pause(request: Request) -> Dict[str, Any]:
         """Ask the one in-flight chat reply to stop at its next boundary.
 
         The worker closes the upstream stream, reports its exact usage and
         terminates the reply with ``pause_ack``, so the client keeps the
         partial turn in its history. Idempotent — a second call while the
         first is pending says so.
+
+        The client sends this tab's workspace with it (clws-02), so the field is
+        validated here like any other workspace-scoped request. Which reply that
+        folder *selects* is the per-workspace slot this task keys (clws-04): the
+        handle read here is the one armed by a ``POST /api/chat`` naming the same
+        folder, so a reply streaming on another workspace is not this request's
+        to stop. Task 10 is where "Pause reaches this tab's reply only" becomes
+        the tested contract.
         """
-        handle = _CHAT_HANDLE
+        resolved = require_workspace(request)
+        handle = _chat_reply_handle(resolved.root)
         if handle is None:
-            raise HTTPException(status_code=409, detail="No chat reply is streaming")
+            # A fact about **this** folder, named as such: another tab's reply
+            # makes "no chat reply is streaming" false for the process but never
+            # for the workspace this request asked about (spec §5.3 rule 15).
+            raise HTTPException(
+                status_code=409,
+                detail=f"No chat reply is streaming on {resolved.root}",
+            )
         if handle.pause_event.is_set():
             return {"paused": "pending"}
         handle.pause_event.set()

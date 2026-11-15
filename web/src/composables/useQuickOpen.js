@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 
 import { registerReRootHandler, useWorkspaceTree } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // Quick Open: the state behind the Editor tab's fuzzy file finder.
@@ -80,7 +81,7 @@ export function useQuickOpen() {
     let res
     let body = null
     try {
-      res = await fetch('/api/fs/files')
+      res = await fetch(withWorkspace('/api/fs/files'))
       body = await res.json().catch(() => null)
     } catch (exc) {
       if (askedAt !== generation) return

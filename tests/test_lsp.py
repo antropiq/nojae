@@ -47,6 +47,11 @@ from src.core.mcphub.validation import expand_env_list, expand_env_map
 
 from tests.conftest import skip_unless, proc_fs_probe
 
+#: The pool is the only place a hub lives now (clws-06 deleted the
+#: ``app.state.lsp`` read-through), so a hub test hands its double to the
+#: workspace's own set through these two.
+from tests.conftest import NO_HUB, WorkspaceClient, set_workspace_hubs, scoped
+
 FAKE_SERVER = str(Path(__file__).parent / "fake_langserver.py")
 # The loader requires an existing workspaceRoot; the repo itself always does.
 REPO_ROOT = str(Path(FAKE_SERVER).resolve().parents[2])
@@ -535,7 +540,6 @@ class TestLoadLspServers:
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(workspace))
         # The list names a tree, the workspace sits inside it. The variable is
         # the realpath, because the gate compares realpaths on both sides.
         monkeypatch.setenv("LSP_TEST_DENIED_TREE", os.path.realpath(tmp_path))
@@ -544,8 +548,9 @@ class TestLoadLspServers:
         monkeypatch.setattr(lsp_constants, "LSP_RESTRICTED_PATHS", deny)
 
         assert restricted_lsp_roots() == [os.path.realpath(tmp_path)]
-        with pytest.raises(WorkspacePathError) as caught:
-            _check_workspace_root()
+        with scoped(workspace):
+            with pytest.raises(WorkspacePathError) as caught:
+                _check_workspace_root()
         assert caught.value.status_code == 422
         assert "deny-list" in caught.value.detail
 
@@ -1955,9 +1960,9 @@ class TestLocalReachRefusal:
         """
         from mcp_connectors import path_policy
 
-        from src.config import path_location
+        from src.core import workspace
 
-        own_form = path_policy.root_form(str(path_location()))
+        own_form = path_policy.root_form(workspace.current_root())
         other_form_list = (
             "/etc/credential-store" if own_form == "drive" else "C:/Users/other/.ssh"
         )
@@ -2150,9 +2155,13 @@ class TestLocalReachRefusal:
         )
         app = create_app()
         with TestClient(app) as test_client:
-            body = test_client.get("/api/lsp").json()
+            client = WorkspaceClient(test_client, app.state.hubpool.boot_root)
+            body = client.get("/api/lsp").json()
             assert lsp_constants.LOCAL_REACH_REFUSAL in body["serversError"]
-            entry = {item["id"]: item for item in app.state.lsp.status()}["pyright"]
+            from tests.conftest import workspace_hubs
+
+            manager = workspace_hubs(app).lsp
+            entry = {item["id"]: item for item in manager.status()}["pyright"]
             assert entry["status"] == "error"
             assert entry["error"] == lsp_constants.LOCAL_REACH_REFUSAL
         assert not marker.exists(), "the refused language server was spawned anyway"
@@ -2458,6 +2467,9 @@ class FakeLspManager:
     async def restart(self, servers, enabled_ids=None) -> None:
         self.restarts.append((servers, enabled_ids))
 
+    async def stop_all(self) -> None:
+        """No processes behind this double; shutdown must still find the hook."""
+
     def status(self):
         return self._status
 
@@ -2537,9 +2549,11 @@ def lsp_client(monkeypatch, tmp_path):
             None,
         ),
     )
+    root = tmp_path / "lsp-workspace"
+    root.mkdir()
     app = create_app()
     with TestClient(app) as test_client:
-        yield test_client, app
+        yield WorkspaceClient(test_client, root), app
 
 
 class TestLspEndpoints:
@@ -2674,7 +2688,7 @@ class TestLspEndpoints:
             [{"id": "pyright", "status": "running", "error": None},
              {"id": "vue", "status": "stopped", "error": None}]
         )
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         # vue asked for: start it; pyright stays (already running).
         client.post("/api/lsp", json={"enabled": ["pyright", "vue"]})
         assert hub.started == ["vue"]
@@ -2685,9 +2699,9 @@ class TestLspEndpoints:
 
     def test_merges_manager_status_into_the_payload(self, lsp_client):
         client, app = lsp_client
-        app.state.lsp = FakeLspManager(
+        set_workspace_hubs(app, root=client.root, lsp=FakeLspManager(
             [{"id": "pyright", "status": "error", "error": "boom", "toolCount": 3}]
-        )
+        ))
         by_id = {s["id"]: s for s in client.get("/api/lsp").json()["servers"]}
         assert by_id["pyright"]["status"] == "error"
         assert by_id["pyright"]["error"] == "boom"
@@ -2702,7 +2716,7 @@ class TestLspEndpoints:
         # autouse switch would otherwise blank the scan (tested separately).
         monkeypatch.delenv("NOJAE_DISABLE_LSP", raising=False)
         hub = FakeLspManager()
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
 
         response = client.post("/api/lsp/restart")
 
@@ -2740,7 +2754,7 @@ class TestLspEndpoints:
             encoding="utf-8",
         )
         hub = FakeLspManager()
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         client.post("/api/lsp/restart")
         servers, enabled_ids = hub.restarts[0]
         assert [server["id"] for server in servers] == ["pyright", "vue"]
@@ -2753,7 +2767,7 @@ class TestLspEndpoints:
         # thing that can be holding the hub empty here.
         client, app = lsp_client
         hub = FakeLspManager()
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         client.post("/api/lsp/restart")
         servers, enabled_ids = hub.restarts[0]
         assert servers == []
@@ -2761,12 +2775,45 @@ class TestLspEndpoints:
 
     def test_restart_without_a_hub_returns_503(self, lsp_client):
         client, app = lsp_client
-        app.state.lsp = None
+        set_workspace_hubs(app, root=client.root, lsp=NO_HUB)
         assert client.post("/api/lsp/restart").status_code == 503
+
+    def test_restart_is_refused_only_by_a_reply_on_its_own_workspace(
+        self, lsp_client, tmp_path
+    ):
+        """The gate is per workspace (clws-04, spec §5.4 rule 20).
+
+        A reply streaming on the folder the restart names holds it (that reply
+        is using these servers); a reply on **another** folder must not, so the
+        second half is the one that used to answer 409.
+        """
+        from src.api import routes
+
+        client, app = lsp_client
+        hub = FakeLspManager()
+        set_workspace_hubs(app, root=client.root, lsp=hub)
+        busy = tmp_path / "busy-workspace"
+        busy.mkdir()
+        idle = tmp_path / "idle-workspace"
+        idle.mkdir()
+        guard = object()
+        routes._CHAT_TASKS[guard] = str(busy)
+        try:
+            response = client.post(
+                "/api/lsp/restart", params={"workspace": str(busy)}
+            )
+            assert response.status_code == 409
+            assert hub.restarts == []
+            # The same reply, a different folder: nothing to hold.
+            assert client.post(
+                "/api/lsp/restart", params={"workspace": str(idle)}
+            ).status_code == 200
+        finally:
+            routes._CHAT_TASKS.pop(guard, None)
 
     def test_log_endpoint_returns_the_tail(self, lsp_client):
         client, app = lsp_client
-        app.state.lsp = FakeLspManager()
+        set_workspace_hubs(app, root=client.root, lsp=FakeLspManager())
         body = client.get("/api/lsp/log", params={"server": "pyright"}).json()
         assert body == {"server": "pyright", "log": "log tail of pyright"}
         assert client.get("/api/lsp/log").status_code == 404
@@ -2847,14 +2894,15 @@ class TestChatLspWiring:
             def call_tool_sync(self, sid, name, args, timeout=30.0):
                 return f"{sid}:{name}"
 
-        app.state.lsp = Hub()
+        hub = Hub()
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         captured = self._capture_stream(monkeypatch, ("lsp_pyright_hover",))
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
                                "agentMode": "code"}
         )
         assert response.status_code == 200
-        assert app.state.lsp.ids == ["pyright"]
+        assert hub.ids == ["pyright"]
         assert [d["function"]["name"] for d in captured["tools"]] == ["lsp_pyright_hover"]
         assert captured["tool_servers"] == {"lsp_pyright_hover": "pyright"}
         # The cap value still travels (so the gauge's max matches the setting),
@@ -2892,8 +2940,7 @@ class TestChatLspWiring:
             def call_tool_sync(self, sid, name, args, timeout=30.0):
                 return f"lsp:{name}"
 
-        app.state.mcp = McpHub()
-        app.state.lsp = LspHub()
+        set_workspace_hubs(app, root=client.root, mcp=McpHub(), lsp=LspHub())
         captured = self._capture_stream(
             monkeypatch, ("execute_command", "lsp_pyright_hover")
         )
@@ -2933,7 +2980,7 @@ class TestChatLspWiring:
                         {"lsp_vue_hover": "vue"})
 
         hub = Hub()
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         self._capture_stream(monkeypatch)
         response = client.post(
             "/api/chat",
@@ -2957,7 +3004,7 @@ class TestChatLspWiring:
                         {"lsp_pyright_hover": "pyright"})
 
         hub = Hub()
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         self._capture_stream(monkeypatch)
         client.post(
             "/api/chat",
@@ -2996,7 +3043,7 @@ class TestChatLspWiring:
                 )
 
         hub = Hub()
-        app.state.lsp = hub
+        set_workspace_hubs(app, root=client.root, lsp=hub)
         captured = self._capture_stream(monkeypatch)
         response = client.post(
             "/api/chat",
@@ -3016,12 +3063,21 @@ class TestChatLspWiring:
 
 # ---------------------------------------------------------------------------
 # The app lifespan must never spawn language servers in tests
-# (conftest sets NOJAE_DISABLE_LSP, mirroring the MCP rule).
+# (conftest sets NOJAE_DISABLE_LSP, mirroring the MCP rule) — and the rule holds
+# for **every** workspace the pool admits, not just the boot one.
 # ---------------------------------------------------------------------------
 
 
 def test_lifespan_starts_no_servers_without_the_env_switch(lsp_client):
     _client, app = lsp_client
-    # create_app's lifespan ran with NOJAE_DISABLE_LSP=1 (autouse
-    # conftest fixture): an empty LspManager, so nothing was ever spawned.
-    assert app.state.lsp.status() == []
+    # The lifespan admitted the boot workspace with NOJAE_DISABLE_LSP=1 set (the
+    # autouse conftest fixture), so its own LspManager is empty and nothing was
+    # ever spawned. Reached through the pool, because since clws-05 the pool owns
+    # the hub's whole life: this is the entry the lifespan built.
+    pool = app.state.hubpool
+    hub_set = pool.live(pool.boot_root)
+    assert hub_set is not None
+    assert hub_set.lsp.status() == []
+    # Nothing else holds a hub: the app's state carries the pool and no
+    # process-wide manager name (clws-06 deleted the read-through).
+    assert not hasattr(app.state, "lsp")

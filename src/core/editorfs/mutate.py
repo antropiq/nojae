@@ -509,12 +509,15 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
 
 
 def trash_dir() -> Path:
-    """The active workspace's trash — ``.nojae/trash`` under the resolved root.
+    """The workspace in scope's trash — ``.nojae/trash`` under the resolved root.
 
-    Resolved **per call**, never captured at import: a settings switch changes
-    :func:`editorfs.policy.workspace_root`, and the very next delete has to file
-    into the new root rather than into the install directory it was pointed at
-    when the module was imported.
+    Resolved **per call**, never captured at import: the root is
+    :func:`editorfs.policy.workspace_root`, which since clws-01 is the
+    **request's** workspace, so two tabs deleting into two folders get two
+    trashes and neither one's bytes ever land in the other's reserved folder.
+    (Before the seam the same per-call resolution is what made a settings switch
+    move the trash with the workspace rather than leave a project's deleted
+    bytes inside the install directory.)
 
     ``constants.TRASH_DIR`` stays as the pin for a test (or a deployment) that
     wants one absolute folder instead; it is read here, at call time.

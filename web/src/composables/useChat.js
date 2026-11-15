@@ -2,6 +2,12 @@ import { nextTick, reactive } from 'vue'
 import { renderMarkdown, TOOL_LINE_MARKER } from '../lib/markdown'
 import { createReasoningBuffer } from '../lib/reasoning-buffer'
 import {
+  noteHubPayload,
+  reportPoolRefusal,
+  withWorkspace,
+  withWorkspaceRoot,
+} from './useWorkspaceSession'
+import {
   agentModePayloadId,
   applySessionAgentMode,
   clearAgentModeNotice,
@@ -49,6 +55,7 @@ const state = reactive({
     loaded: false, // GET /api/mcp snapshot succeeded (panel + filter usable)
     locked: false, // sticky: first accepted send locks the toggles
     restarting: false, // POST /api/mcp/restart in flight (button stays busy)
+    error: null, // the route's sentence when it refused this workspace
   },
   // Conversation-scoped LSP toggles — the exact MCP slice pattern, fed by
   // GET /api/lsp instead. Shared `locked` flag semantics: the first accepted
@@ -59,6 +66,7 @@ const state = reactive({
     loaded: false, // GET /api/lsp snapshot succeeded (panel + filter usable)
     locked: false, // sticky: first accepted send locks the toggles (as mcp)
     restarting: false, // POST /api/lsp/restart in flight (button stays busy)
+    error: null, // the route's sentence when it refused this workspace
   },
 })
 
@@ -193,9 +201,23 @@ export async function loadChatHubs() {
 export async function loadChatMcp() {
   if (state.mcp.locked) return
   try {
-    const res = await fetch('/api/mcp')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const body = await res.json()
+    const res = await fetch(withWorkspace('/api/mcp'))
+    const body = await res.json().catch(() => null)
+    if (!res.ok) {
+      // The route's own sentence, verbatim. A 429 is the pool refusing this
+      // workspace, so the app bar says the same thing (one sentence, two
+      // surfaces); a 422 is the folder itself, and the bar already named it.
+      state.mcp.error =
+        typeof body?.detail === 'string' && body.detail
+          ? body.detail
+          : `Could not load MCP connectors (${res.status})`
+      if (res.status === 429) reportPoolRefusal(state.mcp.error)
+      throw new Error(state.mcp.error)
+    }
+    state.mcp.error = null
+    // `built` is the visible-restart flag (spec §5.4 rule 23): the bar says the
+    // tools are coming back, and the next live answer clears it.
+    noteHubPayload(body)
     state.mcp.connectors = (body.connectors || [])
       .filter((connector) => connector.active)
       .map(({ id, label, status }) => ({ id, label, status }))
@@ -253,9 +275,20 @@ function setChatMcp(id, on) {
 export async function loadChatLsp() {
   if (state.lsp.locked) return
   try {
-    const res = await fetch('/api/lsp')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const body = await res.json()
+    const res = await fetch(withWorkspace('/api/lsp'))
+    const body = await res.json().catch(() => null)
+    if (!res.ok) {
+      // Same rule as the MCP twin above: the server's sentence, and the bar's
+      // when the pool's ceiling is what refused the workspace.
+      state.lsp.error =
+        typeof body?.detail === 'string' && body.detail
+          ? body.detail
+          : `Could not load language servers (${res.status})`
+      if (res.status === 429) reportPoolRefusal(state.lsp.error)
+      throw new Error(state.lsp.error)
+    }
+    state.lsp.error = null
+    noteHubPayload(body)
     state.lsp.servers = (body.servers || [])
       .filter((server) => server.active)
       .map(({ id, label, status }) => ({ id, label, status }))
@@ -306,12 +339,18 @@ async function restartHub(kind) {
   if (hub.restarting || chatBusy()) return
   hub.restarting = true
   try {
-    const res = await fetch(`/api/${kind}/restart`, { method: 'POST' })
+    const res = await fetch(withWorkspace(`/api/${kind}/restart`), { method: 'POST' })
     const body = await res.json().catch(() => null)
     if (!res.ok) {
-      state.error = body?.detail || `Restart failed (HTTP ${res.status})`
+      const sentence = body?.detail || `Restart failed (HTTP ${res.status})`
+      // The panel that asked shows the route's sentence, and the bar shows the
+      // pool's ceiling when that is what refused the workspace.
+      hub.error = sentence
+      if (res.status === 429) reportPoolRefusal(sentence)
+      state.error = sentence
     } else {
       state.error = null
+      hub.error = null
       // A started conversation has a locked (frozen) toggle set, so the
       // loaders below would skip it and leave the status dots stale — and
       // watching those dots turn green is the point of the button. The
@@ -991,6 +1030,7 @@ async function startTurn({
   history,
   batchContext = null,
   agentMode = undefined,
+  workspace = undefined,
 }) {
   userStopped = false
   // Fresh turn: a previous turn's pause must not survive into it (its
@@ -1079,7 +1119,21 @@ async function startTurn({
       // a visible bubble — which is what survives the per-task context reset.
       payload.batchContext = batchContext
     }
-    const res = await fetch('/api/chat', {
+    // The turn is **about this tab's folder**: the field rides on the URL like
+    // every other workspace-scoped request (a query parameter, never a body
+    // field — spec D9), so the server injects that folder's project
+    // instructions and roots that folder's tools. The body, the SSE and the
+    // cancellation-on-disconnect are untouched.
+    //
+    // `workspace` names an **explicit** folder rather than the tab's current one:
+    // a batch task turn passes its run's pin, so a tab that moves during the lot
+    // cannot re-root the task still being executed (spec §5.7 rule 33). Absent
+    // (`undefined`) means the interactive shape — the tab's own folder.
+    const chatUrl =
+      workspace === undefined
+        ? withWorkspace('/api/chat')
+        : withWorkspaceRoot('/api/chat', workspace)
+    const res = await fetch(chatUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1167,7 +1221,10 @@ export function useChat() {
   // change that would never come. The payload deliberately carries this turn
   // alone: `state.messages` is never used to build a batch request, so task N+1
   // arrives with no trace of task N's transcript (B6).
-  function sendBatchTurn(text, { batchContext = null, agentMode = undefined } = {}) {
+  function sendBatchTurn(
+    text,
+    { batchContext = null, agentMode = undefined, workspace = undefined } = {},
+  ) {
     const trimmed = typeof text === 'string' ? text.trim() : ''
     if (!trimmed || state.phase !== 'idle') return false
     startTurn({
@@ -1181,6 +1238,7 @@ export function useChat() {
       history: [{ role: 'user', content: trimmed }],
       batchContext,
       agentMode,
+      workspace,
     })
     return true
   }
@@ -1202,8 +1260,10 @@ export function useChat() {
     state.pausePending = true
     try {
       // No body: there is exactly one pausable reply (the server keeps the
-      // single in-flight handle).
-      await fetch('/api/chat/pause', { method: 'POST' })
+      // single in-flight handle). The workspace field names **this tab's**
+      // reply — the slot becomes per workspace in task 04, and sending the
+      // field now means that task has no client-side work to do.
+      await fetch(withWorkspace('/api/chat/pause'), { method: 'POST' })
     } catch {
       // Endpoint unreachable: fall back to a local abort that keeps the
       // fragment. The abort ends readStream, so finish() runs and clears
@@ -1303,8 +1363,8 @@ export function useChat() {
       loadChatLsp()
     }
     // The agent the file was saved with (v4 envelope) is conversation state too,
-    // and it **wins over the browser's remembered choice**: the file describes
-    // the conversation, `localStorage` describes the browser, and the more
+    // and it **wins over the tab's remembered choice**: the file describes
+    // the conversation, `sessionStorage` describes the tab, and the more
     // specific one answers a resume. useAgentModes judges it against the loaded
     // list — an unknown id falls back to the first agent with one notice line,
     // never a silent swap of persona and never a refused load.

@@ -1,9 +1,12 @@
 """Tests for the Editor tab's file surface: the tree, the file read and their
 shared policy.
 
-The workspace is always a throw-away ``tmp_path`` pointed at by
-``NOJAE_PATH_LOCATION`` (the pattern ``tests/test_batch.py`` uses), so
-nothing here reads the repository's own checkout. Caps are exercised by patching
+The workspace is always a throw-away ``tmp_path``, and since clws-03 every
+request **names** it: the client below is a
+:class:`~tests.conftest.WorkspaceClient`, which puts the folder on every call
+through the ``workspace`` field, so what these rows measure is the field and
+never the interim environment value (which task 10 deletes). Nothing here reads
+the repository's own checkout. Caps are exercised by patching
 ``editorfs.constants``; **visibility is exercised by writing rules**, because a
 rule is the only mechanism the tree consults now (pol-00 D7 deleted the
 hardcoded ignored-names set).
@@ -17,7 +20,7 @@ it.
 import os
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,6 +28,7 @@ from fastapi.testclient import TestClient
 from src.api.server import create_app
 from src.core import editorfs
 from src.core.editorfs import policy_file, policy_seed
+from tests.conftest import WorkspaceClient, make_the_install, scoped, workspace_params
 
 
 def write_policy(root: Path, rules: List[Dict[str, str]]) -> Path:
@@ -49,17 +53,21 @@ def write_policy(root: Path, rules: List[Dict[str, str]]) -> Path:
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A small tree, pointed at as the working location.
+def workspace(tmp_path: Path) -> Iterator[Path]:
+    """A small tree, the folder every request of this suite names.
 
-    ``NOJAE_PATH_LOCATION`` is monkeypatched, so the value is restored
-    after every test. The folder also gets the policy file pol-05 leaves behind
-    when a folder becomes the working location, so every listing here answers
-    with the rules a real project starts with — and the workspace is *foreign*
-    (it is not the install directory), so nojae's own level A is dormant
-    and ``.env`` in it is an ordinary file.
+    The folder also gets the policy file pol-05 leaves behind when a folder
+    becomes a workspace, so every listing here answers with the rules a real
+    project starts with — and the workspace is *foreign* (it is not the install
+    directory), so nojae's own level A is dormant and ``.env`` in it is an
+    ordinary file.
+
+    The yield is wrapped in the seam's **scope** for this folder, because a
+    handful of rows ask a core surface directly (``workspace_root()``,
+    ``is_self_workspace()``) rather than through a route: outside a request there
+    is no field to read, so a call that is not a request has to enter the scope
+    itself. The routes are unaffected — each enters its own, nested inside.
     """
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
     (tmp_path / "src" / "core").mkdir(parents=True)
     # ``newline=""``: the bytes planted are the bytes the assertions name. The
     # default text mode translates ``\n`` to the host's line ending on Windows,
@@ -79,17 +87,32 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "src" / "__pycache__").mkdir()
     policy_seed.ensure_policy_file(str(tmp_path))
     policy_file.invalidate_policy_cache()
-    return tmp_path
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 @pytest.fixture
 def client(workspace: Path):
+    """The app, naming ``workspace`` on every request it makes."""
     with TestClient(create_app()) as test_client:
-        yield test_client
+        yield WorkspaceClient(test_client, workspace)
 
 
-def tree(client: TestClient, path: Optional[str] = None):
-    params: Dict[str, str] = {} if path is None else {"path": path}
+def tree(
+    client: TestClient,
+    path: Optional[str] = None,
+    *,
+    about: Any = None,
+) -> Any:
+    """One ``GET /api/fs/tree``.
+
+    ``about`` names **another** workspace than the client's own — the shape a
+    second tab's request has — and goes through :func:`workspace_params` like
+    every other folder a test names.
+    """
+    params: Dict[str, Any] = {} if path is None else {"path": path}
+    if about is not None:
+        params.update(workspace_params(about))
     return client.get("/api/fs/tree", params=params)
 
 
@@ -155,23 +178,23 @@ class TestRootListing:
         assert "__pycache__" not in set(names(tree(client, "src").json()))
 
     def test_the_rules_come_from_this_workspaces_file(
-        self, workspace: Path, client, monkeypatch: pytest.MonkeyPatch
+        self, workspace: Path, client
     ):
         """The file *is* the mechanism: the same code, one rule apart.
 
         Replaces the old patch-the-constant test. A rule that hides ``src`` makes
-        it absent from this workspace's root listing, and pointing the location at
-        a folder with no policy file lists its ``src`` again — which is the whole
-        point of D7: nothing else can decide visibility, so nothing else can
-        override the user's file.
+        it absent from this workspace's root listing, and a **second folder named
+        by the next request** — one with no policy file — lists its ``src`` again,
+        with no environment write and no cache clearing between the two. That is
+        the whole point of D7 (nothing else can decide visibility) and of clws-03
+        (the folder is the request's, so two answers coexist in one process).
         """
         write_policy(workspace, [{"path": "src", "mode": "hidden"}])
         assert "src" not in names(tree(client).json())
 
         other = workspace / "no-rule-here"
         (other / "src").mkdir(parents=True)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(other))
-        assert "src" in names(tree(client).json())
+        assert "src" in names(tree(client, None, about=other).json())
 
     def test_only_hidden_children_counts_as_childless(self, workspace: Path, client):
         """``children`` asks the same one question the listing asks."""
@@ -396,17 +419,21 @@ class TestPathLocks:
         ] is True
 
     def test_workspace_root_on_the_lsp_deny_list_is_422(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, client, monkeypatch: pytest.MonkeyPatch
     ):
-        """The tree inherits the guard ``POST /path-location`` already applies."""
+        """The tree refuses a **named** folder the hub's deny-list claims.
+
+        Since clws-03 the refusal is the seam's, not the route's own check: the
+        field is resolved before the folder is touched, so the sentence is the one
+        every other workspace-scoped route gives for the same folder (spec §5.2
+        rule 10) — and the folder is never listed.
+        """
         denied = tmp_path / "denied-root"
         (denied / "src").mkdir(parents=True)
         list_file = tmp_path / "restricted.txt"
         list_file.write_text(f"{denied}\n", encoding="utf-8")
         monkeypatch.setattr("src.core.lsphub.constants.LSP_RESTRICTED_PATHS", list_file)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(denied))
-        with TestClient(create_app()) as denied_client:
-            response = denied_client.get("/api/fs/tree")
+        response = tree(client, None, about=denied)
         assert response.status_code == 422
         assert "deny-list" in response.json()["detail"]
 
@@ -417,7 +444,7 @@ class TestPathLocks:
         "pair is not the pair's other answer"
     )
     def test_the_deny_list_compare_folds_only_where_the_volume_folds(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, client, monkeypatch: pytest.MonkeyPatch
     ):
         """win-06 §4: the same deny-list line, one spelling apart, and the fold decides.
 
@@ -439,15 +466,12 @@ class TestPathLocks:
         # whose ``realpath`` is therefore kept as written.
         list_file.write_text(f"{tmp_path / 'Denied-Root'}\n", encoding="utf-8")
         monkeypatch.setattr("src.core.lsphub.constants.LSP_RESTRICTED_PATHS", list_file)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(denied))
 
         monkeypatch.setattr(fscase, "case_folded", lambda _root: False)
-        with TestClient(create_app()) as exact_client:
-            assert exact_client.get("/api/fs/tree").status_code == 200
+        assert tree(client, None, about=denied).status_code == 200
 
         monkeypatch.setattr(fscase, "case_folded", lambda _root: True)
-        with TestClient(create_app()) as folded_client:
-            response = folded_client.get("/api/fs/tree")
+        response = tree(client, None, about=denied)
         assert response.status_code == 422
         assert "deny-list" in response.json()["detail"]
 
@@ -561,15 +585,15 @@ class TestReservedFolderIsAbsentEverywhere:
     def test_absent_in_the_apps_own_workspace_too(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """The mixed state is the normal one: the default location is the app."""
+        """The mixed state is the normal one: a new tab lands on the app."""
         root = tmp_path / "app"
         (root / "src").mkdir(parents=True)
         (root / editorfs.constants.POLICY_DIRNAME).mkdir()
         (root / editorfs.constants.POLICY_DIRNAME / "x.md").write_text("x\n")
-        monkeypatch.setattr(editorfs.constants, "PROJECT_ROOT", root)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+        make_the_install(monkeypatch, root)
         policy_file.invalidate_policy_cache()
-        with TestClient(create_app()) as own_client:
+        with TestClient(create_app()) as http:
+            own_client = WorkspaceClient(http, root)
             assert editorfs.constants.POLICY_DIRNAME not in names(
                 tree(own_client).json()
             )
@@ -579,7 +603,7 @@ class TestReservedFolderIsAbsentEverywhere:
             ).status_code == 404
 
     def test_a_folded_filesystem_reserves_it_in_any_spelling(
-        self, workspace: Path, monkeypatch: pytest.MonkeyPatch
+        self, workspace: Path, client, monkeypatch: pytest.MonkeyPatch
     ):
         """§6 behaviour test 3, whole chain (win-05).
 
@@ -605,22 +629,15 @@ class TestReservedFolderIsAbsentEverywhere:
             (workspace / name).mkdir(exist_ok=True)
             (workspace / name / "x.md").write_text("x\n", encoding="utf-8")
         monkeypatch.setattr(fscase, "case_folded", lambda _root: True)
-        with TestClient(create_app()) as folded_client:
-            for rel in (r".NOJAE\x.md", r".nojae\x.md", ".NOJAE/x.md"):
-                assert folded_client.get(
-                    "/api/fs/file", params={"path": rel}
-                ).status_code == 404, rel
-                assert folded_client.get(
-                    "/api/fs/tree", params={"path": rel}
-                ).status_code == 404, rel
-                response = folded_client.request(
-                    "DELETE", "/api/fs/file", params={"path": rel}
-                )
-                assert response.status_code == 422, rel
-                detail = response.json()["detail"]
-                assert editorfs.constants.POLICY_DIRNAME in detail, rel
-            # And the bytes are still where they were: a refusal, not an accident.
-            assert (workspace / ".nojae" / "x.md").is_file()
+        for rel in (r".NOJAE\x.md", r".nojae\x.md", ".NOJAE/x.md"):
+            assert read(client, rel).status_code == 404, rel
+            assert tree(client, rel).status_code == 404, rel
+            response = client.request("DELETE", "/api/fs/file", params={"path": rel})
+            assert response.status_code == 422, rel
+            detail = response.json()["detail"]
+            assert editorfs.constants.POLICY_DIRNAME in detail, rel
+        # And the bytes are still where they were: a refusal, not an accident.
+        assert (workspace / ".nojae" / "x.md").is_file()
 
     @pytest.mark.case_sensitive_volume(
         "``.NOJAE`` is planted as a *second* folder next to the reserved one; "
@@ -629,7 +646,7 @@ class TestReservedFolderIsAbsentEverywhere:
         "here"
     )
     def test_without_the_fold_the_other_spelling_is_not_reserved(
-        self, workspace: Path, monkeypatch: pytest.MonkeyPatch
+        self, workspace: Path, client, monkeypatch: pytest.MonkeyPatch
     ):
         """The other answer of the same probe, on the same route (rule 2).
 
@@ -643,17 +660,23 @@ class TestReservedFolderIsAbsentEverywhere:
         (workspace / ".NOJAE").mkdir()
         (workspace / ".NOJAE" / "x.md").write_text("x\n", encoding="utf-8")
         monkeypatch.setattr(fscase, "case_folded", lambda _root: False)
-        with TestClient(create_app()) as exact_client:
-            assert read(exact_client, ".NOJAE/x.md").status_code == 200
+        assert read(client, ".NOJAE/x.md").status_code == 200
 
 class TestAppsOwnWorkspaceAtTheRoutes:
-    """Level A through the read surface: the app's own ``.env`` is not there.
+    """Level A through the read surface, **per workspace** (spec §5.6 rule 30).
 
     The mirror of ``test_a_foreign_workspaces_dotenv_is_an_ordinary_file``. Both
     halves matter: the same file name answers differently in the two workspaces,
     and within the app's own it answers *absent* to a look and *refused* to a
     touch (404/422, pol-00 D8) — the write routes of that pair live in
     ``tests/test_editorfs_write.py``.
+
+    And since clws-03 the comparison is made **per request**, so the two answers
+    coexist in one process: a tab rooted at the installation is stricter than a
+    tab rooted elsewhere, in either order, with no invalidation call between
+    them. The per-root caches already key on the resolved root, so none is needed
+    — and one in a route would be a second mechanism that made one workspace's
+    answer depend on another's traffic.
     """
 
     @pytest.fixture
@@ -668,15 +691,26 @@ class TestAppsOwnWorkspaceAtTheRoutes:
         # the reserved ``.nojae/trash`` (see ``tests/test_editorfs_write.py``).
         (root / "logs" / "trash").mkdir(parents=True)
         (root / "logs" / "trash" / "x").write_text("kept\n", encoding="utf-8")
-        monkeypatch.setattr(editorfs.constants, "PROJECT_ROOT", root)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+        make_the_install(monkeypatch, root)
         policy_file.invalidate_policy_cache()
+        return root
+
+    @pytest.fixture
+    def foreign(self, tmp_path: Path) -> Path:
+        """The **same three names**, in a folder that is not the installation."""
+        root = tmp_path / "someone-elses-project"
+        (root / "src").mkdir(parents=True)
+        (root / ".env").write_text("ENDPOINT=x\n", encoding="utf-8")
+        (root / "src" / ".env.local").write_text("SECRET=1\n", encoding="utf-8")
+        (root / "logs" / "trash").mkdir(parents=True)
+        (root / "logs" / "trash" / "x").write_text("kept\n", encoding="utf-8")
         return root
 
     def test_its_env_and_logs_are_absent_from_everything_that_only_looks(
         self, own: Path
     ):
-        with TestClient(create_app()) as own_client:
+        with TestClient(create_app()) as http:
+            own_client = WorkspaceClient(http, own)
             assert ".env" not in names(tree(own_client).json())
             assert "logs" not in names(tree(own_client).json())
             for rel in (".env", "src/.env.local", "logs/trash/x"):
@@ -689,6 +723,119 @@ class TestAppsOwnWorkspaceAtTheRoutes:
                 assert own_client.get(
                     "/api/fs/diff", params={"path": rel}
                 ).status_code in (404, 504), rel
+
+    @pytest.mark.parametrize("strict_first", [True, False], ids=["install-first", "foreign-first"])
+    def test_the_two_workspaces_answer_differently_in_one_process(
+        self, own: Path, foreign: Path, strict_first: bool
+    ):
+        """Rule 30, both orders, one app, no invalidation between the calls.
+
+        One ``.env`` at each root, byte-identical, and the two answers are the
+        opposite ones: absent in the installation, an ordinary file in the
+        foreign folder. Running the pair in both orders is the half that proves
+        the verdict is **per workspace** rather than whichever folder was asked
+        about last — which is exactly the state one process used to be unable to
+        hold, because it had one folder.
+        """
+        order = (own, foreign) if strict_first else (foreign, own)
+        with TestClient(create_app()) as http:
+            for root in order:
+                client = WorkspaceClient(http, root)
+                listed = names(tree(client).json())
+                body = read(client, ".env")
+                if root is own:
+                    assert ".env" not in listed and "logs" not in listed
+                    assert body.status_code == 404
+                else:
+                    assert ".env" in listed
+                    assert body.status_code == 200
+                    assert body.json()["text"] == "ENDPOINT=x\n"
+                # The reserved folder is hidden in **every** workspace, so the
+                # pair differs by level A alone and not by D5's reservation.
+                assert editorfs.constants.POLICY_DIRNAME not in listed
+
+
+class TestTwoWorkspacesSideBySide:
+    """The observable guarantee of clws-03: two tabs, two trees, one process.
+
+    Two **foreign** folders, each with its own files and its own policy, are
+    listed, read, probed, searched and quick-opened by one client in **both
+    request orders**, with no environment write and no cache invalidation between
+    the calls. Before the seam this pair was unreachable — one process held one
+    folder, so the second tab necessarily saw the first one's tree.
+
+    The environment is asserted unchanged as well as un-written: the interim
+    fallback still answers a request that names no folder, so a route that had
+    quietly kept reading it would pass every listing assertion here **only** while
+    the two folders happened to be the same one the location held.
+    """
+
+    @pytest.fixture
+    def pair(self, tmp_path: Path) -> Tuple[Path, Path]:
+        """Two folders whose answers cannot be confused with each other's."""
+        alpha = tmp_path / "project-alpha"
+        beta = tmp_path / "project-beta"
+        for root, marker in ((alpha, "alpha"), (beta, "beta")):
+            (root / "src").mkdir(parents=True)
+            (root / "src" / f"{marker}-only.py").write_text(
+                f"{marker} = 1\n", encoding="utf-8", newline=""
+            )
+            (root / "shared.py").write_text("same name\n", encoding="utf-8", newline="")
+        # A rule only one of them carries: the same code, one policy apart, is the
+        # other half of "the answer came from the folder named".
+        write_policy(alpha, [{"path": "hidden-in-alpha.py", "mode": "hidden"}])
+        (alpha / "hidden-in-alpha.py").write_text("x\n", encoding="utf-8", newline="")
+        (beta / "hidden-in-alpha.py").write_text("x\n", encoding="utf-8", newline="")
+        return alpha, beta
+
+    @pytest.mark.parametrize("first", ["alpha", "beta"], ids=["alpha-first", "beta-first"])
+    def test_every_read_answers_about_the_folder_named(
+        self, pair: Tuple[Path, Path], first: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        alpha, beta = pair
+        # Neither folder is a repository, whatever sits above ``tmp_path`` on the
+        # runner (the same pin ``tests/test_editorfs_git.py`` uses for the claim).
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(alpha.parent))
+
+        order = (alpha, beta) if first == "alpha" else (beta, alpha)
+        with TestClient(create_app()) as http:
+            for root in order:
+                client = WorkspaceClient(http, root)
+                marker = "alpha" if root is alpha else "beta"
+                other = "beta" if root is alpha else "alpha"
+
+                listed = names(tree(client).json())
+                assert "src" in listed and "shared.py" in listed
+                # The rule that exists in one folder only: absent in alpha, an
+                # ordinary file in beta.
+                assert ("hidden-in-alpha.py" in listed) is (root is beta)
+                assert names(tree(client, "src").json()) == [f"{marker}-only.py"]
+
+                body = read(client, f"src/{marker}-only.py")
+                assert body.status_code == 200
+                assert body.json()["text"] == f"{marker} = 1\n"
+                assert read(client, f"src/{other}-only.py").status_code == 404
+
+                probed = client.get(
+                    "/api/fs/stat",
+                    params={"path": [f"src/{marker}-only.py", f"src/{other}-only.py"]},
+                ).json()["paths"]
+                assert [item["exists"] for item in probed] == [True, False]
+
+                # The finder's list carries the same difference: the name the
+                # policy hides in alpha is a candidate in beta.
+                assert client.get("/api/fs/files").json()["files"] == (
+                    ["src/alpha-only.py", "shared.py"]
+                    if root is alpha
+                    else ["src/beta-only.py", "hidden-in-alpha.py", "shared.py"]
+                )
+                assert client.get("/api/fs/search", params={"q": "same name"}).json()[
+                    "matchCount"
+                ] == 1
+                # Not a repository: the silent answer, and never the other
+                # folder's rows.
+                assert client.get("/api/fs/status").json()["repo"] is False
+
 
 
 class TestMissingAndFile:

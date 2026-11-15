@@ -1,5 +1,7 @@
 import { reactive } from 'vue'
 
+import { withWorkspace } from './useWorkspaceSession'
+
 // ---------------------------------------------------------------------------
 // Workspace tree: the state behind WorkspaceNavigator.vue.
 //
@@ -251,7 +253,9 @@ export function useWorkspaceTree() {
     const run = (async () => {
       const askedAt = generation
       try {
-        const res = await fetch(`/api/fs/tree?path=${encodeURIComponent(path)}`)
+        const res = await fetch(
+          withWorkspace(`/api/fs/tree?path=${encodeURIComponent(path)}`),
+        )
         const body = await res.json().catch(() => null)
         if (askedAt !== generation) return
         if (!res.ok) {

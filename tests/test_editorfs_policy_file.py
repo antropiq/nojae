@@ -27,6 +27,7 @@ from mcp_connectors import policy_file as parser
 from mcp_connectors import policy_shared as shared
 
 from src.core.editorfs import builtin_policy, constants, policy_file, policy_modes
+from tests.conftest import make_the_install, scoped
 
 
 def policy_json(
@@ -52,7 +53,7 @@ def policy_json(
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def workspace(tmp_path: Path) -> Iterator[Path]:
     """A scratch workspace on the shape pol-00's example file is written about."""
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
@@ -64,10 +65,10 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
     (tmp_path / "web" / "src" / "main.js").write_text("x", encoding="utf-8")
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
 
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    policy_file.invalidate_policy_cache()
-    yield tmp_path
-    policy_file.invalidate_policy_cache()
+    with scoped(tmp_path):
+        policy_file.invalidate_policy_cache()
+        yield tmp_path
+        policy_file.invalidate_policy_cache()
 
 
 def write_policy(root: Path, text: str) -> Path:
@@ -398,7 +399,7 @@ class TestUnreachablePattern:
         assert policy_file.policy_blocking_error() is None
 
     def test_a_tool_directory_is_not_claimed_as_the_typo_of_another(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ):
         """``.svn`` beside a real ``.venv`` is not a misspelling of ``.venv``.
 
@@ -412,26 +413,27 @@ class TestUnreachablePattern:
         root = tmp_path / "pyproject"
         (root / ".venv" / "lib").mkdir(parents=True)
         (root / "src").mkdir()
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
-        policy_file.invalidate_policy_cache()
-        try:
-            write_policy(root, policy_json([
-                {"path": ".svn", "mode": "hidden"},
-                {"path": ".hg", "mode": "hidden"},
-                {"path": ".venv", "mode": "ro"},
-            ]))
-            assert policy_file.workspace_findings() == ()
-            assert len(policy_file.workspace_rules()) == 3
-            assert policy_file.policy_blocking_error() is None
-            # And one real typo in the same file is still caught, so the guard
-            # above is a veto on unrelated names, not a switch-off.
-            write_policy(root, policy_json([{"path": ".vnv", "mode": "hidden"}]))
-            errors = [
-                f for f in policy_file.workspace_findings() if f.kind == shared.KIND_ERROR
-            ]
-            assert errors and ".venv" in errors[0].message
-        finally:
+        with scoped(root):
             policy_file.invalidate_policy_cache()
+            try:
+                write_policy(root, policy_json([
+                    {"path": ".svn", "mode": "hidden"},
+                    {"path": ".hg", "mode": "hidden"},
+                    {"path": ".venv", "mode": "ro"},
+                ]))
+                assert policy_file.workspace_findings() == ()
+                assert len(policy_file.workspace_rules()) == 3
+                assert policy_file.policy_blocking_error() is None
+                # And one real typo in the same file is still caught, so the guard
+                # above is a veto on unrelated names, not a switch-off.
+                write_policy(root, policy_json([{"path": ".vnv", "mode": "hidden"}]))
+                errors = [
+                    f for f in policy_file.workspace_findings()
+                    if f.kind == shared.KIND_ERROR
+                ]
+                assert errors and ".venv" in errors[0].message
+            finally:
+                policy_file.invalidate_policy_cache()
 
     def test_a_deep_missing_prefix_still_suggests_at_its_own_level(self, workspace: Path):
         """The suggestion comes from the directory the prefix sits in, not the root."""
@@ -525,24 +527,22 @@ class TestLevelAShadowing:
     """The note half of the table: a user rule that cannot win (D2)."""
 
     @pytest.fixture
-    def self_workspace(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> Iterator[Path]:
+    def self_workspace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         """A scratch directory that is *also* "the app", so level A is live.
 
         Both sides of :func:`builtin_policy.is_self_workspace` are read at call
-        time, so moving ``constants.PROJECT_ROOT`` alongside the location makes a
-        self workspace out of a temp folder — which is what lets this test write a
-        policy file at all, instead of editing the real checkout.
+        time, so :func:`tests.conftest.make_the_install` alongside the location
+        makes a self workspace out of a temp folder — which is what lets this
+        test write a policy file at all, instead of editing the real checkout.
         """
         (tmp_path / "logs").mkdir()
         (tmp_path / "notes.md").write_text("x\n", encoding="utf-8")
-        monkeypatch.setattr(constants, "PROJECT_ROOT", tmp_path)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-        policy_file.invalidate_policy_cache()
-        assert builtin_policy.is_self_workspace() is True
-        yield tmp_path
-        policy_file.invalidate_policy_cache()
+        make_the_install(monkeypatch, tmp_path)
+        with scoped(tmp_path):
+            policy_file.invalidate_policy_cache()
+            assert builtin_policy.is_self_workspace() is True
+            yield tmp_path
+            policy_file.invalidate_policy_cache()
 
     def test_a_rw_rule_for_an_app_hidden_path_is_a_note_not_an_error(
         self, self_workspace: Path
@@ -625,8 +625,7 @@ class TestCache:
         second: Path = tmp_path_factory.mktemp("other-root")
         (second / "betab").mkdir()
         stamp = (first.stat().st_mtime_ns, first.stat().st_size)
-        os.environ["NOJAE_PATH_LOCATION"] = str(second)
-        try:
+        with scoped(second):
             second_file = write_policy(
                 second, policy_json([{"path": "betab", "mode": "hidden"}])
             )
@@ -637,8 +636,6 @@ class TestCache:
             assert policy_file.workspace_rules()[0].pattern == "betab"
             assert mode("betab/inner") == shared.HIDDEN
             assert mode("alpha/inner") == shared.READ_WRITE
-        finally:
-            os.environ.pop("NOJAE_PATH_LOCATION", None)
 
     def test_an_unchanged_file_is_read_once_per_workspace(self, workspace: Path):
         write_policy(workspace, policy_json([{"path": "notes.md", "mode": "ro"}]))

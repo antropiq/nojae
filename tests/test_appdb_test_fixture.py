@@ -68,13 +68,15 @@ def test_mode_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     folder = root / ".nojae"
     folder.mkdir(parents=True)
     monkeypatch.setenv(appdb.TEST_SETTINGS_KEY, "1")
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
     # A fresh store per case: the switch's root is per process, and the boot
     # below is what this case's rows come from.
     monkeypatch.setattr(appdb, "_test_root", tmp_path / "e2e-store")
     (tmp_path / "e2e-store").mkdir()
     appdb.close_thread_connection()
-    yield root
+    from tests.conftest import scoped
+
+    with scoped(root):
+        yield root
     appdb.close_thread_connection()
 
 

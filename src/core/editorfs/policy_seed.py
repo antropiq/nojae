@@ -20,9 +20,10 @@ Two non-negotiables, both easy to get wrong later:
   hand-edited policy is never clobbered and two concurrent switches have one
   winner. A ``if os.path.isfile(): …`` before the write would be a TOCTOU and
   buys nothing the flag does not already buy;
-* **never called from ``config.path_location()``** — that is a per-request
-  *reader*, and a reader that writes is how a stray folder turns up in a
-  project someone only meant to browse.
+* **never called from a path *reader*** — not from the seam's
+  :func:`src.core.workspace.current_root` and never from the interim accessor:
+  those are readers, and a reader that writes is how a stray folder turns up in
+  a project someone only meant to browse.
 
 A seed that cannot happen (read-only mount, a root owned by someone else, no
 disk) is a **note** for the UI, not a reason to refuse opening a project:
@@ -164,11 +165,11 @@ def ensure_policy_file(root: str) -> Dict[str, Any]:
 def policy_file_state(root: str) -> Dict[str, Any]:
     """What a **reader** may say about the policy file, writing nothing.
 
-    ``GET /api/path-location`` asks this rather than :func:`ensure_policy_file`:
-    the working location is read far more often than a workspace is switched,
-    and a read that leaves a folder behind in someone's project is exactly the
-    mistake the seeding rules forbid. Same shape as the other answers, plus
-    ``"absent"`` — a workspace whose seed failed, or which predates the feature.
+    ``GET /api/workspace`` asks this rather than :func:`ensure_policy_file`: a
+    workspace is read far more often than it is admitted, and a read that leaves
+    a folder behind in someone's project is exactly the mistake the seeding rules
+    forbid. Same shape as the other answers, plus ``"absent"`` — a workspace
+    whose seed failed, or which predates the feature.
     """
     path = policy_file_path(root)
     try:

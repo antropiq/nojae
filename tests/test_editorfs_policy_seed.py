@@ -32,17 +32,18 @@ from mcp_connectors import policy_shared as shared
 
 from src.api.server import create_app
 from src.core.editorfs import constants, policy_file, policy_modes, policy_seed
+from tests.conftest import WorkspaceClient, make_the_install, scoped
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def workspace(tmp_path: Path) -> Iterator[Path]:
     """A scratch working location with no policy file yet, cache clean."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    policy_file.invalidate_policy_cache()
-    yield tmp_path
-    policy_file.invalidate_policy_cache()
+    with scoped(tmp_path):
+        policy_file.invalidate_policy_cache()
+        yield tmp_path
+        policy_file.invalidate_policy_cache()
 
 
 def seeded_path(root: Path) -> Path:
@@ -303,9 +304,13 @@ class TestTheEndpoints:
             # Swapped *inside* the context, as ``tests/test_api.py``'s
             # ``hub_client`` does: the lifespan installs the real hubs on
             # startup, so a stand-in assigned before it is replaced and a
-            # restart would go to a live hub.
-            test_client.app.state.mcp = _RecordingHub()
-            test_client.app.state.lsp = _RecordingHub()
+            # restart would go to a live hub. Since clws-06 the swap goes
+            # through the pool, onto the boot workspace's own set.
+            from tests.conftest import set_workspace_hubs
+
+            set_workspace_hubs(
+                test_client.app, mcp=_RecordingHub(), lsp=_RecordingHub()
+            )
             yield test_client
 
     def test_boot_seeds_the_location_it_chose(self, tmp_path: Path, monkeypatch):
@@ -313,91 +318,52 @@ class TestTheEndpoints:
         nojae its own ``.nojae`` on first launch."""
         target = tmp_path / "booted-project"
         target.mkdir()
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(target))
+        # The boot folder is the installation (clws-10): move the one source the
+        # seam reads, not the retired environment variable.
+        make_the_install(monkeypatch, target)
         create_app()
         assert seeded_path(target).is_file()
 
-    def test_post_to_a_scratch_dir_seeds_it_then_reports_existing(
+    def test_a_workspace_that_was_seeded_reports_existing(
         self, client: TestClient, tmp_path: Path
     ):
-        target = tmp_path / "another-project"
-        (target / "src").mkdir(parents=True)
+        """The read reports a seeded folder, and writes nothing of its own.
 
-        first = client.post("/api/path-location", json={"path": str(target)})
-        assert first.status_code == 200
-        policy = first.json()["policy"]
-        assert policy["state"] == "created"
-        assert policy["error"] is None
-        assert policy["path"] == str(
-            target.resolve() / constants.POLICY_DIRNAME / constants.POLICY_FILENAME
-        )
-        assert seeded_path(target).is_file()
-        # The seed happens *after* both restarts, so a hub failure can never be
-        # mistaken for one and roll the environment back (routes.py:1237).
-        assert len(client.app.state.mcp.restarts) == 1
-        assert len(client.app.state.lsp.restarts) == 1
+        The folder is seeded **directly** here: the route that used to seed a
+        folder when it became the working location is gone (clws-02), and the
+        moment that does it next is the pool admitting the workspace (task 05).
+        """
+        from tests.conftest import workspace_params
 
-        second = client.post("/api/path-location", json={"path": str(target)})
-        assert second.json()["policy"]["state"] == "existing"
-
-    @pytest.mark.posix_behaviour(
-        "the unwritable root this POST is switched to is made with "
-        "``mkdir(mode=0o500)``, a POSIX fact: the switch and the note it carries "
-        "are only observable once a root can be made unwritable"
-    )
-    def test_post_to_an_unwritable_root_still_switches_and_says_so(
-        self, client: TestClient, tmp_path: Path
-    ):
-        if os.geteuid() == 0:
-            pytest.skip("root ignores the mode bits")
-        locked = tmp_path / "read-only-project"
-        locked.mkdir(mode=0o500)
-        try:
-            response = client.post("/api/path-location", json={"path": str(locked)})
-            assert response.status_code == 200
-            policy = response.json()["policy"]
-            assert policy["state"] == "failed"
-            assert policy["error"]
-            # The switch itself is untouched: the location moved and the hubs ran.
-            assert os.environ["NOJAE_PATH_LOCATION"] == str(locked.resolve())
-            assert len(client.app.state.mcp.restarts) == 1
-        finally:
-            locked.chmod(0o755)
-
-    def test_get_carries_the_policy_block_without_seeding(
-        self, client: TestClient, tmp_path: Path
-    ):
         target = tmp_path / "already-seeded"
-        target.mkdir()
-        client.post("/api/path-location", json={"path": str(target)})
-        os.environ["NOJAE_PATH_LOCATION"] = str(target)
-        try:
-            body = client.get("/api/path-location").json()
-            assert body["key"] == "NOJAE_PATH_LOCATION"
-            assert body["path"] == str(target)
-            # The POST seeded it, so GET reports it — and GET itself wrote
-            # nothing: the same answer on a second GET proves nothing changed.
+        (target / "src").mkdir(parents=True)
+        assert policy_seed.ensure_policy_file(str(target))["state"] == "created"
+
+        for _ in range(2):
+            body = client.get(
+                "/api/workspace", params=workspace_params(target)
+            ).json()
+            assert body["workspace"] == str(target)
+            # The seed landed, so the read reports it — and the read itself wrote
+            # nothing: the same answer on a second read proves nothing changed.
             assert body["policy"]["state"] == "existing"
             assert body["policy"]["path"] == str(seeded_path(target))
-            assert client.get("/api/path-location").json()["policy"]["state"] == "existing"
-        finally:
-            os.environ.pop("NOJAE_PATH_LOCATION", None)
 
-    def test_a_location_that_was_never_posted_reports_absent(
+    def test_a_folder_that_was_only_named_reports_absent(
         self, client: TestClient, tmp_path: Path
     ):
-        """The read half with no POST in front of it: the settings dialog may
-        open a hundred times without leaving a folder in the browsed project."""
+        """The read half with no seed in front of it: a tab may point at a
+        project a hundred times without leaving a folder inside it."""
+        from tests.conftest import workspace_params
+
         target = tmp_path / "only-browsed"
         target.mkdir()
-        os.environ["NOJAE_PATH_LOCATION"] = str(target)
-        try:
-            body = client.get("/api/path-location").json()
-            assert body["path"] == str(target)
-            assert body["policy"]["state"] == "absent"
-            assert not (target / constants.POLICY_DIRNAME).exists()
-        finally:
-            os.environ.pop("NOJAE_PATH_LOCATION", None)
+        body = client.get(
+            "/api/workspace", params=workspace_params(target)
+        ).json()
+        assert body["workspace"] == str(target)
+        assert body["policy"]["state"] == "absent"
+        assert not (target / constants.POLICY_DIRNAME).exists()
 
 
 class TestTheSeededFolderIsUnreachableFromTheEditor:
@@ -416,7 +382,7 @@ class TestTheSeededFolderIsUnreachableFromTheEditor:
     def client(self, workspace: Path):
         policy_seed.ensure_policy_file(str(workspace))
         with TestClient(create_app()) as test_client:
-            yield test_client
+            yield WorkspaceClient(test_client, workspace)
 
     def test_nojae_is_absent_from_the_listing(self, client: TestClient):
         names = [entry["name"] for entry in client.get("/api/fs/tree").json()["entries"]]
@@ -500,12 +466,15 @@ class TestTheSeededFolderIsUnreachableFromTheEditor:
 class TestTheCallSitesAreTheTwoEntryPoints:
     """The seeding rule pol-05 §2 draws, pinned rather than trusted.
 
-    Seeding belongs at the *two moments a workspace becomes active* — boot and
-    the switch — and nowhere else. ``config.path_location()`` is a per-request
-    reader, and a reader that writes is how a stray folder turns up in a project
-    someone only meant to browse, so ``src/config.py`` may not call the seeder
-    at all (and may not import ``editorfs``, which imports ``path_location``
-    back — config sits at the bottom of the dependency graph).
+    Seeding belongs at the **one moment a folder becomes a workspace**, and
+    nowhere else. Since clws-05 that moment is the hub pool **admitting** the
+    folder, and the boot is one call to the same function rather than a second
+    copy of the seeding — which is what keeps the two entry points from
+    drifting. So exactly one module may name the seeder, and it is not a route:
+    ``workspace.current_root()`` is a per-request reader, and a reader that
+    writes is how a stray folder turns up in a project someone only meant to
+    browse. (``src/config.py`` may not import ``editorfs`` either, which imports
+    the seam back — config sits at the bottom of the dependency graph.)
     """
 
     REPO = Path(constants.__file__).resolve().parents[3]
@@ -522,14 +491,20 @@ class TestTheCallSitesAreTheTwoEntryPoints:
         assert "ensure_policy_file" not in text
         assert "policy_seed" not in text
 
-    def test_the_two_call_sites_are_the_boot_and_the_switch(self):
+    def test_the_only_call_site_is_the_pools_admission(self):
+        """One seeder, reached by both entry points — and by no route.
+
+        The boot and the pool's admission are the two moments a folder becomes a
+        workspace, and clws-05 made them **one function**: the boot calls the
+        pool, so the pool is the only module that names the seeder.
+        """
         callers = [
             path.relative_to(self.REPO).as_posix()
             for path in self.sources()
             if "ensure_policy_file(" in path.read_text(encoding="utf-8")
             and path.name != "policy_seed.py"
         ]
-        assert callers == ["src/api/routes.py", "src/api/server.py"]
+        assert callers == ["src/core/hubpool.py"]
 
     def test_the_reserved_folder_is_out_of_source_control(self):
         """Acceptance: the seeded file must not turn up in ``git status``."""

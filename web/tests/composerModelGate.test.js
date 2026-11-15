@@ -11,6 +11,7 @@ import {
 } from '../src/composables/useAgentModes'
 import { useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
+import { AGENT_STORAGE_KEY } from '../src/composables/useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // §5.4's model gate on the composer: the selected agent's `model_id` decides
@@ -90,7 +91,9 @@ function resetAll() {
   agentModes.loaded = false
   agentModes.findings = []
   agentModes.notice = null
-  window.localStorage.clear()
+  // The remembered agent is the tab's (§5.5 rule 26): `sessionStorage` is what a
+  // fresh case has to clear.
+  window.sessionStorage.clear()
 }
 
 let host = null
@@ -176,6 +179,22 @@ describe('a selected agent with no model', () => {
     expect(warning(w).exists()).toBe(false)
     expect(sendButton(w).attributes('disabled')).toBeUndefined()
     expect(sendButton(w).attributes('title')).toBe('Send')
+  })
+
+  // Requirement 2 of clws-08, at the surface that sets it: the dropdown's change
+  // lands in the **tab's** storage (§5.5 rule 26), not the browser-wide one. The
+  // component's logic is unchanged — `setAgentMode` on change, which is where
+  // the write happens — and this case is the reason that one call is load-bearing.
+  it('writes the chosen agent to the tab storage, and to nothing browser-wide', async () => {
+    stubRoutes()
+    await loadAgentModes()
+    const w = await mountComposer()
+
+    await w.find('.chat-mode-select').setValue('chat')
+    await flushPromises()
+
+    expect(window.sessionStorage.getItem(AGENT_STORAGE_KEY)).toBe('chat')
+    expect(window.localStorage.getItem(AGENT_STORAGE_KEY)).toBeNull()
   })
 })
 

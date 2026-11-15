@@ -72,3 +72,26 @@ NO_DRIVER_MESSAGE = (
     "The terminal has no pseudo-console driver available "
     "(on Windows: install the 'windows' extra, pywinpty)"
 )
+
+# RFC 6455 caps a close frame's *reason* at 123 bytes. A reason over it is not
+# truncated by the protocol, the close frame fails to serialize and the peer
+# sees an abnormal 1006 close with nothing to show — so every reason this app
+# builds is bounded to this before it reaches the socket.
+MAX_CLOSE_REASON_BYTES = 123
+
+
+def close_reason(text: str) -> str:
+    """``text`` as a WebSocket close reason: whole characters, never over the cap.
+
+    A refusal sentence names a folder, so it can be longer than the protocol
+    allows (spec §5.2 rule 11 wants the folder named). The full sentence is
+    what the route sends in its ``error`` frame; the close *reason* is this
+    bounded form, so the peer always receives the code and as much of the
+    sentence as fits instead of a 1006 with no reason at all.
+    """
+    raw = (text or "").encode("utf-8")
+    if len(raw) <= MAX_CLOSE_REASON_BYTES:
+        return text or ""
+    # ``ignore`` drops a multi-byte character left half-cut at the boundary —
+    # a close reason must be valid UTF-8.
+    return raw[:MAX_CLOSE_REASON_BYTES].decode("utf-8", "ignore")

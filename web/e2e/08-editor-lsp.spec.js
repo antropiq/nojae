@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Task lspe-12 — the Editor pane's language-server gesture as a human performs
 // it, in a real browser. No LLM call is involved: the feature is one POST plus
@@ -41,23 +42,20 @@ import path from 'node:path'
 // it and no notice is raised. The feature degrades to the status quo, never to
 // an error.
 //
-// The scratch is a **fixture workspace** of its own, and switching into it is
-// what makes the assertions facts about a file this spec owns rather than about
-// whatever the developer's checkout happens to contain. It is a top-level folder
-// (visible to the pane) and it is removed with node's `fs`, not through
-// `/api/fs/file`: switching into it seeds a `.nojae/` there, and that folder is
-// reserved — the Editor will not delete a subtree that contains it. Same shape as
-// 03-workspace-switch, 04-agent-modes and 07-quick-open.
-const SCRATCH = 'e2e-editor-lsp'
+// The scratch is a **fixture workspace** of its own (clws-12): the page is
+// pointed at it through the app bar's field and every request names it, so the
+// assertions are facts about a file this spec owns rather than about whatever
+// the developer's checkout happens to contain. It is created and removed with
+// node's `fs`; admitting it seeds a `.nojae/` there, and that folder is reserved,
+// so the Editor will not delete the subtree that contains it. Same shape as
+// 03-workspace-switch.
+const SCRATCH = 'e2e-workspace'
+const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+const WS = { workspace: WORKSPACE }
 
-// The fixture as the **boot** root spells it — what the seeding routes address
-// before the switch, since the working location is still the install directory.
-const SEED = `${SCRATCH}/notes.txt`
-
-// The same file as the **fixture** root spells it — what the tree and the pane
-// address once the working location has moved. Every path the app holds is
-// relative to the working location, so the scratch folder's own name is not part
-// of it.
+// The fixture file as the workspace spells it: the tab's folder is the scratch,
+// so its own name is not part of any path the app holds.
 const FILE = 'notes.txt'
 
 // Four short lines, so a jump is visible as a *different* line: the gesture is
@@ -72,50 +70,12 @@ const TARGET_LINE_INDEX = 1
 // reads.
 const TARGET_LINE = '2'
 
-// The root this server booted on, remembered so a spec that fails between its
-// two switches cannot leave the whole suite pointing at a scratch folder.
-let bootRoot = null
-
-async function currentRoot(request) {
-  return (await (await request.get('/api/path-location')).json()).path
-}
-
-// Removal is over when the path is gone, not when `rmSync` returned. Windows:
-// the unlink of a folder that existed for seconds can fail EPERM while a handle
-// to it is still closing — anything the app ran inside the switched-in root
-// holds its current-directory handle until it is reaped (the terminal's shell
-// cwd, the `git` of a status query) — and `maxRetries`/`retryDelay` is Node's
-// bound for exactly this on a directory. It is not the end of it either: the
-// call can *return* with the folder still on disk, because the last handle
-// closes after it and the name stays in the listing until it does. So the
-// removal is retried until the path is gone, and the answer says which of the
-// two happened — a `beforeEach` that gave up early handed the next spec's
-// `create` a 409 for a folder this suite had just deleted, which is the flake
-// this is here to stop. Same rule as 03-workspace-switch and 07-quick-open.
-//
-// A folder that still will not go after every attempt is reported by the
-// `beforeEach` that needs it out of the way; the teardown, which owes the next
-// spec nothing, ignores the answer.
-async function removeScratch(root) {
-  const target = path.join(root, SCRATCH)
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 })
-    } catch {
-      // Still held; the attempt below retries while the handle closes.
-    }
-    if (!fs.existsSync(target)) return true
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  return false
-}
-
 async function create(request, target, dir = false) {
-  return request.post('/api/fs/create', { data: { path: target, dir } })
+  return request.post('/api/fs/create', { params: WS, data: { path: target, dir } })
 }
 
 async function diskStat(request, target) {
-  const res = await request.get(`/api/fs/stat?path=${encodeURIComponent(target)}`)
+  const res = await request.get('/api/fs/stat', { params: { ...WS, path: target } })
   return (await res.json()).paths[0]
 }
 
@@ -124,52 +84,51 @@ async function diskStat(request, target) {
 async function seed(request, target, text) {
   expect((await create(request, target)).ok(), `could not create ${target}`).toBe(true)
   const res = await request.put('/api/fs/file', {
+    params: WS,
     data: { path: target, text, ifUnmodifiedSince: (await diskStat(request, target)).mtime },
   })
   expect(res.ok(), `could not seed ${target}: ${await res.text()}`).toBe(true)
 }
 
+// Point this tab at the fixture through the field, as a user does. A reload
+// keeps the same tab and folder, so this is a no-op afterwards.
+async function pointTabAt(page) {
+  const field = page.locator('.appbar-location-input')
+  if ((await field.inputValue()) === WORKSPACE) return
+  await field.fill(WORKSPACE)
+  const button = page.locator('.appbar-location-set')
+  await expect(button).toBeEnabled()
+  const applied = page.waitForResponse(
+    (res) =>
+      new URL(res.url()).pathname === '/api/workspace' &&
+      res.request().method() === 'GET' &&
+      res.url().includes('workspace='),
+  )
+  await button.click()
+  const res = await applied
+  expect(res.ok(), `could not point the tab at ${WORKSPACE}: ${await res.text()}`).toBe(true)
+  await expect(field).toHaveValue(WORKSPACE)
+}
+
 // The fixture workspace: one folder and one file, both through the app's own
 // writer, so the pane opens a buffer whose text this spec chose.
 async function seedFixture(request) {
-  const created = await create(request, SCRATCH, true)
-  expect(created.ok(), `could not create the scratch workspace: ${await created.text()}`).toBe(
-    true,
-  )
-  await seed(request, SEED, TEXT)
+  fs.rmSync(WORKSPACE, { recursive: true, force: true })
+  fs.mkdirSync(WORKSPACE, { recursive: true })
+  await seed(request, FILE, TEXT)
 }
 
 test.beforeEach(async ({ request }) => {
-  bootRoot = await currentRoot(request)
-  // The removal has to be *finished* before `seedFixture`'s own `create` runs,
-  // or that create answers 409 for a folder the previous spec deleted.
-  const cleared = await removeScratch(bootRoot)
-  expect(cleared, `the scratch folder is still in the way: ${SCRATCH}`).toBe(true)
   await seedFixture(request)
-  // The switch is the app's own route — the one the app bar's Set button calls —
-  // and it is what makes the fixture the live working location.
-  const moved = await request.post('/api/path-location', {
-    data: { path: path.join(bootRoot, SCRATCH) },
-  })
-  expect(moved.ok(), `could not move the working location: ${await moved.text()}`).toBe(true)
 })
 
-test.afterEach(async ({ request }) => {
-  if (bootRoot === null) return
-  // The *live* location decides, not a remembered flag: a spec that ended its
-  // own switch back owes nothing, and one that died mid-way owes exactly one
-  // restore. A switch restarts both hubs and costs seconds, so the check keeps
-  // that one free — and it cannot drift out of sync the way a flag can.
-  if ((await currentRoot(request)) !== bootRoot) {
-    const res = await request.post('/api/path-location', { data: { path: bootRoot } })
-    expect(res.ok(), `could not restore the working location: ${await res.text()}`).toBe(true)
-  }
-  await removeScratch(bootRoot)
-  bootRoot = null
+test.afterEach(async () => {
+  fs.rmSync(WORKSPACE, { recursive: true, force: true })
 })
 
 async function openEditor(page) {
   await page.goto('/')
+  await pointTabAt(page)
   await page.getByRole('tab', { name: 'Editor' }).click()
   await expect(page.locator('.editor-nav-tree')).toBeVisible()
 }

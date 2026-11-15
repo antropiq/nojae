@@ -1,9 +1,9 @@
 """Tests for the Editor tab's terminal surface: the WebSocket PTY bridge and the
 session registry.
 
-The workspace is a throw-away ``tmp_path`` pointed at by
-``NOJAE_PATH_LOCATION`` (the ``test_editorfs``/``test_batch`` pattern), so
-the shell always starts in a clean directory. Process tests are gated on the
+Every test runs in a throw-away ``tmp_path`` workspace, entered as the seam's
+scope (the ``test_editorfs``/``test_batch`` pattern), so the shell always starts
+in a clean directory and no process-wide location decides it. Process tests are gated on the
 machine actually offering a session — the refusal guards run unconditionally on
 every platform — and the teardown grace is shortened through
 ``termhub.constants`` so a tree-kill assertion stays quick.
@@ -27,17 +27,23 @@ import asyncio
 import re
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from tests.conftest import driver_probe
+from tests.conftest import (
+    WorkspaceClient,
+    driver_probe,
+    scoped,
+    workspace_params,
+)
 
 from src.api.server import create_app
 from src.core import proctree_jobs
 from src.core import termhub
+from src.core import workspace as workspace_seam
 from src.core.termhub import drivers as termhub_drivers
 from src.core.termhub import pty_posix
 
@@ -52,15 +58,14 @@ WS_URL = "/api/terminal"
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
 @pytest.fixture
 def client(workspace: Path):
     with TestClient(create_app()) as test_client:
-        yield test_client
+        yield WorkspaceClient(test_client, workspace)
 
 
 @pytest.fixture
@@ -110,6 +115,32 @@ def open_session(client: TestClient, **kwargs):
     frame = session.receive_json()
     assert frame["type"] == "open", frame
     return session
+
+
+def open_session_in(client: TestClient, root: Any, **kwargs):
+    """A socket naming ``root``, and the ``open`` frame it answered.
+
+    The socket's query string is the only place a folder is named for a
+    terminal (spec §8: it has no per-request body), and the field is spelled by
+    the harness's helper, never here.
+    """
+    session = client.websocket_connect(WS_URL, params=workspace_params(root), **kwargs)
+    session.__enter__()
+    frame = session.receive_json()
+    assert frame["type"] == "open", frame
+    return session, frame
+
+
+def read_until(session, marker: str, frames: int = 60) -> str:
+    """Accumulate ``output`` frames until ``marker`` shows up (or the budget ends)."""
+    seen = ""
+    for _ in range(frames):
+        frame = session.receive_json()
+        if frame["type"] == "output":
+            seen += frame["data"]
+            if marker in seen:
+                break
+    return seen
 
 
 def wait_until(predicate, timeout=4.0, step=0.05) -> bool:
@@ -174,6 +205,314 @@ class TestGuards:
             assert session is not None
         finally:
             session.__exit__(None, None, None)
+
+
+class TestTheShellIsBornInItsTabsFolder:
+    """clws-07: a socket names a folder, and that folder is the shell's ``cwd``.
+
+    The terminal is the one surface with no per-request body, so its workspace
+    arrives **when the socket opens** (spec §8). Everything here is that one
+    fact and its limit: two sockets naming two folders are two shells in two
+    folders, at once, and neither moves when the other's tab re-points — "a live
+    shell keeps the folder it was born in".
+
+    The registry is deliberately *not* per workspace (spec §3.1: "the registry is
+    shared"), so both sessions live in the one map and the cap stays the app's.
+    """
+
+    @pytest.mark.needs_shell
+    @pytest.mark.needs_driver
+    def test_two_sockets_name_two_folders_and_spawn_two_shells_there(
+        self, client, tmp_path: Path, fast_grace
+    ):
+        first = tmp_path / "project-alpha"
+        second = tmp_path / "project-beta"
+        first.mkdir()
+        second.mkdir()
+
+        left, left_frame = open_session_in(client, first)
+        try:
+            right, right_frame = open_session_in(client, second)
+            try:
+                # The frame the pane renders, and the folder the *process* got:
+                # the shell is asked for its own `pwd`, wrapped in markers so
+                # what is matched is the expansion's *result* and never the
+                # echoed command line (which carries the unexpanded text).
+                assert left_frame["cwd"] == str(first)
+                assert right_frame["cwd"] == str(second)
+                left.send_json({"type": "input", "data": 'echo "::{$(pwd)}::"\r'})
+                right.send_json({"type": "input", "data": 'echo "::{$(pwd)}::"\r'})
+                assert f"::{{{first}}}::" in read_until(left, f"::{{{first}}}::")
+                assert f"::{{{second}}}::" in read_until(right, f"::{{{second}}}::")
+
+                # One registry, both sessions, each reporting its own folder.
+                rows = {row["cwd"]: row for row in client.get(WS_URL).json()["sessions"]}
+                assert set(rows) == {str(first), str(second)}
+                assert rows[str(first)]["pid"] != rows[str(second)]["pid"]
+            finally:
+                right.__exit__(None, None, None)
+        finally:
+            left.__exit__(None, None, None)
+
+    @pytest.mark.needs_shell
+    @pytest.mark.needs_driver
+    def test_a_live_shell_keeps_the_folder_it_was_born_in(
+        self, client, tmp_path: Path, fast_grace
+    ):
+        """A later socket naming another folder moves neither process nor row."""
+        first = tmp_path / "stays-here"
+        second = tmp_path / "the-other-tab"
+        first.mkdir()
+        second.mkdir()
+
+        def identity_rows(root: Path) -> List[Dict[str, Any]]:
+            """The session rows in ``root``, minus what a live shell advances.
+
+            ``bytesOut`` is a running total, so it legitimately grows between two
+            reads; the fields that must never move are the id, the pid, the
+            ``cwd`` and the moment it started.
+            """
+            return [
+                {key: row[key] for key in ("id", "pid", "cwd", "startedAt")}
+                for row in client.get(WS_URL).json()["sessions"]
+                if row["cwd"] == str(root)
+            ]
+
+        left, left_frame = open_session_in(client, first)
+        try:
+            before = identity_rows(first)
+            assert before, "the first shell was not listed in its own folder"
+
+            # Another tab's socket, naming another folder. Nothing about the
+            # first session may move — no re-root, no kill, no relaunch.
+            right, _frame = open_session_in(client, second)
+            try:
+                after = identity_rows(first)
+                assert after == before
+                assert left_frame["cwd"] == str(first)
+                # And the live shell still answers, in the folder it was born in.
+                left.send_json({"type": "input", "data": 'echo "::{$(pwd)}::"\r'})
+                assert f"::{{{first}}}::" in read_until(left, f"::{{{first}}}::")
+            finally:
+                right.__exit__(None, None, None)
+        finally:
+            left.__exit__(None, None, None)
+
+    @pytest.mark.needs_shell
+    @pytest.mark.needs_driver
+    def test_a_new_socket_for_the_same_tab_starts_in_the_new_folder(
+        self, client, tmp_path: Path, fast_grace
+    ):
+        """The pane's own reconnect: a **new** shell follows the tab."""
+        first = tmp_path / "before-the-move"
+        second = tmp_path / "after-the-move"
+        first.mkdir()
+        second.mkdir()
+
+        before, _frame = open_session_in(client, first)
+        before.__exit__(None, None, None)
+        assert wait_until(lambda: client.get(WS_URL).json() == {"sessions": []})
+
+        after, frame = open_session_in(client, second)
+        try:
+            assert frame["cwd"] == str(second)
+        finally:
+            after.__exit__(None, None, None)
+
+    @pytest.mark.needs_shell
+    @pytest.mark.needs_driver
+    def test_the_registry_reports_each_sessions_own_cwd(
+        self, client, tmp_path: Path, fast_grace
+    ):
+        """``GET /api/terminal`` is every session's row, each naming its folder."""
+        roots = []
+        for name in ("one", "two"):
+            root = tmp_path / name
+            root.mkdir()
+            roots.append(root)
+        sessions = []
+        try:
+            for root in roots:
+                session, frame = open_session_in(client, root)
+                sessions.append(session)
+                assert frame["cwd"] == str(root)
+            listed = client.get(
+                WS_URL, params=workspace_params(roots[0])
+            ).json()["sessions"]
+            assert sorted(row["cwd"] for row in listed) == sorted(str(r) for r in roots)
+        finally:
+            for session in sessions:
+                session.__exit__(None, None, None)
+
+
+class TestARefusedFolderSpawnsNothing:
+    """Spec §5.2 rules 10–12 on the socket: one sentence, no process, no slot.
+
+    The refusal is the seam's own words — the same ones the 422 routes answer —
+    so the pane shows what every other surface would have said. It arrives
+    **before** a session is reserved, so the registry and the cap see nothing.
+    """
+
+    @staticmethod
+    def _refusal(root: Any) -> str:
+        """The sentence the seam answers for ``root`` — never a second spelling."""
+        _workspace, sentence = workspace_seam.resolve(str(root))
+        assert sentence is not None
+        return sentence
+
+    def test_a_socket_that_names_no_workspace_is_refused_in_the_seams_words(
+        self, client
+    ):
+        """The socket has no default folder either (clws-10).
+
+        The field is the socket's query string (spec §8); absent, it draws the
+        same empty-name sentence every HTTP workspace-scoped route answers, in
+        the pane's ``error`` frame and as the bounded close reason. The raw
+        client is used deliberately: the suite's wrapper would add the field.
+        """
+        with client.http.websocket_connect(WS_URL) as socket:
+            assert socket.receive_json() == {
+                "type": "error",
+                "message": workspace_seam.EMPTY_REFUSAL,
+            }
+            with pytest.raises(WebSocketDisconnect) as caught:
+                socket.receive_json()
+        assert caught.value.code == termhub.CLOSE_CODE_POLICY
+        assert caught.value.reason == termhub.close_reason(
+            workspace_seam.EMPTY_REFUSAL
+        )
+
+    def test_a_missing_folder_closes_with_the_seams_sentence(
+        self, client, tmp_path: Path
+    ):
+        ghost = tmp_path / "not-a-project"
+        sentence = self._refusal(ghost)
+        with client.websocket_connect(
+            WS_URL, params=workspace_params(ghost)
+        ) as socket:
+            frame = socket.receive_json()
+            assert frame == {"type": "error", "message": sentence}
+            with pytest.raises(WebSocketDisconnect) as caught:
+                socket.receive_json()
+        # The policy close code (the same one a refused Origin gets) and the
+        # seam's sentence as the reason, bounded to what a close frame may hold.
+        assert caught.value.code == termhub.CLOSE_CODE_POLICY
+        assert caught.value.reason == termhub.close_reason(sentence)
+        assert sentence.startswith(caught.value.reason)
+
+    @pytest.mark.parametrize("raw", ["relative/name", ""], ids=["relative", "empty"])
+    def test_the_other_refusals_answer_the_same_way(self, client, raw: str):
+        sentence = self._refusal(raw)
+        with client.websocket_connect(WS_URL, params={"workspace": raw}) as socket:
+            assert socket.receive_json() == {"type": "error", "message": sentence}
+            with pytest.raises(WebSocketDisconnect) as caught:
+                socket.receive_json()
+        assert caught.value.code == termhub.CLOSE_CODE_POLICY
+        assert caught.value.reason == termhub.close_reason(sentence)
+
+    def test_a_refused_folder_spawns_no_process_and_takes_no_slot(
+        self, client, tmp_path: Path
+    ):
+        """The registry and the cap are untouched by a refusal."""
+        hub = client.app.state.terminal
+        before = (hub.count(), client.get(WS_URL).json()["sessions"])
+        assert before == (0, [])
+
+        with client.websocket_connect(
+            WS_URL, params=workspace_params(tmp_path / "no-such-folder")
+        ) as socket:
+            socket.receive_json()
+            with pytest.raises(WebSocketDisconnect):
+                socket.receive_json()
+
+        assert hub.count() == 0
+        assert client.get(WS_URL).json() == {"sessions": []}
+
+    def test_the_workspace_guard_comes_before_the_cap(
+        self, client, monkeypatch, tmp_path: Path
+    ):
+        """The pinned guard order: origin, workspace, driver, cap.
+
+        With the cap at zero a refused folder still answers the **workspace**
+        refusal, so the pane is told which folder is wrong rather than that the
+        app is full.
+        """
+        monkeypatch.setattr(termhub.constants, "MAX_SESSIONS", 0)
+        ghost = tmp_path / "no-such-folder"
+        with client.websocket_connect(
+            WS_URL, params=workspace_params(ghost)
+        ) as socket:
+            frame = socket.receive_json()
+            assert frame["message"] == self._refusal(ghost)
+            with pytest.raises(WebSocketDisconnect) as caught:
+                socket.receive_json()
+        assert caught.value.code == termhub.CLOSE_CODE_POLICY
+
+    def test_a_long_folder_name_still_reaches_the_peer_as_a_reason(
+        self, client, tmp_path: Path
+    ):
+        """A refusal names the folder, and a folder name can be long.
+
+        A close reason is capped at 123 bytes by the protocol; over it, the
+        frame cannot be serialized and the peer sees a bare 1006 with nothing to
+        show. The bounded reason keeps the code and the start of the sentence.
+        """
+        # Long, and **absent**: the sentence names it, which is what makes it
+        # longer than a close reason may be.
+        deep = tmp_path / ("nested-" + "x" * 40) / ("project-" + "y" * 60)
+        sentence = self._refusal(deep)
+        assert len(sentence.encode()) > termhub.MAX_CLOSE_REASON_BYTES
+        with client.websocket_connect(
+            WS_URL, params=workspace_params(deep)
+        ) as socket:
+            # The frame carries the whole sentence; only the close reason is cut.
+            assert socket.receive_json()["message"] == sentence
+            with pytest.raises(WebSocketDisconnect) as caught:
+                socket.receive_json()
+        assert caught.value.code == termhub.CLOSE_CODE_POLICY
+        assert caught.value.reason
+        assert caught.value.reason == termhub.close_reason(sentence)
+        assert len(caught.value.reason.encode()) <= termhub.MAX_CLOSE_REASON_BYTES
+        assert sentence.startswith(caught.value.reason)
+
+    def test_the_listing_refuses_the_same_folder_the_same_way(
+        self, client, tmp_path: Path
+    ):
+        """``GET /api/terminal`` is workspace-scoped like every other route."""
+        ghost = tmp_path / "not-a-project"
+        response = client.get(WS_URL, params=workspace_params(ghost))
+        assert response.status_code == 422
+        assert response.json()["detail"] == self._refusal(ghost)
+
+
+class TestTheCloseReasonStaysInsideTheProtocol:
+    """A refusal sentence names a folder, and the protocol caps a close reason.
+
+    ``termhub.close_reason`` is the one place that bound is applied, so what is
+    asserted here is the rule itself rather than one route's luck: a reason over
+    123 bytes does not serialize, and the peer then sees a bare 1006 close with
+    no sentence at all.
+    """
+
+    def test_a_short_reason_is_untouched(self):
+        text = "Working location must not be empty"
+        assert termhub.close_reason(text) == text
+
+    def test_a_long_reason_is_cut_to_the_cap(self):
+        text = "Working location is not an existing directory: /" + "a" * 200
+        cut = termhub.close_reason(text)
+        assert len(cut.encode()) <= termhub.MAX_CLOSE_REASON_BYTES
+        assert text.startswith(cut)
+        assert cut  # never the empty answer in place of the sentence
+
+    def test_a_multibyte_character_is_never_cut_in_half(self):
+        # Every character here is 3 bytes, so the cap lands mid-character unless
+        # the boundary is walked back — and a close reason must be valid UTF-8.
+        text = "Working location is not an existing directory: /" + "日" * 60
+        cut = termhub.close_reason(text)
+        assert len(cut.encode()) <= termhub.MAX_CLOSE_REASON_BYTES
+        cut.encode("utf-8")  # decoding is the assertion: nothing half-written
+        assert text.startswith(cut)
 
 
 class TestDriverSeam:

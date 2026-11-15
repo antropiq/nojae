@@ -2,6 +2,7 @@ import { useEditorFiles } from './useEditorFiles'
 import { useEditorNotices } from './useEditorNotices'
 import { useGitStatus } from './useGitStatus'
 import { registerRenameChord, useWorkspaceTree } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // The rename/move flow behind the tree's inline name input: Rename… and F2.
@@ -115,7 +116,7 @@ export function useEditorRename() {
       let res
       let body = null
       try {
-        res = await fetch('/api/fs/rename', {
+        res = await fetch(withWorkspace('/api/fs/rename'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ from, to }),

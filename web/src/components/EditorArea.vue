@@ -476,11 +476,15 @@ onBeforeUnmount(() => {
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
           <path d="M14 2v6h6" />
         </svg>
-        <p class="stream-empty-title">{{ state.loading ? 'Loading…' : 'Open a file' }}</p>
+        <!-- The tab's folder, by the same label the tree's root row uses: an
+             empty pane that named no folder could be any checkout. -->
+        <p class="stream-empty-title">
+          {{ state.loading ? 'Loading…' : `Open a file in ${tree.rootLabel()}` }}
+        </p>
         <p class="caption">
           {{
             state.loading
-              ? 'Reading it from the working location.'
+              ? `Reading it from ${tree.rootLabel()}.`
               : 'Pick one in the tree on the left — its contents appear here.'
           }}
         </p>

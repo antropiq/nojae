@@ -4,13 +4,16 @@ import { mount } from '@vue/test-utils'
 import AppBar from '../src/components/AppBar.vue'
 import { useAppShell } from '../src/composables/useAppShell'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
+import { useWorkspaceSession } from '../src/composables/useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // The connection line under the brand, now a **store-level** answer (§5.4).
 //
 // The model connection is install-scoped (D11): servers, models and agents live
 // in the settings store, so switching workspace changes none of them and the
-// bar has nothing to re-read. What it shows is the store-level question — *is
+// bar has nothing to re-read. Since clws-02 the folder is the **tab's** own, so
+// "switching workspace" is one tab moving and no other tab noticing. What the
+// bar shows is the store-level question — *is
 // the store usable, and does it hold at least one model?* — and the sentence is
 // the server's, shown verbatim.
 //
@@ -48,31 +51,37 @@ const UNUSABLE_STORE = {
 }
 
 const { state } = useAppShell()
+const { state: session, setWorkspaceFromField } = useWorkspaceSession()
 const tree = useWorkspaceTree()
 
 function jsonResponse(body, ok = true, status = 200) {
   return Promise.resolve({ ok, status, json: () => Promise.resolve(body) })
 }
 
-// The switch answers with the new root's own blocks. `/api/config` answers the
-// *store's* catalogue, which a switch does not change (D11).
+// The workspace read answers with the new root's own blocks. `/api/config`
+// answers the *store's* catalogue, which a move does not change (D11).
 function stubApi(config = CONFIGURED) {
   const calls = []
   vi.spyOn(globalThis, 'fetch').mockImplementation((url, options) => {
     const key = String(url)
     calls.push([key, options?.method ?? 'GET'])
     if (key.startsWith('/api/config')) return jsonResponse(config)
-    if (key.startsWith('/api/path-location')) {
+    if (key.startsWith('/api/workspace')) {
       return jsonResponse({
-        path: NEW_ROOT,
+        workspace: NEW_ROOT,
+        default: '/srv/app',
         policy: { state: 'existing', path: `${NEW_ROOT}/.nojae/read-write-policy.json` },
-        agentModes: { state: 'existing', path: '' },
-        mcp: { installed: true, connectors: [] },
-        lsp: { installed: true, servers: [] },
+        mcpSettings: { state: 'existing', path: '' },
+        lspSettings: { state: 'existing', path: '' },
+        lspSettingsTemplate: { state: 'existing', path: '' },
+        hubs: {
+          mcp: { installed: true, connectors: [] },
+          lsp: { installed: true, servers: [] },
+        },
       })
     }
     if (key.startsWith('/api/fs/tree')) {
-      const path = decodeURIComponent(key.slice('/api/fs/tree?path='.length))
+      const path = treePathOf(key)
       return jsonResponse({
         path,
         workspace: NEW_ROOT,
@@ -85,19 +94,25 @@ function stubApi(config = CONFIGURED) {
   return calls
 }
 
+// The tree's own `path` parameter, read off a URL that also carries the tab's
+// workspace field (clws-02) — so the stub never spells the field itself.
+function treePathOf(key) {
+  const search = new URLSearchParams(key.slice(key.indexOf('?') + 1))
+  return search.get('path') ?? ''
+}
+
 function resetState() {
   state.config = CONFIGURED
   state.storeState = CONFIGURED.store
   state.configError = null
-  // The switch's own shape: the field holds what was typed, `pathLocationCurrent`
-  // what the server applied. Set is enabled -- and the request is made -- only
-  // while the two differ, so a test that gives them the same value asserts a
-  // call that `setPathLocation` refuses to make.
-  state.pathLocation = NEW_ROOT
-  state.pathLocationCurrent = OLD_ROOT
-  state.pathLocationSaving = false
-  state.pathLocationError = null
-  state.pathLocationPolicyNote = null
+  // The move's own shape: the field holds what was typed, `workspace` what the
+  // server applied. Set is enabled — and the request is made — only while the
+  // two differ.
+  session.field = NEW_ROOT
+  session.workspace = OLD_ROOT
+  session.saving = false
+  session.error = null
+  session.policyNote = null
   state.activeTab = 'chat'
   tree.state.nodes = {}
   tree.state.workspace = OLD_ROOT
@@ -158,13 +173,14 @@ describe('the brand connection line is the store-level answer', () => {
   })
 
   // D11's point, as the rendered answer: the store is install-scoped, so a
-  // workspace switch re-reads nothing and the bar's line does not move.
+  // tab moving to another folder re-reads nothing and the bar's line does not
+  // move.
   it('a workspace switch does not re-read the connection', async () => {
     const calls = stubApi()
     const wrapper = mount(AppBar)
     const before = calls.filter(([url]) => url.startsWith('/api/config')).length
 
-    await useAppShell().setPathLocation()
+    await setWorkspaceFromField()
     await wrapper.vm.$nextTick()
 
     expect(
@@ -174,17 +190,18 @@ describe('the brand connection line is the store-level answer', () => {
     wrapper.unmount()
   })
 
-  // A refused switch moves nothing at all, and the bar's line is not the
-  // switch's business any more.
+  // A refused move changes nothing at all — not the folder, and not the bar's
+  // line. The refusal is the server's sentence, shown where the gesture was
+  // made (spec §5.2 rule 12: a refusal is an answer, never a substitution).
   it('a refused switch leaves the line alone', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
       const key = String(url)
       if (key.startsWith('/api/config')) return jsonResponse(EMPTY_STORE)
-      if (key.startsWith('/api/path-location')) {
+      if (key.startsWith('/api/workspace')) {
         return jsonResponse(
-          { detail: 'Cannot change the working location while a chat reply is streaming' },
+          { detail: 'Working location is not an existing directory: /srv/nope' },
           false,
-          409,
+          422,
         )
       }
       return jsonResponse({})
@@ -193,10 +210,13 @@ describe('the brand connection line is the store-level answer', () => {
     state.storeState = EMPTY_STORE.store
 
     const wrapper = mount(AppBar)
-    await useAppShell().setPathLocation()
+    await setWorkspaceFromField()
     await wrapper.vm.$nextTick()
 
     expect(brandLines(wrapper)).toEqual(['no model configured'])
+    // The tab stayed where it was, and said why in the field's own line.
+    expect(session.workspace).toBe(OLD_ROOT)
+    expect(session.error).toBe('Working location is not an existing directory: /srv/nope')
     wrapper.unmount()
   })
 })

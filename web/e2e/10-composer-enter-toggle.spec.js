@@ -25,7 +25,7 @@ const DRAFT = 'first line'
 // "a send happened" from "nothing happened", with no model in the loop.
 async function stubChat(page) {
   const requests = []
-  await page.route('**/api/chat', (route) => {
+  await page.route(/\/api\/chat(?:\?|$)/, (route) => {
     requests.push(route.request().url())
     return route.fulfill({
       status: 500,

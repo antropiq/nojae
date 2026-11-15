@@ -2,10 +2,9 @@
 
 ## What it is
 
-A self-hosted FastAPI + Vue 3 workspace where a coding agent works on a real
-checkout: a streaming chat with the configured model, an editor over the same
-folder, and everything reaching the browser live over Server-Sent Events.
-Desktop browsers only.
+A self-hosted FastAPI + Vue 3 app where a coding agent works on a real checkout:
+a streaming chat with the configured model, an editor over the same folder, all
+live over Server-Sent Events. Desktop browsers only.
 
 ## Rules
 
@@ -34,7 +33,7 @@ The tabs share one settings store and one streaming layer:
 - **WorkBench** — interactive streaming chat with the configured model,
   optionally augmented with MCP connectors and language servers, plus a batch
   mode that works through a folder of task files.
-- **Editor** — the working location as a file tree, a code pane and a terminal.
+- **Editor** — the tab's folder as a file tree, a code pane and a terminal.
   Its writes form one bounded surface, reachable from the browser only, never
   from a hub or a tool. The code pane is served by the same language servers, the
   same declaration and the same path policy as the WorkBench tools, and answers
@@ -49,23 +48,24 @@ A UI-free **core** and the **API** in front of it. Core functions never touch
 FastAPI — they take an injected `emit(event: dict)` callable and report progress
 through it.
 
-- `config` — `.env`, the connection one agent resolves from the settings store,
-  and the project-instructions block injected into chat.
+- `config` — `.env`, the connection an agent resolves from the settings store, and
+  the project-instructions block for chat; `core/workspace.py` answers which folder.
 - `api` — the REST and SSE endpoints under one route prefix, and the chat
   stream's own SSE channel: one worker thread feeding it, one terminal frame
   closing it.
 - `core` — the streamed chat reply with its shared tool-call loop; the
   batch-mode lot listing; the agent modes; `appdb`, the store's only opener.
-- `core/mcphub/` and `core/lsphub/` — the MCP and language-server hubs. They
-  mirror each other (discovery, manager, seed) — keep that symmetry when
-  touching either one. Both read their declarations from the **working
-  location's** reserved folder and are hot-toggled from the UI.
+- `core/mcphub/` and `core/lsphub/` — the MCP and language-server hubs, one per
+  workspace and held in a pool. They mirror each other (discovery, manager, seed) —
+  keep that symmetry when touching either one. Both read their declarations from
+  that workspace's reserved folder and are hot-toggled from the UI.
 - `core/editorfs/` — the Editor's file surface. Paths are relative to the
-  working location and every call answers from the workspace policy's verdict.
+  request's workspace and every call answers from the workspace policy's verdict.
   Reads are bounded, writes to `ro`/`hidden` are refused, and no write destroys
   bytes. What the tree lists, what search can answer about, and what is
   invisible to both are the same set of paths.
-- `core/termhub/` — one shell per WebSocket, on the platform's pseudo-terminal.
+- `core/termhub/` — one shell per WebSocket, on the platform's pseudo-terminal; a
+  new shell starts in its tab's folder, and a live one keeps the folder it was born in.
 - `core/proctree.py` — the process-tree teardown the hubs and the terminal share.
 
 ### Frontend (`web/src/`)
@@ -87,8 +87,8 @@ Configuration is edited from the UI and takes effect hot — except a hand-edit 
 
 The exact route list belongs to the API module; what matters architecturally:
 
-- **Chat**: one request per reply, streamed back over SSE. The client re-posts
-  the whole history each time; the server keeps no conversation state.
+- **Chat**: one request per reply, streamed over SSE and naming the tab's workspace
+  and its remembered agent. The client re-posts the history; the server keeps no state.
 - **Every WorkBench turn runs in an agent mode** — an install-owned persona that
   replaces the configured system prompt, names the model the turn runs on, and may
   switch a whole hub off. It only ever narrows what settings and the conversation
@@ -96,10 +96,9 @@ The exact route list belongs to the API module; what matters architecturally:
 
 ### SSE is the UI's only source of truth
 
-Core emits plain dicts; the streaming endpoint is the only thing that turns
-them into frames. Each stream has its own channel and closes with exactly one
-terminal event; a reply the user paused still ends on its own ack, keeping its
-partial turn.
+Core emits plain dicts; the streaming endpoint is the only thing that turns them
+into frames. Each stream has its own channel and closes with exactly one terminal
+event; a paused reply still ends on its own ack, keeping its partial turn.
 
 Measurement rules hold across every stream:
 
@@ -128,20 +127,21 @@ together:
   reference an environment variable so one declaration works on every machine;
   an unresolved name is kept verbatim with a note, never blanked.
 - **A test run takes its endpoint from the test files, never from a developer's.**
-- **One setting defines the working location** that every file-touching part of
-  the app roots itself at, and it is held outside the settings store. Every path
-  the app holds is relative to it, so moving it invalidates what is genuinely
-  workspace-scoped — hubs, policy, cached views, unsaved work reported rather
-  than dropped — and never the settings store, which is the install's.
+- **The folder is the tab's, not the process's.** Each workspace-scoped request
+  names one; the server holds it for that request only, so tabs work on several
+  folders. Moving a tab's folder invalidates that folder's hubs, policy, cached
+  views and unsaved work — reported, not dropped — never the settings store.
+  `${NOJAE_PATH_LOCATION}` means the workspace served; `tests/test_workspace_seam.py`
+  guards the seam.
 - **Inside the reserved folder a declaration is created only when absent and
   changed only outside the app.** The folder is hidden from the tree, from reads
   and from git status. No write destroys bytes: a save backs up what it replaces,
   a delete moves the file into a dated batch.
 - **Path rules come from two levels, one verdict: the strictest match wins.** The
-  app's own rules apply only while the working location is the app's directory;
-  the workspace's file is always active and can tighten them but never loosen
-  them. A hidden path is indistinguishable from an absent one to a reader and
-  named to a writer; a read-only path is searchable but named to a writer.
+  app's own rules apply only while a workspace is the app's own directory; the
+  workspace's file is always active and can tighten them but never loosen them.
+  A hidden path is indistinguishable from an absent one to a reader and named to a
+  writer; a read-only path is searchable but named to a writer.
 - **The connectors answer the workspace level for their own root**, each reading
   that policy in its own process, so a read-only folder is uneditable by an agent
   too — app and connector share one parser, one matcher and one refusal sentence.
@@ -159,35 +159,32 @@ together:
   worker thread publishing events; the streaming endpoint consumes them. That
   worker-plus-cancellation pattern is the chat's, and nothing under `core` may
   import the API layer.
-- **Hubs are long-lived singletons.** A restart rebuilds a hub's internals but
-  never replaces the object the app holds, because worker threads keep the
-  reference across a request.
+- **The app holds one hub pool, keyed by folder.** A workspace's own hubs are
+  rebuilt in place inside it and never replaced while a worker thread holds them,
+  because something other than a single request owns the object.
 - **A declared-but-unconnected language server is still published** from its
-  declared tools and revived by its first call; only being switched off or
-  errored keeps it out of the catalogue.
+  declared tools and revived by its first call; only off or errored hides it.
 - **Teardown kills process *trees*, not wrappers**, on either platform and by
-  either mechanism, so children a hub or the terminal spawned of their own never
-  outlive the app that started them.
+  either mechanism, so nothing a hub or the terminal spawned outlives the app.
 - **Tools are read-only by design.** Every tool returns information, the shell
-  connector execs a single command with no shell (so command chains, pipes and
-  redirections are unrepresentable), and each connector's reach is bounded by its
-  own deny-list. `tests/test_write_surface_isolation.py` asserts that instead of
-  trusting this sentence: no connector, tool or chat path reaches a write route,
-  and the terminal is never a tool.
+  connector execs one command with no shell (chains, pipes and redirections are
+  unrepresentable), and each connector's reach is bounded by its own deny-list.
+  `tests/test_write_surface_isolation.py` asserts it: no connector, tool or chat
+  path reaches a write route, and the terminal is never a tool.
 - **Every write surface is the browser's alone** — the Editor's file routes and
   the settings-store routes — and the file ones are refused while a chat reply
-  streams. Batch mode lists its lot through the shared path policy but never
-  reads or writes its contents — only the connectors do.
-- **A lot runs every task in one agent, read from the composer's dropdown at
-  launch** — the same agent a standard session of that choice runs as — so moving
-  the choice mid-lot reaches no task. A selection the app cannot resolve, or one
-  with no model on it, stops the lot rather than running it under a stranger.
+  streams **on that workspace**. Batch mode lists its lot through the shared path
+  policy but never reads or writes its contents — only the connectors do.
+- **A lot runs every task in one agent and one workspace, both pinned at launch**
+  — the agent from the composer's dropdown, the folder from the tab that started
+  it, the same as a standard session of that choice — so moving either mid-lot
+  reaches no task. An unresolvable selection, or one with no model, stops the lot.
 - **A task is finished when its file leaves the lot folder**; that move is the
   agent's own acknowledgement, and re-listing is the only way the loop can see it.
   A file still there is relaunched up to the loop's budget, then the lot aborts.
-- **This file feeds the chat**: when the working location carries it, it is
-  injected into every chat turn and re-read per request. The model acts on it, so
-  accuracy matters more than volume.
+- **This file feeds the chat**: when the workspace the request names carries it,
+  it is injected into every chat turn and re-read per request. The model acts on
+  it, so accuracy matters more than volume.
 - **Tests stay hermetic**: no test reads a real model connection, reaches a live
   hub or opens the install's settings store — the hubs are disabled by an
   environment flag and each test runs on a temporary store of its own.
@@ -220,12 +217,13 @@ chains, redirections or backgrounding, and no variable, glob or home expansion.
 ## Gotchas
 
 - **A stream cut by the server looks like a finished answer** at the chunk level.
-  The honest signal is whether a real finish marker was ever seen, read after the
-  loop is drained. A truncated chat reply ends as an error, which also stops a
-  half-streamed tool call from being executed.
+  The honest signal is whether a real finish marker was seen after the loop drains.
+  A truncated reply ends as an error, which also stops a half-streamed tool call.
 - **Token counts can look server-reported when they are not**: a stream that dies
-  before any usage chunk gets a re-counted back-fill, so a reported figure is not
-  evidence of where it came from. Keep the estimated flag honest.
+  before any usage chunk gets a re-counted back-fill, so keep the estimated flag honest.
+- **A core surface reached outside a workspace scope is an error, never a fallback**
+  to the installation folder or the previous one.
+- **A workspace the pool refused is a named refusal, never an empty catalogue.**
 - **Adding a connector is never a module under `src/`** — it is a script plus an
   entry in the workspace's declaration file naming it. Both halves are needed.
 

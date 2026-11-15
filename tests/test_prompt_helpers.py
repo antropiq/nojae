@@ -286,12 +286,13 @@ class TestTheBackupBeforeADelete:
 class TestTheStoreIsNotTheWorkspace:
     """D11: a bullet is a habit of the user, so a switch changes nothing here."""
 
-    def test_the_rows_survive_a_working_location_switch(self, monkeypatch):
+    def test_the_rows_survive_a_working_location_switch(self):
         prompt_helpers.save_prompt_helper(1, "#ff0000", "mine")
 
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", "/somewhere/else")
+        from tests.conftest import scoped
 
-        assert prompt_helpers.load_prompt_helpers()[0]["content"] == "mine"
+        with scoped("/somewhere/else"):
+            assert prompt_helpers.load_prompt_helpers()[0]["content"] == "mine"
 
     def test_nothing_in_the_module_reads_the_working_location(self):
         source = Path(prompt_helpers.__file__).read_text(encoding="utf-8")

@@ -368,19 +368,21 @@ async def hub(tmp_path):
 
 
 @pytest.fixture
-def workspace(tmp_path, monkeypatch):
-    """The working location, made the fake server's own ``workspaceRoot``.
+async def workspace(tmp_path):
+    """The workspace, made the fake server's own ``workspaceRoot``.
 
     ``_fake_server_entry`` roots its server at ``tmp_path/workspace``, so
-    pointing the working location there is what makes a workspace-relative
-    answer and a server-relative one the same string — and what lets the
-    "outside the server's root" test move the location one level up instead.
+    entering that folder's scope is what makes a workspace-relative answer and a
+    server-relative one the same string — and what lets the "outside the
+    server's root" test move the workspace one level up instead.
     """
+    from tests.conftest import scoped
+
     root = tmp_path / "workspace"
     root.mkdir(exist_ok=True)
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
     policy_file.invalidate_policy_cache()
-    yield root
+    with scoped(root):
+        yield root
     policy_file.invalidate_policy_cache()
 
 
@@ -437,7 +439,6 @@ class TestEditorDefinitionAnswer:
         """
         await _start(hub, _fake_server_entry(workspace.parent))
         (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
-
         answer = hub.query_editor_sync(
             "definition", "a.py", position={"line": 0, "character": 0}
         )
@@ -460,16 +461,18 @@ class TestEditorDefinitionAnswer:
         """
         root = tmp_path / "workspace"
         (root / "web" / "src").mkdir(parents=True)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
         policy_file.invalidate_policy_cache()
         entry = _fake_server_entry(tmp_path)
         entry["workspaceRoot"] = str(root / "web")
         await _start(hub, entry)
         (root / "web" / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
 
-        answer = hub.query_editor_sync(
-            "definition", "web/src/app.py", position={"line": 0, "character": 0}
-        )
+        from tests.conftest import scoped
+
+        with scoped(root):
+            answer = hub.query_editor_sync(
+                "definition", "web/src/app.py", position={"line": 0, "character": 0}
+            )
 
         assert answer["status"] == "ok", answer["reason"]
         assert answer["result"]["path"] == "web/src/app.py"
@@ -530,14 +533,16 @@ class TestEditorQuietAnswers:
         """The working location is the parent; the server is rooted below it."""
         root = tmp_path / "workspace"
         root.mkdir(exist_ok=True)
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         policy_file.invalidate_policy_cache()
         await _start(hub, _fake_server_entry(tmp_path))
         (tmp_path / "outside.py").write_text("x = 1\n", encoding="utf-8")
 
-        answer = hub.query_editor_sync(
-            "definition", "outside.py", position={"line": 0, "character": 0}
-        )
+        from tests.conftest import scoped
+
+        with scoped(tmp_path):
+            answer = hub.query_editor_sync(
+                "definition", "outside.py", position={"line": 0, "character": 0}
+            )
 
         assert answer["status"] == "no_server"
         assert answer["server"] is None
@@ -855,9 +860,13 @@ def editor_client(monkeypatch, tmp_path):
     try:
         with TestClient(app) as client:
             # The lifespan's own hub is the disabled one (the autouse switch);
-            # this is the hub the route must answer from.
-            app.state.lsp = manager
-            yield client, app, manager
+            # this is the hub the route must answer from — on the **workspace's
+            # own** set, because a hub route now resolves the request's folder
+            # and reaches that folder's managers (clws-06).
+            from tests.conftest import WorkspaceClient, set_workspace_hubs
+
+            set_workspace_hubs(app, root, lsp=manager)
+            yield WorkspaceClient(client, root), app, manager
     finally:
         asyncio.run(manager.stop_all())
 
@@ -947,7 +956,11 @@ class TestEditorQueryRoute:
 
         client, _app, _manager = editor_client
         (tmp_path / "workspace" / "a.py").write_text("x = 1\n", encoding="utf-8")
-        monkeypatch.setattr(routes, "_CHAT_TASKS", {"a-streaming-reply"})
+        # The in-flight map is keyed **with the workspace** a reply is about
+        # (clws-04); this route asks the question of no folder at all, because
+        # it is a read.
+        monkeypatch.setattr(routes, "_CHAT_TASKS",
+                            {"a-streaming-reply": str(tmp_path / "workspace")})
 
         response = client.post(
             "/api/lsp/query",
@@ -962,7 +975,9 @@ class TestEditorQueryRoute:
     ):
         """A hub that is not there must not become a 500 on every Ctrl+click."""
         client, app, _manager = editor_client
-        app.state.lsp = None
+        from tests.conftest import NO_HUB, set_workspace_hubs
+
+        set_workspace_hubs(app, tmp_path / "workspace", lsp=NO_HUB)
 
         response = client.post(
             "/api/lsp/query",
@@ -1028,7 +1043,8 @@ class TestTheTwoGatesThatMustNotApply:
 
         client, _app, _manager = editor_client
         (tmp_path / "workspace" / "a.py").write_text("x = 1\n", encoding="utf-8")
-        monkeypatch.setattr(routes, "_CHAT_TASKS", {"a-streaming-reply"})
+        monkeypatch.setattr(routes, "_CHAT_TASKS",
+                            {"a-streaming-reply": str(tmp_path / "workspace")})
 
         response = client.post(
             "/api/lsp/query",

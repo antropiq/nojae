@@ -43,11 +43,24 @@ import pytest
 
 from src.core import proctree
 from src.core import proctree_jobs
+from src.core import workspace
 from src.core.termhub import constants as termhub_constants
 from src.core.termhub import drivers as termhub_drivers
 from src.core.termhub import pty_conpty, pty_posix, shells
 from src.core.termhub import session as terminal_session
 
+
+@pytest.fixture(autouse=True)
+def _conpty_workspace(tmp_path):
+    """Every case runs in its own ``tmp_path`` scope (clws-10).
+
+    ``TerminalSession.spawn`` reads the folder from the seam once, and these
+    cases spawn directly rather than through the socket, so the fixture enters
+    the scope they would otherwise have pinned through the retired
+    ``NOJAE_PATH_LOCATION``.
+    """
+    with workspace.scope(str(tmp_path)):
+        yield
 
 # -- the planted console -------------------------------------------------------
 
@@ -750,6 +763,65 @@ class TestTheSessionOwnsOneJob:
         asyncio.run(scenario())
 
 
+# -- the folder a shell is born in (clws-07) -----------------------------------
+#
+# The same fact ``test_terminal.py`` measures through the socket, forced on
+# **either** runner through the planted console: the session reads the folder
+# from the seam once, hands it to the console as the child's cwd, and keeps it
+# for the life of the session — so two sessions born in two workspaces report
+# two folders and neither moves when the other's tab re-points.
+
+
+@pytest.mark.needs_shell
+@pytest.mark.needs_driver
+class TestTheConsoleStartsInItsSocketsFolder:
+    """:meth:`TerminalSession.spawn` is the one place the folder is read."""
+
+    def _spawn_in(self, root, monkeypatch, fake_winpty):
+        """A session spawned inside ``root``'s scope, through the planted pair."""
+        monkeypatch.setattr(pty_posix, "available", lambda: False)
+        monkeypatch.setattr(proctree_jobs, "ProcessJob", RecordingJob)
+
+        async def emit(_event: Dict[str, Any]) -> None:
+            pass
+
+        with workspace.scope(str(root)):
+            session = terminal_session.TerminalSession(emit)
+            session.spawn(cols=80, rows=24)
+        return session
+
+    def test_the_child_is_started_in_the_scope_it_was_born_in(
+        self, fake_winpty, monkeypatch, tmp_path
+    ):
+        session = self._spawn_in(tmp_path, monkeypatch, fake_winpty)
+        try:
+            assert session.cwd == str(tmp_path)
+            assert fake_winpty.last.spawned["cwd"] == str(tmp_path)
+            assert session.status()["cwd"] == str(tmp_path)
+        finally:
+            _release_session(session)
+
+    def test_two_sessions_in_two_workspaces_hold_two_folders(
+        self, fake_winpty, monkeypatch, tmp_path
+    ):
+        first = tmp_path / "project-alpha"
+        second = tmp_path / "project-beta"
+        first.mkdir()
+        second.mkdir()
+        left = self._spawn_in(first, monkeypatch, fake_winpty)
+        try:
+            right = self._spawn_in(second, monkeypatch, fake_winpty)
+            try:
+                assert (left.cwd, right.cwd) == (str(first), str(second))
+                # And the *second* spawn did not move the first: the folder is
+                # read once per session, not once per process.
+                assert left.status()["cwd"] == str(first)
+            finally:
+                _release_session(right)
+        finally:
+            _release_session(left)
+
+
 # -- the Linux import promise, forced on this runner ---------------------------
 
 
@@ -823,7 +895,6 @@ class TestRealPseudoConsole:
         self, monkeypatch, tmp_path
     ):
         """C-D3 case 1: an ``exit``/Ctrl-D ends the pump on the driver's EOF."""
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         frames: List[Dict[str, Any]] = []
 
         async def emit(event: Dict[str, Any]) -> None:
@@ -848,7 +919,6 @@ class TestRealPseudoConsole:
     def test_a_ctrl_d_eof_also_ends_the_pump_with_an_exit_frame(
         self, monkeypatch, tmp_path
     ):
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         frames: List[Dict[str, Any]] = []
 
         async def emit(event: Dict[str, Any]) -> None:
@@ -881,7 +951,6 @@ class TestRealPseudoConsole:
         far end. The wait is bounded by ``STOP_GRACE_SECONDS`` — the same number
         and rule as both hubs', unchanged by this platform.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         grace = termhub_constants.STOP_GRACE_SECONDS
 
         async def emit(_event: Dict[str, Any]) -> None:
@@ -914,7 +983,6 @@ class TestRealPseudoConsole:
         self, monkeypatch, tmp_path
     ):
         """The server-side round-trip (the shell's side is in the Results note)."""
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
 
         async def emit(_event: Dict[str, Any]) -> None:
             pass
@@ -941,7 +1009,6 @@ class TestRealPseudoConsole:
         answer is empty (C-D5's forgotten process). Asserted here against a real
         console: two distinct pids, both live, neither the app itself.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
 
         async def emit(_event: Dict[str, Any]) -> None:
             pass
@@ -975,7 +1042,6 @@ class TestRealPseudoConsole:
         the child bash put in the background. Liveness is the shared probe,
         never ``os.kill(pid, 0)`` (which here would *kill* what it inspected).
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         monkeypatch.setattr(termhub_constants, "STOP_GRACE_SECONDS", 1.0)
 
         async def emit(_event: Dict[str, Any]) -> None:
@@ -1052,7 +1118,6 @@ class TestRealPseudoConsole:
         measured by csl-06), so a teardown reached by a *self-exiting* shell,
         with no kill frame and no disconnect pressure, must still end it.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         monkeypatch.setattr(termhub_constants, "STOP_GRACE_SECONDS", 1.0)
 
         async def emit(_event: Dict[str, Any]) -> None:
@@ -1099,7 +1164,6 @@ class TestRealPseudoConsole:
         no graceful step reaches is force-killed through the job and the call
         still lands inside the patched grace.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         grace = 1.0
         monkeypatch.setattr(termhub_constants, "STOP_GRACE_SECONDS", grace)
 
@@ -1136,7 +1200,6 @@ class TestRealPseudoConsole:
         frame ends the run loop, the shell pid is gone by the shared probe,
         and the teardown returned inside the patched grace.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         grace = 1.0
         monkeypatch.setattr(termhub_constants, "STOP_GRACE_SECONDS", grace)
 
@@ -1183,7 +1246,6 @@ class TestRealPseudoConsole:
         still in the job and dies through the shared teardown — and the
         *missing* helper is a thing the driver says, not one the session hides.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         monkeypatch.setattr(termhub_constants, "STOP_GRACE_SECONDS", 1.0)
         # The driver's enumeration seam, made blind for this session (the
         # hermetic rule: patch the seam's own attribute, not a path).
@@ -1217,7 +1279,6 @@ class TestRealPseudoConsole:
         and a snowman. If the console ever hands back something the driver
         cannot promise is UTF-8, this is the test that says so.
         """
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         payload = "café中文 ☃"
         gathered: List[bytes] = []
 

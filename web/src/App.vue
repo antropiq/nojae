@@ -5,6 +5,7 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import BatchModeDialog from './components/BatchModeDialog.vue'
 import WorkBenchView from './components/WorkBenchView.vue'
 import { useAppShell } from './composables/useAppShell'
+import { loadWorkspace } from './composables/useWorkspaceSession'
 import { useTabTitle } from './composables/useTabTitle'
 import { useSessionSound } from './composables/useSessionSound'
 import { loadChatHubs } from './composables/useChat'
@@ -25,7 +26,7 @@ useTabTitle()
 // how the end of a conversation reaches a user looking at another window.
 useSessionSound()
 
-const { state, loadConfig, loadPathLocation } = useAppShell()
+const { state, loadConfig } = useAppShell()
 
 // The lazy chunk is only fetched once the tab has been opened: an async
 // component behind a plain v-show resolves its import at boot, which would make
@@ -40,21 +41,30 @@ watch(
   { immediate: true },
 )
 
-onMounted(() => {
+onMounted(async () => {
+  // The two **installation-scoped** reads go first and need no folder: the
+  // catalogue and the bullets are the install's, so they answer the same way in
+  // every workspace (spec §4.2) and a tab whose folder has gone away still gets
+  // them.
   loadConfig()
-  // The app bar shows the active working location, so fetch it at boot too —
-  // not only when the settings dialog opens.
-  loadPathLocation()
+  usePromptHelpers().loadPromptHelpers()
+  // The **tab's own** folder, awaited before anything that asks about a
+  // workspace: the stored one if this tab has one, the installation folder
+  // otherwise (spec D4). The app bar's field shows it and every workspace-scoped
+  // request carries it; the address bar never does. A reload returns the tab to
+  // its folder, a new tab lands on the installation, and a folder that has gone
+  // away is reported rather than repaired.
+  //
+  // Awaited rather than fired alongside the rest, because the hub reads below
+  // are workspace-scoped: issued first they would name no folder and answer
+  // about the interim default — the wrong connectors and language servers for a
+  // tab that remembered another folder.
+  await loadWorkspace()
   // The WorkBench tab is mounted from the start (v-show), so its composer's
   // mode dropdown and the tools dock must not wait for a tab click that may
   // never come. The tab's own watch keeps them fresh on re-entry; this is the
   // first fill.
   loadChatHubs()
-  // Same first-fill rule for the memory bullets: the chat tab is now the
-  // default screen, so WorkBenchView's tab watch fires on a later re-entry but
-  // never for the landing itself. Without this the bullets stay empty until
-  // you leave the tab and come back.
-  usePromptHelpers().loadPromptHelpers()
 })
 </script>
 

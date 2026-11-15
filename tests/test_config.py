@@ -9,11 +9,11 @@ import pytest
 from src.core.llmkit import client as llmkit_client
 from src.core.llmkit import constants as llmkit_constants
 from src.core import appdb
+from src.core import workspace as workspace_seam
 from src.config import (
     DEFAULT_MAX_TOOL_ITERATION,
     LLM_DEBUG_KEY,
     LEGACY_LLM_DEBUG_KEY,
-    PATH_LOCATION_KEY,
     _DebugStreamHandler,
     agent_instructions_block,
     apply_llm_debug,
@@ -21,13 +21,10 @@ from src.config import (
     llm_debug_enabled,
     load_agent_instructions,
     max_tool_iteration,
-    default_path_location,
     load_endpoints_config,
-    path_location,
-    setup_path_location,
 )
 from src.core.models import DEFAULT_LLM_SYSPROMPT
-from tests.conftest import neutralise_store, write_store_connection
+from tests.conftest import neutralise_store, scoped, write_store_connection
 
 
 def agent_row(agent_id: str = "code") -> Dict[str, Any]:
@@ -238,44 +235,6 @@ class TestThePerAgentCap:
         assert max_tool_iteration(agent_row()) == 4
 
 
-class TestPathLocation:
-    """The boot default of NOJAE_PATH_LOCATION (the hubs' working dir)."""
-
-    def test_seeded_from_the_install_dir_when_unset(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.delenv(PATH_LOCATION_KEY, raising=False)
-        setup_path_location()
-        assert os.environ[PATH_LOCATION_KEY] == default_path_location()
-        assert path_location() == default_path_location()
-
-    def test_an_existing_value_wins(self, monkeypatch: pytest.MonkeyPatch):
-        # Exported by the launcher or written in .env: boot must not clobber
-        # it, which is what lets an operator pin the location.
-        monkeypatch.setenv(PATH_LOCATION_KEY, "/somewhere/else")
-        setup_path_location()
-        assert path_location() == "/somewhere/else"
-
-    def test_blank_value_is_treated_as_unset(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv(PATH_LOCATION_KEY, "   ")
-        setup_path_location()
-        assert path_location() == default_path_location()
-
-    def test_is_idempotent(self, monkeypatch: pytest.MonkeyPatch):
-        # create_app() runs per test; re-seeding must not drift the value.
-        monkeypatch.delenv(PATH_LOCATION_KEY, raising=False)
-        setup_path_location()
-        first = os.environ[PATH_LOCATION_KEY]
-        setup_path_location()
-        assert os.environ[PATH_LOCATION_KEY] == first
-
-    def test_read_live_after_an_api_style_change(self, monkeypatch: pytest.MonkeyPatch):
-        # The endpoint mutates os.environ directly; path_location() must see it
-        # without any reload, which is what makes the tool restart pick it up.
-        monkeypatch.setenv(PATH_LOCATION_KEY, "/before")
-        assert path_location() == "/before"
-        monkeypatch.setenv(PATH_LOCATION_KEY, "/after")
-        assert path_location() == "/after"
-
-
 class TestAgentInstructions:
     """The project instructions (AGENTS.md) injected into the Chat prompt."""
 
@@ -292,40 +251,41 @@ class TestAgentInstructions:
         (tmp_path / "AGENTS.md").mkdir()
         assert load_agent_instructions(str(tmp_path)) == ""
 
-    def test_resolves_the_location_live(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-        # No explicit location: the working location is read at call time, so
-        # moving it through the settings dialog moves the lookup too.
-        (tmp_path / "AGENTS.md").write_text("from the env", encoding="utf-8")
-        monkeypatch.setenv(PATH_LOCATION_KEY, str(tmp_path))
-        assert load_agent_instructions() == "from the env"
+    def test_resolves_the_workspace_in_scope(self, tmp_path: Path):
+        """No explicit location: the seam's scope answers, read at call time."""
+        root = tmp_path / "in-scope"
+        root.mkdir()
+        (root / "AGENTS.md").write_text("from the scope", encoding="utf-8")
+        with scoped(root):
+            assert load_agent_instructions() == "from the scope"
 
-    def test_block_frames_the_text_with_the_project_root(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv(PATH_LOCATION_KEY, "/srv/proj")
-        block = agent_instructions_block("mind the conventions")
-        assert "The current project root is /srv/proj" in block
+    def test_block_frames_the_text_with_the_workspace_root(self, tmp_path: Path):
+        root = tmp_path / "framed"
+        root.mkdir()
+        with scoped(root):
+            block = agent_instructions_block("mind the conventions")
+        assert f"The current project root is {root}" in block
         assert block.endswith("mind the conventions")
         assert "AGENTS.md" in block
 
-    def test_block_is_empty_without_instructions(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    def test_block_is_empty_without_instructions(self, tmp_path: Path):
         # No file (and no text) means the system prompt is left untouched.
-        monkeypatch.setenv(PATH_LOCATION_KEY, str(tmp_path))
-        assert agent_instructions_block() == ""
-        assert agent_instructions_block("   ") == ""
+        with scoped(tmp_path):
+            assert agent_instructions_block() == ""
+            assert agent_instructions_block("   ") == ""
 
-    def test_block_reads_the_file_when_no_text_is_given(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
+    def test_block_reads_the_file_when_no_text_is_given(self, tmp_path: Path):
         (tmp_path / "AGENTS.md").write_text("body text", encoding="utf-8")
-        monkeypatch.setenv(PATH_LOCATION_KEY, str(tmp_path))
-        assert agent_instructions_block().endswith("body text")
+        with scoped(tmp_path):
+            assert agent_instructions_block().endswith("body text")
 
     def test_a_renamed_file_is_not_picked_up(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ):
         (tmp_path / "AGENTS.md").write_text("nope", encoding="utf-8")
         monkeypatch.setattr("src.config.agent_instructions_filename", lambda: "OTHER.md")
-        monkeypatch.setenv(PATH_LOCATION_KEY, str(tmp_path))
-        assert load_agent_instructions() == ""
+        with scoped(tmp_path):
+            assert load_agent_instructions() == ""
 
 
 def _llm_logger() -> logging.Logger:

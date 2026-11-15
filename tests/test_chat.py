@@ -16,6 +16,10 @@ from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
 from src.core import chat as chat_core
 from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
+#: ``workspace_params`` builds the field every workspace-scoped request names;
+#: the two hub helpers hand a test's manager double to the **workspace's own**
+#: set, which is the only place a hub lives now (clws-06).
+from tests.conftest import WorkspaceClient, set_workspace_hubs, workspace_params
 # The chunk builders and the stream double come from ``tests/llmkit_fakes`` so
 # the stubs and ``llmkit.client.ChatStream`` are held to one interface.
 from tests.llmkit_fakes import (
@@ -570,9 +574,10 @@ class _ChatClient:
     mandatory in the same breath.
     """
 
-    def __init__(self, http: TestClient) -> None:
+    def __init__(self, http: Any) -> None:
         self.http = http
         self.app = http.app
+        self.root = getattr(http, "root", None)
 
     def post(self, url: str, *args: Any, **kwargs: Any):
         body = kwargs.get("json")
@@ -585,11 +590,14 @@ class _ChatClient:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch):
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     app = create_app()
     monkeypatch.setattr(routes, "load_endpoints_config", lambda agent: (_config(), None))
     with TestClient(app) as test_client:
-        yield _ChatClient(test_client)
+        # Every route is answered about the folder its request names (clws-02),
+        # so the suite's client names the test's own ``tmp_path`` on every call.
+        # That is also the folder the hub helpers below put their doubles on.
+        yield _ChatClient(WorkspaceClient(test_client, tmp_path))
 
 
 def _events(body: str):
@@ -1055,18 +1063,20 @@ class TestStreamedDisplayIsSanitized:
         monkeypatch.setattr(routes, "stream_chat", fake)
         with TestClient(app) as test_client:
             response = test_client.post(
-                "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
-                                   "agentMode": DEFAULT_AGENT},
+                "/api/chat",
+                params=workspace_params(tmp_path),
+                json={"messages": [{"role": "user", "content": "hi"}],
+                      "agentMode": DEFAULT_AGENT},
             )
         assert '"api_key_seen": "sk-42"' in response.text
 
     def test_agent_instructions_reach_the_chat_call(
         self, client, monkeypatch, tmp_path: Path
     ):
-        # The working location's AGENTS.md is injected on every request, so a
-        # conversation starts knowing the project's conventions.
+        # The **request's** workspace's AGENTS.md is injected on every request, so
+        # a conversation starts knowing that project's conventions (spec §5.6
+        # rule 31): the folder is named by the field, not by the process.
         (tmp_path / "AGENTS.md").write_text("# rules\n\nrun pytest first\n", encoding="utf-8")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
@@ -1076,15 +1086,18 @@ class TestStreamedDisplayIsSanitized:
                   "tokensEstimated": False})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
-        client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        client.post(
+            "/api/chat",
+            params=workspace_params(tmp_path),
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
         assert seen["instructions"].endswith("run pytest first")
         assert f"project root is {tmp_path}" in seen["instructions"]
 
     def test_agent_instructions_empty_without_the_file(
         self, client, monkeypatch, tmp_path: Path
     ):
-        # No AGENTS.md at the location: the configured prompt stands alone.
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
+        # No AGENTS.md at the named workspace: the configured prompt stands alone.
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
@@ -1094,8 +1107,58 @@ class TestStreamedDisplayIsSanitized:
                   "tokensEstimated": False})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
-        client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        client.post(
+            "/api/chat",
+            params=workspace_params(tmp_path),
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
         assert seen["instructions"] == ""
+
+    @pytest.mark.parametrize("first", ["a", "b"], ids=["a-first", "b-first"])
+    def test_two_turns_in_two_workspaces_carry_their_own_instructions(
+        self, client, monkeypatch, tmp_path: Path, first: str
+    ):
+        """Rule 31, stated as the contract it is: the **system message**, twice.
+
+        The seam suite pins the route's kwarg; this runs the real
+        :func:`src.core.chat.stream_chat` with only the LLM client stubbed, so
+        what is asserted is the system message that would leave the process —
+        each turn carrying its own workspace's ``AGENTS.md``, its own project
+        root, and **nothing** of the other's. Both request orders are run,
+        because "whichever folder was asked about last" is the one failure mode
+        a process-wide location used to make unavoidable.
+        """
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for name, root in (("ALPHA", alpha), ("BETA", beta)):
+            root.mkdir()
+            (root / "AGENTS.md").write_text(
+                f"# rules of {name}\n\nonly {name} builds with make\n", encoding="utf-8"
+            )
+
+        captured: List[Dict[str, Any]] = []
+        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kwargs: captured.append(kwargs) or iter([]),
+        )
+
+        order = (alpha, beta) if first == "a" else (beta, alpha)
+        for root in order:
+            marker = "ALPHA" if root is alpha else "BETA"
+            other = "BETA" if root is alpha else "ALPHA"
+            response = client.post(
+                "/api/chat",
+                params=workspace_params(root),
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status_code == 200, response.text
+            content = captured[-1]["messages"][0]["content"]
+            assert f"# rules of {marker}" in content
+            assert f"only {marker} builds with make" in content
+            assert f"project root is {root}" in content
+            assert other not in content
+        assert len(captured) == 2
 
     def test_error_event_terminates_stream(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
@@ -1172,7 +1235,9 @@ class TestTheTurnResolvesThroughTheStore:
         monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
         app = create_app()
         with TestClient(app) as test_client:
-            yield test_client, seen
+            # A chat turn names its folder (clws-02); the second tab below shares
+            # this app, so it names the same test-owned workspace.
+            yield WorkspaceClient(test_client, tmp_path), seen
 
     @staticmethod
     def _post(client, agent_mode: str = "code"):
@@ -1292,14 +1357,88 @@ class TestTheTurnResolvesThroughTheStore:
         # Nothing streamed: the worker was never handed a connection.
         assert seen == {}
 
+    def test_a_save_from_the_other_tab_cannot_split_the_streaming_turn(
+        self, store_client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """§5.5 rule 27, with the *other* tab doing the saving.
+
+        The stored row moves through the store's own route — ``POST
+        /api/models/save``, the write a second tab's dialog makes — while this
+        tab's reply is mid-stream, and the reply keeps the model it started on.
+        That is the whole of "a turn resolves once, at its start": the *other*
+        side of the change is what no earlier case covered, and it is the case
+        two tabs make reachable.
+
+        The second ``TestClient`` is the second tab: same app, same store, a
+        request of its own. Nothing is serialised between the two, which is why
+        the turn has to hold its answer rather than re-read the row.
+        """
+        from src.core import appdb
+        from tests.conftest import neutralise_store
+
+        client, _seen = store_client
+        neutralise_store(
+            monkeypatch, tmp_path,
+            serverUrl="http://host/v1", endpoint="model-before",
+        )
+        model_id = int(appdb.load_servers()[0]["models"][0]["id"])
+
+        started = threading.Event()
+        release = threading.Event()
+        handed: List[Dict[str, Any]] = []
+
+        def slow_stream(messages, model, server_url, emit, sampling=None,
+                        cancel_event=None, pause_event=None, api_key="none",
+                        sysprompt=None, agent_instructions=None,
+                        mode_instructions=None, **tools):
+            handed.append({"model": model, "server_url": server_url})
+            started.set()
+            # Hold the reply open across the other tab's save: a turn that
+            # re-read the row would answer with the *new* name here.
+            release.wait(timeout=5)
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", slow_stream)
+        other_tab = TestClient(client.app)
+
+        answered: Dict[str, Any] = {}
+
+        def run_turn() -> None:
+            # TestClient buffers a whole SSE body before answering, so the turn
+            # has to be driven from another thread for the save to land mid-stream.
+            answered["response"] = self._post(client)
+
+        worker = threading.Thread(target=run_turn)
+        worker.start()
+        assert started.wait(timeout=5), "the turn never started"
+
+        saved = other_tab.post(
+            "/api/models/save", json={"id": model_id, "name": "model-after"}
+        )
+        assert saved.status_code == 200, saved.text
+
+        release.set()
+        worker.join(timeout=10)
+
+        assert answered["response"].status_code == 200
+        # The streaming reply kept the model it started on ...
+        assert handed == [{"model": "model-before", "server_url": "http://host/v1"}]
+        # ... and the save was a success the *next* turn will see.
+        assert appdb.load_servers()[0]["models"][0]["name"] == "model-after"
+
 
 class TestChatPauseEndpoint:
     """``POST /api/chat/pause`` arms the flag of the one in-flight reply."""
 
-    def test_no_reply_streaming_returns_409(self, client):
+    def test_no_reply_streaming_returns_409(self, client, tmp_path: Path):
         response = client.post("/api/chat/pause")
         assert response.status_code == 409
-        assert "No chat reply is streaming" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "No chat reply is streaming" in detail
+        # The answer is a fact about **this** folder: the workspace is named, so
+        # a second tab's reply can never make this sentence read as global.
+        assert str(tmp_path) in detail
 
     def test_pause_arms_the_flag_and_the_stream_ends_on_pause_ack(
         self, client, monkeypatch
@@ -1369,6 +1508,465 @@ class TestChatPauseEndpoint:
         assert response.status_code == 200
         assert [name for name, _ in _events(response.text)] == ["done"]
         assert client.post("/api/chat/pause").status_code == 409
+
+
+def _model_per_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each built-in agent its own model, so two turns can be told apart."""
+    monkeypatch.setattr(
+        routes,
+        "load_endpoints_config",
+        lambda agent: (_config(f"model-{agent['id']}"), None),
+    )
+
+
+def _post_chat(client: Any, root: Path, agent_mode: str):
+    """One streaming request naming ``root`` and answering as ``agent_mode``."""
+    return client.post(
+        "/api/chat",
+        params=workspace_params(root),
+        json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "agentMode": agent_mode,
+        },
+    )
+
+
+class TestTwoTurnsAtOnce:
+    """Spec §5.3 rules 15–16: two conversations, two workspaces, no queue.
+
+    The in-flight slot became per workspace in clws-04; this class is the
+    contract that keeps it that way. Every stream is the existing stubbed
+    shape — no test reaches a model endpoint — and the barriers prove the two
+    workers really overlap rather than merely both finishing.
+    """
+
+    def test_two_workspaces_stream_at_once_each_on_its_own_model(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+
+        both_streaming = threading.Barrier(2, timeout=10)
+        models: List[str] = []
+
+        def fake(messages, model, server_url, emit, sampling=None,
+                 cancel_event=None, pause_event=None, api_key="none",
+                 sysprompt=None, agent_instructions=None,
+                 mode_instructions=None, **tools):
+            models.append(model)
+            # Both workers have to be inside the turn at the same moment: a
+            # serialised app breaks this barrier and the reply becomes an error.
+            both_streaming.wait()
+            for index in range(3):
+                emit({"event": "token", "text": f"{model}:{index}"})
+                time.sleep(0.01)
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 3,
+                  "tokensEstimated": False})
+
+        _model_per_agent(monkeypatch)
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        results: Dict[str, Any] = {}
+        errors: Dict[str, BaseException] = {}
+
+        def run(label: str, root: Path, mode: str) -> None:
+            try:
+                results[label] = _post_chat(client, root, mode)
+            except BaseException as exc:  # noqa: BLE001 - surfaced below
+                errors[label] = exc
+
+        threads = [
+            threading.Thread(target=run, args=("a", alpha, "chat")),
+            threading.Thread(target=run, args=("b", beta, "code")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        assert not errors, errors
+        assert set(results) == {"a", "b"}
+        for label in ("a", "b"):
+            assert results[label].status_code == 200, results[label].text
+        assert sorted(models) == ["model-chat", "model-code"], (
+            "the two turns did not both reach their own agent's model"
+        )
+
+        for label, own, other in (
+            ("a", "model-chat", "model-code"),
+            ("b", "model-code", "model-chat"),
+        ):
+            frames = _events(results[label].text)
+            names = [name for name, _payload in frames]
+            assert names[-1] == "done", (label, results[label].text)
+            text = "".join(
+                payload.get("text", "")
+                for name, payload in frames
+                if name == "token"
+            )
+            assert f"{own}:0" in text
+            assert other not in text, (
+                f"{label}'s stream carried frames from the other workspace"
+            )
+
+    def test_pause_reaches_only_its_own_workspace(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+
+        alpha_started = threading.Event()
+        beta_started = threading.Event()
+        alpha_acked = threading.Event()
+        release_beta = threading.Event()
+
+        def fake(messages, model, server_url, emit, sampling=None,
+                 cancel_event=None, pause_event=None, api_key="none",
+                 sysprompt=None, agent_instructions=None,
+                 mode_instructions=None, **tools):
+            if model == "model-chat":
+                assert pause_event is not None
+                alpha_started.set()
+                while not pause_event.is_set():
+                    time.sleep(0.01)
+                emit({"event": "token", "text": "alpha-partial"})
+                emit({"event": "pause_ack", "partial": True})
+                alpha_acked.set()
+                return
+            beta_started.set()
+            # Held open across A's pause: if Pause reached this turn it would
+            # never reach `done`.
+            assert release_beta.wait(timeout=10)
+            emit({"event": "token", "text": "beta-answer"})
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 2,
+                  "tokensEstimated": False})
+
+        _model_per_agent(monkeypatch)
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        results: Dict[str, Any] = {}
+        errors: Dict[str, BaseException] = {}
+
+        def run(label: str, root: Path, mode: str) -> None:
+            try:
+                results[label] = _post_chat(client, root, mode)
+            except BaseException as exc:  # noqa: BLE001 - surfaced below
+                errors[label] = exc
+
+        alpha_thread = threading.Thread(target=run, args=("a", alpha, "chat"))
+        beta_thread = threading.Thread(target=run, args=("b", beta, "code"))
+        alpha_thread.start()
+        beta_thread.start()
+
+        assert alpha_started.wait(timeout=10), "A's turn never started"
+        assert beta_started.wait(timeout=10), "B's turn never started"
+
+        paused = client.post(
+            "/api/chat/pause", params=workspace_params(alpha)
+        )
+        assert paused.status_code == 200, paused.text
+        assert paused.json() == {"paused": "requested"}
+        assert alpha_acked.wait(timeout=10), "A's pause_ack never arrived"
+        # B is still held open, so A's pause neither ended nor armed B's turn.
+        assert not release_beta.is_set()
+
+        release_beta.set()
+        alpha_thread.join(timeout=15)
+        beta_thread.join(timeout=15)
+
+        assert not errors, errors
+        assert [name for name, _p in _events(results["a"].text)] == [
+            "token", "pause_ack",
+        ]
+        beta_frames = _events(results["b"].text)
+        assert [name for name, _p in beta_frames] == ["token", "done"]
+        assert beta_frames[0][1]["text"] == "beta-answer"
+
+    def test_a_pause_on_a_quiet_workspace_409s_while_another_streams(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """Rule 15's other half: a quiet folder is not the busy tab's folder."""
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake(messages, model, server_url, emit, sampling=None,
+                 cancel_event=None, pause_event=None, api_key="none",
+                 sysprompt=None, agent_instructions=None,
+                 mode_instructions=None, **tools):
+            started.set()
+            assert release.wait(timeout=10)
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 1,
+                  "tokensEstimated": False})
+
+        _model_per_agent(monkeypatch)
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        answered: Dict[str, Any] = {}
+
+        def run_beta() -> None:
+            answered["beta"] = _post_chat(client, beta, "code")
+
+        thread = threading.Thread(target=run_beta)
+        thread.start()
+        assert started.wait(timeout=10), "B's turn never started"
+
+        refused = client.post(
+            "/api/chat/pause", params=workspace_params(alpha)
+        )
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail == f"No chat reply is streaming on {alpha.resolve()}"
+        assert str(beta.resolve()) not in detail
+
+        release.set()
+        thread.join(timeout=15)
+        assert thread.is_alive() is False
+        assert [name for name, _p in _events(answered["beta"].text)] == ["done"]
+
+    def test_a_write_refused_in_one_workspace_does_not_obstruct_the_other(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """Rules 13–14 with a live reply: A is locked, B is not."""
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake(messages, model, server_url, emit, sampling=None,
+                 cancel_event=None, pause_event=None, api_key="none",
+                 sysprompt=None, agent_instructions=None,
+                 mode_instructions=None, **tools):
+            started.set()
+            assert release.wait(timeout=10)
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 1,
+                  "tokensEstimated": False})
+
+        _model_per_agent(monkeypatch)
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        answered: Dict[str, Any] = {}
+
+        def run_alpha() -> None:
+            answered["alpha"] = _post_chat(client, alpha, "chat")
+
+        thread = threading.Thread(target=run_alpha)
+        thread.start()
+        assert started.wait(timeout=10), "A's turn never started"
+
+        # The other workspace's write is a peer's, not a guest's.
+        written = client.post(
+            "/api/fs/create",
+            params=workspace_params(beta),
+            json={"path": "b.txt", "dir": False},
+        )
+        assert written.status_code == 200, written.text
+        assert (beta / "b.txt").is_file()
+
+        # The same write against the streaming workspace is refused, and the
+        # refusal names the folder it is about.
+        refused = client.post(
+            "/api/fs/create",
+            params=workspace_params(alpha),
+            json={"path": "a.txt", "dir": False},
+        )
+        assert refused.status_code == 409, refused.text
+        assert "while a chat reply is streaming" in refused.json()["detail"]
+        assert str(alpha.resolve()) in refused.json()["detail"]
+        assert not (alpha / "a.txt").exists()
+
+        release.set()
+        thread.join(timeout=15)
+        assert [name for name, _p in _events(answered["alpha"].text)] == ["done"]
+
+
+class _CancelAwareStream(FakeStream):
+    """An upstream that waits for the route's cancel flag, then yields once more.
+
+    ``stream_chat`` checks the flag at the top of every chunk, so the chunk
+    pulled after the client went away is what makes it call ``close()`` — the
+    upstream half of "the turn is cancelled". ``more_after_gate`` models a reply
+    that still had content to send ("between two frames"); ``False`` models one
+    whose last content chunk had already gone ("after the last content chunk").
+    Either way the terminal frame never leaves.
+    """
+
+    def __init__(self, holder: Dict[str, Any], more_after_gate: bool) -> None:
+        super().__init__([])
+        self.holder = holder
+        self.more_after_gate = more_after_gate
+        self.closed_event = threading.Event()
+
+    def __iter__(self):
+        yield content_chunk("PARTIAL-DISCONNECTED-TOKEN ")
+        cancel = self.holder["cancel"]
+        assert cancel.wait(timeout=10), "the route never set its cancel flag"
+        if self.more_after_gate:
+            yield content_chunk("NEVER-DELIVERED ")
+        yield finish_chunk("stop")
+
+    def close(self) -> None:
+        super().close()
+        self.closed_event.set()
+
+
+class _ReleasableStream(FakeStream):
+    """A second reply held open until the test releases it."""
+
+    def __init__(self, chunks, release: threading.Event, started: threading.Event) -> None:
+        super().__init__(chunks)
+        self.release = release
+        self.started = started
+
+    def __iter__(self):
+        self.started.set()
+        assert self.release.wait(timeout=10), "the second reply was never released"
+        yield from super().__iter__()
+
+
+class TestAClosedTabCancelsItsOwnTurnOnly:
+    """D10 at the route: a vanished client cancels its turn, nobody else's.
+
+    The behaviour already existed in the SSE generator's ``finally``; what these
+    cases prove is that the per-workspace slot did not weaken it. A second
+    workspace's reply is held open across the disconnect and then has to finish
+    normally — the same pair of facts spec §5.3 rule 18 asks for.
+    """
+
+    @pytest.mark.parametrize(
+        "more_after_gate",
+        [True, False],
+        ids=["between-two-frames", "after-last-content"],
+    )
+    def test_a_disconnect_cancels_only_that_workspace(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        more_after_gate: bool,
+    ):
+        alpha = tmp_path / "alpha"
+        beta = tmp_path / "beta"
+        for root in (alpha, beta):
+            root.mkdir()
+
+        holders: Dict[str, Dict[str, Any]] = {
+            "model-chat": {},
+            "model-code": {},
+        }
+        streams: Dict[str, Any] = {}
+        beta_started = threading.Event()
+        release_beta = threading.Event()
+
+        def completion(**kwargs):
+            model = kwargs["model"]
+            if model == "model-chat":
+                stream = _CancelAwareStream(
+                    holders[model], more_after_gate=more_after_gate
+                )
+            else:
+                stream = _ReleasableStream(
+                    [content_chunk("BETA-ANSWER"), finish_chunk("stop")],
+                    release=release_beta,
+                    started=beta_started,
+                )
+            streams[model] = stream
+            return stream
+
+        def captured(messages, model, server_url, emit, sampling=None, **kwargs):
+            holders[model]["cancel"] = kwargs.get("cancel_event")
+            return chat_core.stream_chat(
+                messages, model, server_url, emit, sampling, **kwargs
+            )
+
+        _model_per_agent(monkeypatch)
+        monkeypatch.setattr(routes, "stream_chat", captured)
+        monkeypatch.setattr("src.core.chat.stream_completion", completion)
+
+        answered: Dict[str, Any] = {}
+
+        def run_beta() -> None:
+            try:
+                answered["beta"] = _post_chat(client, beta, "code")
+            except BaseException as exc:  # noqa: BLE001 - surfaced below
+                answered["error"] = exc
+
+        beta_thread = threading.Thread(target=run_beta)
+        beta_thread.start()
+        assert beta_started.wait(timeout=10), (
+            "B's turn never started: "
+            f"{answered.get('beta').text if 'beta' in answered else answered!r}"
+        )
+
+        # A's client reads one frame, then goes away between this frame and the
+        # next one (or after the last content chunk, for the other id).
+        with client.stream(
+            "POST",
+            "/api/chat",
+            params=workspace_params(alpha),
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "agentMode": "chat",
+            },
+        ) as response:
+            assert response.status_code == 200
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    payload = json.loads(line[len("data: "):])
+                    if payload.get("event") == "token":
+                        break
+
+        alpha_stream = streams["model-chat"]
+        assert alpha_stream.closed_event.wait(timeout=10), (
+            "the worker's upstream stream was never closed"
+        )
+        cancel = holders["model-chat"]["cancel"]
+        assert cancel is not None
+        assert cancel.is_set(), "the disconnect did not arm the turn's cancel flag"
+        assert alpha_stream.close_calls >= 1
+        # B is untouched: still streaming, and no terminal frame yet.
+        assert release_beta.is_set() is False
+        assert beta_thread.is_alive()
+
+        release_beta.set()
+        beta_thread.join(timeout=15)
+        assert beta_thread.is_alive() is False
+        beta_frames = _events(answered["beta"].text)
+        assert [name for name, _p in beta_frames] == ["token", "done"]
+        assert beta_frames[0][1]["text"] == "BETA-ANSWER"
+
+        # The partial reply was kept nowhere: no chat/transcript table exists,
+        # and no file in the workspace carries the fragment.
+        from src.core import appdb
+
+        tables = {
+            row[0].lower()
+            for row in appdb.connection().execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert not any(
+            word in table
+            for table in tables
+            for word in ("chat", "message", "conversation", "transcript")
+        ), tables
+        for path in alpha.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            assert "PARTIAL-DISCONNECTED-TOKEN" not in text, path
+            assert "NEVER-DELIVERED" not in text, path
 
 
 class TestStreamChatPause:
@@ -1647,7 +2245,6 @@ class TestAgentModePromptAssembly:
     def mode_client(self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """``client`` on a scratch workspace with AGENTS.md, plus the stub's kwargs."""
         (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         seen: Dict[str, Any] = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
@@ -1802,7 +2399,7 @@ class TestAgentModePromptAssembly:
         message that would leave the process, with a persona, blocks and
         ``batchContext`` all in play at once.
         """
-        client, _root, _seen = mode_client
+        client, root, _seen = mode_client
 
         class Hub:
             def status(self):
@@ -1815,7 +2412,9 @@ class TestAgentModePromptAssembly:
             def call_tool_sync(self, cid, name, args):
                 return "ok"
 
-        client.app.state.mcp = Hub()
+        # The double rides on the workspace this fixture pinned, because that is
+        # the folder the request is answered about (clws-06).
+        set_workspace_hubs(client.app, root, mcp=Hub())
         monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
         captured: Dict[str, Any] = {}
         monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
@@ -1880,7 +2479,7 @@ class TestChatMcpFilter:
     def mcp_setup(self, client, monkeypatch):
         monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["alpha", "beta"])
         manager = self.RecordingManager()
-        client.app.state.mcp = manager
+        set_workspace_hubs(client.app, client.root, mcp=manager)
 
         seen = {}
 
@@ -1948,15 +2547,17 @@ class TestAgentModeToolGate:
     is a different request to an OpenAI-compatible server.
     """
 
-    class RequestStub:
-        """Just enough ``Request`` for the two hub lookups (``app.state``)."""
+    class HubSetStub:
+        """Just enough of a ``HubSet`` for the two hub lookups.
 
-        def __init__(self, app):
-            self.app = app
+        ``_chat_tool_kwargs`` takes the **workspace's** set rather than a request
+        (clws-06): which folder a turn is about is the caller's answer, so the
+        helper only ever reaches ``.mcp`` and ``.lsp`` on what it is handed.
+        """
 
-    @staticmethod
-    def _request(app):
-        return TestAgentModeToolGate.RequestStub(app)
+        def __init__(self, mcp, lsp):
+            self.mcp = mcp
+            self.lsp = lsp
 
     class Hub:
         """Answers ``active_tool_defs`` from the ids it was *given*, as MCP does."""
@@ -1993,8 +2594,10 @@ class TestAgentModeToolGate:
         monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
         monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
         mcp, lsp = self.Hub(), self.Hub()
-        client.app.state.mcp = mcp
-        client.app.state.lsp = lsp
+        # No pool involvement: these cases call ``_chat_tool_kwargs`` directly and
+        # hand it the workspace's set, so the two doubles are the whole world the
+        # helper sees (clws-06 moved the lookup out of the helper and into its
+        # caller).
         return client, mcp, lsp
 
     @staticmethod
@@ -2007,7 +2610,7 @@ class TestAgentModeToolGate:
         # the mode still takes it away, and it does so by emptying the list the
         # hub is asked for — no tool definition is ever serialised.
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), ["console"], ["pyright"],
+            self.HubSetStub(mcp, lsp), ["console"], ["pyright"],
             mode=self._mode(False, False),
         )
         assert kwargs == {}
@@ -2032,7 +2635,7 @@ class TestAgentModeToolGate:
         client, mcp, lsp = hubs
         monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), ["console"], mode=self._mode(False, True)
+            self.HubSetStub(mcp, lsp), ["console"], mode=self._mode(False, True)
         )
         assert kwargs == {}
         assert mcp.requested_ids == [[]]
@@ -2044,7 +2647,7 @@ class TestAgentModeToolGate:
     def test_mcp_gate_leaves_the_lsp_hub_alone(self, hubs):
         client, mcp, lsp = hubs
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), ["console"], ["pyright"],
+            self.HubSetStub(mcp, lsp), ["console"], ["pyright"],
             mode=self._mode(False, True),
         )
         assert mcp.requested_ids == [[]]
@@ -2056,7 +2659,7 @@ class TestAgentModeToolGate:
     def test_lsp_gate_leaves_the_mcp_hub_alone(self, hubs):
         client, mcp, lsp = hubs
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), ["console"], ["pyright"],
+            self.HubSetStub(mcp, lsp), ["console"], ["pyright"],
             mode=self._mode(True, False),
         )
         assert lsp.requested_ids == [[]]
@@ -2072,7 +2675,7 @@ class TestAgentModeToolGate:
         monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
         monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), mode=self._mode(True, True)
+            self.HubSetStub(mcp, lsp), mode=self._mode(True, True)
         )
         assert kwargs == {}
         assert mcp.requested_ids == [[]]
@@ -2086,7 +2689,7 @@ class TestAgentModeToolGate:
         monkeypatch.setattr(routes, "_active_connector_ids",
                             lambda: ["alpha", "beta"])
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), ["beta"], [], mode=self._mode(True, False)
+            self.HubSetStub(mcp, lsp), ["beta"], [], mode=self._mode(True, False)
         )
         assert mcp.requested_ids == [["beta"]]
         assert lsp.requested_ids == [[]]
@@ -2095,7 +2698,7 @@ class TestAgentModeToolGate:
         # though its mode opens the hub (the empty list means "nothing in it",
         # which is what the mode gate relies on too).
         kwargs = routes._chat_tool_kwargs(
-            self._request(client.app), [], [], mode=self._mode(True, True)
+            self.HubSetStub(mcp, lsp), [], [], mode=self._mode(True, True)
         )
         assert kwargs == {}
 
@@ -2105,12 +2708,12 @@ class TestAgentModeToolGate:
         # then — same keys, same merged tool list, same cap.
         from tests.conftest import neutralise_store
 
-        client, _mcp, _lsp = hubs
+        client, mcp, lsp = hubs
         # The cap is the resolved agent's own column now (D9), not the env key.
         neutralise_store(monkeypatch, tmp_path, maxToolIteration=7)
         from src.core import appdb
         agent, _findings = appdb.resolve_agent("code")
-        request = self._request(client.app)
+        request = self.HubSetStub(mcp, lsp)
         without = routes._chat_tool_kwargs(request, agent=agent)
         with_mode = routes._chat_tool_kwargs(
             request, mode=self._mode(True, True), agent=agent
@@ -2138,9 +2741,10 @@ class TestAgentModeToolGate:
     def route_client(self, client, tmp_path: Path, monkeypatch):
         """Real ``stream_chat`` on a scratch workspace; the seam is the spy."""
         (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
         hub = self.Hub()
-        client.app.state.mcp = hub
+        # The double goes on **this** workspace's set: the client names this
+        # folder on every request (clws-02), so this is the answered folder.
+        set_workspace_hubs(client.app, tmp_path, mcp=hub)
         monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
         captured: Dict[str, Any] = {}
         monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
@@ -2203,7 +2807,7 @@ class TestAgentModeToolGate:
         assert (chat.mcptools, chat.lsptools) == (False, False)
         client, _root, hub, captured = route_client
         monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
-        client.app.state.lsp = self.Hub()
+        set_workspace_hubs(client.app, _root, lsp=self.Hub())
         response = client.post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "hi"}],

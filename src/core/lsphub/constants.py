@@ -26,7 +26,7 @@ from src.core.mcphub.process import guardrails_speak_here  # noqa: F401 — hub 
 # from ``mcp_connectors/policy_shared``): two constants for one folder name
 # is how the folder stops being one folder.
 from src.core.mcphub.constants import POLICY_DIRNAME
-from src.config import path_location
+from src.core import workspace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LSP_CONNECTORS_DIR = PROJECT_ROOT / "lsp_connectors"
@@ -66,13 +66,17 @@ def lsp_settings_path() -> Path:
     """The active workspace's ``.nojae/lsp-settings.json`` (may not exist).
 
     Built per call out of module attributes, so the pin above, a patched
-    filename, or a switched working location each move the lookup the same
-    way. A read of an absent file is ``([], [])`` — an undeclared workspace
+    filename, or a different workspace each move the lookup the same way. The
+    root comes from the seam (:func:`src.core.workspace.current_root`), so a
+    declaration read is always a read **of one workspace**, in that workspace's
+    scope — the mirror of ``mcphub.constants.mcp_settings_path``.
+
+    A read of an absent file is ``([], [])`` — an undeclared workspace
     simply has no language servers until its declaration is written.
     """
     if LSP_SETTINGS_PATH is not None:
         return LSP_SETTINGS_PATH
-    return Path(path_location()) / POLICY_DIRNAME / LSP_SETTINGS_FILENAME
+    return Path(workspace.current_root()) / POLICY_DIRNAME / LSP_SETTINGS_FILENAME
 
 # Deny-list of workspace roots a server may not be pointed at (same idea as
 # mcp_connectors/restricted-fqdn.txt). One absolute prefix per line.

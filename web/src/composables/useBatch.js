@@ -1,6 +1,7 @@
 import { computed, reactive, watch } from 'vue'
 import { registerChatBusyGuard, useChat } from './useChat'
 import { registerBatchGuard, useAppShell } from './useAppShell'
+import { useWorkspaceSession, withWorkspaceRoot } from './useWorkspaceSession'
 import {
   agentCanRun,
   agentModesLoaded,
@@ -101,6 +102,28 @@ export const REQUIRED_MCP_CONNECTORS = [
 // task 5. The id is read from the loaded agent list rather than sent blind, and
 // an unreadable list or an agent with no model is a **launch refusal**: the lot
 // never runs under an agent nobody chose.
+//
+// **A lot's workspace is part of the same pin** (`pinLotWorkspace`), for exactly
+// the same reason read one level wider: its lot is one folder's lot, its tools
+// are that folder's tools, and every task turn names that folder — so a tab that
+// moves during the run re-roots nothing. That is the rule AGENTS.md states for
+// the mode ("a lot runs every task in one mode, pinned at launch"), applied to
+// the folder (spec §5.7 rule 33): a change of agent **or of folder** in any tab
+// afterwards reaches no task in the run.
+//
+// "A batch is running" is therefore a fact about **one workspace's tab**, never
+// about the app: the flag (`state.active`) and the two guards registered from it
+// below (`useChat`'s busy guard and `useAppShell`'s `batchGuard`) are module
+// state of this composable, and a browser tab is one module instance — so
+// starting a lot in A blocks neither a lot nor a conversation nor a save in B
+// (spec §5.7 rule 35, §5.3 rule 13). The server-side counterpart of the same
+// rule is the in-flight chat slot, which task 04 keyed by workspace
+// (``routes._CHAT_TASKS``); this file's half is the tab's.
+//
+// Last, a lot needs the folder's **tools** to exist: a workspace the hub pool
+// refused (the ceiling) would run its tasks with no connectors, so the launch
+// asks the pool first and refuses with the pool's own sentence rather than
+// burning a turn to discover it (`ensureWorkspaceToolsAvailable`).
 
 export function taskInstruction(taskLocation) {
   return TASK_INSTRUCTION_TEMPLATE.replace('<task_location>', taskLocation)
@@ -160,6 +183,12 @@ const state = reactive({
   // refusal**: there is no other agent a lot may fall back on. Set only once
   // `ensureSelectedAgentRunnable` has accepted it.
   pinnedMode: null,
+  // The folder this run belongs to — the tab's workspace, read **once at launch**
+  // (`pinLotWorkspace`) and named by every task turn, every re-listing and the
+  // pool gate, so a tab that moves mid-lot re-roots nothing (spec §5.7 rule 33).
+  // Null outside a run, and cleared with the run (`clearBatchRun`). It is the
+  // text the tab holds (the server's canonical realpath), never what was typed.
+  pinnedWorkspace: null,
   // A quiet line in the batch status area, kept for a run's own note (none
   // today): a lot that could not resolve its agent never launched, so a running
   // one always has an agent and nothing to explain here. null otherwise.
@@ -233,18 +262,20 @@ export function useBatch() {
     chat.error = message
   }
 
-  // The dropdown's options: every prefix that has at least one task in `dir`.
-  // Fires when the dialog opens and whenever `dir` changes — the folder is the
-  // only thing the option list depends on. A folder that cannot be listed is
-  // reported on the dialog's error line (the same honesty as the listing): an
-  // empty dropdown next to a silent failure would read as "no tasks", which is
-  // a different and much less actionable statement.
+  // The dropdown's options: every prefix that has at least one task in `dir`, of
+  // **the folder this lot belongs to** — the pin while a run is going, the tab's
+  // workspace otherwise (see `lotWorkspace`). Fires when the dialog opens and
+  // whenever `dir` changes — the folder is the only thing the option list
+  // depends on. A folder that cannot be listed is reported on the dialog's error
+  // line (the same honesty as the listing): an empty dropdown next to a silent
+  // failure would read as "no tasks", which is a different and much less
+  // actionable statement.
   async function fetchPrefixes() {
     state.error = null
     state.prefixesLoading = true
     try {
       const query = new URLSearchParams({ dir: state.dir.trim() })
-      const res = await fetch(`/api/batch/prefixes?${query}`)
+      const res = await fetch(lotUrl(`/api/batch/prefixes?${query}`))
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.prefixes = []
@@ -292,7 +323,7 @@ export function useBatch() {
     state.loading = true
     try {
       const query = new URLSearchParams({ prefix, dir: state.dir.trim() })
-      const res = await fetch(`/api/batch/tasks?${query}`)
+      const res = await fetch(lotUrl(`/api/batch/tasks?${query}`))
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.error = describeError(
@@ -380,6 +411,48 @@ export function useBatch() {
     return agentModesLoaded() ? currentMode() : null
   }
 
+  // The folder this lot belongs to: the run's **pin** while one is going, the
+  // tab's workspace otherwise (spec §5.7 rule 33). One answer for every batch
+  // request, so a two-tab pair cannot list one folder's lot and turn into
+  // another's. `''` is a value here (the interim "no field"), which is why the
+  // test is `??` and not `||`: a run that pinned "no folder" keeps it.
+  function lotWorkspace() {
+    return state.pinnedWorkspace ?? useWorkspaceSession().state.workspace
+  }
+
+  // A batch request's URL: the lot's folder on the field, spelled by the one
+  // helper (`withWorkspaceRoot`), so no call site names the parameter.
+  function lotUrl(url) {
+    return withWorkspaceRoot(url, lotWorkspace())
+  }
+
+  // A lot needs its folder's **tools**, and a folder needs a set of them: if the
+  // hub pool refused it — the ceiling, with its own sentence naming the bound and
+  // the live workspaces — every task would run with no connectors, so the launch
+  // refuses here instead (spec §4.4, §5.4 rule 22). The pool's sentence is the
+  // server's own (`GET /api/workspace` answers 429 with it), so the client
+  // re-spells no rule of its own (spec §5.2 rule 10), and it lands on the
+  // dialog's message line while the dialog is still open.
+  //
+  // Only a refusal refuses: an unreachable API is left to the first task turn,
+  // which is where a dead server already reports itself — a launch gate that
+  // also failed on an outage would explain the outage twice, in two words.
+  async function ensureWorkspaceToolsAvailable() {
+    state.error = null
+    try {
+      const res = await fetch(lotUrl('/api/workspace'))
+      if (res.status !== 429) return true
+      const body = await res.json().catch(() => null)
+      state.error = describeError(
+        body,
+        'The workspace hub pool refused this folder, so its tools are not running.',
+      )
+      return false
+    } catch {
+      return true
+    }
+  }
+
   // The launch gate for the agent: the lot must have one, and that agent must
   // have a model. A lot has no agent of its own to fall back on, so both
   // refusals are about the selection the user is looking at.
@@ -415,6 +488,20 @@ export function useBatch() {
     state.modeNote = null
   }
 
+  // Hold the folder for the whole run, for the same reason and one level wider:
+  // the tab's workspace is read **once, here**, and every task turn, every
+  // re-listing and the pool gate name what was read — so a tab that moves during
+  // task 7 cannot re-root task 8, nor make the completion check judge one folder's
+  // lot by another folder's listing (spec §5.7 rules 32–33).
+  //
+  // Read beside `pinLotMode`, at the same moment and for the same reason: the
+  // mode pin says *which agent*, this one says *which folder*, and together they
+  // are the lot's identity for its whole run. `lotWorkspace()` is the single
+  // reader of the answer, so nothing else has to remember it is pinned.
+  function pinLotWorkspace() {
+    state.pinnedWorkspace = useWorkspaceSession().state.workspace
+  }
+
   // A second, quiet listing of the same lot — the completion check's only
   // source. Deliberately *not* `validate()`: the dialog is closed while a lot
   // runs, so a failed fetch must not write into `state.error`/`state.listing`
@@ -428,7 +515,7 @@ export function useBatch() {
         prefix: state.prefix.trim(),
         dir: state.dir.trim(),
       })
-      const res = await fetch(`/api/batch/tasks?${query}`)
+      const res = await fetch(lotUrl(`/api/batch/tasks?${query}`))
       if (!res.ok) return null
       return await res.json()
     } catch {
@@ -519,6 +606,13 @@ export function useBatch() {
   // whatever the dropdown is showing while they stream. That id is always
   // resolved by the time a turn runs — launch refuses otherwise — so this never
   // sends a turn without an `agentMode`.
+  //
+  // It carries the **folder** the same way, from the same pin: `workspace` is
+  // named explicitly on every task turn, so a tab whose field moves mid-lot
+  // re-roots neither the task streaming nor the next one — and the model's tools
+  // therefore keep opening that folder's files (spec §5.7 rules 32–33). Without
+  // the explicit value a moved tab would silently send its *new* folder, which is
+  // the one thing the pin exists to prevent.
   async function runOneTurn(task, attempt = 0) {
     // The lot's big picture rides on every task turn whenever the listing found
     // one: there is no opt-out — a 00 file is the lot's context, and the per-task
@@ -530,6 +624,9 @@ export function useBatch() {
       !sendBatchTurn(taskInstructionForAttempt(task.taskLocation, attempt), {
         batchContext: lotText,
         agentMode: state.pinnedMode,
+        // The pin, never the tab's current value (`lotWorkspace` is the same
+        // answer for the requests the loop makes itself).
+        workspace: state.pinnedWorkspace,
       })
     ) {
       return 'not-started'
@@ -572,19 +669,32 @@ export function useBatch() {
     resetChat({ refetchHubs: false })
   }
 
-  async function launch() {
+  // `toolsChecked` is the one caller that has already asked the pool
+  // (`requestLaunch`, before it closes the dialog), so one launch asks once.
+  async function launch({ toolsChecked = false } = {}) {
     if (state.active || !canLaunch.value) return // one batch at a time
     if (!ensureFreshChat()) return
     if (!ensureToolsAvailable()) return
     // An agent with no model — or no agent at all — cannot run a task, so both
     // refusals stop the lot here, before anything is held or sent.
     if (!ensureSelectedAgentRunnable()) return
+    // ...and neither can a folder the pool refused: its tasks would run with no
+    // connectors at all, which is a lot that cannot move a file (spec §5.4 rule
+    // 22). The refusal is the pool's sentence, and it stops the lot here — before
+    // the pins, so a lot that never launched owns neither an agent nor a folder.
+    if (!toolsChecked && !(await ensureWorkspaceToolsAvailable())) return
     // The dropdown's selection is read once per run, after the refusals (a lot
     // that never launched owns no agent), and each turn sends what was read (see
     // `runOneTurn`) — so a dropdown change during task 7 cannot reach task 8.
     // That is also why the composer's select is inert for the whole run: moving
     // it could reach neither the streaming turn nor the next task of the lot.
     pinLotMode()
+    // And the folder, at the same moment and for the same reason (spec §5.7 rule
+    // 33): the tab's workspace is read once here, so a tab pointed elsewhere
+    // mid-lot re-roots neither the streaming task nor the next one. Both halves
+    // of the pin are read together because they are one decision — which folder,
+    // as which agent — and the whole run depends on both.
+    pinLotWorkspace()
 
     const tasks = state.listing.tasks
     state.total = state.listing.taskCount
@@ -660,13 +770,26 @@ export function useBatch() {
     } finally {
       state.active = false
       state.current = null
+      // The folder pin lasts exactly as long as the run: its whole job is the
+      // tasks still to come, and once the lot is over the dialog must list the
+      // folder the tab is on **now** rather than the one this run started on
+      // (spec §5.7 rule 32). Releasing it here is what keeps a re-opened dialog
+      // from offering a lot belonging to a folder the user has left.
+      state.pinnedWorkspace = null
     }
   }
 
-  // The dialog's Launch, in this exact order: re-validate, switch to the
-  // WorkBench tab *before* the lock-down flag exists (E11 — the setTab guard
-  // added for a running batch would otherwise block the launch's own tab
+  // The dialog's Launch, in this exact order: re-validate, ask the pool, switch
+  // to the WorkBench tab *before* the lock-down flag exists (E11 — the setTab
+  // guard added for a running batch would otherwise block the launch's own tab
   // switch), close the dialog, then run.
+  //
+  // The **pool** question is asked here, while the dialog is still open, because
+  // its answer is a dialog line: a folder the ceiling refused would otherwise run
+  // its tasks with no connectors at all, and the sentence belongs where the user
+  // can act on it (point another tab away, or wait) rather than on a WorkBench
+  // error line under a dialog that has already gone (spec §4.4, §5.4 rule 22).
+  // `launch` is told not to ask a second time.
   async function requestLaunch() {
     if (state.active || state.loading) return
     if (!PREFIX_PATTERN.test(state.prefix.trim())) {
@@ -675,9 +798,10 @@ export function useBatch() {
     }
     await validate()
     if (!canLaunch.value) return
+    if (!(await ensureWorkspaceToolsAvailable())) return
     setTab('chat')
     state.open = false
-    await launch()
+    await launch({ toolsChecked: true })
   }
 
   // The lot folder changed (or the dialog opened): the option list is the first
@@ -714,6 +838,10 @@ export function useBatch() {
     // The mode pin belongs to one run: a lot about to be re-launched resolves it
     // again (`pinLotMode` in `launch`), and a cleared run has no line to keep.
     state.pinnedMode = null
+    // The folder pin belongs to the same run and dies with it, for the same
+    // reason (`pinLotWorkspace`): a re-opened dialog must list the folder the tab
+    // is on now, never the one a cleared run started on (spec §5.7 rule 32).
+    state.pinnedWorkspace = null
     state.modeNote = null
   }
 

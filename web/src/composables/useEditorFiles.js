@@ -7,6 +7,7 @@ import { useChat } from './useChat'
 import { useEditorNotices } from './useEditorNotices'
 import { useGitStatus } from './useGitStatus'
 import { registerDeleteChord, registerReRootHandler, useWorkspaceTree } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // Open files: the state behind the Editor tab's code pane.
@@ -270,7 +271,9 @@ export function useEditorFiles() {
     state.loading = true
     state.message = null
     try {
-      const res = await fetch(`/api/fs/file?path=${encodeURIComponent(path)}`)
+      const res = await fetch(
+        withWorkspace(`/api/fs/file?path=${encodeURIComponent(path)}`),
+      )
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         // 422 deny/escape, 413 over the cap, 404 gone, 400 a directory: all
@@ -358,7 +361,9 @@ export function useEditorFiles() {
     state.loading = true
     state.message = null
     try {
-      const res = await fetch(`/api/fs/diff?path=${encodeURIComponent(path)}`)
+      const res = await fetch(
+        withWorkspace(`/api/fs/diff?path=${encodeURIComponent(path)}`),
+      )
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.message = {
@@ -440,7 +445,9 @@ export function useEditorFiles() {
     state.loading = true
     state.message = null
     try {
-      const res = await fetch(`/api/fs/file?path=${encodeURIComponent(path)}`)
+      const res = await fetch(
+        withWorkspace(`/api/fs/file?path=${encodeURIComponent(path)}`),
+      )
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         // The same answers `openFile` gives, so refusal wording has one home:
@@ -495,7 +502,9 @@ export function useEditorFiles() {
   async function refreshPreview(record) {
     if (!record || record.kind !== 'preview') return null
     try {
-      const res = await fetch(`/api/fs/file?path=${encodeURIComponent(record.path)}`)
+      const res = await fetch(
+        withWorkspace(`/api/fs/file?path=${encodeURIComponent(record.path)}`),
+      )
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.message = {
@@ -678,9 +687,10 @@ export function useEditorFiles() {
     let res
     let body = null
     try {
-      res = await fetch(`/api/fs/file?path=${encodeURIComponent(path)}`, {
-        method: 'DELETE',
-      })
+      res = await fetch(
+        withWorkspace(`/api/fs/file?path=${encodeURIComponent(path)}`),
+        { method: 'DELETE' },
+      )
       body = await res.json().catch(() => null)
     } catch (exc) {
       const text = `Could not delete ${path}: the API could not be reached`
@@ -852,7 +862,7 @@ export function useEditorFiles() {
     let res
     let body = null
     try {
-      res = await fetch('/api/fs/file', {
+      res = await fetch(withWorkspace('/api/fs/file'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -983,7 +993,9 @@ export function useEditorFiles() {
     const record = recordFor(path)
     if (!record) return null
     try {
-      const res = await fetch(`/api/fs/file?path=${encodeURIComponent(path)}`)
+      const res = await fetch(
+        withWorkspace(`/api/fs/file?path=${encodeURIComponent(path)}`),
+      )
       const body = await res.json().catch(() => null)
       if (!res.ok || body?.binary) return null
       const fresh = body.text ?? ''
@@ -1182,7 +1194,7 @@ export function useEditorFiles() {
 
     const run = (async () => {
       try {
-        const res = await fetch(`/api/fs/stat?${query}`)
+        const res = await fetch(withWorkspace(`/api/fs/stat?${query}`))
         const body = await res.json().catch(() => null)
         if (!res.ok) {
           // A refused or failed probe is not evidence that files changed: no
@@ -1302,7 +1314,9 @@ export function useEditorFiles() {
     if (!record || record.kind !== 'file') return null
     let fresh = null
     try {
-      const res = await fetch(`/api/fs/file?path=${encodeURIComponent(record.path)}`)
+      const res = await fetch(
+        withWorkspace(`/api/fs/file?path=${encodeURIComponent(record.path)}`),
+      )
       const body = await res.json().catch(() => null)
       if (res.ok && !body?.binary) {
         fresh = { text: body.text ?? '', language: body.language ?? record.language }

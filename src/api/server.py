@@ -1,7 +1,6 @@
 """FastAPI application entry point."""
 
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict
 
@@ -9,28 +8,18 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from src.api import routes as api_routes
 from src.api.routes import build_router
 from src.config import (
     apply_llm_debug,
     ENV_PATH,
     load_dotenv_once,
     PROJECT_ROOT,
-    path_location,
-    setup_path_location,
 )
-from src.core.mcphub import (
-    McpManager,
-    ensure_mcp_settings_file,
-    load_externals,
-)
-from src.core.lsphub import (
-    LspManager,
-    all_servers,
-    ensure_lsp_settings_template,
-)
-from src.core.editorfs import mutate as editorfs_mutate, policy_seed
+from src.core.hubpool import HubPool
 from src.core.termhub import TerminalHub
 from src.core import appdb
+from src.core import workspace as workspace_seam
 
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 
@@ -42,9 +31,10 @@ def _boot_app_store() -> Dict[str, Any]:
 
     ``appdb.boot()`` is open-or-create → schema at the current level, upgrade, or
     refuse → seed (§4.3), and it already answers a state dict instead of raising,
-    so this wrapper only guards the *unexpected* — the same contract the five
-    seeds below hold, and the reason it matters most here: a database this app
-    could not open, write or understand must not take the boot down with it. The
+    so this wrapper only guards the *unexpected* — the same contract the
+    workspace's reserved-folder seeds hold (``src/core/hubpool.py``), and the
+    reason it matters most here: a database this app could not open, write or
+    understand must not take the boot down with it. The
     app starts, the store's state is kept where a later task can answer it
     (:func:`src.core.appdb.store_state` — the app bar's notice and the chat
     refusal are tasks 09 and 03), and the sentence naming the path goes to the
@@ -75,103 +65,6 @@ def _boot_app_store() -> Dict[str, Any]:
     return result
 
 
-def _seed_workspace_policy() -> Dict[str, Any]:
-    """Leave the workspace's default policy file behind; never raise.
-
-    ``ensure_policy_file`` already answers a dict instead of raising, so this
-    wrapper only guards the *unexpected* — and its one job is that a policy file
-    this app could not write must not take the boot down with it: an unseeded
-    workspace simply has no level-B rules yet (level A, the app's own rules, is
-    built in and still applies).
-    """
-    try:
-        result = policy_seed.ensure_policy_file(path_location())
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not seed the workspace policy: %s", exc)
-        return {"state": "failed", "path": None, "error": str(exc)}
-    if result["state"] == "failed":
-        _log.warning(
-            "could not seed the workspace policy at %s: %s",
-            result["path"],
-            result["error"],
-        )
-    return result
-
-
-def _seed_mcp_settings() -> Dict[str, Any]:
-    """Leave the workspace's MCP declaration file behind; never raise.
-
-    The second half of the pair the declaration file needs: it lives inside
-    ``.nojae`` now, so the boot seed must land *before* the lifespan's first
-    connector scan — a hub rebuilt over an unseeded folder would come up with
-    zero connectors. Same contract as the policy and modes seeds:
-    ``ensure_mcp_settings_file`` already answers a dict instead of raising, so
-    this wrapper only guards the *unexpected*, and a declaration file this app
-    could not write must not take the boot down with it. An unseeded workspace
-    simply has no MCP connectors — its chat works, its tools do not, and the
-    Settings → MCP panel says so.
-    """
-    try:
-        result = ensure_mcp_settings_file(path_location())
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not seed the MCP settings file: %s", exc)
-        return {"state": "failed", "path": None, "error": str(exc)}
-    if result["state"] == "failed":
-        _log.warning(
-            "could not seed the MCP settings file at %s: %s",
-            result["path"],
-            result["error"],
-        )
-    return result
-
-
-def _seed_lsp_template() -> Dict[str, Any]:
-    """Leave the workspace's LSP declaration *template* behind; never raise.
-
-    The language-server declaration lives inside ``.nojae`` now, but unlike
-    the MCP one it is **never seeded as a working file** — every entry names
-    machine-local paths — so what lands here is the template
-    (``.nojae/lsp-settings.template.json``) the operator copies to
-    ``lsp-settings.json``. Same contract as the other four seeds:
-    ``ensure_lsp_settings_template`` already answers a dict instead of
-    raising, so this wrapper only guards the *unexpected*, and a template
-    this app could not write must not take the boot down with it. A
-    workspace with no declaration simply has no language servers — its chat
-    works without ``lsp_*`` tools, and the Settings → LSP panel says so.
-    """
-    try:
-        result = ensure_lsp_settings_template(path_location())
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not seed the LSP settings template: %s", exc)
-        return {"state": "failed", "path": None, "error": str(exc)}
-    if result["state"] == "failed":
-        _log.warning(
-            "could not seed the LSP settings template at %s: %s",
-            result["path"],
-            result["error"],
-        )
-    return result
-
-
-def _sweep_trash() -> None:
-    """Expire old trash batches — including the pre-``.nojae`` ones in ``logs/``.
-
-    The sweep normally runs after a delete, so a folder nothing is ever deleted
-    into again would rot forever. One best-effort call per boot is the cheapest
-    way to keep the legacy ``logs/trash`` batches from outliving their
-    retention, and the same rule as the seed above applies: a folder this app
-    could not prune must not take the boot down with it. It never *moves* those
-    batches, only lets them expire.
-    """
-    try:
-        removed = editorfs_mutate.sweep_trash()
-    except Exception as exc:  # noqa: BLE001 — boot must survive anything here
-        _log.warning("could not sweep the trash: %s", exc)
-        return
-    if removed:
-        _log.info("removed %d expired trash batch(es)", removed)
-
-
 def create_app() -> FastAPI:
     """Build the FastAPI app: API routes first, static SPA fallback after."""
     load_dotenv_once()
@@ -181,52 +74,40 @@ def create_app() -> FastAPI:
     # tests build an app without touching the loggers of the whole process
     # unless they ask for it.
     apply_llm_debug()
-    # The working location the MCP connectors and language servers point at
-    # (``${NOJAE_PATH_LOCATION}`` in both declaration files) must exist
-    # before the very first scan of those files — which happens below, in the
-    # lifespan — so it is seeded here, right after the .env is read. Booting
-    # always lands on the install directory unless the environment already
-    # carries a value.
-    setup_path_location()
-    # Seed the workspace policy for whichever location that chose — the second
-    # of the two entry points ``POST /api/path-location`` is the other. This is
-    # how nojae gets its own ``.nojae/read-write-policy.json`` on first
-    # launch, and why a project opened from the app bar arrives with a tree
-    # already filtered by rules the user can read.
+    # The folder the boot lands on is the **installation**, which is the workspace
+    # a new tab starts on (spec D4). It is admitted to the pool like any other:
+    # seeded first (its reserved files must exist before the first scan of the
+    # declaration files, which is what ``${NOJAE_PATH_LOCATION}`` in both of them
+    # points at), then given its own two managers in the lifespan below. Nothing
+    # process-wide decides it any more — the interim location value is gone
+    # (clws-10) and the pool's admission is the one seeding moment.
+    boot_root = workspace_seam.installation()
+    # One pool for the whole app, built here rather than in the lifespan because
+    # the boot seeding below belongs to this moment (see the note above) and is
+    # the pool's own function: **boot calls the pool, not a copy of the pool**.
+    # Every folder another tab names is admitted by ``acquire`` on its own
+    # request, which seeds it the same way — a read of a workspace never writes.
+    pool = HubPool()
+    pool.boot_root = boot_root
+    # The four actions the boot has always performed at this point — the policy
+    # file, the MCP declaration, the LSP *template* (the declaration itself is
+    # hand-written and is still never seeded), and the trash sweep that keeps a
+    # folder nobody deletes into from rotting — are now one call, with the same
+    # contract: each is a note in the log, never a boot failure. An unseeded
+    # workspace simply has no level-B rules and no connectors yet.
     #
-    # Called from here rather than from inside ``setup_path_location()`` on
-    # purpose: ``src/config.py`` sits at the bottom of the dependency graph
-    # (``editorfs`` imports ``path_location`` *from* it), so a call there would
-    # need an import cycle or a local import in a config module. The app is the
-    # only thing that boots, so one line beside the line it follows is the
-    # honest place. Failure is a note in the log, never a boot failure: an
-    # unseeded workspace still works, it just has no level-B rules yet.
-    _seed_workspace_policy()
     # The agent modes are **not** seeded here any more (appdb-10): the personas
-    # are rows of the install's ``nojae.db``, which
-    # :func:`_boot_app_store` brings up and seeds in the lifespan below. Nothing
-    # about an agent depends on the working location, so there is nothing to
-    # leave in the folder a switch just moved to (D11).
+    # are rows of the install's ``nojae.db``, which :func:`_boot_app_store`
+    # brings up and seeds in the lifespan below. Nothing about an agent depends
+    # on the working location, so there is nothing to leave in the folder a
+    # switch just moved to (D11).
     #
-    # The workspace's MCP declaration file: it lives inside ``.nojae``
-    # now, so this seed must land before the lifespan's first connector scan
-    # below — that is the whole ordering rule for this one. Same reserved
-    # folder, same contract: a note in the log, never a boot failure; a
-    # workspace with no declaration file simply has no MCP connectors.
-    _seed_mcp_settings()
-    # And the workspace's LSP declaration *template*: the declaration itself
-    # moved into ``.nojae`` too, but it is hand-written (its entries are
-    # per-machine), so this seed only offers the copy-me template beside it.
-    # Same reserved folder, same contract: a note in the log, never a boot
-    # failure; a workspace with no declaration file simply has no language
-    # servers. Nothing scans the template, so — unlike the MCP seed — its
-    # ordering against the lifespan's first server scan carries no rule.
-    _seed_lsp_template()
-    # And drain the trash of whichever location that is, plus the legacy
-    # ``logs/trash`` batches the pre-``.nojae`` code wrote here. Age is the only
-    # signal for a batch nobody addresses any more, and a boot is the one moment
-    # guaranteed to happen even if no further delete ever does.
-    _sweep_trash()
+    # Seeding is idempotent (every create is exclusive), so the lifespan's
+    # admission of the same folder costs nothing the second time — and the
+    # ordering rule survives: the MCP declaration is seeded **before** the MCP
+    # manager scans, because the declaration lives inside the folder the manager
+    # is spawned against.
+    pool.seed_reserved_folder(boot_root)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -246,34 +127,41 @@ def create_app() -> FastAPI:
         # The answer is not kept on ``app.state``: ``appdb.store_state()`` is the
         # one place the store's state is recorded, so the app bar and the chat
         # refusal of the tasks after this one cannot disagree with the boot.
-        _boot_app_store()
-        # MCP connector sessions live exactly as long as the web app: connected
-        # here on startup, closed on shutdown. The env var is a test/dev switch
-        # that keeps the endpoints alive but connects nothing. Every connector
-        # is declared in the workspace's .nojae/mcp-settings.json (seeded at
-        # boot above); entries with ``enable: false`` stay stopped until
-        # toggled on.
-        connectors = (
-            [] if os.environ.get("NOJAE_DISABLE_MCP") else load_externals()[0]
-        )
-        manager = McpManager(connectors)
-        app.state.mcp = manager
-        await manager.start_all()
-        # Language servers follow the same rule (own env-var switch, own log
-        # dir): spawned with the app, shut down (shutdown/exit then
-        # SIGTERM/SIGKILL) when it quits. Servers marked ``"lazy": true`` in
-        # .nojae/lsp-settings.json spawn on their first tool call instead, so
-        # the app stays snappy and tsserver does not sit in RAM for nothing.
-        servers = (
-            [] if os.environ.get("NOJAE_DISABLE_LSP") else all_servers()[0]
-        )
-        # One gate decides whether a server runs here: its ``enable`` flag in
-        # .nojae/lsp-settings.json — the same rule the MCP hub above follows,
-        # so ``start_all`` is all the app asks of either hub. (The hub itself
-        # skips the entries whose flag is off, and the lazy ones.)
-        lsp = LspManager(servers)
-        app.state.lsp = lsp
-        await lsp.start_all()
+        # The store is the install's, but in test mode its connection fixture is
+        # a file at the **installation** folder's reserved subfolder — the one
+        # workspace the boot is about (spec D4). Entering that folder's scope is
+        # what lets the store's own workspace-scoped fixture lookup answer where
+        # the suite committed it, without giving any route a default folder.
+        with workspace_seam.scope(boot_root):
+            _boot_app_store()
+        # The pool is the app's long-lived singleton: it holds **one set of
+        # tools per workspace**, and the object itself never changes, so a worker
+        # thread that resolved a manager mid-turn keeps a live reference across
+        # the request (and across a hub restart, which rebuilds a manager's
+        # internals in place).
+        #
+        # The boot workspace is admitted here — the same ``acquire`` any other
+        # folder goes through, so its connectors and language servers are
+        # declared, built and started exactly as a second tab's would be. The
+        # two env switches are honoured **per workspace** by the pool's own
+        # declaration readers: a hermetic test reaches no hub, on any folder.
+        # Entries with ``enable: false`` stay stopped until toggled on, and
+        # servers declared ``"lazy": true`` spawn on their first tool call.
+        admitted = await pool.acquire(boot_root)
+        if admitted.refusal is not None:
+            # Unreachable in practice (the boot folder was just admitted by this
+            # same process), but the answer is a note, never a boot failure: the
+            # app starts, and the first request about that folder says so.
+            _log.warning("could not admit the boot workspace: %s", admitted.refusal)
+        # The veto (spec §4.4): the pool never lets go of a workspace this
+        # process is busy with. The answer belongs to the API — it is the one
+        # that knows which workspaces have a reply in flight — and is handed over
+        # as a plain ``root -> bool`` callable, so nothing under ``core`` reaches
+        # up here.
+        pool.set_busy_predicate(api_routes.workspace_is_busy)
+        # One reaper for every workspace, on the app's own loop: the idle rule
+        # needs no thread per folder.
+        pool.start_reaper()
         # The terminal registry is a plain dict (no hub thread): sessions are
         # driven by their WebSocket coroutine, on this loop. Nothing spawns at
         # boot — a session is only born on a WS upgrade — but it is created
@@ -285,10 +173,16 @@ def create_app() -> FastAPI:
             yield
         finally:
             await terminal.stop_all()
-            await lsp.stop_all()
-            await manager.stop_all()
+            # Every workspace's own two managers, one call each, through their
+            # own ``stop_all`` — the shared process-tree teardown.
+            await pool.stop_all()
 
     app = FastAPI(title="nojae", version="0.2.0", lifespan=lifespan)
+    # The pool is the only hub the app's state carries. The two interim
+    # process-wide hub names are gone (clws-06): a hub is bound to a folder at
+    # birth, so a process-wide name for "the" hub could only ever answer about
+    # one workspace, and every hub route now asks the pool for the request's own.
+    app.state.hubpool = pool
     app.include_router(build_router())
 
     @app.get("/api/health")

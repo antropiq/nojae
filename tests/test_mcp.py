@@ -25,6 +25,12 @@ from src.core.mcphub import (
     tools_to_openai_format,
 )
 
+#: The pool is the only place a hub lives now (clws-06 deleted the
+#: ``app.state.mcp`` read-through), so a hub test hands its double to the
+#: workspace's own set through these two.
+from tests.conftest import NO_HUB, WorkspaceClient, set_workspace_hubs
+
+
 # ---------------------------------------------------------------------------
 # mcp-settings.json loading and write-back
 # ---------------------------------------------------------------------------
@@ -361,6 +367,92 @@ class TestMcpManager:
 
         asyncio.run(manager.stop_all())
         asyncio.run(manager.stop_all())  # second call must not raise
+
+
+class TestToolCallSafetyNet:
+    """``call_tool_sync``'s wait is a net for a mute connector, not a length cap.
+
+    The bug this pins: the net used to be a literal 120 seconds in the manager,
+    which is *shorter than the backend test suite*. A legitimate long run was
+    cut off mid-flight, ``concurrent.futures.TimeoutError`` carries an empty
+    ``str()``, and so it reached the chat panel as a nameless failed tool call.
+    The connector owns the real limit (its own ``timeout`` argument); this net
+    only answers "it never came back at all".
+    """
+
+    @staticmethod
+    def _muted_manager(answer):
+        """A manager whose bridged call runs ``answer`` on its own loop thread.
+
+        ``answer`` is an ``async def`` because the real ``_call_tool`` is: the
+        bridge hands it to ``run_coroutine_threadsafe``, so a plain function
+        would be refused before the wait is ever exercised.
+        """
+        import asyncio
+
+        manager = _declared_manager()
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        manager._loop = loop
+        manager._call_tool = answer
+        return manager, loop
+
+    def test_the_shipped_net_clears_the_old_wall(self):
+        # The bug in one line: 120 seconds was shorter than the backend suite,
+        # so the shipped default has to stay clear of it. A future edit that
+        # reintroduces a short budget fails here.
+        assert mcphub.constants.TOOL_CALL_TIMEOUT > 120.0
+
+    def test_an_unset_timeout_reads_the_constant(self):
+        """``None`` must resolve to the hub constant, not to a literal."""
+        seen: Dict[str, Any] = {}
+
+        async def answer(connector_id, name, arguments):
+            seen["reached"] = name
+            return "ran"
+
+        manager, loop = self._muted_manager(answer)
+        try:
+            assert manager.call_tool_sync("on_ext", "execute_command", {}) == "ran"
+            assert seen == {"reached": "execute_command"}
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_a_genuinely_mute_connector_times_out_with_a_sentence(self, monkeypatch):
+        import asyncio
+
+        async def never_answers(connector_id, name, arguments):
+            await asyncio.sleep(1.0)
+            return "too late"
+
+        manager, loop = self._muted_manager(never_answers)
+        try:
+            monkeypatch.setattr(mcphub.constants, "TOOL_CALL_TIMEOUT", 0.05)
+            with pytest.raises(TimeoutError) as caught:
+                manager.call_tool_sync("on_ext", "execute_command", {})
+            # Named, not the empty message a bare futures TimeoutError gives.
+            message = str(caught.value)
+            assert "execute_command" in message
+            assert "did not answer" in message
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_a_caller_may_pass_its_own_net(self, monkeypatch):
+        import asyncio
+
+        async def never_answers(connector_id, name, arguments):
+            await asyncio.sleep(1.0)
+            return "too late"
+
+        manager, loop = self._muted_manager(never_answers)
+        try:
+            # The LSP side's shape: an explicit budget wins over the constant.
+            monkeypatch.setattr(mcphub.constants, "TOOL_CALL_TIMEOUT", 3600.0)
+            with pytest.raises(TimeoutError):
+                manager.call_tool_sync("on_ext", "lsp_hover", {}, timeout=0.05)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
 
 
 # ---------------------------------------------------------------------------
@@ -708,9 +800,14 @@ class TestLocalReachRefusal:
         )
         app = create_app()
         with TestClient(app) as test_client:
-            body = test_client.get("/api/mcp").json()
+            client = WorkspaceClient(test_client, app.state.hubpool.boot_root)
+            body = client.get("/api/mcp").json()
             assert mcphub.constants.LOCAL_REACH_REFUSAL in body["externalsError"]
-            hub = app.state.mcp
+            # The hub the route reached is the **boot workspace's own** — the
+            # pool is the only place a hub lives now (clws-06).
+            from tests.conftest import workspace_hubs
+
+            hub = workspace_hubs(app).mcp
             entry = {item["id"]: item for item in hub.status()}["console"]
             assert entry["status"] == "error"
             assert entry["error"] == mcphub.constants.LOCAL_REACH_REFUSAL
@@ -781,6 +878,9 @@ class FakeManager:
     def __init__(self, status: Optional[List[Dict[str, Any]]] = None) -> None:
         self._status = status or []
 
+    async def stop_all(self) -> None:
+        """No processes behind this double; shutdown must still find the hook."""
+
     def status(self):
         return self._status
 
@@ -821,9 +921,11 @@ def mcp_client(monkeypatch, tmp_path):
             None,
         ),
     )
+    root = tmp_path / "mcp-workspace"
+    root.mkdir()
     app = create_app()
     with TestClient(app) as test_client:
-        yield test_client, app
+        yield WorkspaceClient(test_client, root), app
 
 
 EXTERNALS_DOC = {
@@ -852,6 +954,9 @@ class RecordingManager:
 
     async def restart(self, connectors) -> None:
         self.restarts.append(connectors)
+
+    async def stop_all(self) -> None:
+        """No processes behind this double; shutdown must still find the hook."""
 
     def status(self):
         return [
@@ -913,9 +1018,9 @@ class TestMcpEndpoints:
     def test_get_merges_manager_status(self, mcp_client, tmp_path):
         self._externals_file(tmp_path)
         client, app = mcp_client
-        app.state.mcp = FakeManager(
+        set_workspace_hubs(app, root=client.root, mcp=FakeManager(
             [{"id": "context7", "status": "running", "error": None}]
-        )
+        ))
         body = client.get("/api/mcp").json()
         assert body["installed"] is True
         by_id = {c["id"]: c for c in body["connectors"]}
@@ -1010,7 +1115,7 @@ class TestMcpEndpoints:
         hub = RecordingManager(
             {"context7": "running", "chrome-devtools": "stopped"}
         )
-        app.state.mcp = hub
+        set_workspace_hubs(app, root=client.root, mcp=hub)
         client.post(
             "/api/mcp",
             json={"enabled": ["context7", "chrome-devtools"]},
@@ -1032,7 +1137,7 @@ class TestMcpEndpoints:
         # autouse switch would otherwise blank the scan (tested separately).
         monkeypatch.delenv("NOJAE_DISABLE_MCP", raising=False)
         hub = RecordingManager({"context7": "running"})
-        app.state.mcp = hub
+        set_workspace_hubs(app, root=client.root, mcp=hub)
 
         response = client.post("/api/mcp/restart")
 
@@ -1053,32 +1158,47 @@ class TestMcpEndpoints:
         self._externals_file(tmp_path)
         client, app = mcp_client
         hub = RecordingManager({})
-        app.state.mcp = hub
+        set_workspace_hubs(app, root=client.root, mcp=hub)
         assert client.post("/api/mcp/restart").status_code == 200
         assert hub.restarts == [[]]
 
     def test_restart_without_a_hub_returns_503(self, mcp_client):
         client, app = mcp_client
-        app.state.mcp = None
+        set_workspace_hubs(app, root=client.root, mcp=NO_HUB)
         assert client.post("/api/mcp/restart").status_code == 503
 
     def test_restart_during_a_streaming_chat_returns_409(self, mcp_client, tmp_path):
         # A hub restart closes the client sessions a tool call is waiting on,
-        # so it must not race an in-flight chat reply.
+        # so it must not race an in-flight chat reply — and the gate is the
+        # **request's workspace** (clws-04): the reply that holds the restart is
+        # the one streaming on the folder the restart names.
         self._externals_file(tmp_path)
         client, app = mcp_client
         hub = RecordingManager({"context7": "running"})
-        app.state.mcp = hub
+        set_workspace_hubs(app, root=client.root, mcp=hub)
+        root = tmp_path / "busy-workspace"
+        root.mkdir()
         guard = object()
-        routes._CHAT_TASKS.add(guard)
+        routes._CHAT_TASKS[guard] = str(root)
         try:
-            response = client.post("/api/mcp/restart")
+            response = client.post("/api/mcp/restart", params={"workspace": str(root)})
         finally:
-            routes._CHAT_TASKS.discard(guard)
+            routes._CHAT_TASKS.pop(guard, None)
         assert response.status_code == 409
         assert hub.restarts == []
+        # The other half of the same rule: a reply streaming on **another**
+        # folder does not hold this restart.
+        elsewhere = tmp_path / "idle-workspace"
+        elsewhere.mkdir()
+        routes._CHAT_TASKS[guard] = str(root)
+        try:
+            assert client.post(
+                "/api/mcp/restart", params={"workspace": str(elsewhere)}
+            ).status_code == 200
+        finally:
+            routes._CHAT_TASKS.pop(guard, None)
         # And the guard released: the next restart goes through.
-        assert client.post("/api/mcp/restart").status_code == 200
+        assert client.post("/api/mcp/restart", params={"workspace": str(root)}).status_code == 200
 
     def test_chat_uses_the_enabled_declaration_entries(self, mcp_client, tmp_path):
         self._externals_file(tmp_path)
@@ -1651,7 +1771,7 @@ class TestChatMcpWiring:
                 return f"{cid}:{name}"
 
         hub = Hub()
-        app.state.mcp = hub
+        set_workspace_hubs(app, root=client.root, mcp=hub)
 
         captured: Dict[str, Any] = {}
 
@@ -1680,7 +1800,7 @@ class TestChatMcpWiring:
 
     def test_nothing_enabled_keeps_call_shape(self, mcp_client, monkeypatch):
         client, app = mcp_client
-        monkeypatch.setattr(app.state, "mcp", None)
+        set_workspace_hubs(app, root=client.root, mcp=NO_HUB)
         captured = {}
 
         def fake_stream(messages, model, server_url, emit, sampling=None,

@@ -14,6 +14,7 @@ import App from '../src/App.vue'
 import MemoryBullets from '../src/components/MemoryBullets.vue'
 import RegistrationMemoryDlg from '../src/components/RegistrationMemoryDlg.vue'
 import { useWorkspaceTree } from '../src/composables/useWorkspaceTree'
+import { useWorkspaceSession } from '../src/composables/useWorkspaceSession'
 
 // Layer 1 (jsdom): the bullet row's own store, after appdb-07 moved the bullets
 // into ``nojae.db``. What is pinned here is §5.3's UI claim — the row renders
@@ -327,21 +328,21 @@ describe('RegistrationMemoryDlg adds and deletes', () => {
   })
 })
 
-// The bullets are install state now (D11), so the switch that used to reload
-// them must not: the row is fetched once, at boot, and a workspace change
-// leaves the user's own habits where they are.
-describe('a working-location switch leaves the bullets alone', () => {
-  const { setPathLocation } = useAppShell()
-  const appShell = useAppShell().state
+// The bullets are install state now (D11), so the gesture that moves **this
+// tab** to another folder must not reload them: the row is fetched once, at
+// boot, and a workspace change leaves the user's own habits where they are.
+describe('a workspace move leaves the bullets alone', () => {
+  const { setWorkspaceFromField } = useWorkspaceSession()
+  const session = useWorkspaceSession().state
 
   beforeEach(() => {
     vi.restoreAllMocks()
     resetState()
-    appShell.pathLocation = '/srv/new'
-    appShell.pathLocationCurrent = '/srv/old'
-    appShell.pathLocationSaving = false
-    appShell.pathLocationError = null
-    appShell.pathLocationPolicyNote = null
+    session.field = '/srv/new'
+    session.workspace = '/srv/old'
+    session.saving = false
+    session.error = null
+    session.policyNote = null
     const tree = useWorkspaceTree()
     tree.state.nodes = {}
     tree.state.expanded = { '': true }
@@ -351,13 +352,17 @@ describe('a working-location switch leaves the bullets alone', () => {
     let slotOne = 'old workspace'
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((url, options) => {
       const key = String(url)
-      if (key === '/api/path-location' && options?.method === 'POST') {
+      if (key.startsWith('/api/workspace')) {
         return jsonResponse({
-          key: 'NOJAE_PATH_LOCATION',
-          path: '/srv/new',
+          workspace: '/srv/new',
           default: '/srv/app',
-          mcp: { installed: true, connectors: [], externalsError: null },
-          lsp: { installed: true, servers: [], serversError: null },
+          mcpSettings: { state: 'existing', path: '' },
+          lspSettings: { state: 'existing', path: '' },
+          lspSettingsTemplate: { state: 'existing', path: '' },
+          hubs: {
+            mcp: { installed: true, connectors: [], externalsError: null },
+            lsp: { installed: true, servers: [], serversError: null },
+          },
           policy: { state: 'created', path: '/srv/new/.nojae/read-write-policy.json', error: null },
         })
       }
@@ -372,11 +377,11 @@ describe('a working-location switch leaves the bullets alone', () => {
     expect(state.slots[0].content).toBe('old workspace')
 
     slotOne = 'new workspace'
-    await setPathLocation()
+    await setWorkspaceFromField()
     await flushPromises()
 
     // The switch happened, and the bullets it cannot see stayed put.
-    expect(appShell.pathLocationCurrent).toBe('/srv/new')
+    expect(session.workspace).toBe('/srv/new')
     expect(state.slots[0].content).toBe('old workspace')
     expect(
       fetchSpy.mock.calls.filter(([url]) => String(url) === '/api/prompt-helpers'),

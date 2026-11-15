@@ -25,8 +25,12 @@ Core-only (no FastAPI), a sibling of ``mcphub/``, ``lsphub/`` and
 A session is a **human** surface, reached only by the SPA over
 ``WS /api/terminal``: it is never an MCP or LSP tool, and that boundary is what
 keeps "tools are read-only by design" intact while a real shell exists in the
-app. Its ``cwd`` is always ``path_location()`` and the server takes no path from
-the client, so the tree/editor path policy has nothing here to guard.
+app. Its ``cwd`` is the workspace in scope when it was born (the seam's
+:func:`src.core.workspace.current_root`), which the route entered from the
+socket's own ``workspace`` query field — the folder arrives as a named
+**workspace** when the socket opens, never as a path, and a live session keeps
+the folder it was born in, so the tree/editor path policy has nothing here to
+guard.
 
 Like the two hubs, a session is torn down as a **tree** (via
 :func:`src.core.proctree.kill_session_tree`) on every exit path: on POSIX the
@@ -66,6 +70,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         DEFAULT_COLS,
         DEFAULT_ROWS,
         FALLBACK_SHELL,
+        MAX_CLOSE_REASON_BYTES,
         MAX_SESSIONS,
         NO_DRIVER_MESSAGE,
         PTY_READ_BYTES,
@@ -73,6 +78,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         STOP_GRACE_SECONDS,
         TERM_VALUE,
         TERMINAL_SHELL_KEY,
+        close_reason,
     )
 
 __all__ = [
@@ -80,4 +86,5 @@ __all__ = [
     "TerminalHub",
     "TerminalSession",
     "TerminalUnsupported",
+    "close_reason",
 ]

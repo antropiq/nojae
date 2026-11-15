@@ -60,23 +60,22 @@ if (!existsSync(ENV_FILE)) {
 }
 
 // The suite's own model connection: `.nojae/nojae-test-settings.json` at the
-// working location the server under test boots on. It is **a store fixture, not
-// a UI payload**, so its member names are the *column* names — one `server`
-// object holding one `model` object, with no ids (the harness assigns both).
-// It is the only connection a spec may use. The app never creates or writes it
-// (it is hand-authored, like `.env.test`), and with the switch below on there is
-// no fallback in either direction: a missing fixture must stop the suite here
-// rather than look like an app bug — or, worse, silently reach the developer's
-// own store and key.
+// **installation** folder. That is the folder the server boots on and the one a
+// new tab lands on, so the fixture is found exactly where it is committed
+// (`<repo>/.nojae/`) — no developer's working location decides the lookup.
+// It is **a store fixture, not a UI payload**, so its member names are the
+// *column* names — one `server` object holding one `model` object, with no ids
+// (the harness assigns both). It is the only connection a spec may use. The app
+// never creates or writes it (it is hand-authored, like `.env.test`), and with
+// the switch below on there is no fallback in either direction: a missing
+// fixture must stop the suite here rather than look like an app bug — or, worse,
+// silently reach the developer's own store and key.
 //
-// Resolved the way the app resolves it: `NOJAE_PATH_LOCATION` when set,
-// else the repo root (the boot default), plus the reserved folder's file name.
-// `E2E_ENV_FILE` has no sibling override on purpose — a settings file named by
-// an env var could live outside the reserved folder, where the workspace policy
-// and the `.nojae` invisibility rules do not apply.
+// The specs name their own folders per request; the config names none. There is
+// therefore no second environment lookup here: a scenario's workspace is the
+// field on its requests, never this file's business.
 const TEST_SETTINGS_FILE = join(
-  process.env.NOJAE_PATH_LOCATION?.trim() ||
-    join(dirname(fileURLToPath(import.meta.url)), '..'),
+  join(dirname(fileURLToPath(import.meta.url)), '..'),
   '.nojae',
   'nojae-test-settings.json',
 )
@@ -142,8 +141,10 @@ export default defineConfig({
   // phase), never on a sleep.
   timeout: 120_000,
   expect: { timeout: 30_000 },
-  // Specs share one global server, which answers one streamed reply at a time
-  // and holds one working location, so they must not fight over either.
+  // Specs share one global server, one settings store and its catalogues, so
+  // they must not race each other's writes. Two tabs inside one spec are how the
+  // two-tab run stays deterministic; two specs racing over one server would not
+  // be, and spec D7 refuses the cross-tab invalidation that could make it safe.
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
@@ -210,4 +211,5 @@ export default defineConfig({
     },
   },
   globalSetup: './e2e/global-setup.js',
+  globalTeardown: './e2e/global-teardown.js',
 })

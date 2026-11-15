@@ -4,10 +4,15 @@ import { registerReRootHandler, useWorkspaceTree } from '../src/composables/useW
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorNotices } from '../src/composables/useEditorNotices'
 import { useGitStatus } from '../src/composables/useGitStatus'
+import { clearTabWorkspace, pointTabAt, withWorkspace } from './helpers/workspace-url'
 
 // ---------------------------------------------------------------------------
 // A working-location switch, seen from the client: everything that holds a
 // workspace-relative path has to let go of it.
+//
+// Since clws-02 the switch is **this tab's** own: the tab holds a folder and
+// every request names it, so the route stubs below match the URLs the call
+// sites build (`withWorkspace`), never a hand-spelled `?workspace=…`.
 //
 // The bug this suite exists for: the tree re-listed the new root while the tab
 // strip still showed a file of the previous one, so the pane and the tree
@@ -39,19 +44,19 @@ function jsonResponse(body, ok = true, status = 200) {
 // was just left.
 function stubRoots(state = { root: OLD_ROOT }) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
-    const key = String(url)
-    if (key.startsWith('/api/fs/tree')) {
-      const path = decodeURIComponent(key.slice('/api/fs/tree?path='.length))
+    const route = routeOf(url)
+    if (route.startsWith('/api/fs/tree')) {
+      const path = pathParamOf(String(url))
       const entries =
         state.root === OLD_ROOT
           ? [{ name: 'README.md', path: 'README.md', dir: false, size: 8, mtime: 1000 }]
           : [{ name: 'src', path: 'src', dir: true, children: true, mtime: 2000 }]
       return jsonResponse({ path, workspace: state.root, entries, truncated: false })
     }
-    if (key.startsWith('/api/fs/file')) {
+    if (route.startsWith('/api/fs/file')) {
       return jsonResponse({ path: 'README.md', text: 'old one\n', mtime: 1000, size: 8 })
     }
-    if (key.startsWith('/api/fs/status')) {
+    if (route.startsWith('/api/fs/status')) {
       return jsonResponse({ repo: false, entries: [] })
     }
     return jsonResponse({})
@@ -59,7 +64,20 @@ function stubRoots(state = { root: OLD_ROOT }) {
   return state
 }
 
+// A recorded URL, back to the route it hit (the workspace field stripped), and
+// its `path` parameter — so the stub spells the field no more than the client
+// does.
+function routeOf(url) {
+  return String(url).split('?')[0]
+}
+
+function pathParamOf(url) {
+  const search = String(url).slice(String(url).indexOf('?') + 1)
+  return new URLSearchParams(search).get('path') ?? ''
+}
+
 function resetState() {
+  clearTabWorkspace()
   tree.state.nodes = {}
   tree.state.expanded = { '': true }
   tree.state.focused = ''
@@ -136,9 +154,7 @@ describe('useWorkspaceTree.reRoot: the tree lets go of the old root', () => {
     stubRoots()
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
       const key = String(url)
-      const path = key.startsWith('/api/fs/tree')
-        ? decodeURIComponent(key.slice('/api/fs/tree?path='.length))
-        : ''
+      const path = key.startsWith('/api/fs/tree') ? pathParamOf(key) : ''
       if (path === 'old') return pending
       return jsonResponse({
         path,
@@ -170,7 +186,31 @@ describe('useWorkspaceTree.reRoot: the tree lets go of the old root', () => {
     expect(tree.state.nodes['old']).toBeUndefined()
     expect(tree.state.workspace).toBe(NEW_ROOT)
   })
+
+  // The half this lot adds: a listing is **about the tab's folder**. Two tabs
+  // on two folders ask the same route with two different fields, and each is
+  // answered about the folder it named — which is only observable client-side
+  // as the field travelling on the URL.
+  it('names this tab folder on every listing it asks for', async () => {
+    const tabRoot = pointTabAt('/w/tab-a')
+    stubRoots()
+    await tree.load('')
+    await tree.load('src')
+
+    const asked = fetchCalls('/api/fs/tree')
+    expect(asked.length).toBe(2)
+    for (const url of asked) {
+      expect(url).toBe(withWorkspace(`/api/fs/tree?path=${pathParamOf(url)}`))
+      expect(url).toContain(encodeURIComponent(tabRoot))
+    }
+  })
 })
+
+function fetchCalls(route) {
+  return globalThis.fetch.mock.calls
+    .map(([url]) => String(url))
+    .filter((url) => url.split('?')[0] === route)
+}
 
 describe('the tab strip: every tab of the old root closes', () => {
   beforeEach(() => {

@@ -1,5 +1,7 @@
 import { reactive } from 'vue'
 
+import { AGENT_STORAGE_KEY } from './useWorkspaceSession'
+
 // ---------------------------------------------------------------------------
 // Agent modes: the persona WorkBench answers as, and what it may reach.
 //
@@ -23,7 +25,7 @@ import { reactive } from 'vue'
 // and the fixed-mode tooltip sentence), the server-side **default** agent and
 // the whole file-document machinery the dialog used to edit (`mtime`, the
 // conflict guard, the draft-from-a-document reader). The last-used agent is
-// browser state — `localStorage`, the theme composable's shape — and the dialog
+// **tab** state — `sessionStorage`, beside the tab's workspace — and the dialog
 // now reads and saves the store's rows one agent at a time.
 // ---------------------------------------------------------------------------
 
@@ -41,24 +43,37 @@ const state = reactive({
   notice: null, // one quiet line the composer shows under the select
 })
 
-//: Where the last agent the user chose is remembered. Browser state, like the
-//: theme and the layout keys — *not* configuration, and therefore not in the
-//: store the installation owns (D5): a second browser on the same install may
-//: open on a different agent, and a workspace switch changes nothing.
-const STORAGE_KEY = 'nojae:agent-mode'
-
 // A second fetch already in flight (tab entry racing a boot).
 let inFlight = null
 
 // ---------------------------------------------------------------------------
-// The browser's remembered choice
+// The tab's remembered choice
 // ---------------------------------------------------------------------------
+
+// Where the last agent the user chose is remembered: the **tab's** storage,
+// under `AGENT_STORAGE_KEY` — written and read here, but *named* in
+// `useWorkspaceSession`, so the tab's two pieces of identity (its folder and its
+// agent) are spelled in one file.
+//
+// `sessionStorage` and not `localStorage`, and that is the whole requirement
+// (spec D5, §5.5 rule 26). Browser-wide storage meant every tab answered as the
+// same agent — moving the choice in one moved it in all of them — which is
+// exactly what D5 retires. Here a reload is the same tab and keeps its agent, a
+// new tab starts on the list's first entry, and a closed tab forgets its choice.
+//
+// The **catalogue** stays the installation's, deliberately: these are the same
+// install-owned rows, selected per tab, not a per-tab copy of them (§4.2, §5.5
+// rule 25). Only the *choice* moved; the agents did not.
+//
+// A `localStorage` value from an older build is **not** read: the new key is a
+// new place, and inheriting the old one would re-share a choice this lot exists
+// to make per tab.
 
 // Tolerant on purpose: a missing key, a cleared storage and a private-mode
 // throw all mean the same thing — no remembered agent.
 export function rememberedAgentId() {
   try {
-    const value = window.localStorage.getItem(STORAGE_KEY)
+    const value = window.sessionStorage.getItem(AGENT_STORAGE_KEY)
     return value ? value : null
   } catch {
     return null
@@ -67,10 +82,10 @@ export function rememberedAgentId() {
 
 export function rememberAgent(id) {
   try {
-    if (id) window.localStorage.setItem(STORAGE_KEY, String(id))
-    else window.localStorage.removeItem(STORAGE_KEY)
+    if (id) window.sessionStorage.setItem(AGENT_STORAGE_KEY, String(id))
+    else window.sessionStorage.removeItem(AGENT_STORAGE_KEY)
   } catch {
-    // Private mode / storage disabled: the choice lasts the session.
+    // Private mode / storage disabled: the choice lasts the tab's lifetime.
   }
 }
 
@@ -141,7 +156,7 @@ export function modeSelectDisabled(batchActive = false) {
 
 // Choosing an agent: whatever the thread has done, from any agent to any other
 // (§4.4, AC-10). What is left of the old guard is the list itself — a client
-// never invents an id — and the browser's memory of the choice.
+// never invents an id — and the **tab's** memory of the choice (spec D5).
 export function setAgentMode(id) {
   const next = modeById(id)
   if (!next) return // never the server's list, never a guess
@@ -251,11 +266,11 @@ export function clearAgentModeNotice() {
 
 // The mode a loaded session file asked for, judged against the loaded list.
 //
-// **The file wins over the browser's memory**, which is the one place the two
-// kinds of state meet: the file describes the conversation, `localStorage`
-// describes the browser, and the more specific one answers a resume. An unknown
-// id falls back to the list's first entry — never to a different persona
-// silently, and never by refusing to load the conversation.
+// **The file wins over the tab's memory**, which is the one place the two kinds
+// of state meet: the file describes the conversation, `sessionStorage` describes
+// the tab, and the more specific one answers a resume. An unknown id falls back
+// to the list's first entry — never to a different persona silently, and never
+// by refusing to load the conversation.
 export function applySessionAgentMode(rawId) {
   const wanted = typeof rawId === 'string' ? rawId.trim() : ''
   if (!wanted) {
@@ -294,10 +309,12 @@ export function applySessionAgentMode(rawId) {
 //
 // The selection is resolved in one order, and each step says which authority
 // answered: a selection the new list still holds is kept (a plain refresh, or a
-// save); otherwise the **remembered** id (§5.4, `localStorage`), because that is
-// the last agent the user chose in this browser; otherwise the first entry. A
-// remembered id naming an agent that is gone — deleted, or a store restored from
-// elsewhere — therefore falls back instead of leaving the composer with nothing.
+// save); otherwise the **remembered** id (§5.4, the tab's `sessionStorage`),
+// because that is the last agent the user chose in this tab; otherwise the first
+// entry — which is also what a brand-new tab gets, having remembered nothing
+// (spec D4, D11). A remembered id naming an agent that is gone — deleted, or a
+// store restored from elsewhere — therefore falls back instead of leaving the
+// composer with nothing.
 function acceptPayload(body, { reseed }) {
   const agents = Array.isArray(body?.agents) ? body.agents : []
   if (!agents.length) throw new Error('no agents in the response')

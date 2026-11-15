@@ -342,9 +342,9 @@ class TestWindowsValuesArriveFromTheEnvironment:
 
     def test_the_module_lists_speak_this_runners_own_working_location_form(self):
         """Whatever the box is, the lists in force speak its form (A-D4's gate)."""
-        from src.config import path_location
+        from src.core import workspace
 
-        resolved = Path(path_location()).resolve().as_posix()
+        resolved = Path(workspace.current_root()).resolve().as_posix()
         assert path_policy.lists_are_meaningful(resolved)
 
 

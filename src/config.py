@@ -73,19 +73,6 @@ _RESERVED_ENV_NAMES: frozenset[str] = frozenset(
 # file — which has its own committed template and no always-written member.
 REQUIRED_SETTING_KEYS: Tuple[str, ...] = ()
 
-# Environment variable holding the *working location* the MCP connectors and
-# language servers are pointed at. Both declaration files reference it
-# (``--root-dir`` / ``workspaceRoot`` as ``${NOJAE_PATH_LOCATION}``), so
-# one value moves every file-touching tool together.
-#
-# Deliberately NOT a managed ``SETTING_KEYS`` key: it is process state, not
-# run configuration, and keeping it out of ``.env`` means ``save_settings``
-# (which regenerates that file from a fixed template) can neither erase it nor
-# resurrect a stale value at the next boot. The boot default below is the
-# single persistence rule: a restart always lands on the install directory.
-PATH_LOCATION_KEY = "NOJAE_PATH_LOCATION"
-
-
 # Debug switch for the in-house LLM client. When set, ``nojae.llm`` —
 # the logger ``core/llmkit`` writes its request payloads to — is raised to
 # DEBUG and its output reaches the server console, so a failed call can be read
@@ -226,55 +213,69 @@ def load_dotenv_once() -> None:
         load_dotenv(ENV_PATH)
 
 
-def default_path_location() -> str:
-    """The install directory, used as the working-location boot default."""
-    return str(PROJECT_ROOT)
-
-
-def setup_path_location() -> None:
-    """Ensure ``PATH_LOCATION_KEY`` is set, defaulting it to the install dir.
-
-    Called at startup, *after* ``load_dotenv_once``: an exported variable (or
-    one written in ``.env``) wins, which is what lets an operator pin the
-    location without touching the code. Never overwrites, so it stays
-    idempotent across the test suite and repeated app factories.
-    """
-    current = (os.environ.get(PATH_LOCATION_KEY) or "").strip()
-    if not current:
-        os.environ[PATH_LOCATION_KEY] = default_path_location()
-
-
-def path_location() -> str:
-    """Effective working location (the value the declaration files expand to).
-
-    Reads ``os.environ`` at call time, so a value set through the API is what
-    the next hub re-scan sees. Falls back to the boot default rather than
-    returning empty, so the app bar always shows a real path.
-    """
-    return (os.environ.get(PATH_LOCATION_KEY) or "").strip() or default_path_location()
-
-
 # Values the app provides for ``${NAME}`` references in the hub declaration
-# files (see ``mcphub.validation.expand_env``). ``NOJAE_PATH_LOCATION``
-# does not belong here — it is process state carried in the environment, which
-# is exactly what lets a workspace switch move it. ``PROJECT_ROOT`` is
-# deliberately *not* exported into the environment either: the app computes
-# its own root, so the value is always right, and a generic name like
-# ``PROJECT_ROOT`` exported process-wide would collide with whatever a shell,
-# a CI runner or one of the connectors' own scripts calls its project root —
-# the ``TEMP`` lesson in ``_RESERVED_ENV_NAMES``, seen from the other side:
-# a name the world already uses cannot become an export of ours either. The
-# value therefore reaches expansion from this computation alone, and a stray
-# ``PROJECT_ROOT`` in the environment cannot redirect connectors away from
-# this install.
+# files (see ``mcphub.validation.expand_env``). Both names here are **computed**,
+# never read back from the environment, and the two must not be confused:
+#
+# * ``NOJAE_PATH_LOCATION`` is the **folder being served** — the workspace of the
+#   call doing the expansion, read through the seam
+#   (:func:`src.core.workspace.provided_path_location`) rather than from
+#   ``os.environ``. That is what makes one declaration file correct in two
+#   workspaces at once: a tab on A gets A's connectors rooted at A, a tab on B
+#   gets B's (spec §4.3). Reading the environment here would answer "which
+#   folder does this *process* hold", which is the question this lot retires.
+# * ``PROJECT_ROOT`` is the **installation**, in every workspace and always.
+#
+# Neither is *exported* into the environment either: the app computes both, so
+# the values are always right, and a generic name like ``PROJECT_ROOT`` exported
+# process-wide would collide with whatever a shell, a CI runner or one of the
+# connectors' own scripts calls its project root — the ``TEMP`` lesson in
+# ``_RESERVED_ENV_NAMES``, seen from the other side: a name the world already
+# uses cannot become an export of ours either. Both therefore reach expansion
+# from this computation alone, and a stray value in the environment cannot
+# redirect connectors away from this install or away from the workspace asked
+# about. An unresolved ``${NAME}`` still stays written as-is with a note (the
+# rule ``expand_env`` holds); these two simply always resolve.
+
+
+#: The **name** ``NOJAE_PATH_LOCATION`` has in this app: the placeholder a
+#: workspace's declaration file writes (``--root-dir`` / ``workspaceRoot``) and
+#: the key :func:`provided_env_values` answers with the workspace being served
+#: (spec §4.3). It is not an environment key any more — clws-10 deleted the
+#: process-wide value, its accessor and the boot seed that wrote it, so this
+#: constant and that one answer are the whole of the name's life in ``src``.
+PATH_PLACEHOLDER = "NOJAE_PATH_LOCATION"
+
+
 def provided_env_values() -> Dict[str, str]:
     """The app-computed ``${NAME}`` values for hub declaration expansion.
 
     Read at call time through this module, so a patched ``PROJECT_ROOT`` (a
     test does exactly that) moves the answer — same convention as every other
-    patchable name.
+    patchable name. ``NOJAE_PATH_LOCATION`` is read through the seam, so the
+    answer follows the workspace in scope; see the block above for why the two
+    names must stay two.
+
+    Outside a scope there is **no** workspace being served, so the placeholder
+    is simply absent: expansion leaves ``${NOJAE_PATH_LOCATION}`` written as-is
+    with a missing-name note (the rule ``expand_env`` holds for every unresolved
+    reference) rather than raising. That matters because some reads happen while
+    the workspace itself is still being resolved — the LSP root deny-list is
+    expanded through this function before a request's scope exists — and a
+    validator for one folder must not need a different folder to already be in
+    scope.
     """
-    return {"PROJECT_ROOT": str(PROJECT_ROOT)}
+    # Lazy: ``src.core.workspace`` imports this module (it reads
+    # ``PROJECT_ROOT`` from here), so a module-level import would be a cycle —
+    # the same shape as the ``appdb`` imports below.
+    from src.core import workspace
+
+    values = {"PROJECT_ROOT": str(PROJECT_ROOT)}
+    try:
+        values[PATH_PLACEHOLDER] = workspace.provided_path_location()
+    except workspace.WorkspaceNotScoped:
+        pass
+    return values
 
 
 # Project agent instructions: when present at the root of the working
@@ -292,16 +293,30 @@ def agent_instructions_filename() -> str:
     return AGENT_INSTRUCTIONS_FILENAME
 
 
-def load_agent_instructions(location: Optional[str] = None) -> str:
-    """Text of the working location's ``AGENTS.md``, "" when absent/unreadable.
+def _served_root() -> str:
+    """The folder the call in progress is about — read through the seam.
 
-    Resolved against ``NOJAE_PATH_LOCATION`` (the same folder the
-    file-touching tools are pointed at) at call time, so moving the location
-    from the app bar also moves where the instructions are looked for. Read per
-    chat request rather than cached: editing ``AGENTS.md`` then takes effect on
-    the very next message.
+    The request's workspace, and the same answer ``${NOJAE_PATH_LOCATION}``
+    expands to for the declaration files. With several tabs on several folders,
+    the instructions a turn receives are the ones at *that* tab's root, never
+    another tab's (spec §5.6 rule 31).
     """
-    root = Path(location) if location else Path(path_location())
+    # Lazy, for the same reason as ``provided_env_values``: the seam imports this
+    # module, so a module-level import here would be a cycle.
+    from src.core import workspace
+
+    return workspace.provided_path_location()
+
+
+def load_agent_instructions(location: Optional[str] = None) -> str:
+    """Text of the workspace's ``AGENTS.md``, "" when absent/unreadable.
+
+    Resolved against the folder the request names (the seam's scope — the same
+    one every file-touching surface answers about) at call time. Read per chat
+    request rather than cached: editing ``AGENTS.md`` then takes effect on the
+    very next message.
+    """
+    root = Path(location) if location else Path(_served_root())
     try:
         return (root / agent_instructions_filename()).read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
@@ -313,9 +328,10 @@ def agent_instructions_block(text: Optional[str] = None) -> str:
 
     The framing tells the model these are the project's own instructions —
     they win over generic wording for anything project-specific — and pins
-    the project root to the working location, which is what makes the paths
+    the project root to the **request's workspace**, which is what makes the paths
     the instructions mention (``src/``, ``tests/``, ``web/``) and the tool
-    UIDs they describe resolve to the real project.
+    UIDs they describe resolve to the real project — and keeps two tabs on two
+    folders from receiving each other's instructions.
     """
     body = load_agent_instructions() if text is None else (text or "").strip()
     if not body:
@@ -325,7 +341,7 @@ def agent_instructions_block(text: Optional[str] = None) -> str:
         "The following are this project's own instructions (AGENTS.md at that "
         "root). Follow them for anything project-specific; they take "
         "precedence over generic wording.\n\n{body}"
-    ).format(root=path_location(), body=body)
+    ).format(root=_served_root(), body=body)
 
 
 def agent_connection_refusal(agent: Optional[Mapping[str, Any]]) -> Optional[str]:

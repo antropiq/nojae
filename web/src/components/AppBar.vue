@@ -6,11 +6,17 @@ import SoundToggle from './SoundToggle.vue'
 import SessionClock from './SessionClock.vue'
 import SessionStatBadges from './SessionStatBadges.vue'
 import { useAppShell } from '../composables/useAppShell'
+import {
+  locationNoteVerdict,
+  useWorkspaceSession,
+} from '../composables/useWorkspaceSession'
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
+import { useWorkspaceTree } from '../composables/useWorkspaceTree'
 import { modeById, runningOnLine } from '../composables/useAgentModes'
 
-const { state, openSettings, setPathLocation } = useAppShell()
+const { state, openSettings, applyWorkspaceHubs } = useAppShell()
+const { state: session, setWorkspaceFromField } = useWorkspaceSession()
 const { state: chat } = useChat()
 const { state: batch } = useBatch()
 
@@ -79,19 +85,28 @@ onUnmounted(clearBatchPillTimer)
 
 // -- the working location, edited in place ---------------------------------
 //
-// ``state.pathLocation`` is what the user has typed, ``state.pathLocationCurrent``
-// what the server applied (its realpath), so Set reads the same difference the
-// field is about: a canonicalised path never leaves it spuriously enabled.
-const pathLocationChanged = computed(
-  () => (state.pathLocation || '').trim() !== state.pathLocationCurrent,
+// The field belongs to **this tab alone** (clws-02): ``session.field`` is what
+// the user has typed, ``session.workspace`` what the server applied (its
+// realpath) and what every request of this tab is built from, so Set reads the
+// same difference the field is about — a canonicalised path never leaves it
+// spuriously enabled. A second tab on the same address keeps its own folder:
+// nothing here is shared, and nothing here touches the address bar.
+const workspaceChanged = computed(
+  () => (session.field || '').trim() !== session.workspace,
 )
 
-// A session must not have its root moved out from under it: the route refuses
-// the switch with 409 while a chat reply is in flight, and a batch would find
-// its lot folder re-rooted mid-task. ``chatBusy`` is the WorkBench's own rule
-// (it also covers the idle gap between two batch turns), so the button cannot
-// disagree with a send being refused. The pill reads the same states, so a
-// locked Set always explains itself.
+// This tab must not have its root moved out from under a running session: a
+// reply streaming **here** owns the tools and the lot of this folder, so the
+// field is locked while `useChat`'s phase (this module instance's) is busy or
+// `useBatch`'s lot is active.
+//
+// **There is deliberately no cross-tab channel here.** Each browser tab is its
+// own JS context, so these two composables — and the `sessionStorage` holding
+// the folder and the agent — are per tab. A reply streaming in another tab lives
+// in *that* tab's module instances and cannot reach this state: no `storage`
+// event, no `BroadcastChannel`, no polling (spec D7). A reader looking for the
+// server's old process-wide guard will find no broadcast to follow, and that is
+// the whole mechanism.
 const locationLocked = computed(
   () => batch.active || chatBusy.value,
 )
@@ -101,20 +116,53 @@ const locationTitle = computed(() =>
     : 'Point the MCP and LSP tools, the Editor and the terminal at this folder',
 )
 
-// What the switch answered that is worth a line under the field: the refusal
-// (red), or the reserved folder's policy seed that could not land. The latter is
-// a warning and never a refusal — the location *did* move and both hubs
-// restarted. The agent-modes block that used to ride along here is gone with the
-// file: the agents are rows of the install's store, so a workspace has nothing
-// to report about them (§4.7).
-const locationNote = computed(() => state.pathLocationPolicyNote ?? '')
+// What the read answered that is worth a line under the field, chosen by the
+// composable's precedence: a refusal (red, alert), the pool's ceiling sentence
+// (red, alert, the server's own words), the policy file that could not be read
+// (warning), or the restarting status. The policy line is a warning and never a
+// refusal — the folder *did* move — and the error outranks it, exactly as the
+// old `error`/`policyNote` pair did.
+const locationNote = computed(() => locationNoteVerdict())
+
+// Presentation only: the composable decides *which* note wins and whether it is
+// an alert or a status; this table decides the colour.
+const NOTE_CLASS = {
+  error: 'appbar-location-note--error',
+  warn: '',
+  status: 'appbar-location-note--status',
+}
+const locationNoteClass = computed(() =>
+  locationNote.value ? NOTE_CLASS[locationNote.value.tone] : '',
+)
 
 // One gesture, two entries: the button and Enter in the field. The lock is
 // re-checked here rather than left to the disabled button, because a key
 // reaches the request without ever meeting the button.
-function applyLocation() {
+async function applyLocation() {
   if (locationLocked.value) return
-  setPathLocation()
+  const body = await setWorkspaceFromField()
+  if (!body) return
+  // The hub panels read the same payload the read answered with, so the tool
+  // lists and the status dots are the new folder's without a second request.
+  applyWorkspaceHubs(body.hubs)
+  // **Three things are deliberately not reloaded**: the model connection, the
+  // agent list and the prompt helpers. All three live in the install's
+  // settings store, so moving a tab invalidates nothing in them (spec §4.2) —
+  // the servers, models, agents and bullets a user built once are the same in
+  // every folder.
+  //
+  // The Editor's tree browses this folder, so the whole workspace-relative view
+  // of the tab moves here: the listings cached under the old root are forgotten
+  // and the tabs that held files of it close with it. Driven from the gesture
+  // rather than from the tab, because the tab may never have been opened — in
+  // which case there is nothing to forget.
+  try {
+    await useWorkspaceTree().reRoot(session.workspace)
+  } catch (exc) {
+    // The folder moved but the tree could not be listed: the next tree request
+    // re-reads it. Say so rather than let it read as a failed move.
+    session.error = `Workspace is set, but the file tree could not re-root: ${exc}`
+  }
 }
 
 const pillLabel = computed(() => {
@@ -186,45 +234,39 @@ const runningLine = computed(() => {
       <div class="appbar-location">
         <div class="appbar-location-row">
           <input
-            v-model="state.pathLocation"
+            v-model="session.field"
             class="appbar-location-input"
             type="text"
             spellcheck="false"
             aria-label="Working location"
-            :disabled="state.pathLocationLoading"
-            :title="state.pathLocationCurrent"
+            :disabled="session.loading"
+            :title="session.workspace"
             @keydown.enter.prevent="applyLocation"
           />
           <button
             class="appbar-location-set"
             type="button"
             :disabled="
-              !pathLocationChanged || state.pathLocationSaving || locationLocked
+              !workspaceChanged || session.saving || locationLocked
             "
             :title="locationTitle"
             @click="applyLocation"
           >
-            {{ state.pathLocationSaving ? 'Reloading…' : 'Set' }}
+            {{ session.saving ? 'Reloading…' : 'Set' }}
           </button>
         </div>
-        <!-- One line, whichever half of the answer it is: the refusal, or the
-             seeds that could not land. The bar has no room for a wrapped
-             sentence, so it truncates and `title` carries the whole of it. -->
+        <!-- One line, whichever answer wins: a refusal (the server's 422 or the
+             pool's ceiling 429), the policy seed that could not land, or the
+             restarting status. The bar has no room for a wrapped sentence, so it
+             truncates and `title` carries the whole of it. -->
         <p
-          v-if="state.pathLocationError"
-          class="appbar-location-note appbar-location-note--error"
-          role="alert"
-          :title="state.pathLocationError"
-        >
-          {{ state.pathLocationError }}
-        </p>
-        <p
-          v-else-if="locationNote"
+          v-if="locationNote"
           class="appbar-location-note"
-          role="status"
-          :title="locationNote"
+          :class="locationNoteClass"
+          :role="locationNote.role"
+          :title="locationNote.text"
         >
-          {{ locationNote }}
+          {{ locationNote.text }}
         </p>
       </div>
     </div>

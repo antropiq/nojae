@@ -1,10 +1,13 @@
 """Tests for the git half of the Editor tab's file surface: ``/api/fs/status``
 (which rows to mark) and ``/api/fs/diff`` (the two sides of one file).
 
-Every test builds its own throw-away repository under ``tmp_path`` and points
-``NOJAE_PATH_LOCATION`` at it, so nothing here reads the suite's own
-checkout. The git runs are hermetic: the global/system config is ignored and
-the identity comes from the environment, so a developer's ``~/.gitconfig``
+Every test builds its own throw-away repository under ``tmp_path``, and since
+clws-03 the route rows **name** it through the ``workspace`` field (the client
+from ``tests/conftest.py``) while the rows that call a core surface directly run
+inside ``workspace.scope`` of it — so nothing here reads the suite's own
+checkout, and what the route rows measure is the field rather than the interim
+environment value. The git runs are hermetic: the global/system config is ignored
+and the identity comes from the environment, so a developer's ``~/.gitconfig``
 (signing, ``core.autocrlf``, a rename threshold) cannot change an answer.
 
 The policy rows here assert one rule, not two (pol-00 D7 deleted the tree's
@@ -17,14 +20,15 @@ import os
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, Iterator, List
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api.server import create_app
-from src.core import editorfs
+from src.core import editorfs, workspace
 from src.core.editorfs import policy_file, policy_seed
+from tests.conftest import WorkspaceClient, scoped, workspace_params
 
 
 def write_policy(root: Path, rules: List[Dict[str, str]]) -> Path:
@@ -62,28 +66,46 @@ def git(repo: Path, *args: str) -> str:
 
 
 @pytest.fixture
-def ws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A committed two-file repository, pointed at as the working location."""
+def ws(tmp_path: Path) -> Iterator[Path]:
+    """A committed two-file repository, the folder every row is asked about.
+
+    Yielded inside the seam's **scope**: several rows here call a core surface
+    directly (``git_status``, ``ignored_paths``, ``mode_for``), and a call that
+    is not a request has to name its folder itself. The route rows enter their
+    own scope per request, nested inside this one, so the two mechanisms cannot
+    disagree about which folder an answer is about.
+    """
     (tmp_path / "pkg").mkdir()
     (tmp_path / "keep.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8", newline="")
     (tmp_path / "pkg" / "mod.py").write_text("x\n", encoding="utf-8", newline="")
     git(tmp_path, "init", "-q")
     git(tmp_path, "add", "-A")
     git(tmp_path, "commit", "-qm", "seed")
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    return tmp_path
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 @pytest.fixture
 def client(ws: Path):
+    """The app, naming ``ws`` on every request it makes."""
     with TestClient(create_app()) as test_client:
-        yield test_client
+        yield WorkspaceClient(test_client, ws)
 
 
-def status(client: TestClient) -> Dict:
-    response = client.get("/api/fs/status")
+def status(client: TestClient, about: Any = None) -> Dict:
+    """One ``GET /api/fs/status``; ``about`` names another workspace than the client's."""
+    params = {} if about is None else workspace_params(about)
+    response = client.get("/api/fs/status", params=params)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def diff(client: TestClient, path: str, about: Any = None):
+    """One ``GET /api/fs/diff`` about the named folder."""
+    params: Dict[str, Any] = {"path": path}
+    if about is not None:
+        params.update(workspace_params(about))
+    return client.get("/api/fs/diff", params=params)
 
 
 def entries_by_path(payload: Dict) -> Dict[str, Dict]:
@@ -103,10 +125,9 @@ def plain_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     plain = tmp_path / "no-repo"
     plain.mkdir()
     (plain / "file.txt").write_text("x\n", encoding="utf-8", newline="")
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(plain))
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     with TestClient(create_app()) as test_client:
-        yield test_client
+        yield WorkspaceClient(test_client, plain)
 
 
 class TestNoRepository:
@@ -279,28 +300,47 @@ class TestStatusFollowsTheTreePolicy:
 
 
 class TestSubdirectoryWorkspace:
-    """The working location may be a folder inside a larger checkout."""
+    """A workspace may be a folder inside a larger checkout.
+
+    Since clws-03 this is one request naming the **inner** folder rather than a
+    process pointed at it: the same repository answers twice in one process, once
+    about the toplevel and once about the subtree, and each answer is relative to
+    the folder that was named.
+    """
 
     @pytest.fixture
-    def inner(self, ws: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def inner(self, ws: Path) -> Path:
         (ws / "outer.txt").write_text("outer\n", encoding="utf-8", newline="")
         git(ws, "add", "outer.txt")
         git(ws, "commit", "-qm", "outer")
         (ws / "outer.txt").write_text("outer changed\n", encoding="utf-8", newline="")
         (ws / "pkg" / "mod.py").write_text("x changed\n", encoding="utf-8", newline="")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(ws / "pkg"))
         return ws / "pkg"
 
     def test_paths_stay_workspace_relative(self, client, inner):
-        payload = status(client)
+        payload = status(client, about=inner)
         assert payload["atToplevel"] is False
         assert list(entries_by_path(payload)) == ["mod.py"]
 
     def test_changes_elsewhere_in_the_repo_are_not_listed(self, client, inner):
-        assert not any("outer" in entry["path"] for entry in status(client)["entries"])
+        assert not any(
+            "outer" in entry["path"] for entry in status(client, about=inner)["entries"]
+        )
+
+    def test_the_same_repository_answers_both_roots(self, client, ws, inner):
+        """Two tabs on one repository, one at the toplevel and one below it.
+
+        The pair is the subdirectory rule and the per-workspace rule at once: the
+        answers differ by exactly the folder each request named, and neither
+        answer is the other's.
+        """
+        outer_rows = list(entries_by_path(status(client, about=ws)))
+        inner_rows = list(entries_by_path(status(client, about=inner)))
+        assert outer_rows == ["outer.txt", "pkg/mod.py"]
+        assert inner_rows == ["mod.py"]
 
     def test_the_diff_resolves_the_prefix_both_ways(self, client, inner):
-        response = client.get("/api/fs/diff", params={"path": "mod.py"})
+        response = diff(client, "mod.py", about=inner)
         assert response.status_code == 200
         body = response.json()
         assert body["path"] == "mod.py"
@@ -308,8 +348,7 @@ class TestSubdirectoryWorkspace:
         assert body["modified"] == "x changed\n"
 
     def test_a_path_outside_the_workspace_is_still_422(self, client, inner):
-        response = client.get("/api/fs/diff", params={"path": "../outer.txt"})
-        assert response.status_code == 422
+        assert diff(client, "../outer.txt", about=inner).status_code == 422
 
 
 class TestDiffPayload:
@@ -421,6 +460,91 @@ class TestDiffPayload:
         response = client.get("/api/fs/diff", params={"path": "keep.py"})
         assert response.status_code == 413
         assert "over the 4-byte cap" in response.json()["detail"]
+
+
+class TestTwoWorkspacesSideBySide:
+    """``/api/fs/status`` and ``/api/fs/diff`` about the folder **named** (clws-03).
+
+    Two repositories, one client, both request orders, and no environment write
+    and no cache invalidation between the calls: each answer is about the folder
+    that was named, and never about whichever folder was asked about last. That
+    ordering is the half that proves the verdict is per workspace — one process
+    used to hold one folder, so the second tab necessarily received the first
+    one's rows.
+    """
+
+    @pytest.fixture
+    def second(self, tmp_path: Path) -> Path:
+        """A **different** repository beside ``ws``, with its own history.
+
+        A *sibling* of ``ws`` (which is ``tmp_path`` itself) rather than a folder
+        inside it: a nested checkout would be an untracked row of the first
+        repository, and the pair would then differ by two things instead of the
+        one it is about — which folder the request named.
+        """
+        root = tmp_path.parent / f"{tmp_path.name}-other-checkout"
+        root.mkdir(exist_ok=True)
+        (root / "only-here.py").write_text("q = 1\n", encoding="utf-8", newline="")
+        git(root, "init", "-q")
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "other seed")
+        return root
+
+    @pytest.mark.parametrize("strict_first", [True, False], ids=["ws-first", "other-first"])
+    def test_each_repository_draws_its_own_rows(
+        self, client, ws: Path, second: Path, strict_first: bool
+    ):
+        (ws / "keep.py").write_text("a = 1\nB = 2\nc = 3\n", encoding="utf-8", newline="")
+        (second / "only-here.py").write_text("q = 2\n", encoding="utf-8", newline="")
+
+        order = (ws, second) if strict_first else (second, ws)
+        for root in order:
+            payload = status(client, about=root)
+            assert payload["root"] == str(root.resolve())
+            rows = list(entries_by_path(payload))
+            assert rows == (
+                ["keep.py"] if root is ws else ["only-here.py"]
+            )
+
+            body = diff(client, rows[0], about=root).json()
+            assert body["status"] == "modified"
+            assert body["original"] == (
+                "a = 1\nb = 2\nc = 3\n" if root is ws else "q = 1\n"
+            )
+
+    def test_a_path_of_one_folder_is_absent_in_the_other(
+        self, client, ws: Path, second: Path
+    ):
+        """The disagreement that would be a bug: a name from A is not in B.
+
+        ``keep.py`` is committed in one repository and does not exist in the
+        other, so the second answer is the 404 the file read gives for an absent
+        name — never the first repository's two sides.
+        """
+        assert diff(client, "keep.py", about=second).status_code == 404
+
+    def test_a_refused_folder_is_422_from_both_git_routes(
+        self, client, tmp_path: Path
+    ):
+        """One sentence, every route (spec §5.2 rule 10) — the git pair included.
+
+        The sentence is taken from the seam rather than spelled here: a test that
+        restated it would be a second builder of the same words, which is the
+        drift rule 10 forbids.
+        """
+        ghost = tmp_path / "not-a-project"
+        _resolved, sentence = workspace.resolve(str(ghost))
+        assert sentence is not None
+
+        response = client.get("/api/fs/status", params=workspace_params(ghost))
+        assert response.status_code == 422
+        assert response.json()["detail"] == sentence
+
+        response = client.get(
+            "/api/fs/diff", params={**workspace_params(ghost), "path": "keep.py"}
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == sentence
 
 
 class TestOddPathNames:
@@ -553,16 +677,14 @@ class TestIgnoredPaths:
         (ws / "pkg" / "inner.log").write_text("x\n", encoding="utf-8", newline="")
         assert editorfs.gitstatus.ignored_paths("pkg") == {"pkg/inner.log"}
 
-    def test_the_names_stay_workspace_relative_below_a_subtree(
-        self, ws: Path, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_the_names_stay_workspace_relative_below_a_subtree(self, ws: Path):
         """The same ``--show-prefix`` map the two routes use, or the walk prunes
         on names the tree never had."""
         (ws / ".gitignore").write_text("*.log\n", encoding="utf-8", newline="")
         (ws / "pkg" / "inner.log").write_text("x\n", encoding="utf-8", newline="")
         (ws / "notes.log").write_text("x\n", encoding="utf-8", newline="")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(ws / "pkg"))
-        assert editorfs.gitstatus.ignored_paths("") == {"inner.log"}
+        with scoped(ws / "pkg"):
+            assert editorfs.gitstatus.ignored_paths("") == {"inner.log"}
 
     def test_a_folder_that_is_not_a_repository_answers_none(self, tmp_path, monkeypatch):
         """``None`` is the *absence of a filter*, not a claim that nothing is
@@ -572,9 +694,9 @@ class TestIgnoredPaths:
         plain = tmp_path / "no-repo-ignores"
         plain.mkdir()
         (plain / "file.txt").write_text("x\n", encoding="utf-8", newline="")
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(plain))
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-        assert editorfs.gitstatus.ignored_paths("") is None
+        with scoped(plain):
+            assert editorfs.gitstatus.ignored_paths("") is None
 
     def test_a_git_that_cannot_be_asked_answers_none(
         self, ws: Path, monkeypatch: pytest.MonkeyPatch

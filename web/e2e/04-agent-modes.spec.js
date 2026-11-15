@@ -228,7 +228,12 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
 
     // The panel only exists when Settings declares connectors; without them
     // there is nothing to gate, and the spec says so instead of passing empty.
-    const mcpRes = await page.request.get('/api/mcp')
+    // The hub is a read of **one** folder: the installation, which is where a
+    // fresh tab lands and therefore the folder every request names here.
+    const installation = (await (await page.request.get('/api/workspace')).json()).workspace
+    const mcpRes = await page.request.get('/api/mcp', {
+      params: { workspace: installation },
+    })
     const mcpConnectors = (await mcpRes.json()).connectors.filter((c) => c.active)
 
     await page.goto('/')
@@ -351,7 +356,12 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
     await expect(pencil).toBeEnabled()
 
     // The hub panels are not gated by an agent nobody resolved.
-    const mcpRes = await page.request.get('/api/mcp')
+    // The hub is a read of **one** folder: the installation, which is where a
+    // fresh tab lands and therefore the folder every request names here.
+    const installation = (await (await page.request.get('/api/workspace')).json()).workspace
+    const mcpRes = await page.request.get('/api/mcp', {
+      params: { workspace: installation },
+    })
     const mcpConnectors = (await mcpRes.json()).connectors.filter((c) => c.active)
     if (mcpConnectors.length) {
       await expect(page.locator('.chat-mcp-panel input[role="switch"]').first()).toBeEnabled()

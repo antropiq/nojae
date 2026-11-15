@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useEditorFiles } from '../src/composables/useEditorFiles'
+import { pointTabAt, withWorkspace } from './helpers/workspace-url'
 
 // The save half of the buffer records: the client-side part of the guarded
 // write. The wire rules (deny-list, size cap, chat-stream gate) are the
@@ -22,6 +23,9 @@ async function openRecord(path = 'src/a.py', overrides = {}) {
 }
 
 function resetState() {
+  // The tab has a folder, so the save's URL carries the workspace field
+  // (clws-02) — the write itself is addressed by the body's `path`.
+  pointTabAt('/w/tab-workspace')
   files.state.open.length = 0
   files.state.active = null
   files.state.message = null
@@ -48,7 +52,8 @@ describe('useEditorFiles.saveFile', () => {
     const put = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT')
     expect(put).toBeTruthy()
     const [url, init] = put
-    expect(url).toBe('/api/fs/file')
+    // The route, plus this tab's workspace field (clws-02).
+    expect(url).toBe(withWorkspace('/api/fs/file'))
     expect(JSON.parse(init.body)).toEqual({
       path: 'src/a.py',
       text: 'changed\n',

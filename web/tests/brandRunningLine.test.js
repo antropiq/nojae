@@ -77,11 +77,6 @@ function reset() {
   shell.config = { models: MODELS, store: { usable: true, sentence: null } }
   shell.storeState = { usable: true, sentence: null }
   shell.configError = null
-  shell.pathLocation = '/w/proj'
-  shell.pathLocationCurrent = '/w/proj'
-  shell.pathLocationSaving = false
-  shell.pathLocationError = null
-  shell.pathLocationPolicyNote = null
   shell.activeTab = 'chat'
   agentModes.modes = AGENTS
   agentModes.current = 'code'

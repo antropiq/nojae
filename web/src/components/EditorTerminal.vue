@@ -19,6 +19,15 @@ import '../fonts/nerd-fonts.css'
 // this component never opens a second socket behind the user's back. This
 // component owns only the DOM lifecycle and the header.
 //
+// **A live shell keeps the folder it was born in**, and that is not a bug to
+// fix. The socket names this tab's workspace when it opens (spec §8: it has no
+// per-request body), and the server starts the shell there; pointing the tab at
+// another folder afterwards does not re-root, kill or relaunch the open shell —
+// the buffered tab you are looking at must not be torn down because the app bar
+// moved. What *does* follow the tab is the **next** shell: the New-session
+// button, or a reconnect after the socket dropped, starts in the folder the tab
+// holds at that moment. `cd` inside the pane remains the user's own business.
+//
 // The mount trap, documented in useSplitter.js:112-120: the tab is v-show, so
 // the pane is in the DOM but has no layout while hidden — `fit()` on a
 // zero-height host computes 0 rows and xterm paints a blank grid. Handling:

@@ -14,6 +14,8 @@ import {
 import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 import { loadAgentModes, setAgentMode, useAgentModes } from '../src/composables/useAgentModes'
+import { useWorkspaceSession } from '../src/composables/useWorkspaceSession'
+import { pointTabAt, workspaceOf } from './helpers/workspace-url'
 
 // Layer 1 (jsdom): the retry rule of batch mode. A task is finished when its
 // file has left the lot folder — the move into `done/` is the agent's own
@@ -215,6 +217,8 @@ function listingOf(stillInLot) {
 // agent never moves it, the case the retry exists for).
 // `modes` is what `GET /api/agents` answers (default: the seeded four);
 // `modes: null` makes that fetch fail. `payloads` collects whole /api/chat bodies.
+// `poolRefusal` is the sentence `GET /api/workspace` answers 429 with when the
+// hub pool will not admit the folder (the ceiling, spec §4.4).
 function stubRoutes({
   sent,
   tasks,
@@ -224,11 +228,30 @@ function stubRoutes({
   payloads = null,
   // Absent (undefined) answers the seeded four; `null` makes the fetch fail.
   modes,
+  poolRefusal = null,
+  workspaceCalls = null,
+  // The URL of every `/api/chat` post, so a case can say *which folder* a task
+  // turn named. (`payloads` carries the body, and the folder is never in it —
+  // spec D9: a query parameter everywhere.)
+  chatUrls = null,
+  // The URL of every `/api/batch/tasks` read: the launch's own listing and the
+  // completion check's re-listing. Both are the lot's own folder's lot, which is
+  // what keeps a moved tab from judging A's lot by B's listing (spec §5.7 rule 32).
+  listingCalls = null,
 }) {
   const stillInLot = tasks.slice()
   const turnsOf = new Map()
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     const key = String(url)
+    if (key.startsWith('/api/workspace')) {
+      // The launch's pool gate (clws-09): a read, so it names the lot's folder
+      // and answers the pool's sentence — 429 — only when the pool refused it.
+      if (workspaceCalls) workspaceCalls.push(key)
+      if (poolRefusal) {
+        return { ok: false, status: 429, json: async () => ({ detail: poolRefusal }) }
+      }
+      return { ok: true, json: async () => ({ workspace: LOT_WORKSPACE }) }
+    }
     if (key.startsWith('/api/agents')) {
       if (modes === null) {
         return { ok: false, status: 500, json: async () => ({}) }
@@ -240,6 +263,7 @@ function stubRoutes({
       const instruction = body.messages[0].content
       sent.push(instruction)
       if (payloads) payloads.push(body)
+      if (chatUrls) chatUrls.push(key)
       const task = tasks.find((item) =>
         instruction.includes(`todos/${item.name}`),
       )
@@ -255,6 +279,7 @@ function stubRoutes({
       return { ok: true, body: sseBody(chatDoneFrame()) }
     }
     if (key.startsWith('/api/batch/tasks')) {
+      if (listingCalls) listingCalls.push(key)
       if (failListing) {
         return {
           ok: false,
@@ -317,6 +342,10 @@ function seededModesBody({ noModelFor = null, chatMcpTools = false } = {}) {
   }
 }
 
+//: The folder every lot in this file belongs to — the tab's workspace, which the
+//: lot pins at launch (clws-09). A case that moves the tab mid-lot says so.
+const LOT_WORKSPACE = '/w/tab-a'
+
 function reset() {
   // The relaunch wait uses a real timer; the loop tests exercise the retry
   // *path*, not wall-clock seconds, so make the timer fire on the next
@@ -325,6 +354,9 @@ function reset() {
     queueMicrotask(cb)
     return 0
   })
+  // The tab's folder, which every batch request names: a lot lists that folder's
+  // lot and its turns are about it (spec §5.7 rules 32–33).
+  pointTabAt(LOT_WORKSPACE)
   chat.phase = 'idle'
   chat.messages = []
   chat.error = null
@@ -347,13 +379,16 @@ function reset() {
   batch.prefix = 'ed-'
   batch.dir = 'todos'
   batch.pinnedMode = null
+  batch.pinnedWorkspace = null
   batch.modeNote = null
   agentModes.modes = []
   agentModes.current = null
   agentModes.loaded = false
   agentModes.findings = []
   agentModes.notice = null
-  window.localStorage.clear()
+  // The remembered agent is the tab's (§5.5 rule 26): its storage is
+  // `sessionStorage`, so that is what a fresh case clears.
+  window.sessionStorage.clear()
 }
 
 const agentModes = useAgentModes().state
@@ -782,5 +817,286 @@ describe('the big picture rides automatically', () => {
 
     expect(payloads).toHaveLength(1)
     expect('batchContext' in payloads[0]).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A lot's workspace is part of its pin (clws-09, spec §5.7 rules 32–33).
+//
+// Every request the lot makes names **the folder the run started on**: the task
+// turns, the re-listing that judges a task finished, and the pool gate. So a tab
+// pointed somewhere else mid-lot re-roots nothing — the same rule the mode pin
+// already holds for the agent, read one level wider.
+
+describe('a lot pins the folder it started on', () => {
+  beforeEach(reset)
+
+  it('every task turn names the pinned folder, and so does the re-listing', async () => {
+    const sent = []
+    const chatUrls = []
+    const workspaceCalls = []
+    const listingCalls = []
+    const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
+    stubRoutes({
+      sent,
+      chatUrls,
+      tasks,
+      workspaceCalls,
+      listingCalls,
+      // The tab moves once the run has started, so the pin is the lot's from
+      // then on and the tab's new folder reaches nothing.
+      duringTurn: () => pointTabAt('/w/tab-b'),
+    })
+    await seedLot(tasks)
+
+    await launch()
+
+    expect(batch.pinnedWorkspace).toBeNull() // released with the run
+    expect(chatUrls).toHaveLength(2)
+    for (const url of chatUrls) {
+      expect(workspaceOf(url)).toBe(LOT_WORKSPACE)
+    }
+    // The pool gate asked about the same folder, before any turn ran.
+    expect(workspaceCalls).toHaveLength(1)
+    expect(workspaceOf(workspaceCalls[0])).toBe(LOT_WORKSPACE)
+    // ...and so did every completion check's re-listing: the lot judges its own
+    // folder's lot, never the folder the tab has since moved to (rule 32).
+    expect(listingCalls).toHaveLength(2)
+    for (const url of listingCalls) {
+      expect(workspaceOf(url)).toBe(LOT_WORKSPACE)
+    }
+  })
+
+  it('a folder change mid-run reaches no task in the run', async () => {
+    const sent = []
+    const chatUrls = []
+    const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
+    stubRoutes({
+      sent,
+      chatUrls,
+      tasks,
+      // The human points the tab at another folder before task 2 is sent.
+      duringTurn: () => pointTabAt('/w/tab-b'),
+    })
+    await seedLot(tasks)
+
+    await launch()
+
+    // Both turns name A — the folder the lot started on — even though the tab is
+    // on B by the time the second one is posted (spec §5.7 rule 33).
+    expect(chatUrls).toHaveLength(2)
+    expect(chatUrls.map((url) => workspaceOf(url))).toEqual([
+      LOT_WORKSPACE,
+      LOT_WORKSPACE,
+    ])
+    expect(useWorkspaceSession().state.workspace).toBe('/w/tab-b')
+  })
+
+  it('the pin is held for the run and only for the run', async () => {
+    const sent = []
+    const chatUrls = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({
+      sent,
+      chatUrls,
+      tasks,
+      duringTurn: () => {
+        // Mid-turn: the pin is what every later request reads, so it is still
+        // there and it is still the folder the run started on.
+        expect(batch.pinnedWorkspace).toBe(LOT_WORKSPACE)
+        pointTabAt('/w/tab-b')
+      },
+    })
+    await seedLot(tasks)
+
+    await launch()
+
+    // Over: the dialog's next read must list the folder the tab is on now, not
+    // the one this run started on (spec §5.7 rule 32).
+    expect(batch.pinnedWorkspace).toBeNull()
+  })
+
+  it('a lot never launched pins no folder at all', async () => {
+    const sent = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({ sent, tasks, modes: null }) // the agent list is unreadable
+    await loadAgentModes()
+    batch.listing = listingOf(tasks)
+
+    await launch()
+
+    expect(sent).toEqual([])
+    expect(batch.pinnedWorkspace).toBeNull()
+  })
+
+  // Restart/Clear (B15) ends a run for good: a pinned folder left behind would
+  // make the next dialog list a folder the tab has left, so it goes with the
+  // mode pin — the moment the run is cleared, not only when the run ends.
+  it('clearing a run drops the held folder too', async () => {
+    const sent = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    let pinWhenCleared = 'not cleared'
+    stubRoutes({
+      sent,
+      tasks,
+      movedAfter: { 1: Infinity },
+      duringTurn: () => {
+        expect(batch.pinnedWorkspace).toBe(LOT_WORKSPACE) // held mid-run
+        useBatch().clearBatchRun() // Restart, with the task streaming
+        pinWhenCleared = batch.pinnedWorkspace
+        pointTabAt('/w/tab-b')
+      },
+    })
+    await seedLot(tasks)
+
+    await launch()
+
+    expect(pinWhenCleared).toBeNull()
+    // With the pin gone, the next read is the tab's own folder again.
+    expect(batch.pinnedWorkspace).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The pool gate: a lot cannot start on a folder whose tools are absent.
+//
+// A workspace the ceiling refused would run every task with no connectors, which
+// is a lot that cannot move a single file. The refusal is the **pool's** sentence,
+// rendered in the dialog's own message line while the dialog is still open.
+
+describe('a folder the pool refused is a launch refusal', () => {
+  beforeEach(reset)
+
+  const CEILING =
+    'Too many workspaces are open at once: nojae keeps at most 6 alive, and ' +
+    'these are the live ones — /w/a, /w/b. Point another tab away from one of ' +
+    'them, or wait for an idle one to be let go.'
+
+  it('the launch refuses with the pool sentence and sends no turn', async () => {
+    const sent = []
+    const payloads = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({ sent, payloads, tasks, poolRefusal: CEILING })
+    await seedLot(tasks)
+
+    await launch()
+
+    expect(sent).toEqual([])
+    expect(payloads).toEqual([])
+    expect(batch.active).toBe(false)
+    // Nothing is pinned for a lot that never launched.
+    expect(batch.pinnedMode).toBeNull()
+    expect(batch.pinnedWorkspace).toBeNull()
+    // The server's own sentence, verbatim, on the **dialog's** message line —
+    // the client re-spells no rule of its own (spec §5.2 rule 10).
+    expect(batch.error).toBe(CEILING)
+    expect(batch.error).toContain('at most 6')
+  })
+
+  it('the dialog shows it in its message line, and the dialog stays open', async () => {
+    const { mount } = await import('@vue/test-utils')
+    const { default: BatchModeDialog } = await import('../src/components/BatchModeDialog.vue')
+    const sent = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({ sent, tasks, poolRefusal: CEILING })
+    await loadAgentModes()
+    setAgentMode('code')
+    batch.listing = listingOf(tasks)
+    batch.prefix = 'ed-'
+    batch.prefixes = [{ prefix: 'ed-', tasks: 1, hasLot: false }]
+    batch.open = true
+
+    const wrapper = mount(BatchModeDialog)
+    await wrapper.find('form').trigger('submit')
+    await vi.waitFor(() => expect(batch.error).toBe(CEILING))
+
+    // The dialog never closed: the sentence is the user's to act on.
+    expect(batch.open).toBe(true)
+    expect(wrapper.find('.alert-error').text()).toBe(CEILING)
+    expect(sent).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('a pool that answers anything else does not refuse', async () => {
+    const sent = []
+    const tasks = [task(1, 'ed-01-a.md')]
+    stubRoutes({ sent, tasks }) // 200: the folder is admitted
+    await seedLot(tasks)
+
+    await launch()
+
+    expect(sent).toHaveLength(1)
+    expect(chat.error).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// "A batch is running" is a fact about **one tab** (spec §5.7 rule 35).
+//
+// The flag and the two guards registered from it are module state of a per-tab
+// composable, so a lot in A blocks nothing in B. jsdom has one `window` and
+// therefore one module instance, so — the way `agentModes.test.js` simulates its
+// second tab — the second tab here is a **reset of this module's state**: what
+// the assertion owns is that the guard's answer follows the flag rather than
+// some process-wide fact, and that one tab's run leaves the other's send, tab
+// switch and lot reachable. The real two-tab run is the e2e suite's (task 12).
+
+describe("two tabs' batch guards are independent", () => {
+  beforeEach(reset)
+
+  // A **real** lot, not a hand-set flag: the case is about what a streaming
+  // lot does to the guards the rest of the app reads, so it runs one.
+  // `movedAfter: Infinity` keeps its task in the lot, and `duringTurn` runs
+  // inside the turn — the only moment the flags are what a running lot means.
+  async function runOneLot(duringTurn) {
+    stubRoutes({
+      sent: [],
+      tasks: [task(1, 'ed-01-a.md')],
+      movedAfter: { 1: Infinity },
+      duringTurn,
+    })
+    await seedLot([task(1, 'ed-01-a.md')])
+    await launch()
+  }
+
+  it('this tab refuses an interactive send and a tab switch while its lot runs', async () => {
+    let bodyBusy = null
+    let tabsPinned = null
+    await runOneLot(() => {
+      bodyBusy = useChat().chatBusy()
+      // The tab switch the app bar's buttons and the keyboard both go through.
+      useAppShell().setTab('editor')
+      tabsPinned = appShell.activeTab
+    })
+
+    expect(bodyBusy).toBe(true)
+    expect(tabsPinned).toBe('chat') // pinned by this tab's own run
+  })
+
+  it("the other tab's guards let everything through", async () => {
+    await runOneLot()
+
+    // The second tab is a **fresh module state** — no lot of its own, which is
+    // what `reset()` above leaves behind. Nothing of A's run is in it, so its
+    // send is free, its tab switch is allowed, and a lot of its own may launch
+    // (spec §5.7 rule 35): "a batch is running" never became a fact about the
+    // app that A's run could leave behind.
+    expect(batch.active).toBe(false)
+    expect(useChat().chatBusy()).toBe(false)
+    useAppShell().setTab('editor')
+    expect(appShell.activeTab).toBe('editor')
+
+    // B then launches its own lot: a fresh module state is a fresh conversation
+    // too (the transcript is the tab's, like the folder), so B wipes it the way
+    // Restart does and starts on its own folder. Nothing of A's run refuses it.
+    useChat().reset({ refetchHubs: false })
+    const sent = []
+    stubRoutes({ sent, tasks: [task(1, 'ed-01-a.md')] })
+    pointTabAt('/w/tab-b')
+    await seedLot([task(1, 'ed-01-a.md')])
+    await launch()
+
+    expect(sent).toHaveLength(1)
+    expect(batch.error).toBeNull()
   })
 })

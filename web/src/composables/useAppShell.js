@@ -1,7 +1,10 @@
 import { reactive } from 'vue'
-import { describePolicy } from '../lib/path-location-policy'
 import { loadChatLsp, loadChatMcp } from './useChat'
-import { useWorkspaceTree } from './useWorkspaceTree'
+import {
+  noteHubPayload,
+  reportPoolRefusal,
+  withWorkspace,
+} from './useWorkspaceSession'
 import { describeTransportError, fetchWithRetry } from '../lib/api-fetch'
 
 // Read handle on "a batch is running", registered by useBatch on import — the
@@ -104,29 +107,12 @@ const state = reactive({
   lspSaving: false,
   lspError: null,
   lspServersError: null, // .nojae/lsp-settings.json validation errors from the backend
-  // Working location both hubs point at (${NOJAE_PATH_LOCATION} in
-  // .nojae/mcp-settings.json and .nojae/lsp-settings.json), shown and set from
-  // the app bar. ``pathLocation`` is what its input holds, ``pathLocationCurrent``
-  // the value the server confirmed — Set is enabled while the two differ.
-  pathLocation: '',
-  pathLocationCurrent: '',
-  pathLocationLoading: false,
-  pathLocationSaving: false,
-  pathLocationError: null,
-  // The workspace's own read-write policy file (pol-05). The server seeds a
-  // default ``.nojae/read-write-policy.json`` when a folder becomes the working
-  // location, and reports what happened: ``{state, path, error}`` with
-  // ``created`` / ``existing`` / ``absent`` / ``failed``. Only the block is
-  // kept: the wording is ``lib/path-location-policy``'s, and a ``failed`` seed
-  // is rendered as a *note* — never into ``pathLocationError``, because the
-  // switch itself succeeded and a red line there would claim it had not.
-  pathLocationPolicy: null,
-  // The one sentence the app bar shows under its field for this file: set from
-  // ``describePolicy`` only when its tone is ``warn``, so a ``created`` or
-  // ``absent`` report (and ``existing``, which has nothing to tell) leaves the
-  // bar's line out. Cleared on every attempt, so a note from a switch that has
-  // since worked cannot linger.
-  pathLocationPolicyNote: null,
+  // The folder this tab works on is **not** held here: it is the tab's own, in
+  // ``useWorkspaceSession`` (clws-02). What stays in the shell is only what the
+  // hub panels need — the connector and language-server rows the workspace read
+  // answered with — because those panels are the shell's state and the app bar
+  // is the one that performs the gesture. The policy note the read reports lives
+  // with the field that renders it, in the session composable.
 })
 
 function describeError(body, fallback) {
@@ -328,11 +314,11 @@ export function useAppShell() {
       state.lspActivated = []
       state.lspError = null
       state.lspServersError = null
-      // The working location is not this dialog's business any more: its field
-      // and its answer lines live in the app bar, whose state a settings read
-      // must not clear (a seed warning the user has not read yet would vanish
-      // on an unrelated visit to the dialog). ``loadPathLocation()`` runs at
-      // boot and after every switch.
+      // The workspace is not this dialog's business: its field and its answer
+      // lines live in the app bar, whose state a settings read must not clear
+      // (a policy note the user has not read yet would vanish on an unrelated
+      // visit to the dialog). ``loadWorkspace()`` runs at boot and
+      // ``setWorkspaceFromField()`` on every move.
       loadServers()
       loadMcp()
       loadLsp()
@@ -602,12 +588,18 @@ export function useAppShell() {
     state.lspLoading = true
     state.lspError = null
     try {
-      const res = await fetchWithRetry('/api/lsp')
+      const res = await fetchWithRetry(withWorkspace('/api/lsp'))
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.lspError = describeError(body, `Could not load LSP servers (${res.status})`)
+        // The pool's ceiling is one sentence wherever it is raised: the bar
+        // shows it too, and this panel shows the same text.
+        if (res.status === 429) reportPoolRefusal(state.lspError)
         return
       }
+      // `built` is the visible restart (spec §5.4 rule 23); a live answer
+      // without it clears the bar's restarting line.
+      noteHubPayload(body)
       state.lspInstalled = !!body.installed
       state.lspServers = body.servers || []
       // No iteration counter here: the LSP payload stopped carrying the shared
@@ -641,7 +633,7 @@ export function useAppShell() {
     state.lspError = null
     state.lspSaving = true
     try {
-      const res = await fetch('/api/lsp', {
+      const res = await fetch(withWorkspace('/api/lsp'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // The whole payload: the route writes the declaration's `enable` flag
@@ -651,8 +643,10 @@ export function useAppShell() {
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.lspError = describeError(body, `Could not save LSP settings (${res.status})`)
+        if (res.status === 429) reportPoolRefusal(state.lspError)
         return
       }
+      noteHubPayload(body)
       state.lspInstalled = !!body.installed
       state.lspServers = body.servers || []
       state.lspServersError = body.serversError || null
@@ -675,12 +669,14 @@ export function useAppShell() {
     state.mcpLoading = true
     state.mcpError = null
     try {
-      const res = await fetchWithRetry('/api/mcp')
+      const res = await fetchWithRetry(withWorkspace('/api/mcp'))
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.mcpError = describeError(body, `Could not load MCP connectors (${res.status})`)
+        if (res.status === 429) reportPoolRefusal(state.mcpError)
         return
       }
+      noteHubPayload(body)
       state.mcpInstalled = !!body.installed
       state.mcpConnectors = body.connectors || []
       // No tool-loop cap here: it is a per-agent column now (D9), so this
@@ -711,7 +707,7 @@ export function useAppShell() {
     state.mcpError = null
     state.mcpSaving = true
     try {
-      const res = await fetch('/api/mcp', {
+      const res = await fetch(withWorkspace('/api/mcp'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // The ids and nothing else: the cap is the agent tab's to edit.
@@ -720,8 +716,10 @@ export function useAppShell() {
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         state.mcpError = describeError(body, `Could not save MCP settings (${res.status})`)
+        if (res.status === 429) reportPoolRefusal(state.mcpError)
         return
       }
+      noteHubPayload(body)
       state.mcpInstalled = !!body.installed
       state.mcpConnectors = body.connectors || []
       state.mcpExternalsError = body.externalsError || null
@@ -740,130 +738,41 @@ export function useAppShell() {
     }
   }
 
-  async function loadPathLocation() {
-    state.pathLocationLoading = true
-    state.pathLocationError = null
-    try {
-      const res = await fetchWithRetry('/api/path-location')
-      const body = await res.json().catch(() => null)
-      if (!res.ok) {
-        state.pathLocationError = describeError(
-          body,
-          `Could not load the working location (${res.status})`,
-        )
-        return
-      }
-      state.pathLocationCurrent = body.path || ''
-      state.pathLocation = state.pathLocationCurrent
-      // Read-only on purpose: GET never seeds (a read that writes a folder into
-      // someone's project is the mistake pol-05 forbids), so ``absent`` here is
-      // a real state — a workspace whose seed failed, or one opened before the
-      // feature existed.
-      state.pathLocationPolicy = body.policy || null
-      // Same rule as after a switch: only a ``warn`` tone becomes the bar's own
-      // line, so ``absent`` stays silent, and a lingering note from an earlier
-      // attempt cannot outlive the read that disproves it.
-      const described = describePolicy(body.policy)
-      state.pathLocationPolicyNote =
-        described && described.tone === 'warn' ? described.text : null
-      // The agents and the prompt helpers are not here any more: they live in
-      // ``nojae.db``, so there is no per-workspace file for a read to report on
-      // (D11).
-    } catch (exc) {
-      state.pathLocationError = describeTransportError(exc)
-    } finally {
-      state.pathLocationLoading = false
+  // Paint the hub panels from the ``hubs`` block of a workspace read (clws-02).
+  //
+  // The app bar owns the tab's folder and the gesture that moves it; these two
+  // panels are the shell's state, so the read hands them over rather than the
+  // bar reaching in. Same shape as the two hub loaders above: the declaration
+  // file is the only activation source, so the rows adopted here are the ones
+  // the server says run, and the conversation-scoped panels are re-snapshotted
+  // from them (a locked conversation keeps its frozen toggles — ``loadChatMcp``
+  // is a no-op then).
+  //
+  // **Nothing of the installation is reloaded by a move**: the model connection,
+  // the agent list and the prompt helpers are rows of ``nojae.db``, so the
+  // servers, models, agents and bullets a user built once are the same in every
+  // folder (spec §4.2). The tree re-rooting and the buffers closing with it are
+  // the caller's — the gesture that moved the folder owns what it invalidates.
+  function applyWorkspaceHubs(hubs) {
+    const mcp = hubs?.mcp
+    if (mcp) {
+      state.mcpInstalled = !!mcp.installed
+      state.mcpConnectors = mcp.connectors || []
+      state.mcpExternalsError = mcp.externalsError || null
+      state.mcpEnabled = state.mcpConnectors
+        .filter((connector) => connector.active)
+        .map((connector) => connector.id)
+      loadChatMcp()
     }
-  }
-
-  // Apply a new working location: the endpoint sets the env var and restarts
-  // both hubs in one call, so on return the MCP/LSP panels below already
-  // carry the post-restart statuses of the tools pointed at the new folder.
-  async function setPathLocation() {
-    if (state.pathLocationSaving) return
-    const next = (state.pathLocation || '').trim()
-    if (!next || next === state.pathLocationCurrent) return
-    state.pathLocationSaving = true
-    state.pathLocationError = null
-    state.pathLocationPolicyNote = null
-    try {
-      const res = await fetch('/api/path-location', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: next }),
-      })
-      const body = await res.json().catch(() => null)
-      if (!res.ok) {
-        state.pathLocationError = describeError(
-          body,
-          `Could not set the working location (${res.status})`,
-        )
-        return
-      }
-      // The server canonicalises the path (realpath), so adopt what it stored
-      // rather than what was typed: field and Set button then agree.
-      state.pathLocationCurrent = body.path || ''
-      state.pathLocation = state.pathLocationCurrent
-      // pol-05: the switch seeded this workspace's default policy file (or
-      // tried to). A ``failed`` state is a note, not an error — the location is
-      // set and both hubs restarted; only the workspace's own rules are
-      // missing. ``lib/path-location-policy`` is what turns the block into the
-      // sentence under the app bar's field — its own words, and the only place
-      // these two blocks are rendered.
-      state.pathLocationPolicy = body.policy || null
-      const described = describePolicy(body.policy)
-      state.pathLocationPolicyNote =
-        described && described.tone === 'warn' ? described.text : null
-      // The hubs just restarted: refresh both panels so the tool lists and
-      // status dots show the new location.
-      if (body.mcp) {
-        state.mcpInstalled = !!body.mcp.installed
-        state.mcpConnectors = body.mcp.connectors || []
-        state.mcpExternalsError = body.mcp.externalsError || null
-        state.mcpEnabled = state.mcpConnectors
-          .filter((connector) => connector.active)
-          .map((connector) => connector.id)
-        loadChatMcp()
-      }
-      if (body.lsp) {
-        state.lspInstalled = !!body.lsp.installed
-        state.lspServers = body.lsp.servers || []
-        state.lspServersError = body.lsp.serversError || null
-        state.lspActivated = state.lspServers
-          .filter((server) => server.active)
-          .map((server) => server.id)
-        loadChatLsp()
-      }
-      // **Three things are deliberately not reloaded here** (D11): the model
-      // connection, the agent list and the prompt helpers. All three live in
-      // ``nojae.db``, which belongs to the installation rather than to a folder,
-      // so a workspace switch invalidates nothing in them — the servers, models,
-      // agents and bullets a user built once are the same everywhere. The
-      // composer's *selected* agent does not move either, and that is one more
-      // reason no refresh belongs here: the list is identical, and the selection
-      // is the browser's own memory (`localStorage`), not the workspace's.
-      // The Editor tab's tree browses this location, so the whole workspace-
-      // relative view of the app moves here: the tree forgets the listings it
-      // cached under the old root and re-roots, and the tabs that held files of
-      // the old one close with it (useWorkspaceTree.reRoot -> the buffer half's
-      // handler, registered by useEditorFiles when the Editor chunk loads).
-      // Driven from the save path rather than from the tab, because the tab may
-      // never have been opened — in which case there is nothing to forget.
-      // `refresh()` would be the wrong call: its cached paths mean something
-      // else entirely in another root. (The terminal's `cwd` moves with the same
-      // value: a new session is born on the current location.)
-      try {
-        await useWorkspaceTree().reRoot(state.pathLocationCurrent)
-      } catch (exc) {
-        // The hubs moved but the tree could not be listed: the panel and the
-        // tools agree, and the next tree request re-reads it. Say so rather
-        // than let it end the save as a failure.
-        state.pathLocationError = `Working location is set, but the file tree could not re-root: ${exc}`
-      }
-    } catch (exc) {
-      state.pathLocationError = `Could not reach the API: ${exc}`
-    } finally {
-      state.pathLocationSaving = false
+    const lsp = hubs?.lsp
+    if (lsp) {
+      state.lspInstalled = !!lsp.installed
+      state.lspServers = lsp.servers || []
+      state.lspServersError = lsp.serversError || null
+      state.lspActivated = state.lspServers
+        .filter((server) => server.active)
+        .map((server) => server.id)
+      loadChatLsp()
     }
   }
 
@@ -892,7 +801,6 @@ export function useAppShell() {
     loadLsp,
     toggleLsp,
     saveLsp,
-    loadPathLocation,
-    setPathLocation,
+    applyWorkspaceHubs,
   }
 }

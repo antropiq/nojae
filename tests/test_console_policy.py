@@ -746,7 +746,8 @@ def test_one_workspace_answers_the_pane_and_the_agent_identically(
         {"path": ".git", "mode": "hidden"},
         {"path": "vendor", "mode": "ro", "reason": "vendored"},
     ])
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+    from tests.conftest import scoped
+
     app_policy_file.invalidate_policy_cache()
 
     cases = [
@@ -755,21 +756,22 @@ def test_one_workspace_answers_the_pane_and_the_agent_identically(
         (".git/config", False),    # hidden     -> both refuse, one sentence
         ("web/src/main.js", True),  # unmarked  -> both allow
     ]
-    for rel, for_write in cases:
-        verdict = policy_modes.mode_for(rel)
-        pane = policy_modes.refusal_message(verdict, for_write=for_write)
-        agent = connector_policy.workspace_policy_reason(
-            rel, root=str(root), for_write=for_write
-        )
-        allowed = verdict.mode == shared.READ_WRITE or (
-            verdict.mode == shared.READ_ONLY and not for_write
-        )
-        if allowed:
-            assert agent is None, (rel, for_write, agent)
-        else:
-            # The pane's whole sentence, inside the connector's -- not a
-            # paraphrase of it.
-            assert agent is not None and pane in agent, (rel, for_write, pane, agent)
+    with scoped(root):
+        for rel, for_write in cases:
+            verdict = policy_modes.mode_for(rel)
+            pane = policy_modes.refusal_message(verdict, for_write=for_write)
+            agent = connector_policy.workspace_policy_reason(
+                rel, root=str(root), for_write=for_write
+            )
+            allowed = verdict.mode == shared.READ_WRITE or (
+                verdict.mode == shared.READ_ONLY and not for_write
+            )
+            if allowed:
+                assert agent is None, (rel, for_write, agent)
+            else:
+                # The pane's whole sentence, inside the connector's -- not a
+                # paraphrase of it.
+                assert agent is not None and pane in agent, (rel, for_write, pane, agent)
 
 
 def test_a_command_naming_no_path_is_unaffected_by_the_policy(root: Path):

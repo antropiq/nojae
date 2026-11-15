@@ -10,6 +10,12 @@ nojae.db
 nojae.db-wal
 nojae.db-shm
 
+# E2E fixture workspaces (created and removed by web/e2e)
+e2e-workspace/
+e2e-ws-root/
+e2e-two-tabs-a/
+e2e-two-tabs-b/
+
 # Logs
 logs/
 

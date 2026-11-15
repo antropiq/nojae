@@ -54,7 +54,8 @@ reason: interactive-non-login reads ``~/.bashrc`` — the prompt, aliases and
 colours a user expects in a pane — and does not start each tab as a login shell,
 which would re-run the profile's environment setup once per tab.
 
-*Not here:* the child's ``cwd`` — the session's, always ``path_location()``, and
+*Not here:* the child's ``cwd`` — the session's, always the workspace in scope
+when it was born (``src.core.workspace.current_root``), and
 the server takes no path from the client; the pseudo-terminal itself —
 :mod:`termhub.drivers`; any permission question. A shell is reachable only from
 the Editor's WebSocket, never from a hub, a tool or a chat turn, and none of this

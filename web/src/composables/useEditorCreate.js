@@ -2,6 +2,7 @@ import { useEditorFiles } from './useEditorFiles'
 import { useEditorNotices } from './useEditorNotices'
 import { useGitStatus } from './useGitStatus'
 import { registerCreateChord, useWorkspaceTree } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // The create flow behind the tree's inline name input: New file / New folder.
@@ -104,7 +105,7 @@ export function useEditorCreate() {
       let res
       let body = null
       try {
-        res = await fetch('/api/fs/create', {
+        res = await fetch(withWorkspace('/api/fs/create'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path, dir: pending.isDir }),

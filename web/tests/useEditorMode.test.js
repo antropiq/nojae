@@ -155,6 +155,45 @@ describe('useEditorMode: one rule, shown and enforced', () => {
     expect(mode.badgeTitle.value).toContain('Saving is refused until it ends')
   })
 
+  // clws-04, rule 13's client half: the pane's lock reads **this tab's** chat
+  // phase, and that phase is per-tab state — `useChat` owns this tab's stream and
+  // its abort. A sibling tab streaming on another folder has no representation
+  // here at all, so the client cannot lock this pane for a reply this tab did not
+  // start, and it must not try to: the server's per-workspace refusal is the
+  // boundary, this badge is only its display. The regression this pins is a badge
+  // that derived the lock from anything shared (the notices stack, a global flag),
+  // which would undo the server's per-workspace rule from the browser side.
+  it('locks for this tab reply, and for nothing else', () => {
+    open('file')
+    expect(mode.editorMode.value).toBe('read_write')
+
+    chat.state.phase = 'answering'
+    expect(mode.editorMode.value).toBe('read_only')
+
+    // The reply ended. A refusal it left behind — about *this* path — explains
+    // itself in the badge but does not keep the pane locked: the lock is the
+    // stream, not the memory of a refused write.
+    chat.state.phase = 'idle'
+    notices.notice(
+      'error',
+      'Could not save a.py: Cannot save while a chat reply is streaming on /srv/first',
+      'a.py',
+    )
+    expect(mode.editorMode.value).toBe('read_write')
+    expect(mode.badgeTitle.value).toContain('streaming on /srv/first')
+
+    // And a refusal about another workspace's path is not this badge's business
+    // either — the pane is editable and the title says nothing about it.
+    notices.clear()
+    notices.notice(
+      'error',
+      'Could not save b.py: Cannot save while a chat reply is streaming on /srv/second',
+      'b.py',
+    )
+    expect(mode.editorMode.value).toBe('read_write')
+    expect(mode.badgeTitle.value).not.toContain('streaming')
+  })
+
   // lspe-11: the badge is the pane's "why did that do nothing?" answer, so it
   // names the one reader the mode does not lock — the language server behind
   // Ctrl+click, hover and find-references. It must be true in *both* modes: the

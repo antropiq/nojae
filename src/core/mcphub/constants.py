@@ -24,7 +24,7 @@ from typing import Optional
 # answer the question with the same function and a test forces it the same way
 # it redirects any other hub constant (win-07 / A-D4).
 from .process import guardrails_speak_here  # noqa: F401 — bound as a hub attribute
-from src.config import path_location
+from src.core import workspace
 
 # The reserved folder's name is not re-declared here: it comes from
 # ``mcp_connectors/policy_shared``, with the same ``sys.path`` fallback
@@ -72,13 +72,17 @@ def mcp_settings_path() -> Path:
     """The active workspace's ``.nojae/mcp-settings.json`` (may not exist).
 
     Built per call out of module attributes, so the pin above, a patched
-    filename, or a switched working location each move the lookup the same
-    way. A read of an absent file is ``([], [])`` — an unseeded workspace
-    simply has no connectors until its declaration is written.
+    filename, or a different workspace each move the lookup the same way. The
+    root comes from the seam (:func:`src.core.workspace.current_root`), so a
+    declaration read is always a read **of one workspace**, in that workspace's
+    scope — which is what a second tab on a second folder needs (clws-01).
+
+    A read of an absent file is ``([], [])`` — an unseeded workspace simply has
+    no connectors until its declaration is written.
     """
     if MCP_SETTINGS_PATH is not None:
         return MCP_SETTINGS_PATH
-    return Path(path_location()) / POLICY_DIRNAME / MCP_SETTINGS_FILENAME
+    return Path(workspace.current_root()) / POLICY_DIRNAME / MCP_SETTINGS_FILENAME
 
 # Connection retry policy for a freshly launched connector session.
 CONNECT_RETRIES = 20
@@ -88,6 +92,17 @@ EXTERNAL_CONNECT_RETRIES = 60
 CONNECT_INTERVAL = 0.5
 # Grace given to a connector process between SIGTERM and SIGKILL.
 STOP_GRACE_SECONDS = 5.0
+
+# How long a synchronous caller waits for one tool call before giving up
+# (``McpManager.call_tool_sync``). **A safety net, not a budget**: the connector
+# owns the real limit (``execute_command``'s own ``timeout`` argument) and hands
+# back what the command had already printed when *it* fires. This number only
+# answers "the connector never came back at all", and it used to be a literal
+# 120 in the manager -- shorter than the backend test suite, so a legitimate
+# long run was cut off mid-flight and came back as a failed call. A caller that
+# knows better (the chat side, for a language server's cold start) passes its
+# own; patch this attribute to move the net.
+TOOL_CALL_TIMEOUT: Optional[float] = 3600.0
 
 CONNECTORS_MISSING_HINT = (
     'The "mcp" package is not installed — run: pip install -e ".[mcp]"'

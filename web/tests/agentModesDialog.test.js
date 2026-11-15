@@ -432,7 +432,9 @@ beforeEach(() => {
     this.open = false
   }
   resetEditor()
-  window.localStorage.clear()
+  // The remembered agent is the tab's (§5.5 rule 26), so the storage a fresh
+  // case must clear is `sessionStorage`.
+  window.sessionStorage.clear()
   vi.restoreAllMocks()
 })
 

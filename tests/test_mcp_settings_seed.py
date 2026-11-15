@@ -37,13 +37,14 @@ from src.api.server import create_app
 from src.core.mcphub import constants, seed
 from src.core.mcphub.discovery import load_externals, set_externals_enabled
 from src.core.mcphub.validation import expand_env
+from tests.conftest import make_the_install, scoped
 
 
 @pytest.fixture
-def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """A scratch working location with no declaration file yet."""
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(tmp_path))
-    yield tmp_path
+def workspace(tmp_path: Path) -> Iterator[Path]:
+    """A scratch workspace with no declaration file yet."""
+    with scoped(tmp_path):
+        yield tmp_path
 
 
 def seeded_path(root: Path) -> Path:
@@ -164,16 +165,16 @@ class TestTheInterpolation:
         second = tmp_path / "second"
         for root in (first, second):
             root.mkdir()
-            monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
-            seed.ensure_mcp_settings_file(str(root))
+            with scoped(root):
+                seed.ensure_mcp_settings_file(str(root))
 
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(first))
-        connectors, _ = load_externals()
-        assert connectors[0]["command"][3] == str(first)
+        with scoped(first):
+            connectors, _ = load_externals()
+            assert connectors[0]["command"][3] == str(first)
 
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(second))
-        connectors, _ = load_externals()
-        assert connectors[0]["command"][3] == str(second)
+        with scoped(second):
+            connectors, _ = load_externals()
+            assert connectors[0]["command"][3] == str(second)
 
 
 class TestThePinStillPins:
@@ -242,98 +243,83 @@ def seed_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     root = tmp_path / "boot-root"
     root.mkdir()
-    monkeypatch.setenv("NOJAE_PATH_LOCATION", str(root))
+    make_the_install(monkeypatch, root)
     with TestClient(create_app()) as client:
-        client.app.state.mcp = _RecordingHub()
-        client.app.state.lsp = _RecordingHub()
+        # The doubles ride on the **boot workspace's** set: a hub route resolves
+        # the folder its request named and reaches that folder's managers
+        # (clws-06 deleted the ``app.state.mcp`` read-through).
+        from tests.conftest import set_workspace_hubs
+
+        set_workspace_hubs(client.app, root, mcp=_RecordingHub(), lsp=_RecordingHub())
         yield client, root
 
 
-class TestTheTwoEntryPoints:
+class TestTheEntryPoints:
+    """The route half of the two entry points, as clws-02 leaves them.
+
+    The switch that used to seed a folder and restart both hubs in one call is
+    gone: nothing sets the process's working location any more, so there is no
+    longer a route that seeds. Boot is the only entry point until task 05 makes
+    the pool's **admission** of a workspace the second — including the
+    seed-before-the-first-restart order that the switch used to pin, which no
+    route can express in between. The seed's own promises (never overwrites, a
+    failure is a note) stay asserted directly in ``TestTheSeedLands``.
+    """
+
     def test_boot_leaves_the_declaration_behind(self, seed_client):
+        from tests.conftest import workspace_params
+
         client, root = seed_client
         assert seeded_path(root).is_file()
-        body = client.get("/api/path-location").json()
+        body = client.get(
+            "/api/workspace", params=workspace_params(root)
+        ).json()
         assert body["mcpSettings"]["state"] == "existing"
 
-    def test_get_never_seeds(self, seed_client, tmp_path: Path, monkeypatch):
+    def test_the_read_never_seeds(self, seed_client, tmp_path: Path):
+        """A tab may name a folder it only wants to browse, twice or a hundred
+        times, and the folder stays as it was."""
+        from tests.conftest import workspace_params
+
         client, _ = seed_client
         other = tmp_path / "browsed"
         other.mkdir()
-        monkeypatch.setenv("NOJAE_PATH_LOCATION", str(other))
         for _ in range(2):
-            body = client.get("/api/path-location").json()
+            body = client.get(
+                "/api/workspace", params=workspace_params(other)
+            ).json()
             assert body["mcpSettings"]["state"] == "absent"
         assert not seeded_path(other).exists()
         assert not other.joinpath(constants.POLICY_DIRNAME).exists()
 
-    def test_switch_seeds_before_the_hub_restarts(
+    def test_a_restart_reads_the_named_workspaces_declaration(
         self, seed_client, tmp_path: Path, monkeypatch
     ):
-        """The order that the whole move depends on: fresh root, real connectors.
+        """The half of the old switch order a route can still express, per workspace.
 
-        With the MCP test switch lifted, ``_restart_mcp_hub`` hands the hub the
-        live file scan; the recording hub captures it. If the seed ran after
-        the restart, the new root would come up with zero connectors — the
-        exact failure the old "all seeds after the restarts" order would hit
-        once the declaration moved inside ``.nojae``.
+        The switch read the folder it had *just* seeded, and that ordering is
+        what kept a fresh root from coming up with zero connectors. No route
+        seeds on a request any more, so seeding the folder directly is the
+        honest way to ask the surviving half: does a restart of **this**
+        workspace hand **its own** hub the connectors of **its** declaration
+        file? The double therefore goes on the target workspace's set, not the
+        boot one's — which is the same fact clws-06 makes of every hub route.
         """
+        from tests.conftest import set_workspace_hubs, workspace_params
+
         client, _ = seed_client
         monkeypatch.delenv("NOJAE_DISABLE_MCP")
         target = tmp_path / "fresh-root"
         target.mkdir()
+        assert seed.ensure_mcp_settings_file(str(target))["state"] == "created"
+        hub = _RecordingHub()
+        set_workspace_hubs(client.app, target, mcp=hub)
 
-        response = client.post("/api/path-location", json={"path": str(target)})
+        response = client.post("/api/mcp/restart", params=workspace_params(target))
         assert response.status_code == 200
-        body = response.json()
-        expanded = os.path.realpath(str(target))
-        assert body["mcpSettings"] == {
-            "state": "created",
-            "path": os.path.join(expanded, constants.POLICY_DIRNAME,
-                                 constants.MCP_SETTINGS_FILENAME),
-            "error": None,
-        }
-        handed = last_restart_connectors(client)
+        assert len(hub.restarts) == 1
+        handed = list(hub.restarts[0][0])
         assert [connector["id"] for connector in handed] == ["console", "fedit"]
-        # Every entry carries an unresolved ${NOJAE_PYTHON_ROOT} note —
-        # honest, and proof the expansion ran on the seeded bytes.
-        assert "NOJAE_PYTHON_ROOT" in (body["mcp"]["externalsError"] or "")
-        assert os.environ["NOJAE_PATH_LOCATION"] == expanded
-
-    def test_switch_reports_an_existing_declaration_untouched(
-        self, seed_client, tmp_path: Path
-    ):
-        client, _ = seed_client
-        target = tmp_path / "owned-root"
-        (target / constants.POLICY_DIRNAME).mkdir(parents=True)
-        handwritten = "{}\n"
-        seeded_path(target).write_text(handwritten, encoding="utf-8")
-
-        response = client.post("/api/path-location", json={"path": str(target)})
-        assert response.status_code == 200
-        assert response.json()["mcpSettings"]["state"] == "existing"
-        assert seeded_path(target).read_text(encoding="utf-8") == handwritten
-
-    def test_a_failing_seed_is_a_note_not_a_refusal(self, seed_client, tmp_path: Path):
-        client, _ = seed_client
-        target = tmp_path / "locked-root"
-        target.mkdir()
-        (target / constants.POLICY_DIRNAME).mkdir()
-        seeded_path(target).mkdir()  # a folder where the file belongs
-
-        response = client.post("/api/path-location", json={"path": str(target)})
-        assert response.status_code == 200
-        assert response.json()["mcpSettings"]["state"] == "failed"
-        # The switch itself succeeded: the environment moved and the hubs
-        # restarted — a seeding hiccup is a note, never a rollback.
-        assert os.environ["NOJAE_PATH_LOCATION"] == os.path.realpath(
-            str(target)
-        )
-        assert len(client.app.state.mcp.restarts) >= 1
-
-
-def last_restart_connectors(client) -> List[Dict[str, Any]]:
-    """The connector list the last hub restart was handed."""
-    restarts = client.app.state.mcp.restarts
-    assert restarts, "the MCP hub was not restarted"
-    return list(restarts[-1][0])
+        # Every entry carries an unresolved ${NOJAE_PYTHON_ROOT} note — honest,
+        # and proof the expansion ran on the seeded bytes.
+        assert "NOJAE_PYTHON_ROOT" in (response.json()["externalsError"] or "")

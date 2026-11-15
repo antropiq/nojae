@@ -2,6 +2,7 @@ import { reactive } from 'vue'
 
 import { scopeFor } from '../lib/search-scope'
 import { registerReRootHandler, useWorkspaceTree } from './useWorkspaceTree'
+import { withWorkspace } from './useWorkspaceSession'
 
 // ---------------------------------------------------------------------------
 // Workspace search: the state behind the Editor tab's search dialog.
@@ -124,7 +125,7 @@ export function useWorkspaceSearch() {
     let res
     let body = null
     try {
-      res = await fetch(`/api/fs/search?${params}`)
+      res = await fetch(withWorkspace(`/api/fs/search?${params}`))
       body = await res.json().catch(() => null)
     } catch (exc) {
       if (askedAt !== generation) return

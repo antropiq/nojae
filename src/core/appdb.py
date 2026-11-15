@@ -809,21 +809,33 @@ class TestFixtureError(Exception):
 def test_settings_path() -> Path:
     """Where the suite's connection fixture lives: ``<location>/.nojae/nojae-test-settings.json``.
 
-    Built from the working location the way the reserved folder's other files
-    are, so a suite that points ``NOJAE_PATH_LOCATION`` at a workspace of its own
-    reads the fixture there. A **function** so a test can point the lookup
-    elsewhere without rewriting the module.
+    Built from the workspace in scope the way the reserved folder's other files
+    are (the seam, :func:`src.core.workspace.current_root`), so a suite that
+    points its own folder at the seam still finds its fixture there. A
+    **function** so a test can point the lookup elsewhere without rewriting the
+    module.
+
+    This is the store's **one** workspace-scoped lookup, and it is a *file*
+    rather than a row: the e2e connection fixture is a workspace artefact, while
+    everything the store itself holds is the installation's (D11).
+    ``tests/test_appdb_read.py`` pins that no other read in this module reaches
+    the workspace.
     """
-    # Local imports: ``config`` sits below this module, and the reserved folder's
-    # name comes from ``mcp_connectors/policy_shared`` — the one source
-    # ``editorfs``, ``mcphub`` and ``lsphub`` all read it from too.
-    from src.config import path_location
+    # Local imports: the seam sits below nothing here but is imported lazily for
+    # the same reason ``config`` was — and the reserved folder's name comes from
+    # ``mcp_connectors/policy_shared``, the one source ``editorfs``, ``mcphub``
+    # and ``lsphub`` all read it from too.
+    from src.core import workspace as workspace_seam
 
     try:
         from mcp_connectors import policy_shared as shared
     except ImportError:  # pragma: no cover - depends on how the app is started
-        return Path(path_location()) / ".nojae" / TEST_SETTINGS_FILENAME
-    return Path(path_location()) / shared.POLICY_DIRNAME / TEST_SETTINGS_FILENAME
+        return Path(workspace_seam.current_root()) / ".nojae" / TEST_SETTINGS_FILENAME
+    return (
+        Path(workspace_seam.current_root())
+        / shared.POLICY_DIRNAME
+        / TEST_SETTINGS_FILENAME
+    )
 
 
 def _describe_value(value: Any) -> str:
