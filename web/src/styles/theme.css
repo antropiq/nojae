@@ -926,6 +926,12 @@ body {
   background: transparent;
   color: var(--bi-icon);
   cursor: pointer;
+  /* Pico paints a button's focus ring as a box-shadow in --pico-primary-focus.
+     The arrow is a bare glyph on the card's own surface, so a ring there reads
+     as a stray border: the colour is retargeted to that surface instead of
+     deleting the shadow, which keeps the focus box-shadow — and the a11y
+     affordance it carries for anything that reads it — in place. */
+  --pico-primary-focus: var(--bi-surface);
 }
 
 .models-name {
