@@ -394,12 +394,6 @@ export function agentModesLoaded() {
 //: the answer. Spell it once: the empty option and "cannot run" are one fact.
 export const NO_MODEL_LABEL = '— no model: this agent cannot run —'
 
-//: Why a tab's other fields are disabled. Said once, for every `readonly` row —
-//: the client never names one (§4.4).
-export const READONLY_CAPTION =
-  'These fields belong to nojae: it re-asserts them from code on every start. ' +
-  'The model is yours to choose.'
-
 function capsOf(draft) {
   return draft?.caps ?? {}
 }

@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { ref } from 'vue'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { h, ref } from 'vue'
 
 import {
   FOCUS_CONVERSATION,
@@ -17,10 +18,13 @@ import {
 // The four arguments are the column/input/dock refs `useChatLayout` hands to
 // `useSplitter`; null refs make both splitters inert (no shell to measure),
 // which is what the tests want — the axis must not need a laid-out DOM.
-// (The direct call does print Vue's "onMounted without a component instance"
-// warning for those two splitters: harmless here, and the alternative — a
-// throwaway component per test — would add a mount to every case without
-// testing anything the axis owns.)
+//
+// So the composable is called directly here, outside any component. Its two
+// splitters register mount hooks, which need an instance to belong to — see
+// `useSplitter`: it asks for one and registers only if there is one, so a
+// headless splitter is inert without Vue warning once per hook per call. The
+// last block asserts both halves of that: nothing is warned here, and a layout
+// built inside a component still observes its shells.
 function layout() {
   return useChatLayout(ref(null), ref(null), ref(null), ref(null))
 }
@@ -308,5 +312,59 @@ describe('the fold while an inference runs', () => {
     l.toggleFocus()
     l.toggleLeftHidden()
     expect(pair(l)).toEqual(SHAPE[FOCUS_CONVERSATION])
+  })
+})
+
+// Every `layout()` in this file builds its two splitters outside a component,
+// so their mount hooks have no instance to belong to. `useSplitter` asks
+// whether there is one and registers only if there is; these are both halves of
+// that decision — the headless split must be silent (that is what made the
+// suite's stderr unreadable), and the owned one must still observe its shells
+// and let go of them, which is the half a shortcut could have broken.
+describe('the splitters, with and without a component', () => {
+  it('warns about nothing when no component owns them', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    layout()
+    guardedLayout(() => false)
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('observes both shells when a component owns them, and detaches on unmount', () => {
+    const observed = new Set()
+    class FakeObserver {
+      constructor() {
+        this.target = null
+      }
+      observe(target) {
+        this.target = target
+        observed.add(target)
+      }
+      unobserve(target) {
+        observed.delete(target)
+      }
+      disconnect() {
+        observed.delete(this.target)
+      }
+    }
+    vi.stubGlobal('ResizeObserver', FakeObserver)
+
+    const Host = {
+      setup() {
+        const leftCol = ref(null)
+        const rightCol = ref(null)
+        useChatLayout(leftCol, rightCol, ref(null), ref(null))
+        return () =>
+          h('div', {}, [h('div', { ref: leftCol }), h('div', { ref: rightCol })])
+      },
+    }
+
+    const w = mount(Host)
+    // One observer per splitter, each on the column it measures.
+    expect(observed.size).toBe(2)
+
+    w.unmount()
+    expect(observed.size).toBe(0)
+    vi.unstubAllGlobals()
   })
 })

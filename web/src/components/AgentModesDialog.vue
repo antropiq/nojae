@@ -2,7 +2,6 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import {
   NO_MODEL_LABEL,
-  READONLY_CAPTION,
   addSlotFor,
   closeConfirmationFor,
   closeWouldLoseForDraft,
@@ -54,9 +53,8 @@ import { useAppShell } from '../composables/useAppShell'
 // a save succeeds. Clicking a row ends that state by design, without asking.
 //
 // **`readonly` is data, never an id.** The fields of an app-owned agent render
-// disabled and one caption says why, but this file never compares an agent id:
-// the flag the server publishes is the whole answer (and a test scans `web/src`
-// to keep it that way).
+// disabled, but this file never compares an agent id: the flag the server
+// publishes is the whole answer (and a test scans `web/src` to keep it that way).
 //
 // It opens the way the other cards open (watch + showModal + backdrop click +
 // native-close sync, the SettingsDialog / RegistrationMemoryDlg / BatchModeDialog
@@ -582,13 +580,6 @@ async function save() {
               :data-tab="tabKeyFor(entry)"
               v-show="activeTab === tabKeyFor(entry)"
             >
-              <!-- A `readonly` agent: everything nojae owns is rendered but
-                   disabled, the model stays live, and one caption says why. The
-                   **flag** decides this, never an id (§4.4). -->
-              <p v-if="entry.readonly" class="caption agent-modes-readonly">
-                {{ READONLY_CAPTION }}
-              </p>
-
               <!-- The two short fields share the section's first row: Label on the
                    left, Max tool iterations on the right, so the persona textarea
                    starts higher up the column. -->

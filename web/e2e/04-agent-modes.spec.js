@@ -395,7 +395,6 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     await openModesDialog(page)
     await modeTab(page, appOwned.label).click()
     const section = page.locator(`section[data-tab="${appOwned.id}"]`)
-    await expect(section.locator('.agent-modes-readonly')).toBeVisible()
     await expect(section.getByLabel('Label')).toBeDisabled()
     // No id field at all: a stored row's id is immutable and names nothing the
     // user acts on, so the dialog does not spend room on it.

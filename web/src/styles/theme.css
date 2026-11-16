@@ -1493,12 +1493,6 @@ body {
   color: var(--bi-danger);
 }
 
-/* Why a `readonly` agent's fields are disabled. A caption, not an alarm: it
-   explains a state the user can work with (the model is still theirs). */
-.agent-modes-readonly {
-  margin: 0 0 var(--bi-space-1);
-}
-
 /* The quiet line naming the model an agent will run on — the answer someone
    reading a persona wants without opening another dialog. */
 .agent-modes-model-line {

@@ -1,4 +1,4 @@
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 // Defaults of the chat splitter, kept as defaults so the original two-argument
 // call — `useSplitter(shell, input)` in WorkBenchView — is unchanged.
@@ -187,19 +187,33 @@ export function useSplitter(shellRef, resizedRef, options = {}) {
   // for the latter, and the first observer callback doubles as the initial
   // check, so the restored height is validated as soon as it can be.
   let observer = null
-  onMounted(() => {
-    const shell = shellRef.value
-    if (typeof ResizeObserver !== 'undefined' && shell) {
-      observer = new ResizeObserver(onResize)
-      observer.observe(shell)
-    } else {
-      window.addEventListener('resize', onResize)
-    }
-  })
-  onBeforeUnmount(() => {
-    if (observer) observer.disconnect()
-    else window.removeEventListener('resize', onResize)
-  })
+  //
+  // Both hooks belong to a component instance. Everywhere the app builds a
+  // splitter it is inside a `setup()`, and that is also what makes the pair
+  // worth registering: the mount attaches the observer, the unmount detaches
+  // it, so neither leaks.
+  //
+  // A splitter can also be created headlessly — `useChatLayout` with no shell
+  // refs, which is how the focus axis is unit-tested — and there Vue has no
+  // instance to hang the hooks on: it warns once per call and drops the
+  // registration. Asking first is the same outcome without the warning, and a
+  // headless splitter wants no observer anyway: with no shell there is no
+  // layout to re-clamp against, and `onResize` returns on a zero extent.
+  if (getCurrentInstance()) {
+    onMounted(() => {
+      const shell = shellRef.value
+      if (typeof ResizeObserver !== 'undefined' && shell) {
+        observer = new ResizeObserver(onResize)
+        observer.observe(shell)
+      } else {
+        window.addEventListener('resize', onResize)
+      }
+    })
+    onBeforeUnmount(() => {
+      if (observer) observer.disconnect()
+      else window.removeEventListener('resize', onResize)
+    })
+  }
 
   nextTick(onResize)
 

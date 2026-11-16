@@ -593,7 +593,7 @@ describe('a per-agent tab (§5.2)', () => {
 })
 
 describe('a readonly agent (§5.2, §4.4)', () => {
-  it('renders every field disabled, except the model, and says why once', async () => {
+  it('renders every field disabled, except the model', async () => {
     stubRoutes()
     const w = await openDialog()
     await tabButton(w, 3).trigger('click') // Reserved
@@ -613,9 +613,6 @@ describe('a readonly agent (§5.2, §4.4)', () => {
     // ...and the model is live: it is the one field of this row the user owns.
     expect(reserved.find('select').attributes('disabled')).toBeUndefined()
 
-    // One caption, naming no agent.
-    expect(reserved.findAll('.agent-modes-readonly')).toHaveLength(1)
-    expect(reserved.find('.agent-modes-readonly').text()).toContain('belong to nojae')
     w.unmount()
   })
 
@@ -2394,8 +2391,8 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     const selectors = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/{[^{}]*}/g, '')
     const styled = [...new Set([...selectors.matchAll(/agent-modes[a-z0-9_-]*/g)].map((m) => m[0]))].sort()
 
-    // Every state that renders something the others do not: a broken row, the
-    // `readonly` caption, and each confirmation pair.
+    // Every state that renders something the others do not: a broken row, and
+    // each confirmation pair.
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
     await labelField(w, 'chat').setValue('')
