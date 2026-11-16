@@ -590,10 +590,48 @@ describe('the mode hint', () => {
     expect(modeHint('architect')).toBe('Architect — MCP available')
   })
 
+  it('the select names the agent, its server, its model and its hubs', async () => {
+    stubRoutes()
+    await loadAgentModes()
+    // Three lines: the agent's label with the server it runs on, the model, then
+    // the hub verdict. `serverName` comes from the config catalogue the caller
+    // hands in — the same resolution the app bar's running line uses.
+    const models = [
+      { id: 1, name: 'qwen3.8-flash-next', serverName: 'hpz' },
+      { id: 4, name: 'model-4', serverName: 'hpz' },
+    ]
+    expect(modeSelectTitle({ models })).toBe(
+      'Code: hpz\nmodel: qwen3.8-flash-next\nMCP: On, LSP: On',
+    )
+    setAgentMode(RESERVED_ID)
+    expect(modeSelectTitle({ models, batchActive: false })).toBe(
+      'Reserved: hpz\nmodel: model-4\nMCP: On, LSP: Off',
+    )
+  })
+
+  it('the select names no server and no model it cannot read', async () => {
+    stubRoutes()
+    await loadAgentModes()
+    // The catalogue is the only source of a server name, so with none loaded the
+    // line is the label alone and the model is the row's own name.
+    expect(modeSelectTitle()).toBe('Code\nmodel: model-1\nMCP: On, LSP: On')
+    // An agent whose row points at a model the catalogue does not hold keeps the
+    // model it carries but drops the server half.
+    expect(modeSelectTitle({ models: [{ id: 7, name: 'other', serverName: 'elsewhere' }] })).toBe(
+      'Code\nmodel: model-1\nMCP: On, LSP: On',
+    )
+    // An agent with no model has no model line: the composer's warning icon says
+    // that, and the tooltip must not invent a name for it.
+    stubRoutes({ modes: modesBody({ models: { code: null } }) })
+    await loadAgentModes()
+    expect(modeSelectTitle({ models: [{ id: 2, name: 'm', serverName: 's' }] })).toBe(
+      'Code\nMCP: On, LSP: On',
+    )
+  })
+
   it('the select explains a running lot, and says nothing about a fixed mode', async () => {
     stubRoutes()
     await loadAgentModes()
-    expect(modeSelectTitle()).toBe('Code — MCP and language servers available')
     batch.active = true
     expect(modeSelectTitle({ batchActive: true })).toContain(
       'a running lot keeps the agent it launched with',
@@ -604,7 +642,7 @@ describe('the mode hint', () => {
     // than no message".
     setAgentMode(RESERVED_ID)
     chat.messages = [{ role: 'user', raw: 'one turn', html: '', images: [] }]
-    expect(modeSelectTitle({ batchActive: false })).toBe('Reserved — MCP available')
+    expect(modeSelectTitle({ batchActive: false })).not.toContain('running lot')
   })
 })
 
@@ -1443,6 +1481,10 @@ describe('messageFor: the card\'s one message, by fixed priority (D11)', () => {
     editor.serverFindings = [{ kind: 'error', message: 'the store refused' }]
     editor.saving = true
     expect(messageFor(draft, draft.entries[0])).toEqual({ text: 'Saving…', role: 'status' })
+    // Including the close guard's question: with bytes moving, that is the one
+    // truth the user cannot yet act on, and the pair's tooltips already name the
+    // two answers that are live.
+    expect(messageFor(draft, draft.entries[0], { closing: true })).toEqual({ text: 'Saving…', role: 'status' })
   })
 
   it('a read in flight is progress too, and a write in flight outranks it', () => {
@@ -1452,6 +1494,28 @@ describe('messageFor: the card\'s one message, by fixed priority (D11)', () => {
     expect(messageFor(null, null)).toEqual({ text: 'Reading the agents…', role: 'status' })
     editor.saving = true
     expect(messageFor(null, null)).toEqual({ text: 'Saving…', role: 'status' })
+  })
+
+  it('the close guard asks in the one line, outranking every older truth (D8)', () => {
+    const CLOSE_QUESTION = 'There are unsaved changes. Close anyway?'
+    const draft = draftOf()
+    // Every other truth the line could hold at once: a refusal, an incomplete
+    // form, a read failure and the read's findings. While the footer's pair is
+    // asking, the line answers the question the user is actually being asked.
+    draft.entries[0].label = ''
+    draft.findings = [{ kind: 'error', message: 'row x is odd' }]
+    editor.readError = 'Could not read the agents (500).'
+    editor.serverFindings = [{ kind: 'error', message: 'the store refused' }]
+    const asked = messageFor(draft, draft.entries[0], { closing: true })
+    expect(asked).toEqual({ text: CLOSE_QUESTION, role: 'status' })
+
+    // And it is the guard's own sentence: with no close being confirmed, the same
+    // state says its older truth exactly as it did before — and the card without a
+    // footer of its own passes no context at all and gets the same answer.
+    const notAsked = messageFor(draft, draft.entries[0], {})
+    expect(notAsked).toEqual({ text: 'the store refused', role: 'alert' })
+    expect(messageFor(draft, draft.entries[0], { closing: false })).toEqual(notAsked)
+    expect(messageFor(draft, draft.entries[0])).toEqual(notAsked)
   })
 
   it('a refusal from the store outranks the incomplete-form sentence', () => {

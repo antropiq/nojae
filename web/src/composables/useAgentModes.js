@@ -128,15 +128,38 @@ export function modeHint(id) {
   return `${mode.label} — ${tools}`
 }
 
-// The `<select>`'s title: the hint, qualified by whatever currently stops the
-// user acting on it. The **only** qualifier left is a running lot: D5 deleted
-// the mode lock and with it the fixed-mode sentence — "a message describing
-// behaviour that no longer happens is worse than no message".
-export function modeSelectTitle({ batchActive = false } = {}) {
-  const hint = modeHint(state.current)
-  if (!hint) return ''
-  if (batchActive) return `${hint} — a running lot keeps the agent it launched with`
-  return hint
+// The `<select>`'s title: what the **selected** agent runs as and on, in three
+// lines — `<agent>: <server>`, `model: <model>` and the two hubs with their
+// verdict. Hovering the control the user is about to act on answers the question
+// they are actually asking there, so opening the dialog to find out is not
+// needed. The per-`<option>` tooltip stays the short `modeHint` sentence: a
+// dropdown row is too narrow for this, and the hub verdict is what it is worth
+// while choosing.
+//
+// Nothing is invented: the server name comes from the catalogue entry the agent's
+// row points at (`GET /api/config`'s `models`, resolved by the caller), and the
+// model name from that entry or — while the catalogue has not been read — from
+// the name the agent row carries itself. A half that cannot be named is dropped,
+// never guessed: an agent with no model shows no model line at all (the composer's
+// warning icon already says that), and a row whose catalogue entry is gone keeps
+// its model name but loses the server.
+//
+// The one qualifier is a running lot: D5 deleted the mode lock and with it the
+// fixed-mode sentence — "a message describing behaviour that no longer happens is
+// worse than no message".
+export function modeSelectTitle({ batchActive = false, models = [] } = {}) {
+  const mode = modeById(state.current)
+  if (!mode) return ''
+  const entry = (Array.isArray(models) ? models : []).find(
+    (model) => model?.id === mode.modelId,
+  )
+  const modelName = String(entry?.name ?? mode.modelName ?? '').trim()
+  const serverName = String(entry?.serverName ?? '').trim()
+  const lines = [serverName ? `${mode.label}: ${serverName}` : mode.label]
+  if (modelName) lines.push(`model: ${modelName}`)
+  lines.push(`MCP: ${mode.mcpEnable ? 'On' : 'Off'}, LSP: ${mode.lspEnable ? 'On' : 'Off'}`)
+  if (batchActive) lines.push('a running lot keeps the agent it launched with')
+  return lines.join('\n')
 }
 
 // Whether the whole `<select>` is inert: a running lot whose mode the runner
@@ -1069,6 +1092,11 @@ function storeRefusalSentence() {
   return editorState.serverFindings[0]?.message || editorState.writeError || null
 }
 
+//: What the close guard asks with (D8), once the footer's pair is up: the pair's
+//: two glyphs name its two answers, and this names the question they answer, so a
+//: reader is not left inferring from an ✕ and a ✓ that leaving discards typing.
+const CLOSE_QUESTION = 'There are unsaved changes. Close anyway?'
+
 //: **The card's one message** (D11): everything it has to say — progress, a
 //: refusal from the store, an incomplete form, a failed read, the read's
 //: findings — chosen by this fixed priority and never by recency, so two truths
@@ -1076,14 +1104,32 @@ function storeRefusalSentence() {
 //: announced and not just drawn: `alert` for a refusal or a failure, `status` for
 //: progress and for the incomplete-form sentence.
 //:
+//: **A close the card is asking about outranks every older truth** (D8): while
+//: the footer's pair is up, everything the line would otherwise say is about a
+//: click that is no longer the current question — the guard's own answers are
+//: live, so the line answers what the user is being asked. A **write in flight
+//: still outranks it**: bytes are moving, that is the one truth the user cannot
+//: yet act on, and the pair's tooltips already name its two answers.
+//:
+//: The question therefore lives here and nowhere else: the reserved line is the
+//: only slot on `Close`'s band that can hold a sentence without moving a control
+//: (D10), and §8's standing rule is that a needed message goes to it.
+//:
 //: It always answers an object, so the line is a slot that is *always there*: an
 //: empty `text` means nothing to say, and filling or emptying it reflows nothing
 //: (D10). It clears when its cause goes away because it is derived from the state
 //: that caused it — typing the missing label empties the form sentence, and a
 //: successful write clears the store's.
-export function messageFor(draft, entry) {
+//:
+//: `context` is the card's own slot context, read for `closing` alone: the guard
+//: asks once per `Close`, so the question is present exactly as long as the pair
+//: is, and never before. A caller with no footer of its own passes nothing and
+//: gets the priority as it was.
+export function messageFor(draft, entry, context = {}) {
   if (editorState.saving) return { text: 'Saving…', role: 'status' }
   if (editorState.loading) return { text: 'Reading the agents…', role: 'status' }
+
+  if (slotContext(context).closing) return { text: CLOSE_QUESTION, role: 'status' }
 
   const refusal = storeRefusalSentence()
   if (refusal) return { text: refusal, role: 'alert' }

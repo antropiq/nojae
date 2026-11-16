@@ -287,9 +287,9 @@ and a backdrop click do the same, as today.
 Because it is now the *only* exit — the footer no longer offers a Cancel/Save
 pair — it must not silently discard typing. **While the card holds unsaved work,
 Close asks first, in place**: the two-glyph pair of D7 appears in the footer's
-reserved slot, left of `Close`. No sentence is added, no dialog is nested, and
-the footer's height and `Close`'s position do not move. With nothing unsaved,
-Close closes immediately and the pair never appears.
+reserved slot, left of `Close`. No dialog is nested, and the footer's height and
+`Close`'s position do not move. With nothing unsaved, Close closes immediately
+and the pair never appears.
 
 The pair reuses the delete confirmation's idiom so the card teaches it once:
 
@@ -297,6 +297,15 @@ The pair reuses the delete confirmation's idiom so the card teaches it once:
 |---|---|---|
 | cancel close | red cross | `Keep editing` |
 | confirm close | green check | `Discard and close` |
+
+Unlike the delete pair (D7, Q7), the close pair is **explained in words**: the
+card's one message line (D11) reads `There are unsaved changes. Close anyway?`
+while the pair is up. Discarding typing is the one consequence a silent ✕/✓
+should not be trusted to carry on its own, and the reserved line is the only
+slot on `Close`'s band that can hold a sentence without moving a control (D10) —
+so the question goes there, never beside the glyphs where it would reflow them.
+It is the only guard whose question is said rather than drawn; the delete pair's
+answers stay tooltips alone.
 
 Escape and a backdrop click count as `Close` in every respect, and so take the
 same guard — otherwise they would be a silent bypass of it.
@@ -380,15 +389,15 @@ Rules for the line:
   appearing never reflows the card, the form or `Close` (D10). This is the whole
   reason it is a reserved slot rather than a line that grows.
 - **It holds exactly one message**, chosen by a fixed priority rather than by
-  recency, so two truths never fight for the line: a write in flight, then a
-  refusal from the store, then the incomplete-form message, then a read failure,
-  then the read's findings.
+  recency, so two truths never fight for the line: a write in flight, then the
+  close guard's question (D8), then a refusal from the store, then the
+  incomplete-form message, then a read failure, then the read's findings.
 - **It is announced, not just drawn**: `role="alert"` for a refusal or a failure,
   `role="status"` for progress and for the incomplete-form sentence, so a screen
   reader hears what a reader sees.
 - **It is never a tooltip's replacement**: a disabled slot still explains itself
-  (D1). The line reports what *happened*; a tooltip explains what a control
-  *would do*.
+  (D1). The line reports what *happened* (or, for D8's question, what the card is
+  asking to do); a tooltip explains what a control *would do*.
 - **It clears when its cause goes away** — typing a missing label empties the
   incomplete-form message, and a successful save empties a refusal.
 
@@ -470,8 +479,10 @@ what is already stored has nothing to offer.
 14. While a confirmation is pending, selecting another agent cancels it and
     deletes nothing.
 15. With unsaved work, `Close` — and Escape, and a backdrop click — asks in the
-    footer's reserved slot (`Keep editing` / `Discard and close`); with none, it
-    closes immediately. `Close` never moves when the pair appears.
+    footer's reserved slot (`Keep editing` / `Discard and close`) and says the
+    question in the one message line; with none, it closes immediately and
+    neither the pair nor the sentence appears. `Close` never moves when the pair
+    appears.
 16. Every toolbar slot has an accessible name equal to its tooltip, and a
     disabled slot always explains itself.
 17. The two confirmation pairs are absent from the DOM — not merely invisible —
@@ -509,7 +520,7 @@ implementation.
 | Q2 | Gate the save slot on the form being "dirty"? | **Dropped.** No `Nothing to save` state, and save is not disabled by an incomplete form either — it refuses on click and explains itself in the message line. The baseline is kept **only** for the close guard. | D8, D11, §5 |
 | Q3 | Does a new agent get a row in the list before it is saved? | **No.** Clicking `+` clears the selection and enters creation mode; the list gains nothing until a save succeeds. Clicking an agent during creation abandons it without asking. | D4 |
 | Q4 | What does `Cancel delete` restore? | **Nothing needs restoring** — the form keeps the typed edits and stays where it was. | D7.4 |
-| Q5 | Does `Close` with unsaved work ask? | **Yes**, in place, in the footer's reserved slot. | D8 |
+| Q5 | Does `Close` with unsaved work ask? | **Yes**, in place, in the footer's reserved slot, with its question in the message line (revised: D7's glyph-only rule was not enough for discarding typing). | D8, D11 |
 | Q6 | Icons: house SVGs or an npm package? | **House inline SVGs.** No icon package is added. | D1 |
 | Q7 | Where is the delete confirmation explained? | **The two buttons' tooltips only** — no sentence, no label, no inserted caption. | D7 |
 

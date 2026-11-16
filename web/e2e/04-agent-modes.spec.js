@@ -62,6 +62,12 @@ async function serversPayload(request) {
   return res.json()
 }
 
+async function configPayload(request) {
+  const res = await request.get('/api/config')
+  expect(res.ok(), `GET /api/config failed: ${await res.text()}`).toBe(true)
+  return res.json()
+}
+
 // The model every created agent is pointed at: the one the suite's fixture
 // materialised into the temporary store. Read, never spelled.
 async function firstModel(request) {
@@ -246,21 +252,29 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
       payload.agents.map((agent) => agent.label),
     )
 
-    // The select's title names the agent and the hubs it can reach — the part
-    // of the sentence the user acts on. The wording is derived from the row's
-    // own flags, so it follows whatever the seeded store holds.
-    const hintFor = (agent) => {
-      const hubs = []
-      if (agent.mcpEnable) hubs.push('MCP')
-      if (agent.lspEnable) hubs.push('language servers')
-      return hubs.length ? `${hubs.join(' and ')} available` : 'no tools'
+    // The select's title says what the selected agent runs as and on: the agent
+    // with the server its model sits on, the model itself, and the two hubs.
+    // Every part is derived from the store's rows and `/api/config`, so it
+    // follows whatever the seeded install holds.
+    const config = await configPayload(page.request)
+    const titleFor = (agent) => {
+      const entry = config.models.find((model) => model.id === agent.modelId)
+      const modelName = String(entry?.name ?? agent.modelName ?? '').trim()
+      const serverName = String(entry?.serverName ?? '').trim()
+      const lines = [serverName ? `${agent.label}: ${serverName}` : agent.label]
+      if (modelName) lines.push(`model: ${modelName}`)
+      // The hub flags are `!== false` on the client (an absent flag is On), so
+      // the derivation mirrors that rather than reading the flag as a boolean.
+      lines.push(
+        `MCP: ${agent.mcpEnable !== false ? 'On' : 'Off'}, ` +
+          `LSP: ${agent.lspEnable !== false ? 'On' : 'Off'}`,
+      )
+      return lines.join('\n')
     }
 
     await select.selectOption(gated.id)
     await expect(select).toHaveValue(gated.id)
-    const gatedHint = (await select.getAttribute('title')) ?? ''
-    expect(gatedHint).toContain(gated.label)
-    expect(gatedHint).toContain(hintFor(gated))
+    expect((await select.getAttribute('title')) ?? '').toBe(titleFor(gated))
 
     if (mcpConnectors.length) {
       await expect(page.locator('.chat-mcp-panel')).toBeVisible()
@@ -278,7 +292,7 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
 
     await select.selectOption(open.id)
     await expect(select).toHaveValue(open.id)
-    expect((await select.getAttribute('title')) ?? '').toContain(hintFor(open))
+    expect((await select.getAttribute('title')) ?? '').toBe(titleFor(open))
     if (mcpConnectors.length) {
       await expect(
         page.locator('.chat-mcp-panel input[role="switch"]').first(),
@@ -667,9 +681,15 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     await expect(slot(page, 'Keep editing')).toBeVisible()
     await expect(slot(page, 'Discard and close')).toBeVisible()
     await expect(card(page)).toBeVisible()
+    // The guard asks in **words** too, in the one message line: two glyphs are not
+    // a sentence, and the consequence here is that leaving throws typing away.
+    await expect(messageLine(page)).toHaveText('There are unsaved changes. Close anyway?')
     await slot(page, 'Keep editing').click()
     await expect(card(page)).toBeVisible()
     await expect(visibleSection(page).getByLabel('Label')).toHaveValue(`${NEW_LABEL} Unsaved`)
+    // The question was the guard's, so it left with the guard (D11: a message
+    // clears when its cause goes away).
+    await expect(messageLine(page)).toHaveText('')
     await writes.expectNone('the close guard writes nothing')
     // And the row it was typed over is still the store's own.
     expect(

@@ -135,7 +135,12 @@ const canRestart = computed(
 // that has turned can move to any agent, including the app-owned one. What is
 // left of the disabling rules is the running lot, which took this selection at
 // launch and keeps it for every task — a rendering rule the composable owns.
-const modeTitle = computed(() => modeSelectTitle({ batchActive: batch.active }))
+// The catalogue the server name is read from: `/api/config`'s per-model rows,
+// which already carry the `serverName` of the server each model sits on. The
+// WorkBench loads it for its own reasons, so the tooltip adds no fetch.
+const modeTitle = computed(() =>
+  modeSelectTitle({ batchActive: batch.active, models: appShellState.config?.models }),
+)
 const modeFindingsLine = computed(() => findingsLine())
 
 function onModeChange(event) {

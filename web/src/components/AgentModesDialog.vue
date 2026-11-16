@@ -164,8 +164,14 @@ const closeConfirmation = computed(() => closeConfirmationFor(slotContext.value)
 
 //: The card's **one message** (D11): everything it has to say comes out of here,
 //: with the role that announces it. The line is always rendered, so an empty
-//: `text` is a slot holding nothing rather than a slot that is gone.
-const message = computed(() => messageFor(draft.value, subject.value))
+//: `text` is a slot holding nothing rather than a slot that is gone. The slot
+//: context goes in as well, because **the close guard's question** (D8) is one of
+//: the things the card has to say: the pair's two glyphs are its two answers, and
+//: this line is the question they answer, so a reader never has to infer from an
+//: ✕ and a ✓ that closing now would discard typing.
+const message = computed(() =>
+  messageFor(draft.value, subject.value, slotContext.value),
+)
 
 // Open/fetch/close, following the SettingsDialog pattern. Opening *is* the read:
 // agents are uncached on purpose (the store is the cache, D11), so a card that
@@ -245,8 +251,9 @@ function onNativeClose() {
 
 //: `Close` is the card's only way out and it writes nothing. **While the card holds
 //: unsaved work it asks first, in place** (D8): the delete confirmation's idiom
-//: arrives in the footer's reserved slot, no sentence is added, no dialog is nested,
-//: and `Close` does not move. A pending delete is **abandoned** here — nothing was
+//: arrives in the footer's reserved slot and its question in the message line
+//: (both `messageFor`'s, so nothing is spelled here), no dialog is nested, and
+//: `Close` does not move. A pending delete is **abandoned** here — nothing was
 //: written for it — and the guard answers on its own terms.
 function askClose() {
   pendingDelete.value = null
@@ -748,7 +755,10 @@ async function save() {
         <footer class="settings-actions">
           <!-- **The card's one message** (D11): always present, on the same band
                as the buttons, its text and its role both `messageFor`'s answer.
-               Nothing else in the card says anything. -->
+               Nothing else in the card says anything. It is also where the close
+               guard puts its question (D8) — the slot immediately before the
+               pair's two buttons, and the only one that can hold a sentence
+               without moving `Close`. -->
           <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
           <!-- The footer's **reserved** confirmation slot (D8): always there and
                always the pair's width, so `Close` never moves when the card asks a

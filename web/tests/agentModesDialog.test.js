@@ -1633,10 +1633,16 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
     expect(keepEditingButton(w).attributes('aria-label')).toBe('Keep editing')
     expect(discardCloseButton(w).attributes('title')).toBe('Discard and close')
     expect(discardCloseButton(w).attributes('aria-label')).toBe('Discard and close')
-    // It asks with glyphs and tooltips only: no sentence appeared, and the card's
-    // one message line is still empty.
-    expect(messageText(w)).toBe('')
-    expect(w.text()).not.toMatch(/unsaved|discard changes|Are you sure/i)
+    // The pair's two glyphs name its two answers; the card's **one message line**
+    // (D11) names the question they answer, so nobody has to read a glyph twice to
+    // learn that closing now would discard typing. It is the footer's question, so
+    // the line — the slot immediately before the two buttons — is its home, and
+    // `messageFor` owns the wording, not the template.
+    expect(messageText(w)).toBe('There are unsaved changes. Close anyway?')
+    expect(messageLine(w).attributes('role')).toBe('status')
+    // It says nothing else: no nested dialog appeared, and no second copy of the
+    // question sits anywhere outside that line.
+    expect(w.findAll('.agent-modes-message')).toHaveLength(1)
     // Focus landed on **`Keep editing`** — the safe answer.
     expect(document.activeElement).toBe(keepEditingButton(w).element)
     // And while it is pending the toolbar's three verbs are inert: one destructive
@@ -1774,6 +1780,9 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
     expect(tabButton(w, 1).classes()).toContain('active')
     expect(personaField(w, 'code').element.value).toBe('typed and not saved')
     expect(calls).toEqual([])
+    // The question is the guard's, so it leaves with the guard: the line is empty
+    // again rather than still asking about a close that was refused.
+    expect(messageText(w)).toBe('')
     // The verbs are live again, and the pencil's `@close` was never reached.
     expect(saveButton(w).element.disabled).toBe(false)
     // Focus went back to the verb that asked, not to `<body>`.

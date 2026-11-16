@@ -10,6 +10,7 @@ import {
   useAgentModes,
 } from '../src/composables/useAgentModes'
 import { useBatch } from '../src/composables/useBatch'
+import { useAppShell } from '../src/composables/useAppShell'
 import { useChat } from '../src/composables/useChat'
 import { AGENT_STORAGE_KEY } from '../src/composables/useWorkspaceSession'
 
@@ -27,6 +28,7 @@ import { AGENT_STORAGE_KEY } from '../src/composables/useWorkspaceSession'
 const agentModes = useAgentModes().state
 const chat = useChat().state
 const batch = useBatch().state
+const appShell = useAppShell().state
 
 function agentsBody({ chatModel = 2, codeModel = 1 } = {}) {
   return {
@@ -91,6 +93,7 @@ function resetAll() {
   agentModes.loaded = false
   agentModes.findings = []
   agentModes.notice = null
+  appShell.config = null
   // The remembered agent is the tab's (§5.5 rule 26): `sessionStorage` is what a
   // fresh case has to clear.
   window.sessionStorage.clear()
@@ -195,6 +198,43 @@ describe('a selected agent with no model', () => {
 
     expect(window.sessionStorage.getItem(AGENT_STORAGE_KEY)).toBe('chat')
     expect(window.localStorage.getItem(AGENT_STORAGE_KEY)).toBeNull()
+  })
+})
+
+// The hover over the selected agent: three lines naming what the turn will run
+// as and on. The rule is `modeSelectTitle`'s (judged in `agentModes.test.js`);
+// what is measured here is the composer wiring the config catalogue into it —
+// without that argument the server half could never appear.
+describe('the selected agent tooltip', () => {
+  it('says agent: server, model, and the two hubs', async () => {
+    stubRoutes()
+    appShell.config = {
+      models: [
+        { id: 1, name: 'qwen3.8-flash-next', serverName: 'hpz' },
+        { id: 2, name: 'model-2', serverName: 'hpz' },
+      ],
+      store: { usable: true },
+    }
+    await loadAgentModes()
+    const w = await mountComposer()
+
+    expect(w.find('.chat-mode-select').attributes('title')).toBe(
+      'Code: hpz\nmodel: qwen3.8-flash-next\nMCP: On, LSP: On',
+    )
+  })
+
+  it('follows the selection, and omits the model an agent does not have', async () => {
+    stubRoutes({ agents: agentsBody({ chatModel: null }) })
+    appShell.config = { models: [{ id: 1, name: 'qwen3.8-flash-next', serverName: 'hpz' }] }
+    await loadAgentModes()
+    const w = await mountComposer()
+
+    await w.find('.chat-mode-select').setValue('chat')
+    await flushPromises()
+
+    // Chat has neither hub open and now no model at all, so it gets two lines —
+    // the missing model is the warning icon's sentence, not an invented name.
+    expect(w.find('.chat-mode-select').attributes('title')).toBe('Chat\nMCP: Off, LSP: Off')
   })
 })
 
