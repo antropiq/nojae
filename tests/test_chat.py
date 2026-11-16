@@ -2822,3 +2822,207 @@ class TestAgentModeToolGate:
         system = captured["messages"][0]["content"]
         assert chat_core.TOOL_NOTICE.strip() not in system
         assert "PERSONA" not in system  # the real persona, not a stub's
+
+
+class TestAToolCallWrittenAsTextIsRepaired:
+    """A call the server could not parse must not end the reply.
+
+    A serving runtime gives up on its tool-call parser at the first name it
+    cannot match, so the call arrives as ordinary content with no
+    ``tool_calls`` delta. The loop used to ``break`` there: the markup was
+    painted into the conversation and nothing ran, and only a new user message
+    restarted inference. The round is repaired instead.
+    """
+
+    # The Hermes spelling the reported engine actually produced.
+    LEAKED = (
+        "<tool_call>\n"
+        '{"name": "read_files", "arguments": {"path": "AGENTS.md"}}\n'
+        "</tool_call>"
+    )
+
+    def _run(self, monkeypatch, streams, tools=None, **kwargs):
+        calls: List[Dict[str, Any]] = []
+
+        def fake(**kw):
+            calls.append(kw)
+            return streams[len(calls) - 1]
+
+        monkeypatch.setattr("src.core.chat.stream_completion", fake)
+        events: List[Dict[str, Any]] = []
+        executed: List[str] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "read AGENTS.md"}],
+            "m",
+            "http://s/v1",
+            events.append,
+            tools=tools
+            or [{"type": "function", "function": {"name": "read_file"}}],
+            tool_executor=lambda name, args: executed.append(name) or "ok",
+            **kwargs,
+        )
+        return events, calls, executed
+
+    def test_the_round_does_not_end_the_reply(self, monkeypatch):
+        events, calls, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream([content_chunk(self.LEAKED), finish_chunk("stop")]),
+                FakeStream([content_chunk("Recovered."), finish_chunk("stop")]),
+            ],
+        )
+        # A second round ran, and the reply ends normally on the answer it got.
+        assert len(calls) == 2
+        assert events[-1]["event"] == "done"
+        streamed = "".join(e["text"] for e in events if e["event"] == "token")
+        assert streamed == "Recovered."
+
+    def test_the_markup_never_reaches_the_conversation_panel(self, monkeypatch):
+        events, _, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream([content_chunk(self.LEAKED), finish_chunk("stop")]),
+                FakeStream([content_chunk("ok"), finish_chunk("stop")]),
+            ],
+        )
+        streamed = "".join(e["text"] for e in events if e["event"] == "token")
+        assert "tool_call" not in streamed
+        assert "read_files" not in streamed
+        assert "AGENTS.md" not in streamed
+
+    def test_the_correction_is_fed_back_as_a_tool_turn(self, monkeypatch):
+        # The exact message the user used to type by hand, and the names the
+        # model actually had: that is what it needs to self-correct.
+        _, calls, executed = self._run(
+            monkeypatch,
+            [
+                FakeStream([content_chunk(self.LEAKED), finish_chunk("stop")]),
+                FakeStream([content_chunk("ok"), finish_chunk("stop")]),
+            ],
+        )
+        assert executed == []  # never a structured call, so never executed
+        messages = calls[1]["messages"]
+        assert messages[-1]["role"] == "tool"
+        assert chat_core.BAD_TOOL_CALL_MESSAGE in messages[-1]["content"]
+        assert "read_file" in messages[-1]["content"]
+        assert messages[-1]["tool_call_id"].startswith(chat_core.BAD_TOOL_CALL_ID)
+
+    def test_the_panel_gets_one_red_badge_naming_what_it_tried(
+        self, monkeypatch
+    ):
+        events, _, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream([content_chunk(self.LEAKED), finish_chunk("stop")]),
+                FakeStream([content_chunk("ok"), finish_chunk("stop")]),
+            ],
+        )
+        call = next(e for e in events if e["event"] == "tool_call")
+        assert call["bad"] is True
+        assert call["tool"] == "read_files"
+        assert call["server"] == ""
+        result = next(e for e in events if e["event"] == "tool_result")
+        assert result["ok"] is False
+        assert result["id"] == call["id"]
+
+    def test_every_call_it_wrote_gets_an_answer(self, monkeypatch):
+        # Two text-shaped calls in one round: each id must be answered, or the
+        # next request carries a history the server rejects.
+        two = (
+            "<tool_call>\n"
+            '{"name": "read_files", "arguments": {}}\n'
+            "</tool_call>\n"
+            "<tool_call>\n"
+            '{"name": "read_file", "arguments": {"path": "x"}}\n'
+            "</tool_call>"
+        )
+        _, calls, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream([content_chunk(two), finish_chunk("stop")]),
+                FakeStream([content_chunk("ok"), finish_chunk("stop")]),
+            ],
+        )
+        tool_turns = [m for m in calls[1]["messages"] if m["role"] == "tool"]
+        assert len(tool_turns) == 2
+        assert len({m["tool_call_id"] for m in tool_turns}) == 2
+
+    def test_a_name_it_was_offered_is_asked_to_retry_not_listed(
+        self, monkeypatch
+    ):
+        offered = (
+            "<tool_call>\n"
+            '{"name": "read_file", "arguments": {"path": "x"}}\n'
+            "</tool_call>"
+        )
+        _, calls, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream([content_chunk(offered), finish_chunk("stop")]),
+                FakeStream([content_chunk("ok"), finish_chunk("stop")]),
+            ],
+        )
+        content = calls[1]["messages"][-1]["content"]
+        assert "Retry it as a real tool call" in content
+        assert "is not one of them" not in content
+
+    def test_prose_with_a_stray_angle_bracket_still_streams(self, monkeypatch):
+        # The filter must not eat ordinary text: "a < b" is not a call.
+        events, calls, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream(
+                    [content_chunk("if a < b and 3 < 4"), finish_chunk("stop")]
+                ),
+            ],
+        )
+        streamed = "".join(e["text"] for e in events if e["event"] == "token")
+        assert streamed == "if a < b and 3 < 4"
+        assert len(calls) == 1  # no repair round, no tool turn
+        assert not [e for e in events if e["event"] == "tool_call"]
+
+    def test_an_unterminated_opener_is_released_as_prose(self, monkeypatch):
+        events, calls, _ = self._run(
+            monkeypatch,
+            [
+                FakeStream(
+                    [content_chunk("see <tool_call soon"), finish_chunk("stop")]
+                ),
+            ],
+        )
+        streamed = "".join(e["text"] for e in events if e["event"] == "token")
+        assert "<tool_call soon" in streamed
+        assert len(calls) == 1
+
+    def test_a_tool_less_reply_is_untouched(self, monkeypatch):
+        # With no tools offered there is no loop to repair and no markup to
+        # read: the text is the answer, as it always was.
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kw: FakeStream(
+                [content_chunk(self.LEAKED), finish_chunk("stop")]
+            ),
+        )
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            "m",
+            "http://s/v1",
+            events.append,
+        )
+        streamed = "".join(e["text"] for e in events if e["event"] == "token")
+        assert streamed == self.LEAKED
+        assert events[-1]["event"] == "done"
+
+    def test_the_iteration_cap_bounds_the_repair(self, monkeypatch):
+        # A model that keeps writing calls as text must not loop for ever: the
+        # cap stops the lot exactly as it stops a real tool loop.
+        leak = FakeStream([content_chunk(self.LEAKED), finish_chunk("stop")])
+        events, calls, _ = self._run(
+            monkeypatch,
+            [leak] * 5,
+            max_tool_iterations=2,
+        )
+        assert len(calls) <= 3
+        note = "".join(e["text"] for e in events if e["event"] == "token")
+        assert "maximum of 2 tool iterations" in note

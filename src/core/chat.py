@@ -13,6 +13,12 @@ for the Chat tab), the reply runs an OpenAI-style tool-calling loop: each
 iteration streams the model, executes any ``tool_calls`` it produced via
 the injected executor, feeds the results back, and repeats — up to
 ``max_tool_iterations`` — until a plain answer arrives.
+
+A model that names a tool it was not offered sometimes has its call fail the
+server's structured path and arrive as *text* instead. That round is repaired
+rather than ending the reply: the markup is kept out of the answer by
+:class:`~src.core.tooltext.TextToolCallFilter`, fed back as a failed tool turn,
+and the loop continues — see :data:`BAD_TOOL_CALL_MESSAGE`.
 """
 
 import json
@@ -33,6 +39,7 @@ from src.core.llm import (
 from src.core.llmkit import stream_completion
 from src.core.llmkit.sanitize import StreamNeutralizer, neutralize
 from src.core.models import DEFAULT_LLM_SYSPROMPT
+from src.core.tooltext import TextToolCallFilter
 from src.core.utils import estimate_completion_tokens
 
 # Executor bridge onto the MCP manager: name + args in, tool text out.
@@ -121,6 +128,52 @@ def _collect_tool_call_deltas(chunk: Any, acc: Dict[int, Dict[str, Any]]) -> str
             entry["arguments"] += arguments
             arg_text += str(arguments)
     return arg_text
+
+
+# The one id a text-shaped call round is reported under: the round produced no
+# structured call, so no id came off the wire for it.
+BAD_TOOL_CALL_ID = "bad-tool-call"
+
+# What a reply whose tool call arrived as text is told back. The loop repairs
+# the round instead of ending it (the alternative was the user re-sending a
+# message by hand), so the model gets the correction the user used to type and
+# the reply carries on in the same turn.
+BAD_TOOL_CALL_MESSAGE = (
+    "Your last tool call did not succeed: it arrived as text instead of as a "
+    "tool call, so nothing was executed. Call one of the tools that were "
+    "actually offered, submitting it as a real tool call rather than writing "
+    "the call out in your answer."
+)
+
+
+def _tool_names(tools: Optional[List[Dict[str, Any]]]) -> Set[str]:
+    """The tool names a round offered the model, in the wire's own shape."""
+    names: Set[str] = set()
+    for tool in tools or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def _bad_tool_call_content(name: str, offered: Set[str]) -> str:
+    """What one text-shaped call's tool turn answers with.
+
+    Two cases, and the distinction is the model's own mistake: a name it *was*
+    offered needs only to be resubmitted, one it invented is told the names it
+    actually had.
+    """
+    if name in offered:
+        return (
+            f"Error: the call to '{name}' arrived as text, so it was not "
+            "executed. Retry it as a real tool call."
+        )
+    return (
+        f"{BAD_TOOL_CALL_MESSAGE}\n\n"
+        f"Tool '{name}' is not one of them. Available: "
+        f"{', '.join(sorted(offered)) or 'none'}."
+    )
 
 
 def _preview(value: str, limit: int = 200) -> str:
@@ -354,6 +407,13 @@ def stream_chat(
         # the re-posted message is cleaned again at the seam anyway.
         answer_display = StreamNeutralizer()
         reasoning_display = StreamNeutralizer()
+        # The third display filter, and only while tools are offered: a call
+        # the model wrote as text instead of as a `tool_calls` delta is held
+        # back here rather than painted into the conversation. Its calls are
+        # what the round is repaired with below -- the same answer text is
+        # still accumulated raw, because the measurement and the re-posted
+        # message are not the panel.
+        tool_text = TextToolCallFilter() if use_tools else None
 
         def flush_display() -> None:
             # Hand over what the filters held back, before any terminal
@@ -363,6 +423,11 @@ def stream_chat(
             if left:
                 emit({"event": "reasoning_delta", "text": left})
             left = answer_display.flush()
+            if left:
+                emit({"event": "token", "text": left})
+            # A text-shaped call that never closed is prose after all, so it
+            # is released here like any other held partial.
+            left = tool_text.flush() if tool_text is not None else ""
             if left:
                 emit({"event": "token", "text": left})
 
@@ -414,6 +479,10 @@ def stream_chat(
                 iteration_content += content
                 answer_buffer += content
                 shown = answer_display.feed(content)
+                # Chained after the token filter, so a call is held back whole
+                # whichever of the two would have painted part of it.
+                if tool_text is not None:
+                    shown = tool_text.feed(shown)
                 if shown:
                     emit({"event": "token", "text": shown})
         except Exception as exc:
@@ -529,8 +598,84 @@ def stream_chat(
 
         # `tool_executor is None` only narrows for the type checker: use_tools
         # already implies the executor is set.
-        if not use_tools or tool_executor is None or not tool_calls:
+        if not use_tools or tool_executor is None:
             break
+
+        # A round that produced no structured call can still have written one
+        # out as text: the serving runtime gives up on its tool-call parser at
+        # the first name it cannot match, and the markup arrives as ordinary
+        # content. Repair that round instead of ending the reply on it -- the
+        # text was held out of the answer by the display filter, so the panel
+        # never showed the call, and feeding the model a correction keeps the
+        # reply running the way a re-sent message used to.
+        text_calls = tool_text.calls if tool_text is not None else []
+        if not tool_calls:
+            if not text_calls:
+                break
+            iteration += 1
+            emit(
+                {
+                    "event": "usage",
+                    "tokens": completion_tokens,
+                    "decode": decode_seconds,
+                    "contextTokens": context_tokens,
+                    "contextEstimated": context_estimated,
+                }
+            )
+            offered = _tool_names(tools)
+            emit(
+                {
+                    "event": "tool_call",
+                    "id": BAD_TOOL_CALL_ID,
+                    # No connector answered this one, so the badge names the
+                    # call the model tried to make instead of a tool of ours.
+                    "tool": _preview(
+                        neutralize(", ".join(c["name"] for c in text_calls)), 80
+                    ),
+                    "server": "",
+                    "argsPreview": "",
+                    "iteration": iteration,
+                    "maxIterations": max_tool_iterations,
+                    # The panel's red badge, rather than a connector's badge.
+                    "bad": True,
+                }
+            )
+            # One tool turn per call it wrote: OpenAI-style servers reject a
+            # message list whose call ids were never answered. A call whose
+            # name *was* offered is reported as its own failure (the loop never
+            # produced a structured call for it); one naming something the
+            # round never offered is told back the offered names, which is the
+            # list the model had.
+            for index, call in enumerate(text_calls):
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"{BAD_TOOL_CALL_ID}-{index}",
+                        "content": _bad_tool_call_content(call["name"], offered),
+                    }
+                )
+            emit(
+                {
+                    "event": "tool_result",
+                    "id": BAD_TOOL_CALL_ID,
+                    "ok": False,
+                    "preview": BAD_TOOL_CALL_MESSAGE,
+                }
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            if pause_event is not None and pause_event.is_set():
+                _emit_paused(emit)
+                return
+            if iteration >= max_tool_iterations:
+                capped = True
+                break
+            continue
+
+        # A recovered round can mix both spellings (one name matched, the
+        # others did not): the structured calls execute, and the text ones are
+        # answered too rather than left in the history as orphans.
+        stray_calls = text_calls
 
         # The cap counts MCP tool rounds only. A round that used nothing but
         # uncapped tools (the language-server tools, listed in
@@ -637,6 +782,37 @@ def stream_chat(
                     # the preview is run-free for the browser, the message
                     # re-posted to the model is stripped at the seam.
                     "preview": _preview(neutralize(result_text), 400),
+                }
+            )
+        # The round's text-shaped calls get an answer too, so no call id of the
+        # re-posted history is left unanswered (a server rejects such a list).
+        # They are not executed: they were never a structured call, and the
+        # model is told to submit them properly.
+        offered = _tool_names(tools)
+        for index, call in enumerate(stray_calls):
+            call_id = f"{BAD_TOOL_CALL_ID}-{index}"
+            content = _bad_tool_call_content(call["name"], offered)
+            messages.append(
+                {"role": "tool", "tool_call_id": call_id, "content": content}
+            )
+            emit(
+                {
+                    "event": "tool_call",
+                    "id": call_id,
+                    "tool": _preview(neutralize(call["name"]), 80),
+                    "server": "",
+                    "argsPreview": "",
+                    "iteration": iteration,
+                    "maxIterations": max_tool_iterations,
+                    "bad": True,
+                }
+            )
+            emit(
+                {
+                    "event": "tool_result",
+                    "id": call_id,
+                    "ok": False,
+                    "preview": _preview(neutralize(content), 400),
                 }
             )
         if cancel_event is not None and cancel_event.is_set():

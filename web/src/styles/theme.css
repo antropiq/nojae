@@ -2962,6 +2962,18 @@ input.appbar-location-input {
   color: var(--bi-danger);
 }
 
+/* A call the model wrote as text rather than submitting it: the red is on the
+   whole badge, because the failure is the call itself — nothing was dispatched,
+   so the badge must not read like one of the connector's own gone wrong. */
+.chat-tool--bad {
+  color: var(--bi-danger);
+  border-color: var(--bi-danger);
+}
+
+.chat-tool--bad .chat-tool-state {
+  color: var(--bi-danger);
+}
+
 /* Narrow screens: the Chat left column (timeline over the tools dock) shrinks.
    The column's width is derived from the per-panel token, so one override
    keeps the timeline and the dock aligned at every breakpoint. */

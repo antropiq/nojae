@@ -839,6 +839,10 @@ function applyEvent(name, data, assistant) {
         tool: data.tool ?? 'tool',
         server: data.server ?? '',
         preview: data.argsPreview ?? '',
+        // A call the model wrote as text instead of submitting it: the server
+        // never ran it, and the panel paints it as a bad tool call rather than
+        // as one of the connector's own (see `bad` in WorkBenchToolPanel).
+        bad: data.bad === true,
         state: 'running',
       })
       // Same reactive object in the panel timeline, at its chronological

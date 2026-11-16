@@ -296,7 +296,12 @@ onBeforeUnmount(() => {
 // then the callable name. Older payloads without a server fall back to the
 // bare method name. LSP tool names already carry their server id
 // (`lsp_vue_diagnostics`), so the redundant prefix is dropped there.
+//
+// A bad tool call is the exception, and says so: the model wrote a call out as
+// text, so there is no hub behind it and no method of ours to name — the badge
+// carries the label and the call the model tried, nothing else.
 function toolLabel(tool) {
+  if (tool.bad) return `bad tool call · ${tool.tool}`
   if (!tool.server) return tool.tool
   const namespaced = `lsp_${tool.server}_`
   const method = tool.tool.startsWith(namespaced)
@@ -330,7 +335,7 @@ function toolLabel(tool) {
           <li
             v-if="unit.block.kind === 'tool'"
             class="chat-tool"
-            :class="unit.block.tool.state"
+            :class="[unit.block.tool.state, { 'chat-tool--bad': unit.block.tool.bad }]"
             :title="`${unit.block.tool.server ? unit.block.tool.server + ' · ' : ''}${unit.block.tool.preview}${unit.block.tool.resultPreview ? '\n→ ' + unit.block.tool.resultPreview : ''}`"
           >
             <span class="chat-tool-state" aria-hidden="true">
