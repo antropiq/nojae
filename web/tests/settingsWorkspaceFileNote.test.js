@@ -33,6 +33,7 @@ describe('the dialog shows one store-level notice', () => {
     state.serversCaps = null
     state.unassigned = null
     state.serversLoading = false
+    state.serversLoaded = true
     state.serversError = null
     state.activeSection = 'servers'
     state.serverDraft = null

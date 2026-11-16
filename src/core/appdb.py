@@ -678,11 +678,12 @@ def _seed(conn: sqlite3.Connection, created: bool) -> Dict[str, Any]:
     because for that row code *is* the source of truth — a hand-corrupted
     ``readonly = 0`` is re-asserted rather than obeyed.
 
-    **Helpers: only when this boot made the file.** "Is the table empty" is not
+    **Helpers: only when this boot made the store.** "Is the table empty" is not
     the question — a user who deleted every bullet made the table empty, and a
     boot that refilled it would undo a delete the app promised to honour (D12).
-    So the answer comes from :func:`prepare`'s ``created``, which is decided by
-    the exclusive create itself.
+    The gate is :func:`prepare`'s ``created``, widened by :func:`boot` to cover a
+    zero-byte file left between the exclusive create and the schema: that file
+    holds no user data either, so it is still a first boot.
 
     **Servers and models are never seeded** (§4.3): there is no example server,
     no placeholder key and no placeholder URL, because a value that cannot be
@@ -1085,6 +1086,15 @@ def boot() -> Dict[str, Any]:
     """
     global _store_state
     target = database_path()
+    # A first boot killed between the exclusive create and the schema leaves a
+    # zero-byte file behind. It is "existing" to `prepare`, but it is a pristine
+    # store, not one the user emptied: the helper rows belong in it exactly as
+    # they do in a file this boot creates.
+    was_empty_file = False
+    try:
+        was_empty_file = target.is_file() and target.stat().st_size == 0
+    except OSError:
+        was_empty_file = False
     try:
         prepared = prepare()
     except AppStoreError as exc:
@@ -1105,7 +1115,7 @@ def boot() -> Dict[str, Any]:
     try:
         conn = connect()
         conn.execute("BEGIN IMMEDIATE")
-        seeded = _seed(conn, bool(prepared["created"]))
+        seeded = _seed(conn, bool(prepared["created"] or was_empty_file))
         # D14's first two steps, in the same transaction as the seed: the suite's
         # own connection fixture becomes one server row and one model row of the
         # temporary store.

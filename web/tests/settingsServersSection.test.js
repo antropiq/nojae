@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import SettingsDialog from '../src/components/SettingsDialog.vue'
-import { useAppShell } from '../src/composables/useAppShell'
+import { draftKey, useAppShell } from '../src/composables/useAppShell'
 
 // ---------------------------------------------------------------------------
 // The Servers section, mounted for real.
@@ -79,9 +79,10 @@ function tree() {
 //: What every write route answers with: the whole tree, which is the only shape
 //: the client re-baselines on. `extraModels` grows server 1, which is how a test
 //: can answer an add with the row the add created.
-function treeBody({ extraModels = [] } = {}) {
+function treeBody({ extraModels = [], extraServers = [] } = {}) {
   const rows = tree()
   if (extraModels.length) rows[0].models.push(...extraModels)
+  if (extraServers.length) rows.push(...extraServers)
   return {
     servers: rows,
     caps: CAPS,
@@ -93,10 +94,13 @@ function resetShell() {
   state.settings = { store: true }
   state.settingsOpen = true
   state.settingsError = null
+  state.config = null
+  state.configError = null
   state.settingsSaving = false
   state.servers = tree()
   state.serversCaps = CAPS
   state.serversLoading = false
+  state.serversLoaded = true
   state.serversError = null
   state.unassigned = { agentsWithoutModel: 0, agents: 4 }
   state.storeState = null
@@ -146,7 +150,9 @@ async function open(options = {}) {
     }
     if (path.startsWith('/api/mcp')) return { connectors: [], enabled: [] }
     if (path.startsWith('/api/lsp')) return { servers: [], activated: [] }
-    if (path.startsWith('/api/config')) return { models: [] }
+    if (path.startsWith('/api/config')) {
+      return options.config ? options.config() : { models: [] }
+    }
     return options.body ? options.body(path) : treeBody()
   }
   const mock = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
@@ -332,6 +338,83 @@ describe('the toolbar verbs create and save the row the page is showing', () => 
     expect(wrapper.find('.agent-modes-message').text()).toContain('already exists')
     expect(wrapper.find('.agent-modes-message').attributes('role')).toBe('alert')
   })
+
+  it('shows the new form refusal instead of an older write failure', async () => {
+    await open({
+      body: (url) =>
+        String(url).includes('/add')
+          ? { ok: false, status: 422, detail: 'a server named Local already exists' }
+          : treeBody(),
+    })
+    await wrapper.find('.servers-add').trigger('click')
+    await flushPromises()
+    state.serverDraft.name = 'Local'
+    state.serverDraft.url = 'http://x/v1'
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.agent-modes-message').text()).toContain('already exists')
+
+    // A write failure does not make the form "unread": the click is still
+    // available, and the next refusal is the band's answer.
+    expect(wrapper.find('.servers-save').attributes('disabled')).toBeUndefined()
+    state.serverDraft.name = ''
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.agent-modes-message').text()).toContain('name must not be empty')
+    expect(wrapper.find('.agent-modes-message').text()).not.toContain('already exists')
+  })
+
+  it('keeps the caps and the unassigned count when a write omits them', async () => {
+    await open({ body: () => ({ servers: tree() }) })
+    useAppShell().selectServer(1)
+    await flushPromises()
+
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+
+    expect(state.serversCaps).toEqual(CAPS)
+    expect(state.unassigned).toEqual({ agentsWithoutModel: 0, agents: 4 })
+  })
+
+  it('refreshes the store-level line after a successful write', async () => {
+    state.storeState = { usable: true }
+    state.config = { models: [], store: { usable: true } }
+    await open({
+      config: () => ({ models: [{ id: 10, name: 'alpha' }], store: { usable: true } }),
+    })
+    useAppShell().selectServer(1)
+    await flushPromises()
+    expect(wrapper.find('.agent-modes-message').text()).toContain('No model is configured')
+
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+
+    expect(state.config.models).toHaveLength(1)
+    expect(wrapper.find('.agent-modes-message').text()).not.toContain('No model is configured')
+  })
+
+  it('lands a stripped name on the row the store created', async () => {
+    await open({
+      body: (url) =>
+        String(url).includes('/add')
+          ? treeBody({
+              extraServers: [
+                { id: 3, name: 'Third', url: 'http://z/v1', apiKey: '', models: [] },
+              ],
+            })
+          : treeBody(),
+    })
+    await wrapper.find('.servers-add').trigger('click')
+    await flushPromises()
+    state.serverDraft.name = '  Third  '
+    state.serverDraft.url = 'http://z/v1'
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+
+    // The saved row is selected, so a second Save cannot post a duplicate.
+    expect(state.serverDraft?.id).toBe(3)
+    expect(state.serverDraft?.name).toBe('Third')
+  })
 })
 
 // -- selection -------------------------------------------------------------------
@@ -511,15 +594,17 @@ describe('Fetch models and the listing', () => {
     expect(names).toEqual(['alpha', 'gamma', 'delta'])
     // One `+` per name, and the listing belongs to *this* server only.
     expect(wrapper.findAll('.models-add-row')).toHaveLength(3)
-    expect(state.fetchedModelIds[1]).toEqual(['alpha', 'gamma', 'delta'])
-    expect(state.fetchedModelIds[2]).toBeUndefined()
+    expect(state.fetchedModelIds[draftKey(state.serverDraft)]).toEqual([
+      'alpha', 'gamma', 'delta',
+    ])
+    expect(state.fetchedModelIds[draftKey({ id: 2, url: 'https://y/v1', apiKey: '' })]).toBeUndefined()
   })
 
   it('keeps the previous rows on screen while the next fetch is in flight', async () => {
     let resolveFetch = null
     const mock = await open()
     useAppShell().selectServer(1)
-    state.fetchedModelIds = { 1: ['alpha'] }
+    state.fetchedModelIds = { [draftKey(state.serverDraft)]: ['alpha'] }
     await flushPromises()
 
     mock.mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve }))
@@ -613,6 +698,77 @@ describe('Fetch models and the listing', () => {
     await flushPromises()
     expect(wrapper.find('.agent-modes-message').text()).toBe('')
   })
+
+  it('forgets a fetch failure when that server is saved', async () => {
+    await open({
+      listed: () => ({ ok: false, status: 502, detail: 'All connection attempts failed' }),
+    })
+    useAppShell().selectServer(1)
+    await flushPromises()
+    await wrapper.find('.models-fetch').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.agent-modes-message').text()).toContain(
+      'All connection attempts failed',
+    )
+
+    state.serverDraft.url = 'http://fixed/v1'
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+
+    expect(state.fetchedModelsErrors).toEqual({})
+    expect(wrapper.find('.agent-modes-message').text()).not.toContain(
+      'All connection attempts failed',
+    )
+  })
+
+  it('drops a deleted server\'s listing so a reused id cannot show it', async () => {
+    await open({ body: () => ({ ...treeBody(), servers: [tree()[1]] }) })
+    useAppShell().selectServer(1)
+    await flushPromises()
+    await wrapper.find('.models-fetch').trigger('click')
+    await flushPromises()
+    expect(Object.keys(state.fetchedModelIds)).toHaveLength(1)
+
+    await wrapper.find('.servers-delete').trigger('click')
+    await flushPromises()
+    await wrapper.find('.servers-confirm-delete').trigger('click')
+    await flushPromises()
+
+    expect(state.fetchedModelIds).toEqual({})
+    expect(state.fetchedModelsErrors).toEqual({})
+  })
+
+  it('does not replace a new model draft from the toolbar `+`', async () => {
+    await open()
+    useAppShell().selectModel(10)
+    await flushPromises()
+    await wrapper.find('.servers-add').trigger('click')
+    await flushPromises()
+    state.modelDraft.name = 'typed but unsaved'
+    await flushPromises()
+
+    const button = wrapper.find('.servers-add')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.attributes('title')).toContain('Already adding a model')
+    await button.trigger('click')
+    await flushPromises()
+    expect(state.modelDraft.name).toBe('typed but unsaved')
+  })
+
+  it('refuses a sampler outside its bound before it reaches the store', async () => {
+    const mock = await open()
+    useAppShell().selectModel(10)
+    await flushPromises()
+
+    state.modelDraft.topP = 2
+    await wrapper.find('.servers-save').trigger('click')
+    await flushPromises()
+
+    expect(posts(mock)).toHaveLength(0)
+    expect(wrapper.find('.agent-modes-message').text()).toContain(
+      'topP must be at most 1',
+    )
+  })
 })
 
 // -- the destructive verbs --------------------------------------------------------
@@ -658,6 +814,45 @@ describe('the destructive verbs', () => {
     expect(postFor(mock, '/api/servers/delete')).toBeUndefined()
   })
 
+  it('abandons the question when the selection moves', async () => {
+    await open()
+    useAppShell().selectServer(1)
+    await flushPromises()
+
+    await wrapper.find('.servers-delete').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.servers-confirm-delete').exists()).toBe(true)
+    expect(wrapper.find('.agent-modes-message').text()).toContain('Delete Local')
+
+    await wrapper.findAll('.models-name')[1].trigger('click')
+    await flushPromises()
+
+    // The sentence named Local; the pair is gone rather than aimed at Cloud.
+    expect(wrapper.find('.servers-confirm-delete').exists()).toBe(false)
+    expect(state.pendingDelete).toBeNull()
+    expect(wrapper.find('.agent-modes-message').text()).not.toContain('Delete Local')
+  })
+
+  it('answers the row the question named even if the selection changes', async () => {
+    const mock = await open({
+      body: () => ({ ...treeBody(), servers: [tree()[1]] }),
+    })
+    useAppShell().selectServer(1)
+    await flushPromises()
+    await wrapper.find('.servers-delete').trigger('click')
+    await flushPromises()
+
+    // Move the selection without the UI's dismissal (the guard that path uses).
+    state.selectedServerId = 2
+    state.serverDraft = { id: 2, name: 'Cloud', url: 'https://y/v1', apiKey: '' }
+    await wrapper.find('.servers-confirm-delete').trigger('click')
+    await flushPromises()
+
+    expect(postFor(mock, '/api/servers/delete')).toEqual([
+      '/api/servers/delete', { id: 1 },
+    ])
+  })
+
   it('is inert for a row that has no backend row', async () => {
     await open()
     useAppShell().addServerRow()
@@ -687,6 +882,7 @@ describe('the MCP and LSP sections', () => {
     await visibleSave().trigger('click')
     await flushPromises()
     expect(posts(mock).some(([url]) => url.includes('/mcp'))).toBe(true)
+    expect(state.settingsOpen).toBe(true)
   })
 
   it('saves the language servers from their own toolbar', async () => {
@@ -699,6 +895,7 @@ describe('the MCP and LSP sections', () => {
     await visibleSave().trigger('click')
     await flushPromises()
     expect(posts(mock).some(([url]) => url.includes('/lsp'))).toBe(true)
+    expect(state.settingsOpen).toBe(true)
   })
 })
 
@@ -737,5 +934,38 @@ describe('the dialog\'s one message area', () => {
     expect(state.agentModesRequest).toBe(before + 1)
     // A card opened behind a modal dialog is a click that did nothing.
     expect(state.settingsOpen).toBe(false)
+  })
+
+  it('does not print a Servers failure while another section is on screen', async () => {
+    await open()
+    state.serversError = 'the store could not be read'
+    state.activeSection = 'mcp'
+    await flushPromises()
+
+    expect(wrapper.find('.agent-modes-message').text()).not.toContain(
+      'the store could not be read',
+    )
+    // It speaks about the MCP section instead: nothing is declared there.
+    expect(wrapper.find('.agent-modes-message').text()).toContain(
+      'Nothing declared in',
+    )
+  })
+
+  it('says a hub read is loading, and a failed read before "not installed"', async () => {
+    await open()
+    state.activeSection = 'mcp'
+    state.mcpLoading = true
+    state.mcpInstalled = null
+    await flushPromises()
+    expect(wrapper.find('.agent-modes-message').text()).toContain('Loading connectors…')
+
+    state.mcpLoading = false
+    state.mcpError = 'could not read the connectors'
+    state.mcpInstalled = null
+    await flushPromises()
+    expect(wrapper.find('.agent-modes-message').text()).toContain(
+      'could not read the connectors',
+    )
+    expect(wrapper.find('.agent-modes-message').text()).not.toContain('not installed')
   })
 })

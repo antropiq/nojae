@@ -282,9 +282,9 @@ const runningLine = computed(() => {
       <button
         class="icon-btn appbar-settings"
         type="button"
-        :disabled="batch.active || chatBusy"
-        :aria-label="batch.active || chatBusy ? 'Settings (available when idle)' : 'Open settings'"
-        :title="batch.active || chatBusy ? 'Available when idle' : 'Settings'"
+        :disabled="batch.active || chatBusy || session.loading"
+        :aria-label="batch.active || chatBusy || session.loading ? 'Settings (available when idle)' : 'Open settings'"
+        :title="batch.active || chatBusy || session.loading ? 'Available when idle' : 'Settings'"
         @click="openSettings"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"

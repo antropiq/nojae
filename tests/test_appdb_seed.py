@@ -15,8 +15,9 @@ boot contract, in the order the spec states them:
   (D4) — and an editable row is left alone, because overwriting it would undo a
   save the app promised to keep;
 * **the nine prompt-helper rows land when the database is created and never
-  again** — the gate is the exclusive create, not "is the table empty", so a
-  delete the user made is still a delete on the next boot (D12);
+  again** — the gate is the exclusive create (or a zero-byte file an interrupted
+  first boot left), not "is the table empty", so a delete the user made is still
+  a delete on the next boot (D12);
 * **servers and models are never seeded**: no example server, no placeholder key,
   no placeholder URL (§4.3);
 * **an unusable store is a named state**: the boot answers a sentence naming the
@@ -298,6 +299,24 @@ class TestASecondBootChangesNothing:
         assert result["created"] is False
         assert result["promptHelpers"] == 0
         assert helper_rows(store_root / "nojae.db") == []
+
+    def test_a_zero_byte_interrupted_first_boot_still_gets_the_helpers(
+        self, store_root: Path
+    ):
+        """A boot killed between the create and the schema leaves an empty file.
+
+        It is "existing" to ``prepare``, but it holds no user data: the next boot
+        is still a first boot and seeds the helper rows.
+        """
+        (store_root / "nojae.db").touch()
+
+        result = appdb.boot()
+
+        assert result["created"] is False
+        assert result["promptHelpers"] == appdb.SEEDED_PROMPT_HELPER_COUNT
+        assert len(helper_rows(store_root / "nojae.db")) == (
+            appdb.SEEDED_PROMPT_HELPER_COUNT
+        )
 
     def test_a_deleted_helper_row_stays_deleted(self, seeded: Path):
         """A table that is empty afterwards is a choice the user made (D12)."""

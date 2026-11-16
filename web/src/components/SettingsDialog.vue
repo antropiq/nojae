@@ -617,11 +617,6 @@ function serverDetail(server) {
                 {{ mcpSaveSlot.text }}
               </button>
             </div>
-            <p v-if="!state.mcpConnectors.length" class="caption">
-              Nothing declared in <code>.nojae/mcp-settings.json</code>:
-              add a <code>remote</code> or <code>local</code> entry to get
-              connectors here.
-            </p>
             <div v-for="connector in state.mcpConnectors" :key="connector.id" class="mcp-panel">
               <div class="mcp-panel-header">
                 <label class="mcp-activate">
@@ -662,11 +657,6 @@ function serverDetail(server) {
                 {{ lspSaveSlot.text }}
               </button>
             </div>
-            <p v-if="!state.lspServers.length" class="caption">
-              No language servers declared in
-              <code>.nojae/lsp-settings.json</code> (copy the seeded
-              <code>.nojae/lsp-settings.template.json</code> to get started).
-            </p>
             <div v-for="server in state.lspServers" :key="server.id" class="mcp-panel">
               <div class="mcp-panel-header">
                 <label class="mcp-activate" :title="LSP_TOGGLE_TOOLTIP">

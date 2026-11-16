@@ -74,7 +74,7 @@ const { editor } = useAgentModes()
 // The model dropdown's contents are the *connection* store's rows, which the
 // Settings dialog already reads. Sharing the singleton rather than fetching a
 // second time is what keeps the two dialogs naming one catalogue.
-const { state: shell, loadServers } = useAppShell()
+const { state: shell, loadServers, loadConfig } = useAppShell()
 
 const dialogEl = ref(null)
 const draft = ref(null)
@@ -404,6 +404,11 @@ async function save() {
   activeTab.value = tabKeyFor(
     entries.value.find((row) => row.id === savedId) ?? entries.value[0] ?? null,
   )
+  // The save may have assigned or cleared this agent's model, which changes the
+  // Settings band's cross-store count and, for a model added elsewhere, the
+  // store-level "no model configured" line. Both are shell state read outside
+  // this card, so refresh them now instead of leaving a stale sentence behind.
+  await Promise.all([loadServers(), loadConfig()])
 }
 </script>
 

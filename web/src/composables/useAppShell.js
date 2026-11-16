@@ -3,6 +3,7 @@ import { loadChatLsp, loadChatMcp } from './useChat'
 import {
   noteHubPayload,
   reportPoolRefusal,
+  useWorkspaceSession,
   withWorkspace,
 } from './useWorkspaceSession'
 import { describeTransportError, fetchWithRetry } from '../lib/api-fetch'
@@ -51,6 +52,10 @@ const state = reactive({
   // connection, in the read's insertion order, exactly as the server answered it.
   servers: [],
   serversLoading: false,
+  // True once a **read** has answered. A write failure does not clear it: the
+  // rows the form is editing are still the store's, so the form must stay
+  // usable and say the write's sentence rather than going inert as unread.
+  serversLoaded: false,
   serversError: null,
   // The read's ``caps``: ``{samplerRanges, reasoningLevels}``. The form's
   // ``min``/``max`` and its reasoning options come from here.
@@ -68,9 +73,9 @@ const state = reactive({
   // Shell state for the same reason (§4.6): the flow that adds a model from the
   // server page's listing has to *set* it, and that flow is a shell action.
   detailTab: 'settings',
-  // The row a delete is being confirmed for: `'server'`, `'model'`, or null.
-  // The toolbar's confirmation pair and the band's sentence are both read off
-  // it, so the question and its answer cannot disagree about what was asked.
+  // The row a delete is being confirmed for: `{kind, id}`, or null. The id is
+  // captured when the question is asked, so the confirmation answers *that*
+  // row even if the selection moves before it is confirmed.
   pendingDelete: null,
   // The sentence the band says while a delete awaits its answer. Set when the
   // question is asked, cleared with it — the copy is the store's own
@@ -94,7 +99,9 @@ const state = reactive({
   // ``*Fetch models*`` answers, keyed by the row it was fetched for: the ids
   // that server's own ``/models`` listed, offered for the model name field. Per
   // server rather than one global dropdown, because a model belongs to the
-  // server that names it (§5.1).
+  // server that names it (§5.1). The key includes the endpoint the list came
+  // from, so a URL/key edit (or a reused row id) cannot show a dead server's
+  // listing.
   fetchedModelIds: {},
   fetchedModelsLoading: null, // the key whose listing is in flight, or null
   // Refusals are keyed like the listings: a server that could not be listed is a
@@ -106,14 +113,16 @@ const state = reactive({
   // the card's open state (it mounts it), and a second opener must not be able
   // to leave a stale ``true`` behind that opens the card on the next mount.
   agentModesRequest: 0,
-  mcpInstalled: false,
+  // `null` means "not known yet": a package flag is only trusted after a read
+  // has answered, so a failed read is never reported as "not installed".
+  mcpInstalled: null,
   mcpConnectors: [],
   mcpEnabled: [], // connector ids ticked in the dialog, saved via saveMcp()
   mcpLoading: false,
   mcpSaving: false,
   mcpError: null,
   mcpExternalsError: null, // .nojae/mcp-settings.json validation errors from the backend
-  lspInstalled: false, // pygls/lsprotocol importable server-side
+  lspInstalled: null, // pygls/lsprotocol importable server-side; null = not read yet
   lspServers: [],
   // Server ids ticked in the dialog, saved via saveLsp(). These ticks *are* the
   // activation decision: the save writes the declaration's `enable` flag and
@@ -203,10 +212,13 @@ export function modelWritePayload(draft) {
   return payload
 }
 
-// The key the fetched list is filed under: a saved row by its id, a new one by
-// the sentinel, so an unsaved server still gets its own listing.
+// The key the fetched list is filed under: the row's id **and the endpoint it
+// was fetched from**, so a save that changes the URL or key cannot reuse an
+// answer about another endpoint. A new row uses the sentinel, so an unsaved
+// server still gets its own listing.
 export function draftKey(draft) {
-  return draft?.id ?? 'new'
+  if (!draft || draft.id === null || draft.id === undefined) return 'new'
+  return `${draft.id}|${String(draft.url ?? '').trim()}|${String(draft.apiKey ?? '').trim()}`
 }
 
 export function selectedServer() {
@@ -231,6 +243,38 @@ export function fetchedModelsErrorFor(draft) {
 export function hasFetchedListing(draft) {
   return draft !== null && draft !== undefined &&
     Object.prototype.hasOwnProperty.call(state.fetchedModelIds, draftKey(draft))
+}
+
+// The listing and error caches are facts about an endpoint, not about an id the
+// store can reuse. These two helpers make a stale entry impossible: one forgets
+// every entry for a row, the other drops entries whose row no longer exists.
+function isCacheKeyFor(key, id) {
+  return String(key) === String(id) || String(key).startsWith(`${id}|`)
+}
+
+function dropServerCaches(id, { listing = true, errors = true } = {}) {
+  if (id === null || id === undefined) return
+  const keep = (cache) =>
+    Object.fromEntries(
+      Object.entries(cache).filter(([key]) => !isCacheKeyFor(key, id)),
+    )
+  if (listing) state.fetchedModelIds = keep(state.fetchedModelIds)
+  if (errors) state.fetchedModelsErrors = keep(state.fetchedModelsErrors)
+}
+
+function pruneServerCaches() {
+  const present = new Set(state.servers.map((server) => server.id))
+  const keep = (cache) =>
+    Object.fromEntries(
+      Object.entries(cache).filter(([key]) => {
+        const head = String(key).split('|')[0]
+        if (head === 'new') return true
+        const id = Number(head)
+        return !Number.isFinite(id) || present.has(id)
+      }),
+    )
+  state.fetchedModelIds = keep(state.fetchedModelIds)
+  state.fetchedModelsErrors = keep(state.fetchedModelsErrors)
 }
 
 // The unassigned line's text, or null when there is nothing to say. The
@@ -325,7 +369,21 @@ export function useAppShell() {
   }
 
   async function openSettings() {
-    if (state.settingsLoading || batchRunning()) return
+    if (batchRunning()) return
+    // The MCP and LSP reads are workspace-scoped, so opening before the boot
+    // workspace read has answered would name no folder (and be refused). The
+    // app bar's button is disabled for the same window; this is the keyboard
+    // guard.
+    if (useWorkspaceSession().state.loading) return
+    if (state.settingsOpen) return
+    // A closed dialog whose reads are still in flight is reopened, not read
+    // again: one set of answers is already on its way, and a second would race
+    // it into the same state.
+    if (state.settingsLoading) {
+      state.settings = state.settings ?? { store: true }
+      state.settingsOpen = true
+      return
+    }
     state.settingsError = null
     state.settingsLoading = true
     state.settingsOpen = true
@@ -334,23 +392,25 @@ export function useAppShell() {
     // document to fetch first. `state.settings` stays the dialog's "may I
     // render" flag, set as soon as the store has been asked.
     state.settings = { store: true }
+    state.mcpConnectors = []
+    state.mcpEnabled = []
+    state.mcpInstalled = null
+    state.mcpError = null
+    state.mcpExternalsError = null
+    state.lspServers = []
+    state.lspActivated = []
+    state.lspInstalled = null
+    state.lspError = null
+    state.lspServersError = null
+    // The workspace is not this dialog's business: its field and its answer
+    // lines live in the app bar, whose state a settings read must not clear
+    // (a policy note the user has not read yet would vanish on an unrelated
+    // visit to the dialog). ``loadWorkspace()`` runs at boot and
+    // ``setWorkspaceFromField()`` on every move.
     try {
-      state.mcpConnectors = []
-      state.mcpEnabled = []
-      state.mcpError = null
-      state.mcpExternalsError = null
-      state.lspServers = []
-      state.lspActivated = []
-      state.lspError = null
-      state.lspServersError = null
-      // The workspace is not this dialog's business: its field and its answer
-      // lines live in the app bar, whose state a settings read must not clear
-      // (a policy note the user has not read yet would vanish on an unrelated
-      // visit to the dialog). ``loadWorkspace()`` runs at boot and
-      // ``setWorkspaceFromField()`` on every move.
-      loadServers()
-      loadMcp()
-      loadLsp()
+      // Await them: the loading flag is the single-flight guard, and the
+      // section on screen has a fact to show while its read is in flight.
+      await Promise.all([loadConfig(), loadServers(), loadMcp(), loadLsp()])
     } catch (exc) {
       state.settingsError = describeTransportError(exc)
     } finally {
@@ -376,8 +436,18 @@ export function useAppShell() {
   // server takes its models) visible without the client knowing the rule.
   function adoptServers(body) {
     state.servers = Array.isArray(body?.servers) ? body.servers : []
-    state.serversCaps = body?.caps ?? null
-    state.unassigned = body?.unassigned ?? null
+    // A write's answer should carry the read's whole envelope. Keep the last
+    // known caps/count when an older or partial answer omits them, rather than
+    // blanking the form's bounds and the unassigned line on every write.
+    if (body && Object.prototype.hasOwnProperty.call(body, 'caps')) {
+      state.serversCaps = body.caps ?? null
+    }
+    if (body && Object.prototype.hasOwnProperty.call(body, 'unassigned')) {
+      state.unassigned = body.unassigned ?? null
+    }
+    // A listing/error for a row the store no longer has is dead data, and SQLite
+    // reuses a freed id: drop it before a new row can inherit it.
+    pruneServerCaches()
     // A row that stopped existing cannot stay selected, and a draft of a row
     // that is gone must not be savable. A **new** row's draft is neither: it
     // addresses nothing, so no write from anywhere can have removed it, and
@@ -406,6 +476,7 @@ export function useAppShell() {
       const res = await fetchWithRetry('/api/servers')
       const body = await res.json().catch(() => null)
       if (!res.ok) {
+        state.serversLoaded = false
         state.serversError = describeError(
           body,
           `Could not load the model connection (${res.status})`,
@@ -413,7 +484,9 @@ export function useAppShell() {
         return
       }
       adoptServers(body)
+      state.serversLoaded = true
     } catch (exc) {
+      state.serversLoaded = false
       state.serversError = describeTransportError(exc)
     } finally {
       state.serversLoading = false
@@ -439,6 +512,9 @@ export function useAppShell() {
         return false
       }
       adoptServers(body)
+      // The dialog edits what `/api/config` describes (the install's models),
+      // so a successful write must move the app bar and the band with it.
+      await loadConfig()
       return true
     } catch (exc) {
       state.serversError = describeTransportError(exc)
@@ -454,6 +530,10 @@ export function useAppShell() {
   // deliberate: typing in a field must not change what the store holds, and
   // Close has nothing to undo.
   function selectServer(id) {
+    // A pending question was asked about the row that was selected then; moving
+    // the selection abandons it rather than letting the answer name one row and
+    // delete another.
+    dismissDeleteRow()
     state.selectedServerId = id
     state.selectedModelId = null
     state.modelDraft = null
@@ -470,6 +550,7 @@ export function useAppShell() {
   // predictable outcome (§4.6); the one flow that *does* choose a page is the
   // listing's `+`, which asks for Settings explicitly.
   function selectModel(id) {
+    dismissDeleteRow()
     const parent =
       state.servers.find((server) =>
         server.models.some((model) => model.id === id)) ?? null
@@ -510,11 +591,24 @@ export function useAppShell() {
     if (ok) {
       // The new row is the last one the read answered; a save keeps the
       // selection on the row the user was editing, which is now addressed.
+      // The store strips names, so the lookup compares trimmed text: a name
+      // typed as ` Local ` must land on the row stored as `Local`.
+      const wanted = payload.name.trim()
       const saved = state.servers.find(
         (server) =>
-          (isNew && server.name === payload.name) || server.id === draft.id,
+          (isNew && server.name.trim() === wanted) || server.id === draft.id,
       )
-      if (saved) selectServer(saved.id)
+      if (saved) {
+        // The listing/error was fetched from the endpoint as it stood before
+        // the save. A fresh row's id can be a reused one, so it has no cache at
+        // all; an existing row keeps its listing when the endpoint is unchanged
+        // (the key carries the endpoint it came from) and drops it when the URL
+        // or key moved. Either way an earlier fetch failure is forgotten now
+        // the save succeeded.
+        const endpointChanged = draftKey(draft) !== draftKey(saved)
+        dropServerCaches(saved.id, { listing: isNew || endpointChanged })
+        selectServer(saved.id)
+      }
     }
   }
 
@@ -533,10 +627,12 @@ export function useAppShell() {
     )
     if (ok) {
       // Look the row up in the tree the write answered, not in the one held
-      // before it: the write replaced ``state.servers`` wholesale.
+      // before it: the write replaced ``state.servers`` wholesale. The store
+      // strips the name, so the comparison strips it too.
+      const wanted = payload.name.trim()
       const saved = selectedServer()?.models.find(
         (model) =>
-          (isNew && model.name === payload.name) || model.id === draft.id,
+          (isNew && model.name.trim() === wanted) || model.id === draft.id,
       )
       if (saved) selectModel(saved.id)
     }
@@ -548,7 +644,15 @@ export function useAppShell() {
   // user cannot undo by retyping.
   async function deleteServerRow(id) {
     if (id === null) return
-    await postConnectionWrite('/api/servers/delete', { id }, 'Could not delete the server')
+    const ok = await postConnectionWrite(
+      '/api/servers/delete',
+      { id },
+      'Could not delete the server',
+    )
+    // A deleted row's fetched listing and fetch error leave with it. The id may
+    // be handed to a later server, and nothing about this endpoint describes
+    // that one.
+    if (ok) dropServerCaches(id)
   }
 
   async function deleteModelRow(id) {
@@ -639,7 +743,12 @@ export function useAppShell() {
       'Could not add the model',
     )
     if (!ok) return false
-    const added = selectedServer()?.models.find((model) => model.name === name)
+    // The store strips the name it was given, so the row it created is the one
+    // whose trimmed name matches (a server-provided name may carry whitespace).
+    const wanted = String(name).trim()
+    const added = selectedServer()?.models.find(
+      (model) => model.name.trim() === wanted,
+    )
     if (!added) return true
     if (!state.expandedServers.includes(server.id)) {
       toggleServerExpanded(server.id)
@@ -657,17 +766,23 @@ export function useAppShell() {
   // untouched.
   function askDeleteRow(kind) {
     if (kind !== 'server' && kind !== 'model') return
-    if (kind === 'model' && state.modelDraft?.id == null) return
-    if (kind === 'server' && state.serverDraft?.id == null) return
-    state.pendingDelete = kind
+    const model =
+      kind === 'model'
+        ? selectedServer()?.models.find(
+            (entry) => entry.id === state.selectedModelId,
+          ) ?? null
+        : null
+    const server = kind === 'server' ? selectedServer() : null
+    if (kind === 'model' && (state.modelDraft?.id == null || !model)) return
+    if (kind === 'server' && (state.serverDraft?.id == null || !server)) return
+    // The subject is captured **now**, with the sentence: a later selection
+    // change must neither re-aim the answer nor leave a stale question on
+    // screen.
+    state.pendingDelete = { kind, id: kind === 'server' ? server.id : model.id }
     state.pendingDeleteSentence =
       kind === 'server'
-        ? serverDeleteSentence(selectedServer())
-        : modelDeleteSentence(
-            selectedServer()?.models.find(
-              (model) => model.id === state.selectedModelId,
-            ),
-          )
+        ? serverDeleteSentence(server)
+        : modelDeleteSentence(model)
   }
 
   function dismissDeleteRow() {
@@ -676,11 +791,11 @@ export function useAppShell() {
   }
 
   async function confirmDeleteRow() {
-    const kind = state.pendingDelete
-    if (kind === 'server') await deleteServerRow(state.serverDraft?.id ?? null)
-    else if (kind === 'model') await deleteModelRow(state.modelDraft?.id ?? null)
-    state.pendingDelete = null
-    state.pendingDeleteSentence = null
+    const subject = state.pendingDelete
+    if (!subject) return
+    if (subject.kind === 'server') await deleteServerRow(subject.id)
+    else if (subject.kind === 'model') await deleteModelRow(subject.id)
+    dismissDeleteRow()
   }
 
   // The unassigned line's one action: ask for the Agent-modes dialog. The card
@@ -765,7 +880,8 @@ export function useAppShell() {
       state.lspActivated = state.lspServers
         .filter((server) => server.active)
         .map((server) => server.id)
-      state.settingsOpen = false
+      // Save is a write, not an exit: the dialog stays open, as it does for the
+      // Servers section.
       // Keep the Chat tab's conversation-scoped LSP panel in sync with the
       // just-saved activation set (kept-OFF switches survive; a locked
       // conversation keeps its frozen list — loadChatLsp is a no-op then).
@@ -838,7 +954,8 @@ export function useAppShell() {
       state.mcpEnabled = state.mcpConnectors
         .filter((connector) => connector.active)
         .map((connector) => connector.id)
-      state.settingsOpen = false
+      // Save is a write, not an exit: the dialog stays open, as it does for the
+      // Servers section.
       // Keep the Chat tab's conversation-scoped MCP panel in sync with the
       // just-saved activation set (kept OFF switches survive; a locked
       // conversation keeps its frozen list — loadChatMcp is a no-op then).

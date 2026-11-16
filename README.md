@@ -282,7 +282,7 @@ bullets answer there. The store is read afresh at the start of every turn, so a
 dialog save needs no restart at all. `.env` follows the other rule: a hand-edit
 waits for one.
 
-### The model connection — Settings → **Models**
+### The model connection — Settings → **Servers**
 
 A connection is two things, and the dialog edits them one after the other:
 
@@ -290,8 +290,9 @@ A connection is two things, and the dialog edits them one after the other:
    (`http://127.0.0.1:8080/v1` for a local llama.cpp), and its API key, which
    stays on the server and is never sent to a connector, a log or a tool listing.
    **Fetch models** asks that server what it offers: the names it answers with are
-   listed under the button and fill the name list the model field completes from.
-   It dials the URL in the field, so it works on a server that is not saved yet.
+   listed in a table under the button, each with a **+** that adds that model
+   under the server. The server must be saved first; the fetch dials its saved URL
+   and key.
 2. **Add a model under it** — the id *exactly as the server names it*, the system
    prompt that model is given, its samplers, and whether it accepts images. A
    sampler left empty is left out of the request rather than defaulted, so `0` and
@@ -635,7 +636,7 @@ nojae          # API + UI on http://127.0.0.1:8001
 ```
 
 Nothing else is required for the Editor. A fresh checkout's WorkBench needs one
-thing: the model connection, which **Settings → Models** writes into the install's
+thing: the model connection, which **Settings → Servers** writes into the install's
 settings store — a fresh one holds no server and says so in the app bar, and until
 an agent is given a model no turn can run. The connectors and servers only decide
 how far the agent may reach.

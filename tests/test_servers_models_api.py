@@ -154,6 +154,22 @@ class TestTheRead:
             "min": None, "max": None,
         }
 
+    def test_a_write_answers_the_same_envelope_as_the_read(
+        self, client: TestClient
+    ):
+        """A write must not blank the caps or the unassigned count the form reads."""
+        server = add_server(client)
+
+        response = client.post(
+            "/api/models/add", json={"serverId": server["id"], "name": "alpha"}
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {"servers", "caps", "unassigned"}
+        assert body["caps"] == client.get("/api/servers").json()["caps"]
+        assert body["unassigned"] == {"agentsWithoutModel": 4, "agents": 4}
+
     def test_a_server_comes_back_with_its_models_and_nothing_else(
         self, client: TestClient
     ):

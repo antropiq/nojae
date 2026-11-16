@@ -140,6 +140,7 @@ function stubRoutes({ agents = agentsBody(), saves = {}, calls = [] } = {}) {
       return agents === null ? jsonResponse({}, false, 500) : jsonResponse(agents)
     }
     if (key === '/api/servers') return jsonResponse(SERVERS)
+    if (key === '/api/config') return jsonResponse({ models: [], store: { usable: true } })
     if (key.startsWith('/api/agents/')) {
       calls.push({ key, body: JSON.parse(init.body) })
       const answer = saves[key]

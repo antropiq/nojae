@@ -1,9 +1,12 @@
 import { computed } from 'vue'
 
 import {
+  SAMPLER_FIELDS,
+  draftKey,
   fetchedModelIdsFor,
   fetchedModelsErrorFor,
   hasFetchedListing,
+  samplerBounds,
   unassignedLine,
   useAppShell,
 } from './useAppShell'
@@ -106,6 +109,9 @@ export function addSlotFor(context = {}) {
   if (ctx.page === 'server' && !ctx.serverSaved) {
     return slotInert('Already adding a server — save it or select one.')
   }
+  if (ctx.page === 'model' && !ctx.rowSaved) {
+    return slotInert('Already adding a model — save it or select one.')
+  }
   return slotLive('Add')
 }
 
@@ -201,8 +207,16 @@ export function addRowSlotFor({
 //: whether that server already holds a model of the name. The comparison is
 //: against the tree the client already holds, so it costs no route (§4.4).
 export function listingRowsFor(fetchedIds, server) {
-  const names = new Set((server?.models ?? []).map((model) => model.name))
-  return (fetchedIds ?? []).map((name) => ({ name, added: names.has(name) }))
+  // The store strips names, while a server may list them with whitespace: the
+  // comparison is on the trimmed text so a listed name the store already holds
+  // cannot be offered again as a duplicate.
+  const names = new Set(
+    (server?.models ?? []).map((model) => String(model.name).trim()),
+  )
+  return (fetchedIds ?? []).map((name) => ({
+    name,
+    added: names.has(String(name).trim()),
+  }))
 }
 
 //: ---------------------------------------------------------------------------
@@ -251,12 +265,13 @@ export function detailBodyFor(page, tab) {
 //: ---------------------------------------------------------------------------
 //: Why a click on Save is refused, or null when this form may be written.
 //:
-//: The client states the two things the store's own validators refuse for the
-//: same reason (a row must be named, a URL must be diallable) so the sentence
-//: arrives without a round-trip. It is a **message**, never a disabled button.
+//: The client states what the store's own validators refuse for the same reason
+//: (a row must be named, a URL must be diallable, a sampler must sit inside its
+//: bound) so the sentence arrives without a round-trip. It is a **message**,
+//: never a disabled button.
 //: ---------------------------------------------------------------------------
 
-export function saveRefusalFor({ page = null, draft = null } = {}) {
+export function saveRefusalFor({ page = null, draft = null, caps = null } = {}) {
   if (!draft || page === null) return null
   if (!String(draft.name ?? '').trim()) {
     return page === 'model'
@@ -270,6 +285,21 @@ export function saveRefusalFor({ page = null, draft = null } = {}) {
     }
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       return 'The form must be completed before this server can be saved: url must start with http:// or https://.'
+    }
+  }
+  if (page === 'model') {
+    for (const field of SAMPLER_FIELDS) {
+      const raw = draft[field]
+      if (raw === null || raw === undefined || raw === '') continue
+      const value = Number(raw)
+      if (!Number.isFinite(value)) continue
+      const { min, max } = samplerBounds(caps, field)
+      if (min !== null && value < min) {
+        return `The form must be completed before this model can be saved: ${field} must be at least ${min}.`
+      }
+      if (max !== null && value > max) {
+        return `The form must be completed before this model can be saved: ${field} must be at most ${max}.`
+      }
     }
   }
   return null
@@ -293,6 +323,7 @@ export function saveRefusalFor({ page = null, draft = null } = {}) {
 
 export function messageFor({
   section = 'servers',
+  page = null,
   saving = false,
   listing = false,
   storeState = null,
@@ -308,13 +339,19 @@ export function messageFor({
   mcpError = null,
   mcpExternalsError = null,
   mcpLoading = false,
+  mcpEmpty = false,
   lspInstalled = true,
   lspError = null,
   lspServersError = null,
   lspLoading = false,
+  lspEmpty = false,
 } = {}) {
-  if (saving) return { text: 'Saving…', role: 'status', action: null }
-  if (listing) {
+  // Everything about the Servers section is gated on it being the section on
+  // screen: the dialog has one band, and a section's fact must not be printed
+  // while another section is visible. The store-level lines below stay global.
+  const servers = section === 'servers'
+  if (servers && saving) return { text: 'Saving…', role: 'status', action: null }
+  if (servers && listing && page === 'server') {
     return { text: 'Listing this server’s models…', role: 'status', action: null }
   }
   // A hub read in flight is progress about the section on screen, which is what
@@ -330,7 +367,9 @@ export function messageFor({
   // the band by the verb that asked (§4.8). It outranks everything the read or a
   // stale failure could say, because the question on screen is the one that
   // needs answering.
-  if (deleteSentence) return { text: deleteSentence, role: 'alert', action: null }
+  if (servers && deleteSentence) {
+    return { text: deleteSentence, role: 'alert', action: null }
+  }
 
   // The store's own sentence, verbatim: it already names what is wrong, and the
   // dialog adds nothing and translates nothing.
@@ -341,14 +380,36 @@ export function messageFor({
   if (section === 'mcp') {
     const line = mcpTopLevelLine({ mcpInstalled, mcpError, mcpExternalsError })
     if (line) return { text: line, role: 'alert', action: null }
+    if (mcpEmpty) {
+      return {
+        text: 'Nothing declared in .nojae/mcp-settings.json: add a remote or local ' +
+          'entry to get connectors here.',
+        role: 'status',
+        action: null,
+      }
+    }
   } else if (section === 'lsp') {
     const line = lspTopLevelLine({ lspInstalled, lspError, lspServersError })
     if (line) return { text: line, role: 'alert', action: null }
+    if (lspEmpty) {
+      return {
+        text: 'No language servers declared in .nojae/lsp-settings.json (copy the ' +
+          'seeded .nojae/lsp-settings.template.json to get started).',
+        role: 'status',
+        action: null,
+      }
+    }
   }
 
-  if (serversError) return { text: serversError, role: 'alert', action: null }
-  if (fetchError) return { text: fetchError, role: 'alert', action: null }
-  if (refusal) return { text: refusal, role: 'status', action: null }
+  // The live form's refusal outranks a failure from an earlier click: when the
+  // current draft is the problem, that is the answer to the click just made.
+  if (servers && refusal) return { text: refusal, role: 'status', action: null }
+  if (servers && serversError) {
+    return { text: serversError, role: 'alert', action: null }
+  }
+  if (servers && page === 'server' && fetchError) {
+    return { text: fetchError, role: 'alert', action: null }
+  }
   if (settingsError) return { text: settingsError, role: 'alert', action: null }
 
   // The read's findings, joined as **one** message rather than two lines that
@@ -356,7 +417,7 @@ export function messageFor({
   const findings = storeFindings({ storeState, config })
   if (findings) return { text: findings, role: 'alert', action: null }
 
-  if (section === 'servers') {
+  if (servers) {
     const line = unassignedMessage(unassigned)
     if (line) return line
   }
@@ -364,7 +425,7 @@ export function messageFor({
   // The quietest thing the band ever says, and last for that reason: a listing
   // that came back empty is contextual help about the table on screen, and it
   // must not out-rank a failure or the cross-store line (§9.1-2).
-  if (listingEmpty) {
+  if (servers && page === 'server' && listingEmpty) {
     return { text: 'This server lists no models.', role: 'status', action: null }
   }
 
@@ -387,19 +448,25 @@ function storeFindings({ storeState, config }) {
 //: stay beside the connector they describe: a band that carries six connector
 //: errors is a list, not a message (§4.7).
 function mcpTopLevelLine({ mcpInstalled, mcpError, mcpExternalsError }) {
-  if (!mcpInstalled) {
+  // A failed read is the fact, never "not installed": the flag is only known
+  // after a read has answered.
+  if (mcpError) return mcpError
+  if (mcpInstalled === false) {
     return 'The mcp package is not installed. Run pip install -e ".[mcp]" and ' +
       'restart the app.'
   }
-  return mcpError || mcpExternalsError || null
+  if (mcpInstalled == null) return null
+  return mcpExternalsError || null
 }
 
 function lspTopLevelLine({ lspInstalled, lspError, lspServersError }) {
-  if (!lspInstalled) {
+  if (lspError) return lspError
+  if (lspInstalled === false) {
     return 'The pygls package is not installed. Run pip install -e ".[lsp]" and ' +
       'restart the app.'
   }
-  return lspError || lspServersError || null
+  if (lspInstalled == null) return null
+  return lspServersError || null
 }
 
 //: ---------------------------------------------------------------------------
@@ -413,15 +480,27 @@ function lspTopLevelLine({ lspInstalled, lspError, lspServersError }) {
 
 export function mcpSaveSlotFor({ saving = false, loading = false, installed = true } = {}) {
   if (saving) return slotInertText('Saving…', 'Saving…')
-  if (!installed) return slotInertText('Save', 'The mcp package is not installed.')
   if (loading) return slotInertText('Save', 'The connectors are still being read.')
+  if (installed === false) {
+    return slotInertText('Save', 'The mcp package is not installed.')
+  }
+  if (installed == null) {
+    return slotInertText('Save', 'The connectors have not been read.')
+  }
   return slotLiveText('Save')
 }
 
 export function lspSaveSlotFor({ saving = false, loading = false, installed = true } = {}) {
   if (saving) return slotInertText('Saving…', 'Saving…')
-  if (!installed) return slotInertText('Save', 'The pygls package is not installed.')
-  if (loading) return slotInertText('Save', 'The language servers are still being read.')
+  if (loading) {
+    return slotInertText('Save', 'The language servers are still being read.')
+  }
+  if (installed === false) {
+    return slotInertText('Save', 'The pygls package is not installed.')
+  }
+  if (installed == null) {
+    return slotInertText('Save', 'The language servers have not been read.')
+  }
   return slotLiveText('Save')
 }
 
@@ -449,12 +528,13 @@ export function useSettingsServers() {
   )
   const listingInFlight = computed(
     () =>
+      page.value === 'server' &&
       state.fetchedModelsLoading !== null &&
       state.fetchedModelsLoading !== undefined &&
-      state.fetchedModelsLoading === (state.serverDraft?.id ?? 'new'),
+      state.fetchedModelsLoading === draftKey(state.serverDraft),
   )
   const slotContextFor = computed(() => ({
-    loaded: !state.serversLoading && state.serversError === null,
+    loaded: state.serversLoaded && !state.serversLoading,
     saving: state.settingsSaving,
     listing: listingInFlight.value,
     confirming: state.pendingDelete !== null,
@@ -495,18 +575,26 @@ export function useSettingsServers() {
   )
 
   const refusal = computed(() =>
-    saveRefusalFor({ page: page.value, draft: state.modelDraft ?? state.serverDraft }),
+    saveRefusalFor({
+      page: page.value,
+      draft: state.modelDraft ?? state.serverDraft,
+      caps: state.serversCaps,
+    }),
   )
 
   const message = computed(() =>
     messageFor({
       section: activeSectionOf(state),
+      page: page.value,
       saving: state.settingsSaving,
       listing: listingInFlight.value,
       storeState: state.storeState,
       serversError: state.serversError,
       settingsError: state.settingsError,
-      fetchError: fetchedModelsErrorFor(state.serverDraft),
+      fetchError:
+        page.value === 'server'
+          ? fetchedModelsErrorFor(state.serverDraft)
+          : null,
       deleteSentence: state.pendingDeleteSentence,
       listingEmpty: listingEmptyFor(state),
       refusal: refusal.value,
@@ -515,9 +603,14 @@ export function useSettingsServers() {
       mcpInstalled: state.mcpInstalled,
       mcpError: state.mcpError,
       mcpExternalsError: state.mcpExternalsError,
+      mcpLoading: state.mcpLoading,
+      mcpEmpty:
+        state.mcpInstalled === true && state.mcpConnectors.length === 0,
       lspInstalled: state.lspInstalled,
       lspError: state.lspError,
       lspServersError: state.lspServersError,
+      lspLoading: state.lspLoading,
+      lspEmpty: state.lspInstalled === true && state.lspServers.length === 0,
     }),
   )
 

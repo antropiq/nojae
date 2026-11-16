@@ -1564,6 +1564,29 @@ def build_router() -> APIRouter:
             "reasoningLevels": list(REASONING_LEVELS),
         }
 
+    def _connection_envelope(servers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The connection read's whole answer, for a read **and every write**.
+
+        One envelope for both, so a write cannot blank the caps the form's
+        bounds come from or the unassigned count the band's actionable line
+        reads. ``caps`` is static; ``unassigned`` is re-derived because a server
+        or model delete nulls the agents that pointed at it.
+        """
+        try:
+            agents = appdb.resolve_agents()["agents"]
+        except appdb.AppStoreError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "servers": servers,
+            "caps": _connection_caps(),
+            "unassigned": {
+                "agentsWithoutModel": sum(
+                    1 for agent in agents if agent["modelId"] is None
+                ),
+                "agents": len(agents),
+            },
+        }
+
     def _connection_write(
         servers: Optional[List[Dict[str, Any]]], what: str, row_id: Optional[int]
     ) -> Dict[str, Any]:
@@ -1572,8 +1595,8 @@ def build_router() -> APIRouter:
         ``None`` from the store means the id named no row — the browser was working
         from a list that has since changed — which is a 404 naming it, the same
         shape the prompt-helper writes answer. A list is the new truth and is
-        returned whole, so the dialog re-baselines on the server's rows rather than
-        splicing the one it sent.
+        returned whole, in the read's envelope, so the dialog re-baselines on the
+        server's rows rather than splicing the one it sent.
         """
         if servers is None:
             raise HTTPException(
@@ -1583,7 +1606,7 @@ def build_router() -> APIRouter:
                     "reload the servers."
                 ),
             )
-        return {"servers": servers}
+        return _connection_envelope(servers)
 
     def _require_free_server_name(name: str, servers: List[Dict[str, Any]],
                                   keep_id: Optional[int] = None) -> None:
@@ -1643,19 +1666,9 @@ def build_router() -> APIRouter:
         """
         try:
             servers = appdb.load_servers()
-            agents = appdb.resolve_agents()["agents"]
         except appdb.AppStoreError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {
-            "servers": servers,
-            "caps": _connection_caps(),
-            "unassigned": {
-                "agentsWithoutModel": sum(
-                    1 for agent in agents if agent["modelId"] is None
-                ),
-                "agents": len(agents),
-            },
-        }
+        return _connection_envelope(servers)
 
     @router.post("/servers/add")
     def post_servers_add(body: ServerCreateIn) -> Dict[str, Any]:

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useAppShell } from '../src/composables/useAppShell'
+import { useWorkspaceSession } from '../src/composables/useWorkspaceSession'
 
 // A read-only loader, seen end to end: the composable must actually go through
 // the retry, not just call fetch once and bail on the first dropped packet.
@@ -49,5 +50,73 @@ describe('loadConfig survives a dropped connection', () => {
     expect(state.configError).toContain('Network unavailable')
     expect(state.configError).not.toMatch(/^Could not reach the API/)
     expect(state.configError).toContain('Error in input stream')
+  })
+})
+
+describe('opening the settings dialog', () => {
+  const { state } = useAppShell()
+  const session = useWorkspaceSession()
+
+  beforeEach(() => {
+    state.settingsOpen = false
+    state.settingsLoading = false
+    session.state.loading = false
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('waits for the boot workspace read before asking a workspace-scoped section', async () => {
+    session.state.loading = true
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    await useAppShell().openSettings()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(state.settingsOpen).toBe(false)
+    session.state.loading = false
+  })
+
+  it('awaits its reads, and a reopen does not start a second set', async () => {
+    const releases = {}
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (url) =>
+        new Promise((resolve) => {
+          releases[String(url)] = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: () => Promise.resolve(
+                String(url).startsWith('/api/servers')
+                  ? {
+                      servers: [],
+                      caps: { samplerRanges: {}, reasoningLevels: [] },
+                      unassigned: { agentsWithoutModel: 0, agents: 4 },
+                    }
+                  : String(url).startsWith('/api/config')
+                    ? { models: [], store: { usable: true } }
+                    : String(url).startsWith('/api/mcp')
+                      ? { installed: true, connectors: [] }
+                      : { installed: true, servers: [] },
+              ),
+            })
+        }),
+    )
+
+    const first = useAppShell().openSettings()
+    expect(state.settingsLoading).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
+    useAppShell().closeSettings()
+    await useAppShell().openSettings()
+    expect(state.settingsOpen).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
+    for (const release of Object.values(releases)) release()
+    await first
+
+    expect(state.settingsLoading).toBe(false)
+    expect(state.settingsOpen).toBe(true)
   })
 })
