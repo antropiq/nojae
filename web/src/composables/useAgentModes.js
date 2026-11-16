@@ -497,11 +497,18 @@ export function personaOverByteCap(draft, text) {
   return Number.isFinite(cap) && personaByteCount(text) > cap
 }
 
-// The tool-iteration cap's floor, as a message or null (D9: a floor of 1 and
+// The tool-iteration value's problem, as a message or null (D9: a floor of 1 and
 // **no ceiling**, so nothing here refuses a big number).
+//
+// An empty field is a problem, not "no value": the column is `INTEGER NOT NULL`
+// and the store refuses anything below its floor, so a blank form that reports
+// nothing would post a 0 (or nothing at all) the server rejects. Saying it here
+// is what lets the message line answer before the click.
 export function toolIterationProblem(draft, value) {
   const floor = capsOf(draft).minToolIteration
-  if (value === null || value === undefined || value === '') return null
+  if (value === null || value === undefined || value === '') {
+    return 'Max tool iterations must be a whole number.'
+  }
   const number = Number(value)
   if (!Number.isInteger(number)) return 'Max tool iterations must be a whole number.'
   if (Number.isFinite(floor) && number < floor) {
@@ -534,8 +541,18 @@ export function entryProblems(draft, entry) {
   if (!entry) return []
   const problems = []
   if (entry.readonly !== true) {
-    if (!String(entry.label ?? '').trim()) {
+    const label = String(entry.label ?? '').trim()
+    const maxLabelChars = capsOf(draft).maxLabelChars
+    if (!label) {
       problems.push({ field: 'label', message: 'A label is required.' })
+    } else if (Number.isFinite(maxLabelChars) && label.length > maxLabelChars) {
+      // The server measures the trimmed label against this same cap, so a stored
+      // over-cap row is marked broken and its save refused in the line — not
+      // discovered only when the store answers a 422 after the click.
+      problems.push({
+        field: 'label',
+        message: `The label must be at most ${maxLabelChars} characters.`,
+      })
     } else if (labelTakenBy(draft, entry)) {
       problems.push({
         field: 'label',
@@ -927,10 +944,15 @@ export function successorAfterDelete(entries, entry) {
 //: form to write), delete is inert with its reason (nothing is stored to delete).
 //: Its baseline is null because nothing was ever written, which is also why the
 //: close guard treats creation mode as unsaved work by definition.
+//:
+//: `idEdited` is the creation form's own provenance for its id: the Label slug
+//: keeps it up to date only while the user has not corrected it by hand, so a
+//: later Label edit never discards a chosen id.
 export function creationFormFor(draft) {
   return {
     id: slugForDraft(draft, ''),
     isNew: true,
+    idEdited: false,
     label: '',
     maxToolIteration: capsOf(draft).minToolIteration ?? null,
     mcpEnable: false,
@@ -992,8 +1014,16 @@ export function agentWritePayload(entry) {
     systemMessage: entry.personaText ?? '',
     modelId: entry.modelId ?? null,
   }
-  const cap = Number(entry.maxToolIteration)
-  if (Number.isInteger(cap)) payload.maxToolIteration = cap
+  const cap = entry.maxToolIteration
+  // Only a real value is serialised: a cleared field is `''` (Vue's `.number`
+  // keeps it) and a missing one is null/undefined, and `Number('')` and
+  // `Number(null)` are both `0` — a value the store refuses. Omitting the key
+  // leaves an update's stored cap alone and lets a create take the route's
+  // default, which is why the form's rule refuses the empty field first.
+  if (cap !== '' && cap !== null && cap !== undefined) {
+    const number = Number(cap)
+    if (Number.isInteger(number)) payload.maxToolIteration = number
+  }
   return payload
 }
 
@@ -1083,6 +1113,10 @@ export function messageFor(draft, entry) {
 export async function fetchAgentDraft() {
   editorState.loading = true
   editorState.readError = null
+  // The editor state is a module singleton that outlives the card, so a failure
+  // from a previous open must not greet the next one as if it had just happened
+  // — nor outrank (it is read first) a read failure in this one.
+  editorState.writeError = null
   editorState.serverFindings = []
   try {
     const res = await fetch('/api/agents')

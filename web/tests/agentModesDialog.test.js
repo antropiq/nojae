@@ -145,7 +145,10 @@ function stubRoutes({ agents = agentsBody(), saves = {}, calls = [] } = {}) {
       calls.push({ key, body: JSON.parse(init.body) })
       const answer = saves[key]
       // An **array** is a sequence: each call to that route takes the next
-      // answer, which is how a test drives "refused, then accepted".
+      // answer, which is how a test drives "refused, then accepted". A
+      // **function** is called per request, for an answer that must only be
+      // produced when the route is reached (a rejected promise, below).
+      if (typeof answer === 'function') return answer()
       if (Array.isArray(answer)) return answer.shift()
       if (answer !== undefined) return answer
       return jsonResponse(agents)
@@ -769,6 +772,43 @@ describe('the form-level problems (D11)', () => {
     expect(messageText(w)).toBe('')
     w.unmount()
   })
+
+  it('clearing Max tool iterations is said in the line, and the click posts nothing', async () => {
+    const calls = stubRoutes()
+    const w = await openDialog()
+    await tabButton(w, 1).trigger('click') // Code
+
+    // `.number` leaves a cleared field as `''`, which used to read as "no value"
+    // and then serialise to 0 — a save the store refuses after the click.
+    await section(w, 'code').find('input[type="number"]').setValue('')
+    expect(saveButton(w).element.disabled).toBe(false)
+    expect(messageText(w)).toContain('Max tool iterations')
+
+    await saveButton(w).trigger('click')
+    await flushPromises()
+    expect(calls).toEqual([])
+    w.unmount()
+  })
+
+  it('a label over the payload\'s cap is refused in the line, and marks its tab', async () => {
+    const calls = stubRoutes()
+    const w = await openDialog()
+
+    await labelField(w, 'chat').setValue('x'.repeat(CAPS.maxLabelChars + 1))
+    expect(saveButton(w).element.disabled).toBe(false)
+    expect(messageText(w)).toContain(`at most ${CAPS.maxLabelChars}`)
+    expect(tabButton(w, 0).classes()).toContain('agent-modes-tab--broken')
+
+    await saveButton(w).trigger('click')
+    await flushPromises()
+    expect(calls).toEqual([])
+
+    // The cap itself is the payload's number: a label at it is fine.
+    await labelField(w, 'chat').setValue('x'.repeat(CAPS.maxLabelChars))
+    expect(messageText(w)).toBe('')
+    expect(tabButton(w, 0).classes()).not.toContain('agent-modes-tab--broken')
+    w.unmount()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -792,6 +832,26 @@ describe('the one message line (D11)', () => {
     expect(w.findAll('.agent-modes-tab')).toHaveLength(0)
     expect(w.findAll('section[data-tab]')).toHaveLength(0)
     expect(w.find('header').element.nextElementSibling.className).toContain('settings-form')
+    w.unmount()
+  })
+
+  it('a failed write does not survive Close/Reopen as a fresh error', async () => {
+    stubRoutes({
+      saves: { '/api/agents/save': () => Promise.reject(new Error('network down')) },
+    })
+    const first = await openDialog()
+
+    await labelField(first, 'chat').setValue('Chatting')
+    await saveButton(first).trigger('click')
+    await flushPromises()
+    expect(messageText(first)).toContain('Could not reach the API')
+    first.unmount()
+
+    // The editor state is a module singleton, so reopening must read the store
+    // afresh and say nothing about an action this card never attempted.
+    const w = await openDialog()
+    expect(messageText(w)).toBe('')
+    expect(w.findAll('[role="alert"]')).toHaveLength(0)
     w.unmount()
   })
 
@@ -977,6 +1037,30 @@ describe('creation mode (D4, D5)', () => {
     expect(tabs(w)).toContain('Code')
     expect(creationIdField(w).element.value).toBe('code-2')
     expect(section(w, 'code').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('a hand-edited Id is not overwritten by the next Label edit', async () => {
+    stubRoutes()
+    const w = await openDialog()
+
+    await addButton(w).trigger('click')
+    await flushPromises()
+    await creationLabelField(w).setValue('Reviewer')
+    expect(creationIdField(w).element.value).toBe('reviewer')
+
+    // The id is a choice a chat payload and a saved session name the agent by, so
+    // correcting it by hand stops the Label from driving it.
+    await creationIdField(w).setValue('my-custom-id')
+    await creationLabelField(w).setValue('Reviewer Bot')
+    expect(creationIdField(w).element.value).toBe('my-custom-id')
+
+    // The untouched path still follows the Label: a fresh form slugs as before.
+    await tabButton(w, 0).trigger('click') // ends creation mode
+    await addButton(w).trigger('click')
+    await flushPromises()
+    await creationLabelField(w).setValue('Scribe')
+    expect(creationIdField(w).element.value).toBe('scribe')
     w.unmount()
   })
 })
@@ -1172,6 +1256,34 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     expect(labelField(w, 'proofreader').element.value).toBe('Proofreader')
     // The pair went away with the delete it was asked for.
     expect(cancelDeleteButton(w).exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('deleting one agent leaves another agent\'s typed edits alone (§6.18)', async () => {
+    stubRoutes({
+      agents: withScribeAndProofreader(),
+      saves: { '/api/agents/delete': jsonResponse(withoutScribe()) },
+    })
+    const w = await openDialog()
+
+    // Type into Chat, then delete a different, deletable row.
+    await labelField(w, 'chat').setValue('Chatting')
+    await personaField(w, 'chat').setValue('typed and not saved')
+    await tabButton(w, 4).trigger('click') // Scribe
+    await deleteSlotButton(w).trigger('click')
+    await flushPromises()
+    await confirmDeleteButton(w).trigger('click')
+    await flushPromises()
+
+    // Chat still holds what was typed in it — the delete was Scribe's alone.
+    await tabButton(w, 0).trigger('click')
+    expect(labelField(w, 'chat').element.value).toBe('Chatting')
+    expect(personaField(w, 'chat').element.value).toBe('typed and not saved')
+    // ...and because its baseline is still the store's, the close guard can see
+    // the unsaved work instead of being made blind by the new rows.
+    await closeButton(w).trigger('click')
+    await flushPromises()
+    expect(keepEditingButton(w).exists()).toBe(true)
     w.unmount()
   })
 
@@ -1664,6 +1776,37 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
     expect(calls).toEqual([])
     // The verbs are live again, and the pencil's `@close` was never reached.
     expect(saveButton(w).element.disabled).toBe(false)
+    // Focus went back to the verb that asked, not to `<body>`.
+    expect(document.activeElement).toBe(closeButton(w).element)
+    w.unmount()
+  })
+
+  it('focus returns to the toolbar when a delete pair is cancelled or answered', async () => {
+    stubRoutes({
+      agents: withScribeAndProofreader(),
+      saves: { '/api/agents/delete': jsonResponse(withoutScribe()) },
+    })
+    const w = await openDialog()
+    await tabButton(w, 4).trigger('click') // Scribe
+
+    // Cancel: the Delete verb that asked takes focus back.
+    await deleteSlotButton(w).trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(cancelDeleteButton(w).element)
+    await cancelDeleteButton(w).trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(deleteSlotButton(w).element)
+
+    // Confirm: the pair leaves the DOM, so focus lands on the successor tab the
+    // delete selects — not at the start of the page.
+    await deleteSlotButton(w).trigger('click')
+    await flushPromises()
+    await confirmDeleteButton(w).trigger('click')
+    await flushPromises()
+    const successor = w.find('.agent-modes-tab.active')
+    expect(successor.exists()).toBe(true)
+    expect(successor.text()).toBe('Proofreader')
+    expect(document.activeElement).toBe(successor.element)
     w.unmount()
   })
 

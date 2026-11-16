@@ -261,9 +261,13 @@ function askClose() {
 }
 
 //: `Keep editing`: hide the pair and change **nothing** else — not the selection,
-//: not the form, not a keystroke (§6.12's rule for the other pair).
-function dismissClose() {
+//: not the form, not a keystroke (§6.12's rule for the other pair). Focus goes
+//: back to the verb that asked, because the pair's own button is leaving the DOM
+//: and a keyboard user must not be dropped at the top of the page.
+async function dismissClose() {
   pendingClose.value = false
+  await nextTick()
+  dialogEl.value?.querySelector('.agent-modes-close')?.focus()
 }
 
 //: Leaving: `Discard and close` and an unguarded `Close` are the same act, and it
@@ -316,9 +320,15 @@ async function focusSection() {
 
 // A new agent's id follows its Label field until the user edits it by hand: the
 // slug is the composable's rule, and an id typed here is judged by the same one.
+// `idEdited` is the creation form's provenance, so a manual correction is never
+// overwritten by a later Label change (the id names sessions; it is a choice).
 function onLabelChange(entry) {
-  if (!idEditableFor(entry)) return
+  if (!idEditableFor(entry) || entry.idEdited === true) return
   entry.id = slugForDraft(draft.value, entry.label)
+}
+
+function onIdInput(entry) {
+  if (idEditableFor(entry)) entry.idEdited = true
 }
 
 function problemsOn(entry) {
@@ -349,9 +359,12 @@ async function askDelete() {
 
 //: Cancel (D7.4, Q4): hide the pair and change **nothing** else. Nothing was
 //: written, so there is nothing to restore — the selection stays, the form stays,
-//: and everything typed in it stays (§6.12).
-function dismissDelete() {
+//: and everything typed in it stays (§6.12). Focus returns to the Delete verb,
+//: the one control that asked, rather than dropping to the page.
+async function dismissDelete() {
   pendingDelete.value = null
+  await nextTick()
+  dialogEl.value?.querySelector('.agent-modes-delete')?.focus()
 }
 
 //: Confirm (D7.5): delete the selected agent, re-baseline on the whole answer the
@@ -363,15 +376,46 @@ async function confirmDelete() {
   const entry = pendingEntry.value
   if (!entry) return
   const successor = successorAfterDelete(entries.value, entry)
+  const held = draft.value
   pendingDelete.value = null
   const next = await deleteAgent(entry)
-  if (!next) return // the reason is in the card's message line
-  draft.value = next
+  if (!next) {
+    // The reason is in the card's message line; focus goes back to the Delete
+    // verb, which is still live for the row that was not deleted.
+    await focusAfterDelete(false)
+    return
+  }
+  // Like a save (D6), the answer re-baselines the whole list without discarding
+  // what the user typed in the agents this delete did not touch: `writtenId` is
+  // null because no row here was written as a form — the deleted one is simply
+  // gone from `next.entries`.
+  draft.value = rebaselinedDraft(next, held, null)
   // The successor by id in the re-baselined list — and when the list came back
   // empty there is no row to select, so the card holds no selection.
   activeTab.value = tabKeyFor(
     successor ? (entries.value.find((row) => row.id === successor.id) ?? null) : null,
   )
+  await focusAfterDelete(true)
+}
+
+// The pair's buttons are gone from the DOM by the time a delete lands, so focus
+// is put back deliberately: the successor's tab when the delete succeeded, else
+// the Delete verb, else (an empty list leaves that verb inert) the footer's
+// Close — never `<body>`.
+async function focusAfterDelete(preferTab) {
+  await nextTick()
+  const dialog = dialogEl.value
+  const tab = preferTab ? dialog?.querySelector('.agent-modes-tab.active') : null
+  if (tab) {
+    tab.focus()
+    return
+  }
+  const remove = dialog?.querySelector('.agent-modes-delete')
+  if (remove && !remove.disabled) {
+    remove.focus()
+    return
+  }
+  dialog?.querySelector('.agent-modes-close')?.focus()
 }
 
 // Save **one** agent — the subject, and only it: the form being typed when a new
@@ -596,6 +640,7 @@ async function save() {
                     type="text"
                     spellcheck="false"
                     autocomplete="off"
+                    :maxlength="draft.caps.maxLabelChars ?? undefined"
                     :disabled="fieldsLocked(entry)"
                     @change="onLabelChange(entry)"
                   />
@@ -626,6 +671,7 @@ async function save() {
                   spellcheck="false"
                   autocomplete="off"
                   :disabled="fieldsLocked(entry)"
+                  @input="onIdInput(entry)"
                 />
               </label>
 

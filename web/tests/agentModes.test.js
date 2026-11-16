@@ -9,6 +9,7 @@ import {
   agentCanRun,
   agentModePayloadId,
   agentModesLoaded,
+  agentWritePayload,
   applySessionAgentMode,
   closeConfirmationFor,
   closeWouldLoseFor,
@@ -858,6 +859,22 @@ describe('the tool-iteration cap (D9)', () => {
     draft.entries[0].maxToolIteration = 1
     expect(saveRefusalFor(draft, draft.entries[0])).toBeNull()
   })
+
+  it('an empty field is a problem, and the payload never posts a 0 for it', () => {
+    const draft = draftOf()
+    // Vue's `.number` keeps a cleared number input as `''`; a payload that never
+    // carried the field arrives as null. Both mean "no value", not zero.
+    for (const empty of ['', null, undefined]) {
+      expect(toolIterationProblem(draft, empty)).toBe(
+        'Max tool iterations must be a whole number.',
+      )
+      const entry = { ...draft.entries[0], maxToolIteration: empty }
+      expect(agentWritePayload(entry)).not.toHaveProperty('maxToolIteration')
+    }
+    expect(toolIterationProblem(draft, 0)).toContain('at least 1')
+    const entry = { ...draft.entries[0], maxToolIteration: 5 }
+    expect(agentWritePayload(entry).maxToolIteration).toBe(5)
+  })
 })
 
 describe('the form-level problems (§5.2)', () => {
@@ -880,6 +897,28 @@ describe('the form-level problems (§5.2)', () => {
     const problems = entryProblems(draft, draft.entries[1])
     expect(problems[0].field).toBe('label')
     expect(problems[0].message).toContain('already labelled')
+  })
+
+  it('a label over the payload cap is refused, and a stored over-cap row is marked', () => {
+    const draft = draftOf()
+    draft.entries[0].label = 'x'.repeat(CAPS.maxLabelChars)
+    expect(saveRefusalFor(draft, draft.entries[0])).toBeNull()
+
+    draft.entries[0].label = 'x'.repeat(CAPS.maxLabelChars + 1)
+    expect(entryProblems(draft, draft.entries[0])).toContainEqual({
+      field: 'label',
+      message: `The label must be at most ${CAPS.maxLabelChars} characters.`,
+    })
+    expect(saveRefusalFor(draft, draft.entries[0])).toContain(
+      `at most ${CAPS.maxLabelChars}`,
+    )
+
+    // The number is the payload's, not a literal: a roomier cap accepts the same
+    // label, and a tighter one refuses a label that was fine.
+    const roomy = draftOf()
+    roomy.caps = { ...CAPS, maxLabelChars: 80 }
+    roomy.entries[0].label = 'x'.repeat(80)
+    expect(saveRefusalFor(roomy, roomy.entries[0])).toBeNull()
   })
 
   it('a readonly agent is never judged — only its model is the user\'s', () => {
@@ -1559,6 +1598,32 @@ describe('the editor\'s three calls', () => {
     // ...and it feeds the singleton too, so the composer sees what the card does.
     expect(agentModes.loaded).toBe(true)
     expect(agentModes.modes.map((mode) => mode.id)).toContain('code')
+  })
+
+  it('a read clears a stale write failure, so a reopened card starts clean', async () => {
+    const editor = useAgentModes().editor
+    editor.writeError = 'Could not reach the API: Error: network down'
+    stubEditor()
+
+    const draft = await fetchAgentDraft()
+
+    expect(draft).not.toBeNull()
+    expect(editor.writeError).toBeNull()
+    // The line reads the old failure *before* a read failure, so leaving it set
+    // would also mask a genuine read error in the card that just opened.
+    expect(messageFor(draft, draft.entries[0])).toEqual({ text: '', role: 'status' })
+  })
+
+  it('a stale write failure cannot mask a failed read', async () => {
+    const editor = useAgentModes().editor
+    editor.writeError = 'Could not reach the API: Error: network down'
+    stubEditor({ '/api/agents': jsonResponse({}, false, 500) })
+
+    const draft = await fetchAgentDraft()
+
+    expect(draft).toBeNull()
+    expect(editor.writeError).toBeNull()
+    expect(messageFor(null, null).text).toContain('Could not read the agents')
   })
 
   it('a save addresses one agent and re-baselines on the whole answer', async () => {
