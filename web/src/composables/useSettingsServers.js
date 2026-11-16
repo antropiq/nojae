@@ -2,6 +2,7 @@ import { computed } from 'vue'
 
 import {
   SAMPLER_FIELDS,
+  closeWouldLoseForSettings,
   draftKey,
   fetchedModelIdsFor,
   fetchedModelsErrorFor,
@@ -10,6 +11,7 @@ import {
   unassignedLine,
   useAppShell,
 } from './useAppShell'
+import { CLOSE_QUESTION } from './useAgentModes'
 
 //: ---------------------------------------------------------------------------
 //: The Servers section's rules, as plain functions.
@@ -79,6 +81,7 @@ function slotContext({
   saving = false,
   listing = false,
   confirming = false,
+  closing = false,
   page = null,
   serverSaved = false,
   urlFilled = false,
@@ -89,6 +92,7 @@ function slotContext({
     saving: saving === true,
     listing: listing === true,
     confirming: confirming === true,
+    closing: closing === true,
     page: page === 'model' ? 'model' : page === 'server' ? 'server' : null,
     serverSaved: serverSaved === true,
     urlFilled: urlFilled === true,
@@ -105,7 +109,7 @@ export function addSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
   if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
-  if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
   if (ctx.page === 'server' && !ctx.serverSaved) {
     return slotInert('Already adding a server — save it or select one.')
   }
@@ -123,7 +127,7 @@ export function saveSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (ctx.saving) return slotInert('Saving…')
   if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
-  if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
   if (ctx.page === null) return slotInert(NOTHING_SELECTED_LABEL)
   return slotLive('Save')
 }
@@ -144,7 +148,7 @@ export function deleteSlotFor(context = {}) {
     )
   }
   if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
-  if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
   return slotLive('Delete')
 }
 
@@ -162,6 +166,26 @@ export function deleteConfirmationFor(context = {}) {
     rendered: true,
     cancel: ctx.saving ? slotInert(WRITE_IN_FLIGHT_LABEL) : slotLive('Cancel delete'),
     confirm: ctx.saving ? slotInert(WRITE_IN_FLIGHT_LABEL) : slotLive('Confirm delete'),
+  }
+}
+
+//: **The footer's close pair** (the Agents card's D8, ported): the same idiom as
+//: the delete pair, in the footer's **reserved** slot, and **absent from the DOM**
+//: until a close is being confirmed — so it is neither focusable nor announced
+//: while it means nothing, and `Close` never moves when it arrives. Its two
+//: tooltips are the two answers, and each glyph's tooltip is its accessible name,
+//: so they cannot drift.
+//:
+//: Unlike the delete pair it is **never inert**: keeping editing and discarding
+//: are answers that can always be given, and a write that lands while the question
+//: is up only changes what discarding would drop.
+export function closeConfirmationFor(context = {}) {
+  const ctx = slotContext(context)
+  if (!ctx.closing) return { rendered: false, cancel: null, confirm: null }
+  return {
+    rendered: true,
+    cancel: slotLive('Keep editing'),
+    confirm: slotLive('Discard and close'),
   }
 }
 
@@ -326,6 +350,7 @@ export function messageFor({
   page = null,
   saving = false,
   listing = false,
+  closing = false,
   storeState = null,
   serversError = null,
   settingsError = null,
@@ -361,6 +386,17 @@ export function messageFor({
   }
   if (section === 'lsp' && lspLoading) {
     return { text: 'Loading language servers…', role: 'status', action: null }
+  }
+
+  // **A close the dialog is asking about outranks every older truth**: while the
+  // footer's pair is up, everything the band would otherwise say is about a click
+  // that is no longer the current question. The pair's two glyphs name its two
+  // answers, so this line is the question they answer — nobody has to read a glyph
+  // twice to learn that leaving now would discard typing. A write in flight still
+  // outranks it, because bytes are moving and that is the one truth the user
+  // cannot yet act on.
+  if (closing) {
+    return { text: CLOSE_QUESTION, role: 'status', action: null }
   }
 
   // A delete awaiting its answer: the sentence is the store's own copy, put in
@@ -478,8 +514,14 @@ function lspTopLevelLine({ lspInstalled, lspError, lspServersError }) {
 //: written as a condition beside the button.
 //: ---------------------------------------------------------------------------
 
-export function mcpSaveSlotFor({ saving = false, loading = false, installed = true } = {}) {
+export function mcpSaveSlotFor({
+  saving = false,
+  loading = false,
+  installed = true,
+  closing = false,
+} = {}) {
   if (saving) return slotInertText('Saving…', 'Saving…')
+  if (closing) return slotInertText('Save', CONFIRMATION_PENDING_LABEL)
   if (loading) return slotInertText('Save', 'The connectors are still being read.')
   if (installed === false) {
     return slotInertText('Save', 'The mcp package is not installed.')
@@ -490,8 +532,14 @@ export function mcpSaveSlotFor({ saving = false, loading = false, installed = tr
   return slotLiveText('Save')
 }
 
-export function lspSaveSlotFor({ saving = false, loading = false, installed = true } = {}) {
+export function lspSaveSlotFor({
+  saving = false,
+  loading = false,
+  installed = true,
+  closing = false,
+} = {}) {
   if (saving) return slotInertText('Saving…', 'Saving…')
+  if (closing) return slotInertText('Save', CONFIRMATION_PENDING_LABEL)
   if (loading) {
     return slotInertText('Save', 'The language servers are still being read.')
   }
@@ -538,6 +586,7 @@ export function useSettingsServers() {
     saving: state.settingsSaving,
     listing: listingInFlight.value,
     confirming: state.pendingDelete !== null,
+    closing: state.pendingClose === true,
     page: page.value,
     serverSaved: state.serverDraft?.id != null,
     urlFilled: !!String(state.serverDraft?.url ?? '').trim(),
@@ -555,6 +604,10 @@ export function useSettingsServers() {
   )
   const fetchSlot = computed(() => fetchSlotFor(slotContextFor.value))
 
+  const closeConfirmation = computed(() =>
+    closeConfirmationFor(slotContextFor.value),
+  )
+
   const tabs = computed(() => detailTabsFor(page.value))
   const visibleTabs = computed(() => visibleDetailTabsFor(page.value))
   const activeTab = computed(() => detailPageFor(page.value, state.detailTab))
@@ -564,6 +617,7 @@ export function useSettingsServers() {
       saving: state.mcpSaving,
       loading: state.mcpLoading,
       installed: state.mcpInstalled,
+      closing: state.pendingClose === true,
     }),
   )
   const lspSaveSlot = computed(() =>
@@ -571,6 +625,7 @@ export function useSettingsServers() {
       saving: state.lspSaving,
       loading: state.lspLoading,
       installed: state.lspInstalled,
+      closing: state.pendingClose === true,
     }),
   )
 
@@ -588,6 +643,7 @@ export function useSettingsServers() {
       page: page.value,
       saving: state.settingsSaving,
       listing: listingInFlight.value,
+      closing: state.pendingClose === true,
       storeState: state.storeState,
       serversError: state.serversError,
       settingsError: state.settingsError,
@@ -674,6 +730,24 @@ export function useSettingsServers() {
     return shell.confirmDeleteRow()
   }
 
+  //: The footer's `Close` and its two answers (the Agents card's D8, ported).
+  //: **Every route out of the dialog goes through `askClose`** — `Close`, Escape
+  //: and a backdrop click are the same verb, so none of them can be a silent
+  //: bypass of the guard. The answers are refused by nothing at all: keeping
+  //: editing and discarding can always be given, and both are the pair's own
+  //: verdicts rather than a condition here.
+  function askClose() {
+    shell.askCloseSettings()
+  }
+
+  function dismissClose() {
+    shell.dismissCloseSettings()
+  }
+
+  function discardAndClose() {
+    shell.discardAndCloseSettings()
+  }
+
   return {
     page,
     slotContextFor,
@@ -682,6 +756,7 @@ export function useSettingsServers() {
     deleteSlot,
     deleteConfirmation,
     fetchSlot,
+    closeConfirmation,
     mcpSaveSlot,
     lspSaveSlot,
     rows,
@@ -699,6 +774,9 @@ export function useSettingsServers() {
     askDelete,
     dismissDelete,
     confirmDelete,
+    askClose,
+    dismissClose,
+    discardAndClose,
   }
 }
 

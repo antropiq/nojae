@@ -1095,7 +1095,11 @@ function storeRefusalSentence() {
 //: What the close guard asks with (D8), once the footer's pair is up: the pair's
 //: two glyphs name its two answers, and this names the question they answer, so a
 //: reader is not left inferring from an ✕ and a ✓ that leaving discards typing.
-const CLOSE_QUESTION = 'There are unsaved changes. Close anyway?'
+//:
+//: Exported because the **same question** is asked by the Settings dialog too: a
+//: guard whose sentence reads differently in two cards is two guards, so the
+//: wording lives here once and both dialogs import it.
+export const CLOSE_QUESTION = 'There are unsaved changes. Close anyway?'
 
 //: **The card's one message** (D11): everything it has to say — progress, a
 //: refusal from the store, an incomplete form, a failed read, the read's

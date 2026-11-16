@@ -29,6 +29,7 @@ const {
   deleteSlot,
   deleteConfirmation,
   fetchSlot,
+  closeConfirmation,
   mcpSaveSlot,
   lspSaveSlot,
   rows,
@@ -45,6 +46,9 @@ const {
   askDelete,
   dismissDelete,
   confirmDelete,
+  askClose,
+  dismissClose,
+  discardAndClose,
 } = useSettingsServers()
 
 // This dialog edits the **installation's** catalogue — servers, models, the MCP
@@ -171,12 +175,43 @@ watch(
   },
 )
 
+// **Escape and a backdrop click count as `Close` in every respect**, so they take
+// the same guard as the button — otherwise they would be a silent bypass of it.
+// The backdrop therefore never closes the dialog itself: it asks, and only a
+// guard with nothing to ask lets the card go.
 function onBackdropClick(event) {
-  if (event.target === dialogEl.value) closeSettings()
+  if (event.target === dialogEl.value) askClose()
 }
 
+// The `<dialog>`'s own Escape path is the cancelable `cancel` event, so it is
+// always cancelled here and routed through the same verb the button uses. That is
+// also why no route can reach `onNativeClose` while a close is being confirmed:
+// nothing closes in that state by any route.
+function onEscape(event) {
+  event?.preventDefault?.()
+  askClose()
+}
+
+// The dialog going away, whichever way it went. A close the guard is asking about
+// never gets here — the shell's flag only drops once the answer has been given.
 function onNativeClose() {
   if (state.settingsOpen) closeSettings()
+}
+
+// `Close` while the dialog holds unsaved work asks in place, and focus lands on
+// **`Keep editing`** — the safe answer — so a keyboard user is told what a pointer
+// user reads. `Keep editing` hands it back to `Close`, whose button is leaving the
+// DOM with the pair, so a keyboard user is not dropped at the top of the page.
+async function onAskClose() {
+  askClose()
+  await nextTick()
+  dialogEl.value?.querySelector('.settings-keep-editing')?.focus()
+}
+
+async function onDismissClose() {
+  dismissClose()
+  await nextTick()
+  dialogEl.value?.querySelector('.settings-close')?.focus()
 }
 
 function connectorDetail(connector) {
@@ -215,6 +250,7 @@ function serverDetail(server) {
     class="settings-dialog"
     aria-labelledby="settings-title"
     @click="onBackdropClick"
+    @cancel="onEscape"
     @close="onNativeClose"
   >
     <article>
@@ -691,7 +727,9 @@ function serverDetail(server) {
            the line fills the row left of `Close`, is always there, and carries
            the text and the role `messageFor` answered with. Nothing else in the
            dialog says anything, so no sentence can push a control out of place.
-           `Close` is the footer's only verb for all three sections (§4.9). -->
+           `Close` is the footer's only verb for all three sections (§4.9) — and
+           it is the card's only exit, so it also asks before discarding typed
+           work, which puts its question in this same line. -->
       <footer class="settings-actions">
         <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
         <!-- The one message the user can act on from here: the band renders it as
@@ -705,7 +743,50 @@ function serverDetail(server) {
         >
           Assign one
         </button>
-        <button class="secondary contrast settings-close" type="button" @click="closeSettings">
+        <!-- The footer's **reserved** confirmation slot: always there and always
+             the pair's width, so `Close` never moves when the dialog asks a
+             question. Both buttons are **absent from the DOM** until a close is
+             pending, so neither is focusable nor announced while it means nothing.
+             The two glyphs reuse the delete pair's idiom and its colours, so the
+             dialog teaches the pair once. -->
+        <span class="agent-modes-footer-slot">
+          <span class="agent-modes-slot">
+            <button
+              v-if="closeConfirmation.rendered"
+              class="icon-btn agent-modes-cancel settings-keep-editing"
+              type="button"
+              :disabled="closeConfirmation.cancel.disabled"
+              :aria-label="closeConfirmation.cancel.label"
+              :title="closeConfirmation.cancel.label"
+              @click="onDismissClose"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
+          </span>
+          <span class="agent-modes-slot">
+            <button
+              v-if="closeConfirmation.rendered"
+              class="icon-btn agent-modes-confirm settings-discard-close"
+              type="button"
+              :disabled="closeConfirmation.confirm.disabled"
+              :aria-label="closeConfirmation.confirm.label"
+              :title="closeConfirmation.confirm.label"
+              @click="discardAndClose"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </button>
+          </span>
+        </span>
+        <button class="secondary contrast settings-close" type="button" @click="onAskClose">
           Close
         </button>
       </footer>

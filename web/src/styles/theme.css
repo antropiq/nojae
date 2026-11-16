@@ -1451,9 +1451,12 @@ body {
    nothing as when it holds a sentence, and filling or emptying it moves no
    control (D10, §6.8). The items are bottom-aligned, so a sentence long enough
    to wrap grows the band *upward* into the body's space rather than lifting the
-   buttons off the edge they keep. Scoped through the card: every other dialog
-   shares `.settings-actions` and keeps its own footer. */
-.agent-modes-dialog .settings-actions {
+   buttons off the edge they keep. Scoped to the two cards that lay their footer
+   out this way — the Agents editor and Settings, which asks the same close
+   question and so reserves the same slot: every other dialog shares
+   `.settings-actions` and keeps its own footer. */
+.agent-modes-dialog .settings-actions,
+.settings-dialog .settings-actions {
   align-items: flex-end;
   justify-content: flex-end;
 }

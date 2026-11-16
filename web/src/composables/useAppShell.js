@@ -81,6 +81,15 @@ const state = reactive({
   // question is asked, cleared with it — the copy is the store's own
   // (`serverDeleteSentence` / `modelDeleteSentence`), never re-derived here.
   pendingDeleteSentence: null,
+  // **The close guard** (the Agents card's D8, ported here): `true` while the
+  // footer's pair asks whether leaving should discard what was typed. It is the
+  // dialog's own question, so it is answered by its two buttons and cleared by
+  // either answer — never by a route that leaves without asking.
+  pendingClose: false,
+  // The one thing a *deferred* leave was asked for: the band's way into the
+  // Agent-modes dialog is a close too, and when the guard stopped it the intent
+  // is remembered so the answer that leaves also opens that card.
+  pendingCloseOpensAgentModes: false,
   // The tree row to focus once the DOM has caught up. Set when a model is added
   // from the listing, which must land on its new row (§9.1-3); the component
   // consumes it and clears it.
@@ -307,6 +316,102 @@ export function modelInView(config) {
   return Array.isArray(models) && models.length ? models[0] : null
 }
 
+//: **Would closing this dialog lose something?** — the close guard's only
+//: question, and the only reader of the store's rows as a baseline. It is the
+//: Agents card's D8 verdict, ported: the baseline is always *the store's answer*
+//: (``state.servers``, adopted wholesale by every read and every write, and the
+//: hub reads' ``active`` flags), never what was typed, which is the whole
+//: invariant the guard rests on.
+//:
+//: Three surfaces can hold work that was typed and never written: the server
+//: form, the model form, and the two hub sections' ticks. An **unsaved** row
+//: (``id == null``, the Add affordance) has no store row to compare against, so
+//: it is judged against the empty form the same verb creates — a form that was
+//: opened and never touched has nothing to lose, and a sentence about unsaved
+//: changes must not be printed over an empty field. A row the store no longer
+//: holds is work that addresses nothing, so it counts.
+const SERVER_DIRTY_FIELDS = ['name', 'url', 'apiKey']
+const MODEL_DIRTY_FIELDS = [
+  'name', 'sysPrompt', 'reasoning', 'supportsVision', ...SAMPLER_FIELDS,
+]
+
+//: One draft against the baseline it was filled from: the store's row put
+//: through **the same constructor that fills the form**, so a comparison never
+//: trips on a shape difference the form itself introduces (an absent `reasoning`
+//: is `''` on both sides). With no row to answer for, the baseline is the empty
+//: form the `+` produced, which is the only honest one: an Add the user opened
+//: and never typed in has nothing to lose.
+function draftWouldLose(draft, { row, fields, draftOf }) {
+  if (!draft) return false
+  const baseline = draftOf(row ?? null)
+  if (draft.id == null) {
+    // Unsaved: judged against the empty form, which is the only thing it can
+    // have departed from.
+    return !sameFields(draft, baseline, fields)
+  }
+  // A row the store no longer holds: what is typed addresses nothing, and the
+  // only way to leave it behind is on purpose.
+  if (!row) return true
+  return !sameFields(draft, baseline, fields)
+}
+
+function sameFields(draft, baseline, fields) {
+  return fields.every((field) => sameField(draft?.[field], baseline?.[field]))
+}
+
+//: Two field-values, *the same thing the form holds*. A number typed into a
+//: `type="number"` input arrives as a string while the store's row has a number,
+//: and an unset column is `null` on one side and `''` on the other — neither is
+//: work somebody typed, so neither may make the guard ask. Anything else is
+//: compared as it stands.
+function sameField(held, stored) {
+  if ((held ?? '') === (stored ?? '')) return true
+  const bothFilled = held !== '' && held != null && stored !== '' && stored != null
+  if (!bothFilled) return false
+  const a = Number(held)
+  const b = Number(stored)
+  return Number.isFinite(a) && Number.isFinite(b) && a === b
+}
+
+export function closeWouldLoseForSettings(appState) {
+  const servers = Array.isArray(appState?.servers) ? appState.servers : []
+  const models = servers.flatMap((server) => server.models ?? [])
+  if (
+    draftWouldLose(appState?.serverDraft ?? null, {
+      row: servers.find((server) => server.id === appState?.serverDraft?.id) ?? null,
+      fields: SERVER_DIRTY_FIELDS,
+      draftOf: serverRowDraft,
+    })
+  ) {
+    return true
+  }
+  if (
+    draftWouldLose(appState?.modelDraft ?? null, {
+      row: models.find((model) => model.id === appState?.modelDraft?.id) ?? null,
+      fields: MODEL_DIRTY_FIELDS,
+      draftOf: modelRowDraft,
+    })
+  ) {
+    return true
+  }
+  if (hubTogglesDiffer(appState?.mcpEnabled, appState?.mcpConnectors)) return true
+  return hubTogglesDiffer(appState?.lspActivated, appState?.lspServers)
+}
+
+//: A hub section's ticks are unsaved work the moment they disagree with the
+//: declaration the read answered — the same shape as a draft against its row,
+//: and needing no baseline of its own because the read's rows carry it. Order is
+//: never a difference: both verbs re-materialise their list in declaration order.
+function hubTogglesDiffer(selected, rows) {
+  const stored = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row?.active)
+    .map((row) => row.id)
+  const held = Array.isArray(selected) ? selected : []
+  if (stored.length !== held.length) return true
+  const set = new Set(held)
+  return stored.some((id) => !set.has(id))
+}
+
 // The destructive confirmations D12 asks for. They name what else goes with the
 // row, because that is the part a user cannot retype — and the cascade is the
 // schema's, so the client states its consequence without owning its rule.
@@ -418,14 +523,65 @@ export function useAppShell() {
     }
   }
 
+  //: Leaving the dialog. **`Close` is its only exit and it writes nothing**, so
+  //: while the dialog holds work that was typed and never written it asks first,
+  //: in place — the Agents card's D8, ported here. `closeSettings` is the act
+  //: itself and is reached by an unguarded close, by `Discard and close`, and by
+  //: nothing else: every other route asks.
   function closeSettings() {
     state.settingsOpen = false
     state.settingsError = null
     // A delete that was asked but never answered dies with the dialog: the pair
     // is absent from the DOM when it is closed, so a pending question must not
-    // survive to be answered against a state it was not asked in.
+    // survive to be answered against a state it was not asked in. The same is
+    // true of the close question itself.
     state.pendingDelete = null
     state.pendingDeleteSentence = null
+    state.pendingClose = false
+    state.pendingCloseOpensAgentModes = false
+    // The **in-memory forms go with the close**, so a re-open reads the store
+    // afresh — the Agents card's rule, and the one that makes this guard's
+    // answer mean what it says: `Discard and close` that left the typing in the
+    // singleton would ask the same question again on the next open, forever.
+    state.selectedServerId = null
+    state.selectedModelId = null
+    state.serverDraft = null
+    state.modelDraft = null
+    // The hub ticks are the two forms the same reasoning covers; each section's
+    // read re-derives them from the declaration's `active` flags on the next open.
+    state.mcpEnabled = []
+    state.lspActivated = []
+  }
+
+  //: **`Close`** (and Escape, and a backdrop click — the same verb, so they
+  //: cannot be a silent bypass of the guard): leave, unless something would be
+  //: lost, in which case ask. Asking changes nothing else — no selection moves,
+  //: no field is touched, nothing is written — and it abandons a pending delete,
+  //: for which nothing was written either.
+  function askCloseSettings() {
+    state.pendingDelete = null
+    state.pendingDeleteSentence = null
+    if (!closeWouldLoseForSettings(state)) {
+      closeSettings()
+      return false
+    }
+    state.pendingClose = true
+    return true
+  }
+
+  //: **`Keep editing`**: hide the pair and change nothing else, so the dialog is
+  //: exactly where the click on `Close` found it.
+  function dismissCloseSettings() {
+    state.pendingClose = false
+    state.pendingCloseOpensAgentModes = false
+  }
+
+  //: **`Discard and close`**: the same act as an unguarded `Close`, and it drops
+  //: the in-memory forms only — no store row is reset and no route is posted.
+  function discardAndCloseSettings() {
+    const opensAgentModes = state.pendingCloseOpensAgentModes
+    closeSettings()
+    if (opensAgentModes) state.agentModesRequest += 1
   }
 
   // -- the Models section: the store's servers and models -----------------------
@@ -804,10 +960,16 @@ export function useAppShell() {
   //
   // It closes this dialog on the way, because a `<dialog>` opened with
   // ``showModal`` is on top of everything: a card opened behind it would be a
-  // click that did nothing at all. Nothing is lost by closing it — every write
-  // lands as it is made, so there is no unsaved state here to abandon.
+  // click that did nothing at all. So this *is* a close, and it takes the close
+  // guard like every other route out — the sentence it is attached to can appear
+  // while a field holds typing, and a form the store never answered must not
+  // vanish because of a button the band offered. When the guard asks, the intent
+  // is remembered, so the answer that does leave also opens the card.
   function requestAgentModes() {
-    closeSettings()
+    if (askCloseSettings()) {
+      state.pendingCloseOpensAgentModes = true
+      return
+    }
     state.agentModesRequest += 1
   }
 
@@ -1012,6 +1174,9 @@ export function useAppShell() {
     setTab,
     openSettings,
     closeSettings,
+    askCloseSettings,
+    dismissCloseSettings,
+    discardAndCloseSettings,
     loadServers,
     selectServer,
     selectModel,

@@ -116,6 +116,8 @@ function resetShell() {
   state.fetchedModelsErrors = {}
   state.pendingDelete = null
   state.pendingDeleteSentence = null
+  state.pendingClose = false
+  state.pendingCloseOpensAgentModes = false
   state.focusTreeRowId = null
   state.agentModesRequest = 0
   state.mcpInstalled = true
