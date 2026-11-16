@@ -70,9 +70,13 @@ const state = reactive({
   // The pool's visible-restart fact (rule 23): this workspace's tools were just
   // admitted — its connectors and language servers are coming back — or were let
   // go, so the tab would otherwise show an empty catalogue with no explanation.
-  // It is a **status**, never an error, and it clears when a later read says the
+  // It is a **status**, never an error. It clears when a later read says the
   // set is live (`built: false` on a hub payload, or this root in the pool's
-  // summary).
+  // summary) — and, because an admission is bounded by the managers' own
+  // connect-retry windows, it also **clears itself** once
+  // `TOOLS_RESTARTING.ttlMs` has passed, so a `built: true` that landed last
+  // in the boot race can never stick. The flag and its timer are written only
+  // through `setToolsRestarting`, so the two cannot drift apart.
   toolsRestarting: false,
   // The pool's own sentence when it refused to admit this workspace (the
   // ceiling). It is the server's text, verbatim, and the app bar shows it as an
@@ -84,6 +88,40 @@ const state = reactive({
 // is the ceiling's; this line is the interface's own, because the payload's
 // `built` flag is a fact rather than a sentence.
 export const TOOLS_RESTARTING_TEXT = "this workspace's tools are restarting"
+
+// How long the line may stay without a live answer. "Restarting" is a
+// transient by definition: an admission ends when the managers' own
+// connect-retry windows have burned out, and `ttlMs` is that worst case plus
+// slack — the MCP hub's local-external window (60 retries × 0.5 s, plus the
+// close grace it spends between them) and the LSP hub's stuck-starting
+// budget (a 60 s handshake + 2×5 s grace + 15 s). A healthy set answers
+// within a few seconds, so the timer only fires when nothing else will
+// clear the flag for the tab. A property rather than a bare constant, so a
+// test patches `TOOLS_RESTARTING.ttlMs` and the arm below reads it at call
+// time.
+export const TOOLS_RESTARTING = {
+  ttlMs: (60 * 0.5 + 5 + 60 + 2 * 5 + 15) * 1000 + 10_000,
+}
+
+// The flag's one writer, with its timer. Setting the flag arms the
+// self-clearing; any write — `true` or `false` — replaces rather than stacks
+// the pending timer, so an old expiry cannot clear a newer restart.
+let restartingTimer = null
+
+export function setToolsRestarting(value) {
+  if (restartingTimer) {
+    clearTimeout(restartingTimer)
+    restartingTimer = null
+  }
+  state.toolsRestarting = !!value
+  if (state.toolsRestarting) {
+    restartingTimer = setTimeout(() => {
+      restartingTimer = null
+      state.toolsRestarting = false
+    }, TOOLS_RESTARTING.ttlMs)
+    if (restartingTimer.unref) restartingTimer.unref()
+  }
+}
 
 // -- the tab's storage, tolerant on both ends ----------------------------------
 //
@@ -180,12 +218,15 @@ function adopt(resolvedRoot, block, hubs) {
  * `built: true` is the **visible restart** the pool reports when this request is
  * the one that admitted the workspace (spec §5.4 rule 23): its tools are coming
  * back. `built: false` is the other half — this request found the set already
- * live, so the line clears. A hub route that answered at all means the ceiling
- * did not refuse this workspace, so a stale ceiling sentence clears too.
+ * live, so the line clears. Either way the write goes through
+ * `setToolsRestarting`, so a `built: true` that lands last in the boot race
+ * cannot stick: it expires like every other restart. A hub route that answered
+ * at all means the ceiling did not refuse this workspace, so a stale ceiling
+ * sentence clears too.
  */
 export function noteHubPayload(payload) {
   if (!payload || typeof payload.built !== 'boolean') return
-  state.toolsRestarting = payload.built
+  setToolsRestarting(payload.built)
   state.poolRefusal = null
 }
 
@@ -200,17 +241,17 @@ export function noteHubPayload(payload) {
  */
 export function noteWorkspaceHubs(hubs, root = state.workspace) {
   if (!hubs) {
-    state.toolsRestarting = false
+    setToolsRestarting(false)
     return
   }
   const built = !!(hubs.mcp?.built || hubs.lsp?.built)
   const pool = hubs.pool
   if (pool && Array.isArray(pool.workspaces)) {
     const live = pool.workspaces.some((row) => row?.root === root)
-    state.toolsRestarting = built || !live
+    setToolsRestarting(built || !live)
     return
   }
-  state.toolsRestarting = built
+  setToolsRestarting(built)
 }
 
 /**

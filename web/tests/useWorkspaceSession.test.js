@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   AGENT_STORAGE_KEY,
+  TOOLS_RESTARTING,
   WORKSPACE_STORAGE_KEY,
   loadWorkspace,
+  setToolsRestarting,
   setWorkspaceFromField,
   useWorkspaceSession,
   withWorkspace,
@@ -71,6 +73,9 @@ function reset() {
   state.error = null
   state.policy = null
   state.policyNote = null
+  // Through the setter, not a direct write: it also drops any pending
+  // self-clearing timer a previous test armed.
+  setToolsRestarting(false)
   window.sessionStorage.clear()
   window.localStorage.clear()
 }
@@ -460,6 +465,77 @@ describe('the one gesture: point this tab at the field', () => {
     expect(catalogue()).toBe(before)
     // And no catalogue route was asked: the read is about the folder, nothing else.
     expect(urls).toEqual([`/api/workspace?workspace=${encodeURIComponent('/srv/other')}`])
+  })
+})
+
+describe('the restarting status is a transient, not an edge', () => {
+  beforeEach(() => {
+    reset()
+    vi.restoreAllMocks()
+  })
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  // BUG-01: the flag used to be a last-writer-wins boolean with no expiry, so
+  // a `built: true` that landed last in the boot admission race (or a
+  // let-go-and-rebuild after 30 idle minutes) stuck until a full reload.
+  // "Restarting" is transient by definition — the admission is bounded by the
+  // managers' connect-retry windows — so the flag must clear itself once that
+  // window has passed, with no payload and no user action at all.
+  it('clears itself once the restart window has passed, with no payload at all', async () => {
+    // The file-top bindings, not a fresh dynamic import: a `vi.resetModules()`
+    // elsewhere in the file would hand `import` back a second instance whose
+    // flag is not the one this file's `state` reads.
+    TOOLS_RESTARTING.ttlMs = 25
+    try {
+      setToolsRestarting(true)
+      expect(state.toolsRestarting).toBe(true)
+
+      await sleep(80)
+      expect(state.toolsRestarting).toBe(false)
+    } finally {
+      TOOLS_RESTARTING.ttlMs = 100_000
+    }
+  })
+
+  it('clears early when a live answer arrives before the window has passed', async () => {
+    TOOLS_RESTARTING.ttlMs = 2_000
+    try {
+      setToolsRestarting(true)
+      await sleep(30)
+      expect(state.toolsRestarting).toBe(true)
+
+      // A later `built: false` payload is the "up again" half.
+      setToolsRestarting(false)
+      expect(state.toolsRestarting).toBe(false)
+    } finally {
+      TOOLS_RESTARTING.ttlMs = 100_000
+    }
+  })
+
+  // The pending timer belongs to the restart it was armed for. A write
+  // replaces it, so the old expiry cannot clear a newer restart that was
+  // still inside its own window.
+  it('a newer restart is not cleared by an older expiry', async () => {
+    TOOLS_RESTARTING.ttlMs = 30
+    try {
+      setToolsRestarting(true) // first restart: 30 ms window
+      await sleep(10)
+
+      // A live answer, then a let-go-and-rebuild inside the first window.
+      setToolsRestarting(false)
+      TOOLS_RESTARTING.ttlMs = 200
+      setToolsRestarting(true)
+
+      // The first restart's expiry has passed; the newer one is still live.
+      await sleep(80)
+      expect(state.toolsRestarting).toBe(true)
+
+      await sleep(300)
+      expect(state.toolsRestarting).toBe(false)
+    } finally {
+      TOOLS_RESTARTING.ttlMs = 100_000
+    }
   })
 })
 

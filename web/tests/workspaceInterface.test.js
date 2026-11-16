@@ -14,11 +14,13 @@ import { useBatch } from '../src/composables/useBatch'
 import { loadChatMcp, useChat } from '../src/composables/useChat'
 import {
   AGENT_STORAGE_KEY,
+  TOOLS_RESTARTING,
   TOOLS_RESTARTING_TEXT,
   WORKSPACE_STORAGE_KEY,
   loadWorkspace,
   locationNoteVerdict,
   noteHubPayload,
+  setToolsRestarting,
   setWorkspaceFromField,
   useWorkspaceSession,
 } from '../src/composables/useWorkspaceSession'
@@ -117,7 +119,9 @@ function reset() {
   sessionState.error = null
   sessionState.policy = null
   sessionState.policyNote = null
-  sessionState.toolsRestarting = false
+  // Through the setter: it also drops any pending self-clearing timer a
+  // previous test armed.
+  setToolsRestarting(false)
   sessionState.poolRefusal = null
 
   chat.phase = 'idle'
@@ -304,6 +308,51 @@ describe("this workspace's tools are restarting", () => {
     expect(line[0].text()).toContain('/w/nope')
     expect(line[0].attributes('role')).toBe('alert')
     wrapper.unmount()
+  })
+
+  // BUG-01: at boot the workspace read finds no live set (the flag is set
+  // before any tools exist), then the two hub reads race — one of them is the
+  // admission and answers `built: true`. That writer used to win forever, so
+  // the line stuck until a reload even though the tools were demonstrably up.
+  // The flag must not remain set after an admission whose set is live: once
+  // the restart window has passed, the line is gone with no payload at all.
+  it('does not stick after the boot admission race left built last', async () => {
+    // `TOOLS_RESTARTING` is the file-top import, not a fresh dynamic one: a
+    // previous test's `vi.resetModules()` makes `await import` hand back a
+    // second module instance whose flag is not the one `loadWorkspace` writes.
+    TOOLS_RESTARTING.ttlMs = 40
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+    try {
+      // 1. The boot read: the folder is not live in the pool yet, so the
+      //    workspace-read path sets the flag immediately.
+      vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+        const key = String(url)
+        if (key.startsWith('/api/workspace')) {
+          return jsonResponse(workspacePayload({ workspace: TAB_ROOT, live: [] }))
+        }
+        return jsonResponse({})
+      })
+      await loadWorkspace()
+      expect(sessionState.toolsRestarting).toBe(true)
+
+      // 2. The two hub reads land, and the admitting one's `built: true` is
+      //    the **last** writer to reach the flag — the race losing nothing.
+      noteHubPayload({ built: false })
+      noteHubPayload({ built: true })
+      const wrapper = mount(AppBar)
+      expect(notes(wrapper)[0].text()).toBe(TOOLS_RESTARTING_TEXT)
+
+      // 3. Nothing else answers — no tab switch, no dialog, no reload. The
+      //    restart window is all the tab gets, and it is enough.
+      await sleep(120)
+      await wrapper.vm.$nextTick()
+      expect(notes(wrapper)).toHaveLength(0)
+      expect(sessionState.toolsRestarting).toBe(false)
+      wrapper.unmount()
+    } finally {
+      TOOLS_RESTARTING.ttlMs = 100_000
+    }
   })
 })
 
