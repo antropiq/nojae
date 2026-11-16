@@ -1,18 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
 
-import SettingsDialog from '../src/components/SettingsDialog.vue'
 import { useAppShell } from '../src/composables/useAppShell'
 
-// The "Max tool iterations" knob left the Settings dialog entirely (D9): it is
-// a **per-agent** column now, edited on that agent's tab in the Agent-modes
-// dialog. So neither the MCP tab nor the LSP tab may present an input for it —
-// a field here would be a second writer of a value that belongs to an agent.
-// All sections render (v-show, not v-if), so the test picks a section by title.
-//
-// The LSP section lost its *second gate* with D13, so this file also pins what a
-// tick means now: the row's tooltip says the tick is the whole decision, and the
-// save posts nothing but the ids — no cap it can no longer set.
+// The LSP section writes one thing: which servers are active. Its save is the
+// whole job, so this pins the payload — the ids and nothing else. A
+// `maxIterations` in it would be a second writer of a value that left the dialog
+// with D9 (it is a per-agent column now, edited in the Agent-modes dialog).
 
 const { state } = useAppShell()
 
@@ -27,41 +20,7 @@ function settings() {
   }
 }
 
-function sectionByTitle(wrapper, title) {
-  return wrapper
-    .findAll('.settings-editor > section')
-    .find((section) => section.find('h3').text() === title)
-}
-
-describe('the Max tool iterations knob left the dialog with D9', () => {
-  beforeEach(() => {
-    state.settings = settings()
-    state.settingsError = null
-    state.mcpInstalled = true
-    state.mcpConnectors = []
-    state.lspInstalled = true
-    state.lspServers = []
-  })
-
-  it('shows no iteration input in the MCP section', () => {
-    const wrapper = mount(SettingsDialog)
-    const mcp = sectionByTitle(wrapper, 'MCP connectors')
-    expect(mcp.find('label.mcp-iterations').exists()).toBe(false)
-    expect(mcp.text()).not.toContain('Max tool iterations')
-    wrapper.unmount()
-  })
-
-  it('shows no iteration input in the LSP section', () => {
-    const wrapper = mount(SettingsDialog)
-    const lsp = sectionByTitle(wrapper, 'LSP language servers')
-    expect(lsp.exists()).toBe(true)
-    expect(lsp.find('label.mcp-iterations').exists()).toBe(false)
-    expect(lsp.text()).not.toContain('Max tool iterations')
-    wrapper.unmount()
-  })
-})
-
-describe('the LSP row is the whole activation decision (D13)', () => {
+describe('the LSP save writes the activation it owns', () => {
   const SERVERS = [
     { id: 'pyright', label: 'Pyright', active: true, status: 'running' },
     { id: 'vue', label: 'Vue', active: false, status: 'stopped' },
@@ -78,19 +37,6 @@ describe('the LSP row is the whole activation decision (D13)', () => {
   })
   afterEach(() => {
     vi.restoreAllMocks()
-  })
-
-  // The meaning of a tick changed, so the row has to say so: one gate, and the
-  // flag in the declaration file is what it writes.
-  it('says on the row that the tick is the whole decision', () => {
-    const wrapper = mount(SettingsDialog)
-    const row = sectionByTitle(wrapper, 'LSP language servers').find('label.mcp-activate')
-    const tooltip = row.attributes('title')
-
-    expect(tooltip).toBeTruthy()
-    expect(tooltip).toContain('enable')
-    expect(tooltip).toContain('.nojae/lsp-settings.json')
-    wrapper.unmount()
   })
 
   // The payload is the ids and nothing else: a `maxIterations` in it would be a

@@ -838,18 +838,59 @@ body {
   column-gap: var(--bi-space-2);
 }
 
-/* -- the Models section (appdb-08) ---------------------------------------------
+/* -- the Servers section (appdb-08, settings-dialog-migration-plan §4) ---------
 
-   The connection's master–detail, inside the section the dialog's own
-   two-column body already gives it: servers on the left, the selected row's
-   fields on the right. It reuses `.settings-grid` for the samplers and the
-   `.settings-nav button` look for its rows, so only what this section has and
-   nothing else in the dialog does is declared here. */
-.models-body {
+   The connection's master–detail: servers on the left, the selected row's fields
+   on the right. It is the Agents card's geometry — the toolbar and the tree take
+   the left column's two rows, the detail column spans both — so the two dialogs
+   put a toolbar over a list in the same place and share `.agent-modes-body`,
+   `.agent-modes-toolbar` and the fixed `.agent-modes-slot` boxes for it (§6.2).
+   It has no `.agent-modes-heading`: the section strip above the body already
+   reads `Servers`, so a heading here would title the same thing twice. What
+   follows is only what this section has and the Agents card does not: the two
+   columns' proportion, the detail strip, the model page's field grid and the
+   listing table. */
+/* ~1/5 : 4/5. The tree's longest line is a server name plus a count, so it gets
+   the narrower column; the detail column holds a three-column form. The tree's
+   row is the only flexible one, so the toolbar above it never scrolls away. */
+.settings-models {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-  gap: var(--bi-space-3);
-  align-items: start;
+  height: 100%;
+  gap: var(--bi-space-2) var(--bi-space-3);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 4fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  /* Pico puts a block margin under every `section`, and this one is `height:
+     100%` of a scroll container — so the margin made the content 14px taller
+     than the box and the dialog showed a **permanent** scrollbar with nothing
+     to scroll, in every state. It spaces nothing: the footer is a sibling of
+     the body this section fills, not something below it. */
+  margin-bottom: 0;
+}
+
+/* The shared toolbar rule puts it under a heading; this section has none, so it
+   takes the first row and the tree the second. */
+.settings-models .agent-modes-toolbar {
+  grid-area: 1 / 1;
+}
+
+.models-tree {
+  grid-area: 2 / 1;
+  align-self: stretch;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.models-detail {
+  grid-area: 1 / 2 / 3 / 3;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* The column never scrolls: the listing table inside it owns its scrollbar
+     (§6.4), so a 200-name answer grows nothing here. */
+  overflow: hidden;
+  /* The column's own right edge is where a scrollbar would have been; the
+     fields need the gap the Agents card gives its form for the same reason. */
+  padding-right: 1rem;
 }
 
 .models-tree,
@@ -890,6 +931,7 @@ body {
 .models-name {
   flex: 1 1 auto;
   width: auto;
+  min-width: 0;
   margin: 0;
   padding: 0.3rem 0.5rem;
   border: 1px solid transparent;
@@ -899,6 +941,12 @@ body {
   font-size: 0.9rem;
   text-align: left;
   cursor: pointer;
+  /* One line per row, at any column width: a name that wrapped would make the
+     tree's rows different heights, which is the reflow the fixed columns exist
+     to avoid. The full name is the row's own text, so it is still reachable. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .models-name:hover {
@@ -917,20 +965,98 @@ body {
   font-weight: 400;
 }
 
-.models-detail-title {
-  margin: 0 0 var(--bi-space-1);
-  font-size: 0.95rem;
+/* -- the detail column's strip and its pages (§4.5) ---------------------------
+
+   The strip is **reserved** on the server page with its single `Settings` tab,
+   so selecting a model cannot push the first field down by a row. It reuses the
+   section strip's look, the way the tree rows already do. */
+.models-detail-tabs {
+  flex: 0 0 auto;
+  align-self: stretch;
+  margin-bottom: var(--bi-space-2);
 }
 
-.models-detail-actions,
-.models-add {
+/* Hidden, not removed: `visibility` keeps the row's height, which is the whole
+   point of reserving the strip — `display: none` would collapse it and lift the
+   first field by a row the moment a server was selected. A hidden button is out
+   of the tab order and unclickable, so the strip needs no other change. */
+.models-detail-tab--hidden {
+  visibility: hidden;
+}
+
+.models-page {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The model's Settings page is **one** three-column grid (§4.5): the name takes
+   a column, the reasoning level the two that are left, and the six samplers fall
+   into the same three columns two rows down — so every field's left edge on the
+   page is one of three. The vision tick sits at the row's right end. */
+.models-page--settings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: var(--bi-space-2);
+  row-gap: var(--bi-space-1);
+  align-content: start;
+  overflow-y: auto;
+}
+
+.models-field--name { grid-column: 1; }
+.models-field--reasoning { grid-column: 2 / 4; }
+.models-field--vision {
+  grid-column: 3;
+  justify-self: end;
+  align-self: end;
+}
+
+/* The System prompt page: one textarea filling the column (§4.5). The shared
+   `.settings-editor textarea` rule caps it at `min-height` and allows vertical
+   resize; here the row is flexible, so the field is the row. */
+.models-page--prompt {
   display: flex;
-  gap: var(--bi-space-1);
-  margin-top: var(--bi-space-2);
+  flex-direction: column;
 }
 
-.models-detail-actions button,
-.models-add button {
+.models-prompt {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Pico puts a form element's bottom margin on a textarea, which is the one
+     gap between this field and the row it is meant to fill. */
+  margin: 0;
+}
+
+/* The server page: Name and Server URL side by side, the key across the row,
+   then *Fetch models* under the key it dials, then the listing that answer
+   fills — the last row the only flexible one, so the table gets what is left. */
+.models-page--server {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  column-gap: var(--bi-space-2);
+  row-gap: var(--bi-space-1);
+}
+
+.models-server-name { grid-area: 1 / 1; }
+.models-server-url { grid-area: 1 / 2; }
+.models-server-key { grid-area: 2 / 1 / 3 / 3; }
+
+/* Pico puts a form element's bottom margin on every input, select and textarea,
+   so on this page it is paid three times over and taken straight out of the
+   listing. The grid's own row-gap already separates the rows, so the fields
+   keep only the line they need — every pixel here comes off the table, because
+   the card's height is fixed and the listing is the only row that flexes.
+   Descendant, not child: the API key's input is wrapped in `.password-field`
+   for its show/hide toggle, so a child selector would leave that row paying the
+   margin and stand 11px taller than its neighbours for no reason. */
+.models-page--server > label :is(input, select, textarea) {
+  margin-bottom: 0;
+}
+
+.models-fetch {
+  grid-area: 3 / 1;
+  justify-self: start;
+  align-self: start;
   flex: 0 0 auto;
   width: auto;
   margin: 0;
@@ -938,46 +1064,164 @@ body {
   font-size: 0.85rem;
 }
 
-/* What *Fetch models* answered for the server being edited: a compact listing
-   beside the button that asked for it, so the click has an answer on the row it
-   came from. The names are the server's own, so they are monospace and never
-   wrapped mid-id. */
-.models-fetched-list {
-  margin: var(--bi-space-1) 0 0;
-  padding-left: 1.1rem;
-  list-style: none;
-  columns: 2;
-  column-gap: var(--bi-space-2);
+/* The listing: a real `name` / `Add` table, and **its own** scroll container —
+   the pair the plan calls the one place a naive implementation fails (§6.4).
+   `overflow-y: auto` alone is not enough: the grid row above is `minmax(0, 1fr)`
+   and this box is `min-height: 0`, or a long answer grows the column instead of
+   scrolling here. */
+.models-listing {
+  grid-area: 4 / 1 / 5 / 3;
+  min-height: 0;
+  overflow-y: auto;
+  /* No margin-top: the grid's row-gap already separates it from *Fetch models*,
+     and adding to it spent 7px of the listing's own height. */
 }
 
-.models-fetched-list li {
+.models-listing-table {
+  width: 100%;
+  margin-bottom: 0;
+  font-size: 0.85rem;
+}
+
+.models-listing-table th,
+.models-listing-table td {
+  padding: 0.2rem 0.5rem;
+}
+
+/* The names are the server's own, so they are monospace and never wrapped
+   mid-id. */
+.models-listing-name {
   font-family: var(--pico-font-family-monospace);
-  font-size: 0.8rem;
-  color: var(--pico-muted-color);
-  break-inside: avoid;
+  word-break: break-all;
 }
 
-/* The unassigned line is quiet on purpose — a caption, not a banner — but it is
-   a button, because it is the way into the dialog that fixes it (§5.1). */
-.models-unassigned {
-  margin: 0 0 var(--bi-space-2);
+.models-listing-add-col,
+.models-listing-add {
+  width: 3rem;
+  text-align: center;
 }
 
-.models-unassigned-link {
+.models-add-row {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  /* Pico gives every button a bottom margin, and inside a table cell it raises
+     the row it sits in — 14px of the listing's height per row, a third of the
+     box. The cell's own padding already separates the rows. */
+  margin: 0;
+}
+
+/* -- the MCP and LSP sections' toolbars (§4.9) --------------------------------
+
+   Their `Save` left the footer so the footer is **one shape for all three
+   sections**: the band and `Close`. Each section's own toolbar is the same row
+   logic — the heading at one end, the verb at the other. */
+.settings-section-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--bi-space-2);
+  margin-bottom: var(--bi-space-2);
+}
+
+.settings-section-toolbar .settings-section-title {
+  margin: 0;
+}
+
+.settings-section-save {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0 0 0 auto;
+  padding-inline: 1.25rem;
+}
+
+/* The band's one actionable line: the cross-store count's way into the dialog
+   that fixes it. It is the band's button, not a message site of its own — the
+   line and this button are `messageFor`'s answer and nothing else. */
+.settings-message-action {
+  flex: 0 0 auto;
+  width: auto;
   margin: 0;
   padding: 0;
   border: none;
   background: transparent;
   color: var(--pico-primary);
-  font-size: inherit;
+  font-size: 0.82rem;
   text-decoration: underline;
   cursor: pointer;
 }
 
+/* The narrow clamp (T12). The card is desktop-only but clamped to `94vw`, so
+   the collapse order is decided rather than left to chance: the **tree** moves
+   above the detail column, because the column holds the row being edited and
+   must keep the width its form needs.
+   The section keeps its bounded height — dropping it here would un-bound the
+   flexible row, and a long listing would then grow the column instead of
+   scrolling inside itself, which is the one failure §6.4 warns about. */
 @media (max-width: 640px) {
-  .models-body {
+  .settings-models {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(6rem, 1fr) minmax(0, 2fr);
+  }
+
+  .models-tree {
+    grid-area: 2 / 1;
+  }
+
+  /* Stacked, the column no longer has room for the fields *and* a bounded
+     table, so it scrolls and the table keeps a usable floor instead of being
+     squeezed to nothing. */
+  .models-detail {
+    grid-area: 3 / 1;
+    overflow-y: auto;
+  }
+
+  .models-page--server {
+    grid-template-rows: auto auto auto auto auto;
+  }
+
+  .models-listing {
+    min-height: 10rem;
+  }
+}
+
+/* The model page's three columns are the width the form was designed for; below
+   it they become unreadable, so they collapse the way the shared `.settings-grid`
+   does at the same width. */
+@media (max-width: 560px) {
+  .models-page--settings {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .models-field--name,
+  .models-field--reasoning,
+  .models-field--vision {
+    grid-column: 1;
+  }
+
+  /* Only the tick keeps its own width: it is a checkbox and a sentence, not a
+     field, and stretching it would stretch the gap after the box. */
+  .models-field--vision {
+    justify-self: start;
+  }
+
+  .models-page--server {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  }
+
+  .models-server-name,
+  .models-server-url,
+  .models-server-key,
+  .models-fetch {
+    grid-column: 1;
+  }
+
+  .models-server-name { grid-area: 1 / 1; }
+  .models-server-url { grid-area: 2 / 1; }
+  .models-server-key { grid-area: 3 / 1; }
+  .models-fetch { grid-area: 4 / 1; }
+
+  .models-listing { grid-area: 5 / 1; }
 }
 
 /* Password input with an inline show/hide (eye) toggle. */

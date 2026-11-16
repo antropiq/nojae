@@ -1,37 +1,51 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import ApiKeyField from './ApiKeyField.vue'
-import {
-  SAMPLER_FIELDS,
-  draftKey,
-  fetchedModelIdsFor,
-  fetchedModelsErrorFor,
-  modelDeleteSentence,
-  samplerBounds,
-  serverDeleteSentence,
-  unassignedLine,
-  useAppShell,
-} from '../composables/useAppShell'
+import { SAMPLER_FIELDS, samplerBounds, useAppShell } from '../composables/useAppShell'
+import { useSettingsServers } from '../composables/useSettingsServers'
 
 const {
   state,
   closeSettings,
   selectServer,
   selectModel,
-  addServerRow,
-  addModelRow,
-  saveServerDraft,
-  saveModelDraft,
-  deleteServerRow,
-  deleteModelRow,
   toggleServerExpanded,
-  fetchServerModels,
+  setDetailTab,
   requestAgentModes,
   toggleMcp,
   saveMcp,
   toggleLsp,
   saveLsp,
 } = useAppShell()
+
+// **The dialog decides nothing.** Every enablement verdict, every tooltip, the
+// detail page that is drawn and the one message the band says are answered by
+// `useSettingsServers`; this file turns those answers into fields and buttons
+// (plan §6.1). A condition in this template would be a rule that can drift from
+// the control that shows it.
+const {
+  addSlot,
+  saveSlot,
+  deleteSlot,
+  deleteConfirmation,
+  fetchSlot,
+  mcpSaveSlot,
+  lspSaveSlot,
+  rows,
+  rowSlotFor,
+  tabs,
+  visibleTabs,
+  activeTab,
+  body,
+  message,
+  addRow,
+  saveRow,
+  addFromListing,
+  fetchModels,
+  askDelete,
+  dismissDelete,
+  confirmDelete,
+} = useSettingsServers()
 
 // This dialog edits the **installation's** catalogue — servers, models, the MCP
 // and LSP declarations — and deliberately has **no workspace control**: the
@@ -42,16 +56,23 @@ const {
 // carry the tab's folder through `withWorkspace`; that is the tab's own field
 // riding along, not a setting this dialog owns.
 const dialogEl = ref(null)
-const activeSection = ref('models')
 
-// The connection is one section now: the LLM fields and the sampling fields were
-// two halves of **one** thing, and a model carries its own samplers, so the
-// split stopped meaning anything the moment a model was a row (§5.1).
+// The three sections, and the strip that chooses between them. The first is
+// named for the tree's root object — a **server**, with its models under it —
+// which is what the toolbar's heading reads too (plan §4.1 / §4.2).
 const SECTIONS = [
-  { id: 'models', label: 'Models' },
+  { id: 'servers', label: 'Servers' },
   { id: 'mcp', label: 'MCP' },
   { id: 'lsp', label: 'LSP' },
 ]
+
+// The section strip's selection is the shell's, not this component's, for one
+// reason: the strip and the **one** message band have to agree about which
+// section the sentence on screen belongs to (§4.7). Choosing a section is a
+// plain assignment — no verdict is decided here.
+function setSection(id) {
+  state.activeSection = id
+}
 
 const MCP_STATUS_CLASS = {
   running: 'green',
@@ -77,63 +98,52 @@ const SAMPLER_LABELS = {
 // server spells it with an absent value, not a word.
 const reasoningLevels = computed(() => state.serversCaps?.reasoningLevels ?? [])
 
-// The fetched listing for the server the form is editing, and the key it is
-// filed under — both through the composable, so the dialog never re-derives
-// which listing belongs to which row.
-const fetchedIds = computed(() => fetchedModelIdsFor(state.serverDraft))
+// The strip's buttons, by position, so an arrow key can move focus as well as
+// selection. The list is re-taken whenever the strip changes, so a stale button
+// can never be focused.
+let detailTabRefs = []
+watch(() => tabs.value, () => { detailTabRefs = [] })
 
-// The same listing, read where *Fetch models* was clicked. The button is on the
-// server's fields and the `datalist` is on the model's, so the click alone asked
-// the server a question whose answer appeared somewhere else — nothing on the
-// row it was asked from ever changed. The server column therefore shows what its
-// own listing holds: a saved row reads the listing filed under its id (which is
-// also where a re-read files it), an unsaved one the listing under the new-row
-// key.
-const fetchedIdsForServer = computed(() => {
-  const draft = state.serverDraft
-  if (!draft) return []
-  return draft.id === null
-    ? fetchedModelIdsFor(draft)
-    : state.fetchedModelIds[draft.id] ?? []
-})
+function setDetailTabRef(el, index) {
+  detailTabRefs[index] = el ?? undefined
+}
 
-// The refusal this row's listing got, if it got one.
-const fetchedError = computed(() => fetchedModelsErrorFor(state.serverDraft))
+// The detail strip behaves as tabs: the buttons are a `tablist`, the arrow keys
+// walk between them, and only the selected one is in the tab order. A model is
+// the only row with two pages, so the list the keys walk is the composable's
+// `visibleTabs` — empty on the server page, where the strip is reserved but the
+// tabs are hidden (§4.5). The refs are kept by position in the **full** list,
+// which is what the `v-for` indexes, so the walked tab is looked up there.
+function onDetailTabKeydown(event, index) {
+  const step = { ArrowRight: 1, ArrowLeft: -1 }
+  const walkable = visibleTabs.value
+  if (walkable.length < 2) return
+  const at = walkable.findIndex((tab) => tab.id === tabs.value[index]?.id)
+  if (at === -1) return
+  let next
+  if (event.key in step) next = (at + step[event.key] + walkable.length) % walkable.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = walkable.length - 1
+  else return
+  event.preventDefault()
+  const target = walkable[next]
+  setDetailTab(target.id)
+  detailTabRefs[tabs.value.findIndex((tab) => tab.id === target.id)]?.focus()
+}
 
-// What the server column says when its listing is empty: the fetch is in flight,
-// or nothing was ever fetched. A failure is rendered as its own alert line, so
-// it is not repeated here.
-const fetchedIdsNote = computed(() =>
-  state.fetchedModelsLoading === draftKey(state.serverDraft)
-    ? 'Loading this server’s models…'
-    : 'No listing yet — ask this server what it offers, then add a model by one of those names.',
+// A model added from the listing must land on its own tree row (§9.1-3): the
+// name is already in the field, so focusing the row is what makes the tree's
+// keyboard position coherent and lets Tab walk into the form from there.
+watch(
+  () => state.focusTreeRowId,
+  async (id) => {
+    if (id === null || id === undefined) return
+    await nextTick()
+    const row = document.querySelector(`.models-name--model[data-model-id="${id}"]`)
+    row?.focus()
+    state.focusTreeRowId = null
+  },
 )
-
-// "2 of 4 agents have no model" — the sentence is the composable's arithmetic,
-// and the line is the only thing in this dialog that speaks about the other
-// store (§5.1). Clicking it opens the Agent-modes dialog, where a model is
-// assigned.
-const unassignedNote = computed(() => unassignedLine(state.unassigned))
-
-// The destructive confirmations (D12). The sentences name what else goes with
-// the row — a server takes its models with it, and every agent pointing at one
-// is left unrunnable — because that is the part nobody can retype. The store
-// keeps its own copy of the database before either delete lands.
-function removeServer() {
-  const server = state.servers.find((entry) => entry.id === state.selectedServerId)
-  if (!server) return
-  if (!window.confirm(serverDeleteSentence(server))) return
-  deleteServerRow(server.id)
-}
-
-function removeModel() {
-  const model = state.servers
-    .flatMap((server) => server.models)
-    .find((entry) => entry.id === state.selectedModelId)
-  if (!model) return
-  if (!window.confirm(modelDeleteSentence(model))) return
-  deleteModelRow(model.id)
-}
 
 // One gate decides whether a language server runs in this workspace: the
 // `enable` flag of its entry in `.nojae/lsp-settings.json`, which is what a
@@ -192,18 +202,10 @@ function serverDetail(server) {
     .join('\n')
 }
 
-// The app-level notice (§5.1): *no model configured*, or the store itself
-// unusable. The sentence is the server's — it already names what is wrong — so
-// the dialog shows it verbatim: it adds nothing and translates nothing.
-const storeNotice = computed(() => {
-  if (!state.storeState) return null
-  if (!state.storeState.usable) return state.storeState.sentence || null
-  if (!(state.config?.models ?? []).length) {
-    return 'No model is configured yet. Add a server and a model under it, then ' +
-      'assign one to the agent you use.'
-  }
-  return null
-})
+// The app-level notice (§5.1) — *no model configured*, or the store itself
+// unusable — is no longer assembled here: it is one of the lines the band's
+// single `messageFor` verdict chooses, so the dialog has one message area and
+// not six that each push different content down at a different moment.
 </script>
 
 <template>
@@ -219,9 +221,6 @@ const storeNotice = computed(() => {
     <header>
       <h2 id="settings-title" class="settings-title">Settings</h2>
     </header>
-    <p v-if="state.settingsError" class="alert-error" role="alert">
-      {{ state.settingsError }}
-    </p>
 
     <form class="settings-form" @submit.prevent>
       <nav class="settings-nav" aria-label="Settings sections">
@@ -229,9 +228,9 @@ const storeNotice = computed(() => {
           <li v-for="section in SECTIONS" :key="section.id">
             <button
               type="button"
-              :class="{ active: activeSection === section.id }"
-              :aria-current="activeSection === section.id ? 'true' : undefined"
-              @click="activeSection = section.id"
+              :class="{ active: state.activeSection === section.id }"
+              :aria-current="state.activeSection === section.id ? 'true' : undefined"
+              @click="setSection(section.id)"
             >
               {{ section.label }}
             </button>
@@ -241,7 +240,7 @@ const storeNotice = computed(() => {
 
       <div class="settings-body">
         <div class="settings-editor">
-          <!-- The Models section (§5.1): the store's servers on the left, each
+          <!-- The Servers section (§4): the store's servers on the left, each
                expandable to its own models, and the selected row's fields on the
                right. It is the old LLM and Sampling sections merged, because a
                model carries its own samplers — the split only made sense while
@@ -250,114 +249,223 @@ const storeNotice = computed(() => {
                No model is marked as special anywhere in here: which agent runs on
                which model is the agent's own field, and the question is asked in
                the Agent-modes dialog (D5). What this section says about that is
-               the one quiet line below. -->
-          <section v-show="activeSection === 'models'" class="settings-models">
-            <h3 class="settings-section-title">Models</h3>
-            <p v-if="storeNotice" class="caption alert-error mcp-externals-error" role="alert">
-              {{ storeNotice }}
-            </p>
-            <p v-if="state.serversError" class="caption alert-error mcp-externals-error" role="alert">
-              {{ state.serversError }}
-            </p>
-            <p v-if="unassignedNote" class="caption models-unassigned">
-              <button type="button" class="models-unassigned-link" @click="requestAgentModes">
-                {{ unassignedNote }} — assign one
-              </button>
-            </p>
+               the band's cross-store line, not a line of its own (§4.7).
 
-            <div class="models-body">
-              <ul class="models-tree" aria-label="Servers and their models">
-                <li v-if="state.serversLoading" class="caption">Loading servers…</li>
-                <li v-else-if="!state.servers.length" class="caption">
-                  No server configured yet.
-                </li>
-                <li v-for="server in state.servers" :key="server.id" class="models-server">
-                  <div class="models-row">
+               The body is the shared two-column grid, with the toolbar and the
+               tree down the left column's two rows and the detail column spanning
+               both — the Agents card's geometry, so the two dialogs put a toolbar
+               over a list in the same place (§4.3, §6.2). It has no heading of its
+               own: the section strip one row above already reads `Servers`, and
+               repeating it there is a second title for the thing it titles. -->
+          <section v-show="state.activeSection === 'servers'" class="settings-models">
+            <!-- **Three verb slots, a spacer, two reserved confirmation slots** —
+                 the Agents card's toolbar, in the shared classes. Every slot keeps
+                 its size whether or not it holds a button, so the pair's arrival
+                 moves nothing and the toolbar never changes height. The verbs are
+                 scoped to the page that is visible, which is why no label spells
+                 its scope (§4.3). -->
+            <div class="agent-modes-toolbar" role="group" aria-label="Server and model actions">
+              <span class="agent-modes-slot">
+                <button
+                  class="icon-btn servers-add"
+                  type="button"
+                  :disabled="addSlot.disabled"
+                  :aria-label="addSlot.label"
+                  :title="addSlot.label"
+                  @click="addRow"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
+              </span>
+              <span class="agent-modes-slot">
+                <button
+                  class="icon-btn servers-save"
+                  type="button"
+                  :disabled="saveSlot.disabled"
+                  :aria-label="saveSlot.label"
+                  :title="saveSlot.label"
+                  @click="saveRow"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                    <path d="M17 21v-8H7v8" />
+                    <path d="M7 3v5h8" />
+                  </svg>
+                </button>
+              </span>
+              <span class="agent-modes-slot">
+                <button
+                  class="icon-btn servers-delete"
+                  type="button"
+                  :disabled="deleteSlot.disabled"
+                  :aria-label="deleteSlot.label"
+                  :title="deleteSlot.label"
+                  @click="askDelete"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 6h18" />
+                    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                    <path d="M10 11v6M14 11v6" />
+                  </svg>
+                </button>
+              </span>
+              <span class="agent-modes-toolbar-space"></span>
+              <!-- The delete pair, **absent from the DOM** until asked (§4.8). Its
+                   slots were already reserved, so the three verbs do not move when
+                   it arrives; the sentence naming what the delete takes with it is
+                   the band's, not the toolbar's. -->
+              <span class="agent-modes-slot">
+                <button
+                  v-if="deleteConfirmation.rendered"
+                  class="icon-btn agent-modes-cancel servers-cancel-delete"
+                  type="button"
+                  :disabled="deleteConfirmation.cancel.disabled"
+                  :aria-label="deleteConfirmation.cancel.label"
+                  :title="deleteConfirmation.cancel.label"
+                  @click="dismissDelete"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M18 6 6 18" />
+                    <path d="m6 6 12 12" />
+                  </svg>
+                </button>
+              </span>
+              <span class="agent-modes-slot">
+                <button
+                  v-if="deleteConfirmation.rendered"
+                  class="icon-btn agent-modes-confirm servers-confirm-delete"
+                  type="button"
+                  :disabled="deleteConfirmation.confirm.disabled"
+                  :aria-label="deleteConfirmation.confirm.label"
+                  :title="deleteConfirmation.confirm.label"
+                  @click="confirmDelete"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                </button>
+              </span>
+            </div>
+
+            <!-- The tree is the grid's only flexible row, so it scrolls in its own
+                 bounded area and the toolbar above it never scrolls away with it. -->
+            <ul class="models-tree" aria-label="Servers and their models">
+              <li v-if="state.serversLoading" class="caption">Loading servers…</li>
+              <li v-else-if="!state.servers.length" class="caption">
+                No server configured yet.
+              </li>
+              <li v-for="server in state.servers" :key="server.id" class="models-server">
+                <div class="models-row">
+                  <button
+                    type="button"
+                    class="models-disclosure"
+                    :aria-expanded="state.expandedServers.includes(server.id) ? 'true' : 'false'"
+                    :title="server.models.length ? 'Show or hide its models' : 'This server has no models yet'"
+                    @click="toggleServerExpanded(server.id)"
+                  >
+                    {{ state.expandedServers.includes(server.id) ? '▾' : '▸' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="models-name"
+                    :class="{ active: state.selectedServerId === server.id && state.selectedModelId === null }"
+                    :aria-current="state.selectedServerId === server.id && state.selectedModelId === null ? 'true' : undefined"
+                    @click="selectServer(server.id)"
+                  >
+                    {{ server.name }}
+                    <span class="models-count">[{{ server.models.length }}]</span>
+                  </button>
+                </div>
+                <ul v-if="state.expandedServers.includes(server.id)" class="models-children">
+                  <li v-for="model in server.models" :key="model.id" class="models-row">
                     <button
                       type="button"
-                      class="models-disclosure"
-                      :aria-expanded="state.expandedServers.includes(server.id) ? 'true' : 'false'"
-                      :title="server.models.length ? 'Show or hide its models' : 'This server has no models yet'"
-                      @click="toggleServerExpanded(server.id)"
+                      class="models-name models-name--model"
+                      :data-model-id="model.id"
+                      :class="{ active: state.selectedModelId === model.id }"
+                      :aria-current="state.selectedModelId === model.id ? 'true' : undefined"
+                      @click="selectModel(model.id)"
                     >
-                      {{ state.expandedServers.includes(server.id) ? '▾' : '▸' }}
+                      {{ model.name }}
                     </button>
-                    <button
-                      type="button"
-                      class="models-name"
-                      :class="{ active: state.selectedServerId === server.id && state.selectedModelId === null }"
-                      :aria-current="state.selectedServerId === server.id && state.selectedModelId === null ? 'true' : undefined"
-                      @click="selectServer(server.id)"
+                  </li>
+                </ul>
+              </li>
+            </ul>
+
+              <div class="models-detail">
+                <!-- The detail column's two pages (§4.5). Both tabs stay in the DOM
+                     and the strip is **reserved** whatever is selected, so choosing
+                     a model cannot push the first field down by a row. On the server
+                     page they are hidden rather than removed: the section strip
+                     above already reads `Servers`, so a `Settings` tab there would
+                     repeat it — and removing the row is what would move the fields.
+                     Which page is drawn is `body`'s answer, never a condition here. -->
+                <nav class="settings-nav models-detail-tabs" aria-label="Model page">
+                  <ul role="tablist">
+                    <li
+                      v-for="(tab, index) in tabs"
+                      :key="tab.id"
+                      :class="{ 'models-detail-tab--hidden': tab.hidden }"
                     >
-                      {{ server.name }}
-                      <span class="models-count">[{{ server.models.length }}]</span>
-                    </button>
-                  </div>
-                  <ul v-if="state.expandedServers.includes(server.id)" class="models-children">
-                    <li v-for="model in server.models" :key="model.id" class="models-row">
                       <button
+                        :id="`models-tab-${tab.id}`"
                         type="button"
-                        class="models-name models-name--model"
-                        :class="{ active: state.selectedModelId === model.id }"
-                        :aria-current="state.selectedModelId === model.id ? 'true' : undefined"
-                        @click="selectModel(model.id)"
+                        role="tab"
+                        class="models-detail-tab"
+                        :class="{ active: activeTab === tab.id }"
+                        :aria-selected="activeTab === tab.id ? 'true' : 'false'"
+                        :aria-controls="`models-panel-${tab.id}`"
+                        :tabindex="activeTab === tab.id ? 0 : -1"
+                        :ref="(el) => setDetailTabRef(el, index)"
+                        @click="setDetailTab(tab.id)"
+                        @keydown="onDetailTabKeydown($event, index)"
                       >
-                        {{ model.name }}
+                        {{ tab.label }}
                       </button>
                     </li>
                   </ul>
-                </li>
-              </ul>
+                </nav>
 
-              <div class="models-detail">
-                <!-- A model's fields win the column when one is selected: the
-                     server is its parent, and the row the user clicked is the
-                     one they mean to edit. -->
-                <template v-if="state.modelDraft">
-                  <h4 class="models-detail-title">
-                    {{ state.modelDraft.id === null ? 'New model' : state.modelDraft.name }}
-                  </h4>
-                  <label>
+                <!-- Both pages read and write **one** `state.modelDraft`, so the
+                     tab is presentation only: a keystroke made on either page is
+                     on the other the moment it is drawn, and switching writes
+                     nothing (§4.5). No API key appears on either: the credential
+                     is a server column and a model request never carries one (§2.1). -->
+                <div
+                  v-if="body === 'modelSettings'"
+                  id="models-panel-settings"
+                  role="tabpanel"
+                  aria-labelledby="models-tab-settings"
+                  class="models-page models-page--settings"
+                >
+                  <!-- One three-column grid for the whole page (§4.5): the name
+                       takes a column, the reasoning level the two that are left,
+                       and the six samplers fall into the same columns two rows
+                       down — so every field's left edge is one of three, and the
+                       vision tick sits at the row's right end. -->
+                  <label class="models-field models-field--name">
                     Model name
                     <input
                       v-model="state.modelDraft.name"
                       type="text"
-                      list="models-fetched"
                       placeholder="exactly as the server names it"
                     />
                   </label>
-                  <datalist id="models-fetched">
-                    <option v-for="id in fetchedIds" :key="id" :value="id"></option>
-                  </datalist>
-                  <p v-if="!fetchedIds.length" class="caption">
-                    {{ state.fetchedModelsLoading === draftKey(state.serverDraft)
-                      ? 'Loading this server’s models…'
-                      : 'No listing yet — use Fetch models on the server, or type the name.' }}
-                  </p>
-                  <p v-if="fetchedError" class="caption alert-error" role="alert">
-                    {{ fetchedError }}
-                  </p>
-                  <label>
-                    System prompt
-                    <textarea
-                      v-model="state.modelDraft.sysPrompt"
-                      rows="3"
-                      placeholder="You are a helpful assistant."
-                    ></textarea>
-                  </label>
-                  <div class="settings-grid">
-                    <label v-for="field in SAMPLER_FIELDS" :key="field">
-                      {{ SAMPLER_LABELS[field] }}
-                      <input
-                        v-model="state.modelDraft[field]"
-                        type="number"
-                        :step="field === 'topK' ? '1' : '0.1'"
-                        :min="samplerBounds(state.serversCaps, field).min ?? undefined"
-                        :max="samplerBounds(state.serversCaps, field).max ?? undefined"
-                      />
-                    </label>
-                  </div>
-                  <label>
+                  <label class="models-field models-field--reasoning">
                     Reasoning level
                     <select v-model="state.modelDraft.reasoning">
                       <option value="">None</option>
@@ -370,39 +478,55 @@ const storeNotice = computed(() => {
                       </option>
                     </select>
                   </label>
-                  <label class="settings-vision">
+                  <label
+                    v-for="field in SAMPLER_FIELDS"
+                    :key="field"
+                    class="models-field models-field--sampler"
+                  >
+                    {{ SAMPLER_LABELS[field] }}
+                    <input
+                      v-model="state.modelDraft[field]"
+                      type="number"
+                      :step="field === 'topK' ? '1' : '0.1'"
+                      :min="samplerBounds(state.serversCaps, field).min ?? undefined"
+                      :max="samplerBounds(state.serversCaps, field).max ?? undefined"
+                    />
+                  </label>
+                  <label class="models-field models-field--vision">
                     <input type="checkbox" v-model="state.modelDraft.supportsVision" />
                     Model accepts image input (vision)
                   </label>
-                  <div class="models-detail-actions">
-                    <button
-                      type="button"
-                      :disabled="state.settingsSaving"
-                      @click="saveModelDraft"
-                    >
-                      {{ state.settingsSaving ? 'Saving…' : 'Save model' }}
-                    </button>
-                    <button
-                      v-if="state.modelDraft.id !== null"
-                      type="button"
-                      class="secondary contrast"
-                      :disabled="state.settingsSaving"
-                      @click="removeModel"
-                    >
-                      Remove model
-                    </button>
-                  </div>
-                </template>
+                </div>
 
-                <template v-else-if="state.serverDraft">
-                  <h4 class="models-detail-title">
-                    {{ state.serverDraft.id === null ? 'New server' : state.serverDraft.name }}
-                  </h4>
-                  <label>
+                <div
+                  v-else-if="body === 'modelPrompt'"
+                  id="models-panel-prompt"
+                  role="tabpanel"
+                  aria-labelledby="models-tab-prompt"
+                  class="models-page models-page--prompt"
+                >
+                  <textarea
+                    v-model="state.modelDraft.sysPrompt"
+                    class="models-prompt"
+                    placeholder="You are a helpful assistant."
+                  ></textarea>
+                </div>
+
+                <!-- The server page: its three fields, then *Fetch models* under
+                     the key it dials, then the listing that answer fills (§4.4).
+                     The verb sits **inside** the page rather than in the toolbar
+                     because what it answers is this page's body — which is also
+                     what makes its disabled state legible: it is disabled *about
+                     this server*, and the fields above it are the server. -->
+                <div
+                  v-else-if="body === 'server'"
+                  class="models-page models-page--server"
+                >
+                  <label class="models-server-name">
                     Name
                     <input v-model="state.serverDraft.name" type="text" placeholder="Local" />
                   </label>
-                  <label>
+                  <label class="models-server-url">
                     Server URL
                     <input
                       v-model="state.serverDraft.url"
@@ -410,98 +534,90 @@ const storeNotice = computed(() => {
                       placeholder="http://127.0.0.1:8080/v1"
                     />
                   </label>
-                  <label>
+                  <label class="models-server-key">
                     API key
                     <ApiKeyField v-model="state.serverDraft.apiKey" />
                   </label>
-                  <div class="models-detail-actions">
-                    <button
-                      type="button"
-                      :disabled="state.settingsSaving"
-                      @click="saveServerDraft"
-                    >
-                      {{ state.settingsSaving ? 'Saving…' : 'Save server' }}
-                    </button>
-                    <button
-                      type="button"
-                      :disabled="
-                        state.settingsSaving ||
-                        state.fetchedModelsLoading === draftKey(state.serverDraft)
-                      "
-                      title="Ask this server which models it offers, for the model name field"
-                      @click="fetchServerModels"
-                    >
-                      {{ state.fetchedModelsLoading === draftKey(state.serverDraft)
-                        ? 'Fetching…'
-                        : 'Fetch models' }}
-                    </button>
-                    <button
-                      v-if="state.serverDraft.id !== null"
-                      type="button"
-                      class="secondary contrast"
-                      :disabled="state.settingsSaving"
-                      @click="removeServer"
-                    >
-                      Remove server
-                    </button>
-                  </div>
-                  <p v-if="state.serverDraft.id === null" class="caption">
-                    Save the server before adding a model to it.
-                  </p>
-
-                  <!-- What *Fetch models* answered for this row, beside the button
-                       that asked it. The refusal sentence belongs here too: the
-                       model column's copy of it is not on screen while the server
-                       row is the one being edited. -->
-                  <p
-                    v-if="fetchedError"
-                    class="caption alert-error mcp-externals-error"
-                    role="alert"
+                  <button
+                    class="models-fetch"
+                    type="button"
+                    :disabled="fetchSlot.disabled"
+                    :aria-label="fetchSlot.label"
+                    :title="fetchSlot.label"
+                    @click="fetchModels"
                   >
-                    {{ fetchedError }}
-                  </p>
-                  <p v-else-if="!fetchedIdsForServer.length" class="caption">
-                    {{ fetchedIdsNote }}
-                  </p>
-                  <ul v-else class="models-fetched-list" aria-label="Models this server offers">
-                    <li v-for="id in fetchedIdsForServer" :key="id">{{ id }}</li>
-                  </ul>
-                </template>
+                    {{ fetchSlot.text }}
+                  </button>
 
+                  <!-- The listing: a real table, `name` and `Add`, whose **own**
+                       scroll area holds any number of names so the detail column
+                       gains no scrollbar of its own (§4.4, §6.4). A name the server
+                       already has keeps its `+` in the cell, inert with its reason:
+                       a column that answered differently per row would make the
+                       table's widths jump. -->
+                  <div class="models-listing">
+                    <table class="models-listing-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">name</th>
+                          <th scope="col" class="models-listing-add-col">Add</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="row in rows" :key="row.name" class="models-listing-row">
+                          <td class="models-listing-name">{{ row.name }}</td>
+                          <td class="models-listing-add">
+                            <button
+                              class="icon-btn models-add-row"
+                              type="button"
+                              :disabled="rowSlotFor(row).disabled"
+                              :aria-label="`${rowSlotFor(row).label}: ${row.name}`"
+                              :title="rowSlotFor(row).label"
+                              @click="addFromListing(row)"
+                            >
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                stroke-linejoin="round" aria-hidden="true">
+                                <path d="M12 5v14M5 12h14" />
+                              </svg>
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- The column's own nothing-to-edit state: the tree holds no row
+                     and the toolbar has nothing to act on. -->
                 <p v-else class="caption">
                   Select a server or a model to edit it.
                 </p>
-
-                <div class="models-add">
-                  <button type="button" :disabled="state.settingsSaving" @click="addServerRow">
-                    Add server
-                  </button>
-                  <button
-                    type="button"
-                    :disabled="state.settingsSaving || state.selectedServerId === null"
-                    @click="addModelRow"
-                  >
-                    Add model
-                  </button>
-                </div>
               </div>
-            </div>
           </section>
 
-          <section v-show="activeSection === 'mcp'">
-            <h3 class="settings-section-title">MCP connectors</h3>
-            <p v-if="!state.mcpInstalled" class="caption alert-error" role="alert">
-              The mcp package is not installed. Run
-              <code>pip install -e ".[mcp]"</code> and restart the app.
-            </p>
-            <p v-if="state.mcpError" class="caption alert-error" role="alert">
-              {{ state.mcpError }}
-            </p>
-            <p v-if="state.mcpExternalsError" class="caption alert-error mcp-externals-error" role="alert">
-              {{ state.mcpExternalsError }}
-            </p>
-            <p v-if="state.mcpLoading" class="caption">Loading connectors…</p>
-            <p v-else-if="!state.mcpConnectors.length" class="caption">
+          <!-- The MCP and LSP sections (§4.9): their `Save` left the footer for a
+               toolbar of the Servers tab's shape — heading at one end, the verb at
+               the other — so the footer is **one shape for all three sections**:
+               the band and `Close`. Their top-level lines (package not installed,
+               the read's failure) moved to the band too; what stays beside a row
+               is that row's own badge and its own error, because a band that
+               carries six connector errors is a list, not a message (§4.7). -->
+          <section v-show="state.activeSection === 'mcp'" class="settings-hub-section">
+            <div class="settings-section-toolbar">
+              <h3 class="settings-section-title">MCP connectors</h3>
+              <button
+                class="settings-section-save"
+                type="button"
+                :disabled="mcpSaveSlot.disabled"
+                :aria-label="mcpSaveSlot.label"
+                :title="mcpSaveSlot.label"
+                @click="saveMcp"
+              >
+                {{ mcpSaveSlot.text }}
+              </button>
+            </div>
+            <p v-if="!state.mcpConnectors.length" class="caption">
               Nothing declared in <code>.nojae/mcp-settings.json</code>:
               add a <code>remote</code> or <code>local</code> entry to get
               connectors here.
@@ -532,20 +648,21 @@ const storeNotice = computed(() => {
                  is a per-agent column, edited on that agent's tab. -->
           </section>
 
-          <section v-show="activeSection === 'lsp'">
-            <h3 class="settings-section-title">LSP language servers</h3>
-            <p v-if="!state.lspInstalled" class="caption alert-error" role="alert">
-              The pygls package is not installed. Run
-              <code>pip install -e ".[lsp]"</code> and restart the app.
-            </p>
-            <p v-if="state.lspError" class="caption alert-error" role="alert">
-              {{ state.lspError }}
-            </p>
-            <p v-if="state.lspServersError" class="caption alert-error mcp-externals-error" role="alert">
-              {{ state.lspServersError }}
-            </p>
-            <p v-if="state.lspLoading" class="caption">Loading language servers…</p>
-            <p v-else-if="!state.lspServers.length" class="caption">
+          <section v-show="state.activeSection === 'lsp'" class="settings-hub-section">
+            <div class="settings-section-toolbar">
+              <h3 class="settings-section-title">LSP language servers</h3>
+              <button
+                class="settings-section-save"
+                type="button"
+                :disabled="lspSaveSlot.disabled"
+                :aria-label="lspSaveSlot.label"
+                :title="lspSaveSlot.label"
+                @click="saveLsp"
+              >
+                {{ lspSaveSlot.text }}
+              </button>
+            </div>
+            <p v-if="!state.lspServers.length" class="caption">
               No language servers declared in
               <code>.nojae/lsp-settings.json</code> (copy the seeded
               <code>.nojae/lsp-settings.template.json</code> to get started).
@@ -580,31 +697,27 @@ const storeNotice = computed(() => {
         </div>
       </div>
 
+      <!-- **The dialog's one message band** (§4.7), in the shared footer shape:
+           the line fills the row left of `Close`, is always there, and carries
+           the text and the role `messageFor` answered with. Nothing else in the
+           dialog says anything, so no sentence can push a control out of place.
+           `Close` is the footer's only verb for all three sections (§4.9). -->
       <footer class="settings-actions">
-        <button class="secondary contrast" type="button" :disabled="state.settingsSaving" @click="closeSettings">
+        <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
+        <!-- The one message the user can act on from here: the band renders it as
+             the button that opens the Agent-modes dialog, and which line that is
+             is `messageFor`'s choice, not the template's. -->
+        <button
+          v-if="message.action === 'agentModes'"
+          class="settings-message-action"
+          type="button"
+          @click="requestAgentModes"
+        >
+          Assign one
+        </button>
+        <button class="secondary contrast settings-close" type="button" @click="closeSettings">
           Close
         </button>
-        <button
-          v-if="activeSection === 'mcp'"
-          type="button"
-          :disabled="state.mcpSaving || state.mcpLoading"
-          @click="saveMcp"
-        >
-          {{ state.mcpSaving ? 'Saving…' : 'Save' }}
-        </button>
-        <button
-          v-else-if="activeSection === 'lsp'"
-          type="button"
-          :disabled="state.lspSaving || state.lspLoading"
-          @click="saveLsp"
-        >
-          {{ state.lspSaving ? 'Saving…' : 'Save' }}
-        </button>
-        <!-- The Models section has no footer Save at all: a server and a model
-             are each saved from their own field column, because each is a row
-             and the dialog edits one row at a time. The Close button above is
-             therefore its whole footer — a second "close" beside it would be a
-             second word for one action. -->
       </footer>
     </form>
     </article>

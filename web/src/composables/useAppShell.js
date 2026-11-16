@@ -59,6 +59,27 @@ const state = reactive({
   // about the *other* store, because a fresh install has four agents and no
   // models, and every one of them is unrunnable until it is given one (D7).
   unassigned: null,
+  // Which section the dialog's strip is on. It lives here rather than in the
+  // component because the dialog's **one** message band is the shell's answer:
+  // a section's failure must not be printed while another section is on screen,
+  // and a message area that read component state could not know which it was.
+  activeSection: 'servers',
+  // Which of the detail column's two pages is drawn (`settings` | `prompt`).
+  // Shell state for the same reason (§4.6): the flow that adds a model from the
+  // server page's listing has to *set* it, and that flow is a shell action.
+  detailTab: 'settings',
+  // The row a delete is being confirmed for: `'server'`, `'model'`, or null.
+  // The toolbar's confirmation pair and the band's sentence are both read off
+  // it, so the question and its answer cannot disagree about what was asked.
+  pendingDelete: null,
+  // The sentence the band says while a delete awaits its answer. Set when the
+  // question is asked, cleared with it — the copy is the store's own
+  // (`serverDeleteSentence` / `modelDeleteSentence`), never re-derived here.
+  pendingDeleteSentence: null,
+  // The tree row to focus once the DOM has caught up. Set when a model is added
+  // from the listing, which must land on its new row (§9.1-3); the component
+  // consumes it and clears it.
+  focusTreeRowId: null,
   // The dialog's selection: which row the right-hand column edits. ``null`` id
   // with a draft means a row that does not exist yet (the Add affordance).
   selectedServerId: null,
@@ -204,6 +225,14 @@ export function fetchedModelsErrorFor(draft) {
   return state.fetchedModelsErrors[draftKey(draft)] ?? null
 }
 
+// Has this row ever been listed? The listing table distinguishes "nothing asked
+// yet" from "asked, and the server answered with no names" — the second is a
+// fact worth saying, the first is not (§9.1-2). Keyed like the listings.
+export function hasFetchedListing(draft) {
+  return draft !== null && draft !== undefined &&
+    Object.prototype.hasOwnProperty.call(state.fetchedModelIds, draftKey(draft))
+}
+
 // The unassigned line's text, or null when there is nothing to say. The
 // arithmetic lives here because it is a decision — "2 of 4 agents have no
 // model" — and the dialog renders the sentence (§5.1).
@@ -332,6 +361,11 @@ export function useAppShell() {
   function closeSettings() {
     state.settingsOpen = false
     state.settingsError = null
+    // A delete that was asked but never answered dies with the dialog: the pair
+    // is absent from the DOM when it is closed, so a pending question must not
+    // survive to be answered against a state it was not asked in.
+    state.pendingDelete = null
+    state.pendingDeleteSentence = null
   }
 
   // -- the Models section: the store's servers and models -----------------------
@@ -430,6 +464,11 @@ export function useAppShell() {
   // Selecting a model selects its **server** too: the detail column shows the
   // model, the tree highlights the parent it belongs to, and a model row clicked
   // straight out of the tree is still editable.
+  //
+  // The detail tab is **not** reset here. A model clicked out of the tree while
+  // the strip is on `System prompt` opens on `System prompt`, which is the
+  // predictable outcome (§4.6); the one flow that *does* choose a page is the
+  // listing's `+`, which asks for Settings explicitly.
   function selectModel(id) {
     const parent =
       state.servers.find((server) =>
@@ -524,14 +563,20 @@ export function useAppShell() {
     state.expandedServers = [...opened]
   }
 
-  // *Fetch models*: the existing live listing call, now answering **a server's**
-  // model list rather than one global dropdown. It dials the URL and key in the
-  // draft, not the stored row, so a server whose address was just corrected can
-  // be listed before it is saved.
+  // *Fetch models*: the existing live listing call, answering **a server's** own
+  // model list. It dials the URL and key in the draft, so a server whose address
+  // was just corrected is listed from what is typed; the button is gated on the
+  // row existing (§4.4), which is what retires the unsaved-row path.
+  //
+  // The previous answer is **not** blanked on the way out: a 200-name table that
+  // collapsed to nothing for a second and then re-grew is the exact reflow the
+  // layout exists to prevent. An empty answer is still an answer, so it does
+  // replace the rows once it lands (§9.1-2).
   async function fetchServerModels() {
     const draft = state.serverDraft
-    const serverUrl = (draft?.url || '').trim()
-    const key = (draft?.apiKey || '').trim()
+    if (!draft || draft.id === null) return
+    const serverUrl = (draft.url || '').trim()
+    const key = (draft.apiKey || '').trim()
     const id = draftKey(draft)
     const forgetFailure = () => {
       const { [id]: _gone, ...rest } = state.fetchedModelsErrors
@@ -544,7 +589,6 @@ export function useAppShell() {
     }
     if (state.fetchedModelsLoading === id) return
     state.fetchedModelsLoading = id
-    state.fetchedModelIds = { ...state.fetchedModelIds, [id]: [] }
     try {
       let url = `/api/models?serverUrl=${encodeURIComponent(serverUrl)}`
       if (key) url += `&apiKey=${encodeURIComponent(key)}`
@@ -569,6 +613,74 @@ export function useAppShell() {
     } finally {
       state.fetchedModelsLoading = null
     }
+  }
+
+  // -- the Servers section's own actions --------------------------------------
+
+  // The detail strip's two pages. Only a model has a second one, so the tab is
+  // stored as asked and *read* through `detailPageFor`, which falls back to
+  // Settings for a server (§4.5).
+  function setDetailTab(tab) {
+    state.detailTab = tab === 'prompt' ? 'prompt' : 'settings'
+  }
+
+  // The listing's `+`: **a write**, not a pre-fill (§4.4). One click posts the
+  // name, the parent's id and nothing else — the six samplers stay null columns,
+  // so the model runs on the endpoint's own defaults until someone edits them.
+  // The write answers the whole tree, so no merge is needed: expand the parent,
+  // select the new model, ask for its row to be focused, and open its Settings
+  // page, where the name field already holds the name just added.
+  async function addModelFromListing(name) {
+    const server = selectedServer()
+    if (!server || state.settingsSaving) return false
+    const ok = await postConnectionWrite(
+      '/api/models/add',
+      { name, serverId: server.id },
+      'Could not add the model',
+    )
+    if (!ok) return false
+    const added = selectedServer()?.models.find((model) => model.name === name)
+    if (!added) return true
+    if (!state.expandedServers.includes(server.id)) {
+      toggleServerExpanded(server.id)
+    }
+    selectModel(added.id)
+    setDetailTab('settings')
+    state.focusTreeRowId = added.id
+    return true
+  }
+
+  // The inline delete confirmation (§4.8), replacing `window.confirm`. Asking
+  // puts the store's own sentence in the band — a server delete takes its models
+  // with it, and that is the part nobody can retype — and the toolbar's two
+  // reserved slots carry the answers. The cascade itself is the schema's and is
+  // untouched.
+  function askDeleteRow(kind) {
+    if (kind !== 'server' && kind !== 'model') return
+    if (kind === 'model' && state.modelDraft?.id == null) return
+    if (kind === 'server' && state.serverDraft?.id == null) return
+    state.pendingDelete = kind
+    state.pendingDeleteSentence =
+      kind === 'server'
+        ? serverDeleteSentence(selectedServer())
+        : modelDeleteSentence(
+            selectedServer()?.models.find(
+              (model) => model.id === state.selectedModelId,
+            ),
+          )
+  }
+
+  function dismissDeleteRow() {
+    state.pendingDelete = null
+    state.pendingDeleteSentence = null
+  }
+
+  async function confirmDeleteRow() {
+    const kind = state.pendingDelete
+    if (kind === 'server') await deleteServerRow(state.serverDraft?.id ?? null)
+    else if (kind === 'model') await deleteModelRow(state.modelDraft?.id ?? null)
+    state.pendingDelete = null
+    state.pendingDeleteSentence = null
   }
 
   // The unassigned line's one action: ask for the Agent-modes dialog. The card
@@ -794,6 +906,11 @@ export function useAppShell() {
     deleteModelRow,
     toggleServerExpanded,
     fetchServerModels,
+    setDetailTab,
+    addModelFromListing,
+    askDeleteRow,
+    dismissDeleteRow,
+    confirmDeleteRow,
     requestAgentModes,
     loadMcp,
     toggleMcp,
