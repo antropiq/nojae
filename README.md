@@ -692,10 +692,15 @@ the selected agent can reach them.
 Around the composer: the reasoning and tool panel (every tool call, its result
 and the server that answered), image attach when the model in view accepts images,
 the prompt-helper bullets (the install's, so the same bullets answer in every
-workspace — as many as you have added, and no fixed count), a session stopwatch
-and context-size badge, and Save / Load of a conversation as a plain JSON file.
-Markdown renders with KaTeX, highlighted code and Mermaid diagrams, always through
-the sanitizer.
+workspace — as many as you have added, and no fixed count), and Save / Load of a
+conversation as a plain JSON file. Markdown renders with KaTeX, highlighted code
+and Mermaid diagrams, always through the sanitizer.
+
+The app bar carries the session meters: the elapsed clock, the generation speed
+and the context-window occupancy. They describe the **conversation**, not one
+reply, so they keep their figures when an answer lands and the next question
+continues the same totals. Only **Restart conversation** in the composer puts
+them back to zero.
 
 `Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Send
 button swaps the two, so a long message can be finished — and reread — before it

@@ -78,8 +78,9 @@ test.describe('App boot: displayed configuration, tabs, idle meters', () => {
   })
 
   // The clock and the two counters belong to the whole app, which has one
-  // session at a time (a WorkBench reply or a batch turn). Idle, they read
-  // blank — the app bar never shows a finished session's figures as current.
+  // session at a time (a WorkBench reply or a batch turn). A fresh tab has no
+  // conversation yet, so they read blank; they keep their figures once a turn
+  // has been measured, and only Restart clears them (sessionStats.test.js).
   test('app bar carries the shared session meters', async ({ page }) => {
     await bootIdle(page)
 

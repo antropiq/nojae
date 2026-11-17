@@ -12,6 +12,15 @@ import { inferenceRunning } from '../lib/inference-state'
 // read-only while one runs. So the app bar can show a single clock and a single
 // pair of counters.
 //
+// **The figures outlive the reply they describe.** A session continues as long
+// as the conversation does: the user asks again, and the meters must still
+// answer "how fast, how full, how long" about the turns already spent rather
+// than blanking every time an answer lands. So every computed here reads the
+// conversation's carried-over values (the clock's `spentMs`, the last measured
+// reply, the newest occupancy figure) and only the Restart button — `useChat`'s
+// reset() — clears them. `running` stays "an inference is in flight right now"
+// and is used for the clock's emphasis and the labels, never to hide a figure.
+//
 // "Is anything running at all" is the shared inferenceRunning()
 // predicate — the one the tab glyph and the end-of-session chime read too — so
 // the meters, the ⚡/✨ title and the chime cannot disagree about a session.
@@ -29,12 +38,12 @@ const { state: chatState } = useChat()
 const { state: shellState } = useAppShell()
 const { state: batchState } = useBatch()
 
-// 'chat' | null — which session the meters below describe; a batch lot
-// counts as 'chat', since its turns stream through useChat (and the lot keeps
-// the answer true across the gap between two task turns, where the chat phase
-// is briefly back to 'idle'). `null` is idle: nothing is generating, so every
-// figure reads blank rather than keeping the last session's numbers on screen,
-// which would pass them off as current.
+// 'chat' | null — which session is **live right now**; a batch lot counts as
+// 'chat', since its turns stream through useChat (and the lot keeps the answer
+// true across the gap between two task turns, where the chat phase is briefly
+// back to 'idle'). `null` means nothing is generating. It is an emphasis and
+// labelling answer only: the figures below keep describing the conversation's
+// finished turns, because the conversation is still the one they measured.
 const source = computed(() => {
   if (
     inferenceRunning({
@@ -51,14 +60,24 @@ const running = computed(() => source.value !== null)
 
 // -- clock -------------------------------------------------------------------
 
-// Elapsed milliseconds of the active session at instant `now` (the component
-// driving the display owns the ticking). A chat session counts from
-// `session.startedAt`, covering waiting, thinking and every tool round.
+// Elapsed milliseconds of the conversation at instant `now` (the component
+// driving the display owns the ticking): every reply already banked in
+// `session.spentMs`, plus the open one counted from `session.startedAt` —
+// covering waiting, thinking and every tool round.
+//
+// `startedAt` is itself the "a turn is open" marker: startTurn() sets it and
+// only finish() (which banks the span) or reset() (which drops it) clears it.
+// So there is no need to ask `running` as well — and asking it would make the
+// digits drop for the instant between a `pause_ack` (phase back to idle) and
+// the stream closing, which is exactly the kind of flicker the clock should
+// never show.
 function elapsedMs(now) {
-  if (source.value === 'chat' && chatState.session.startedAt > 0) {
-    return Math.max(now - chatState.session.startedAt, 0)
+  const session = chatState.session
+  const spent = Math.max(session.spentMs || 0, 0)
+  if (session.startedAt > 0) {
+    return spent + Math.max(now - session.startedAt, 0)
   }
-  return 0
+  return spent
 }
 
 function formatElapsed(ms) {
@@ -94,9 +113,10 @@ function lastMeasuredReply() {
   )
 }
 
+// The reply in flight always wins (its live figure beats a banked one), and the
+// last measured reply answers between turns — so the badge keeps reporting the
+// conversation's speed until the conversation itself is reset.
 const rate = computed(() => {
-  if (!running.value) return null
-
   const active = chatState.messages.find((m) => m.streaming) ?? null
   if (active) {
     // `done` already arrived but the stream is still closing: exact figures.
@@ -124,7 +144,7 @@ const rateText = computed(() =>
 )
 
 const rateTitle = computed(() =>
-  'Generation speed of the WorkBench reply (decode time only — tool execution excluded).',
+  'Generation speed of the last measured WorkBench reply (decode time only — tool execution excluded). Kept until the conversation is restarted.',
 )
 
 // -- context occupancy -------------------------------------------------------
@@ -137,10 +157,10 @@ const contextWindow = computed(
 // the server slots into its window — template, tool schemas and thinking-round
 // history included), never summed across rounds/turns. Fed by `done`,
 // refreshed between tool rounds by `usage`; the cap comes from /api/config
-// (meta.n_ctx).
+// (meta.n_ctx). It is read from the newest reply that reported one, so it
+// survives the end of the turn — the window keeps holding that conversation
+// until the conversation is reset.
 const contextUsage = computed(() => {
-  if (!running.value) return null
-
   for (let i = chatState.messages.length - 1; i >= 0; i -= 1) {
     const message = chatState.messages[i]
     if (message.role === 'assistant' && message.contextTokens > 0) {
@@ -172,7 +192,7 @@ const contextText = computed(() => {
 
 const contextTitle = computed(() => {
   const head =
-    'Tokens in the model context window (last round: prompt + generation, tool schemas included).'
+    'Tokens in the model context window (last round: prompt + generation, tool schemas included). Kept until the conversation is restarted.'
   const fill = contextFill.value
   if (fill === null) return head
   return `${head} ${

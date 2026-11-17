@@ -5,8 +5,10 @@ import { useSessionStats } from '../composables/useSessionStats'
 // The app bar's elapsed clock: the whole app has one session at a time (a
 // WorkBench reply or a batch turn), so this single readout follows whichever
 // one is live — and keeps ticking while the user watches the Editor tab, which
-// is what makes a background session readable at all. Idle, it rests on
-// 00:00:00. See useSessionStats for the source resolution.
+// is what makes a background session readable at all. Between two replies it
+// holds the total the conversation has spent, because asking again continues
+// the same session; only the composer's Restart puts it back to 00:00:00. See
+// useSessionStats for the source resolution.
 const stats = useSessionStats()
 
 // Ticked on its own interval rather than on SSE events, so the digits keep
@@ -25,8 +27,8 @@ onBeforeUnmount(() => clearInterval(timer))
 const display = computed(() => stats.formatElapsed(stats.elapsedMs(now.value)))
 
 const label = computed(() => {
-  if (stats.source.value === 'chat') return 'Elapsed time of the WorkBench session'
-  return 'No session running'
+  if (stats.running.value) return 'Elapsed time of the WorkBench session'
+  return 'Total time this conversation has spent (no reply running)'
 })
 </script>
 
@@ -39,7 +41,7 @@ const label = computed(() => {
     :title="
       stats.running.value
         ? `${label} — the app has one session at a time.`
-        : 'Idle — the clock counts the running WorkBench session.'
+        : `${label} — restart the conversation to start it over.`
     "
   >
     {{ display }}

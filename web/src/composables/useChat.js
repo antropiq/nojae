@@ -25,16 +25,19 @@ const state = reactive({
   // Image picked for the next message: { dataUrl, name, size } | null.
   pendingImage: null,
   // Chat session clock (consumed by useSessionStats, rendered by the app bar's
-  // SessionClock): ms timestamp of when the running session started
-  // (0 = idle, so the clock reads 00:00:00).
-  // Covers the whole request — waiting, thinking and every MCP/LSP tool
-  // round — and is cleared when the reply ends, is stopped or errors out.
+  // SessionClock): ms timestamp of when the running reply started, plus the
+  // milliseconds every reply of the conversation has already spent
+  // (`spentMs`). A turn covers the whole request — waiting, thinking and every
+  // MCP/LSP tool round — and its span is added to `spentMs` when it ends, is
+  // stopped or errors out, so the app bar keeps the conversation's total time
+  // between two turns. Both are zeroed by reset() alone: that is the Restart
+  // button, the one gesture that starts the counters over.
   // `agentMode` is the agent **this** turn was sent as, recorded when the
   // request is opened (null = no turn running). The app bar names the running
   // model off it rather than off the composer's selection, because a mid-stream
   // dropdown change reaches no turn in flight — the line would otherwise be able
   // to name an agent the stream is not answering as.
-  session: { startedAt: 0, agentMode: null },
+  session: { startedAt: 0, spentMs: 0, agentMode: null },
   // The reasoning panel's Live View (toggled in WorkBenchFocusGutter.vue): on
   // lets the panel paint only what its box can hold, which is the default —
   // the bounded panel is the cheap one, and the whole history is what the
@@ -981,9 +984,15 @@ function finish(assistant) {
   }
   assistant.streaming = false
   state.phase = 'idle'
-  state.session.startedAt = 0
+  // Bank this turn's span: the app bar's clock reads the conversation's total
+  // time, so an ended reply stops ticking without losing what it counted. Only
+  // reset() zeroes it — the Restart button is what starts the counters over.
+  if (state.session.startedAt > 0) {
+    state.session.spentMs += Math.max(Date.now() - state.session.startedAt, 0)
+    state.session.startedAt = 0
+  }
   // The turn is over, so nothing is running on any agent: the app bar's running
-  // line goes blank with the clock, rather than keeping the last model's name.
+  // line goes blank, rather than keeping the last model's name.
   state.session.agentMode = null
   controller = null
   // A pause whose `pause_ack` never arrives (the server died mid-round, or the
@@ -1375,8 +1384,12 @@ export function useChat() {
     applySessionAgentMode(parsed.agentMode)
     state.error = null
     state.pendingImage = null
-    // state.session.startedAt stays 0: the stopwatch reads 00:00:00 for a
-    // conversation that is not currently running a reply.
+    // A loaded conversation replaces the one the meters measured, so they start
+    // from nothing: the file carries no timings (see the zeroed figures above),
+    // and keeping the previous conversation's total would credit these turns
+    // with time they never spent.
+    state.session.startedAt = 0
+    state.session.spentMs = 0
     return { restored: state.messages.length }
   }
 
@@ -1389,6 +1402,13 @@ export function useChat() {
     state.messages = []
     state.error = null
     state.pendingImage = null
+    // The conversation the meters described is gone, so they start over: this is
+    // the **only** place the clock and the counters go back to blank (Restart in
+    // the composer). Batch mode's between-task wipe reaches the same function,
+    // and that is intended: a task's LLM context is its own, so the next task
+    // must not open on its predecessor's occupancy or on its speed.
+    state.session.startedAt = 0
+    state.session.spentMs = 0
     // A pause still in flight has no conversation to ack any more: clear the
     // blinking flag (and the per-reply fallback flag) so no ⏸ survives on a
     // conversation that no longer streams. The ack itself is a no-op then —
