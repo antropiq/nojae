@@ -65,7 +65,7 @@ beforeEach(() => {
   chat.phase = 'idle'
   chat.error = null
   chat.messages = []
-  chat.pendingImage = null
+  chat.pendingImages = []
   chat.draft.html = ''
 })
 

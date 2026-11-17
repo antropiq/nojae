@@ -177,7 +177,7 @@ function resetAll() {
   chat.error = null
   chat.pausePending = false
   chat.session.startedAt = 0
-  chat.pendingImage = null
+  chat.pendingImages = []
   chat.mcp = { connectors: [], enabled: {}, loaded: false, locked: false, restarting: false }
   chat.lsp = { servers: [], enabled: {}, loaded: false, locked: false, restarting: false }
   batch.active = false

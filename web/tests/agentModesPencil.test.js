@@ -88,7 +88,7 @@ function resetAll() {
   chat.messages = []
   chat.error = null
   chat.pausePending = false
-  chat.pendingImage = null
+  chat.pendingImages = []
   chat.mcp = { connectors: [], enabled: {}, loaded: false, locked: false, restarting: false }
   chat.lsp = { servers: [], enabled: {}, loaded: false, locked: false, restarting: false }
   batch.active = false
@@ -154,7 +154,8 @@ describe('the pencil beside the mode dropdown', () => {
     const button = pencil(w)
     expect(select.exists()).toBe(true)
     expect(button.exists()).toBe(true)
-    // The pencil glyph the app already draws (the "Edit and resend" chip).
+    // The pencil glyph the app already draws (the chip that takes the last
+    // unanswered messages back to the strip).
     expect(button.find('svg').exists()).toBe(true)
     // Same row, and the pencil is the select's next sibling: the layout promise
     // the e2e spec measures is "the pencil joined the column, nothing moved".

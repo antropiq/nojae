@@ -27,7 +27,8 @@ const reasoningChars = computed(() =>
 
 // Iteration gauge tracks the latest assistant reply: 0 while it streams
 // before its first tool round, holds its final level afterwards, and drops
-// to the previous reply (or 0) when Stop/editLast splices messages away.
+// to the previous reply (or 0) when Stop, or the edit gesture taking the last
+// unanswered group back to the strip, splices messages away.
 const lastAssistant = computed(() => {
   for (let i = state.messages.length - 1; i >= 0; i -= 1) {
     if (state.messages[i].role === 'assistant') return state.messages[i]

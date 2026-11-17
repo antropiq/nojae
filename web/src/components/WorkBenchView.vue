@@ -5,8 +5,10 @@ import WorkBenchToolPanel from './WorkBenchToolPanel.vue'
 import ImageLightbox from './ImageLightbox.vue'
 import MarkdownStream from './MarkdownStream.vue'
 import MessageCopyChip from './MessageCopyChip.vue'
+import StagedMessageStrip from './StagedMessageStrip.vue'
 import {
   humanFileSize,
+  lastUserGroupStart,
   messageClipboardText,
   useChat,
 } from '../composables/useChat.js'
@@ -18,7 +20,7 @@ import { useBatch } from '../composables/useBatch.js'
 import WorkBenchToolsDock from './WorkBenchToolsDock.vue'
 import WorkBenchFocusGutter from './WorkBenchFocusGutter.vue'
 
-const { state, editLast, clearImage, loadChatHubs, chatBusy } = useChat()
+const { state, editLast, removeImage, loadChatHubs, chatBusy } = useChat()
 const { state: batch } = useBatch()
 const { state: appShellState, loadConfig } = useAppShell()
 const { loadPromptHelpers } = usePromptHelpers()
@@ -42,12 +44,11 @@ watch(
   },
 )
 
-const lastUserIndex = computed(() => {
-  for (let i = state.messages.length - 1; i >= 0; i -= 1) {
-    if (state.messages[i].role === 'user') return i
-  }
-  return -1
-})
+// Where the edit affordance draws itself: on the **first** message of the last
+// unanswered group of user turns, so the gesture is discoverable where the group
+// begins rather than at its end. The rule (adjacency, no marker in the thread) is
+// `useChat`'s; the view renders its answer and derives no index of its own.
+const lastGroupStart = computed(() => lastUserGroupStart(state.messages))
 
 const input = ref(null)
 const panel = ref(null)
@@ -55,12 +56,23 @@ const panel = ref(null)
 // Image opened in the full-size lightbox popup (null = closed). Pure view
 // state, deliberately outside the useChat singleton.
 const preview = ref(null)
+// Everything that changes the pane's height, so the auto-scroll re-anchors when
+// it moves. The whole pending-image list counts: the composer draws one chip row
+// per attached image, so adding or removing one changes the height. The strip
+// counts the same way, so a stage — or a row dropped or pulled back — scrolls
+// the conversation the way typing does.
 const contentVersion = computed(() =>
   state.messages
     .map((m) => `${m.role}:${m.raw.length}:${m.images?.length ?? 0}`)
     .concat(
       `draft:${state.draft.raw.length}`,
-      `image:${state.pendingImage ? state.pendingImage.name : ''}`,
+      // Count first, so attaching the same file name twice still moves it.
+      `images:${state.pendingImages.length}:${state.pendingImages
+        .map((image) => image.name)
+        .join('|')}`,
+      `staged:${state.staged.length}:${state.staged
+        .map((row) => `${row.id}:${row.raw.length}:${(row.images ?? []).length}`)
+        .join('|')}`,
     )
     .join(','),
 )
@@ -157,12 +169,17 @@ const {
                   <path d="M4 21a8 8 0 0 1 16 0" />
                 </svg>
               </span>
+              <!-- The gesture returns the whole unanswered group — every user
+                   turn the model has not answered — to the strip, so it draws on
+                   the group's first message and says what it does rather than
+                   claiming to touch one message. Gated exactly as it always was:
+                   idle, and no batch runs. -->
               <button
-                v-if="i === lastUserIndex && state.phase === 'idle' && !batch.active"
+                v-if="i === lastGroupStart && state.phase === 'idle' && !batch.active"
                 class="chat-turn-chip chat-turn-edit"
                 type="button"
-                aria-label="Edit and resend"
-                title="Edit and resend"
+                aria-label="Edit the last unanswered messages"
+                title="Pull the last unanswered messages back into the strip"
                 @click="editLast"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -218,34 +235,39 @@ const {
             </p>
           </article>
         </template>
+        <!-- One chip per attached image, in attachment order (the order they
+             will be posted in): each carries its own thumbnail, its own
+             lightbox target and its own remove button, so a set of mockups is
+             reviewable and individually editable before it is sent. -->
         <div
-          v-if="state.pendingImage"
+          v-for="(image, index) in state.pendingImages"
+          :key="index"
           class="chat-attachment chat-attachment--pending"
-          aria-label="Attached image (not sent yet)"
+          :aria-label="`Attached image: ${image.name} (not sent yet)`"
         >
           <button
             type="button"
             class="chat-thumb-zoom"
-            aria-label="View attached image at full size"
-            title="View attached image at full size"
-            @click="preview = state.pendingImage"
+            :aria-label="`View ${image.name} at full size`"
+            :title="`View ${image.name} at full size`"
+            @click="preview = image"
           >
             <img
-              :src="state.pendingImage.dataUrl"
-              :alt="state.pendingImage.name"
+              :src="image.dataUrl"
+              :alt="image.name"
               class="chat-thumb"
             />
           </button>
           <span class="chat-attachment-meta">
-            <span class="chat-attachment-name">{{ state.pendingImage.name }}</span>
-            <span class="caption">{{ humanFileSize(state.pendingImage.size) }}</span>
+            <span class="chat-attachment-name">{{ image.name }}</span>
+            <span class="caption">{{ humanFileSize(image.size) }}</span>
           </span>
           <button
             class="icon-btn chat-attachment-remove"
             type="button"
-            aria-label="Remove attached image"
-            title="Remove image"
-            @click="clearImage"
+            :aria-label="`Remove attached image ${image.name}`"
+            :title="`Remove ${image.name}`"
+            @click="removeImage(index)"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -254,6 +276,13 @@ const {
             </svg>
           </button>
         </div>
+        <!-- The strip: the messages the composer has accepted but no turn has
+             carried yet, in flush order. Drawn in the pane, directly above the
+             draft preview and beside the lightbox their thumbnails open, because
+             a staged message is the next thing that will be sent — not a part of
+             the conversation, and not something the composer row decides about.
+             It renders nothing at all until the first stage. -->
+        <StagedMessageStrip @preview="preview = $event" />
         <div
           v-if="state.draft.html"
           class="chat-bubble chat-bubble--draft"
@@ -263,7 +292,12 @@ const {
         </div>
         <p v-if="state.error" class="error-line" role="alert">{{ state.error }}</p>
         <div
-          v-if="!state.messages.length && !state.draft.html && !state.pendingImage"
+          v-if="
+            !state.messages.length &&
+            !state.draft.html &&
+            !state.pendingImages.length &&
+            !state.staged.length
+          "
           class="stream-empty"
         >
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor"

@@ -2586,7 +2586,7 @@ input.appbar-location-input {
   position: relative;
 }
 
-/* Dot on the attach button while an image is pending in the composer. */
+/* Dot on the attach button while the composer holds at least one image. */
 .chat-attach-badge {
   position: absolute;
   top: 1px;
@@ -2611,8 +2611,9 @@ input.appbar-location-input {
   margin-bottom: 0;
 }
 
-/* Right-aligned pending-image chip above the draft preview: thumbnail plus
-   name/size and a remove button, dashed like the draft it accompanies. */
+/* Right-aligned pending-image chips above the draft preview, one row per
+   attached image: thumbnail plus name/size and a remove button, dashed like the
+   draft they accompany. They stack with the panel's own row gap. */
 .chat-attachment {
   align-self: flex-end;
   display: flex;
@@ -2687,6 +2688,130 @@ input.appbar-location-input {
 
 .chat-thumb-zoom .chat-thumb {
   margin-bottom: 0;
+}
+
+/* -- staged messages: the strip above the draft preview ------------------------ */
+
+/* The messages the composer has accepted but no turn has carried yet, in flush
+   order, drawn in the pane where the draft preview is drawn.
+
+   It is bounded by its own scroll box rather than by a count: there is no cap on
+   how many messages the strip may hold, so a long strip must not eat the
+   conversation — it scrolls inside `max-height` and the textarea and the action
+   row keep the sizes they have whatever the strip holds. */
+.chat-staged-strip {
+  flex: none;
+  max-height: 32vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* The box exists only while there are rows (the template renders nothing
+     otherwise), so this padding is never an empty frame around nothing. */
+  padding: 0.1rem 0.1rem 0.2rem;
+}
+
+.chat-staged-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One staged message: the same box a user turn's bubble has, dashed and dimmed
+   like the draft preview below it — a message accepted, not yet sent. */
+.chat-staged-row {
+  margin-left: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed color-mix(in srgb, var(--pico-primary) 35%, transparent);
+  border-radius: var(--bi-radius-lg);
+  background-color: color-mix(in srgb, var(--pico-primary) 8%, var(--bi-surface));
+  opacity: 0.7;
+  overflow-wrap: break-word;
+}
+
+/* The row the flush would be refused over. Marked by its border, its weight and
+   the sentence at its foot — never by colour alone — and announced, because a
+   flush is all-or-nothing and this row is the reason nothing is sent. */
+.chat-staged-row--refused {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bi-danger) 55%, transparent);
+  border-left-width: 4px;
+  opacity: 1;
+}
+
+.chat-staged-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+/* The position this message holds in the flush, not its identity: a removal
+   renumbers the rest, which is what makes the order legible before it is sent. */
+.chat-staged-number {
+  display: grid;
+  place-items: center;
+  flex: none;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  padding: 0 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--pico-primary) 35%, transparent);
+  border-radius: 999px;
+  background-color: var(--bi-surface);
+  color: var(--pico-muted-color);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-staged-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Icon-only, like the rest of this composer: the glyph is small enough that the
+   row keeps its text width, and the accessible name carries the wording. */
+.chat-staged-pull,
+.chat-staged-remove {
+  width: 1.6rem;
+  height: 1.6rem;
+  opacity: 0.6;
+}
+
+.chat-staged-pull:hover:not(:disabled),
+.chat-staged-pull:focus-visible,
+.chat-staged-remove:hover:not(:disabled),
+.chat-staged-remove:focus-visible {
+  opacity: 1;
+}
+
+/* Read-only while the composer is shut, never hidden: the rows stay at full
+   text with their images, and only the two verbs go inert. */
+.chat-staged-pull:disabled,
+.chat-staged-remove:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.chat-staged-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.chat-staged-thumbs .chat-thumb {
+  display: block;
+  max-width: 96px;
+  max-height: 72px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.chat-staged-refusal {
+  margin-top: 0.4rem;
 }
 
 /* -- full-size image lightbox -------------------------------------------------- */

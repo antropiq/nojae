@@ -4,6 +4,7 @@ import { registerReRootHandler, useWorkspaceTree } from '../src/composables/useW
 import { useEditorFiles } from '../src/composables/useEditorFiles'
 import { useEditorNotices } from '../src/composables/useEditorNotices'
 import { useGitStatus } from '../src/composables/useGitStatus'
+import { useChat } from '../src/composables/useChat'
 import { clearTabWorkspace, pointTabAt, withWorkspace } from './helpers/workspace-url'
 
 // ---------------------------------------------------------------------------
@@ -99,6 +100,13 @@ function resetState() {
   git.state.repo = false
   git.state.error = null
   git.state.loadedAt = 0
+  const chat = useChat().state
+  chat.messages = []
+  chat.staged = []
+  chat.pendingImages = []
+  chat.draft = { raw: '', html: '', renderedRaw: '' }
+  chat.error = null
+  chat.phase = 'idle'
 }
 
 describe('useWorkspaceTree.reRoot: the tree lets go of the old root', () => {
@@ -233,6 +241,24 @@ describe('the tab strip: every tab of the old root closes', () => {
     expect(files.recordFor('README.md')).toBeNull()
     expect(files.diffRecordFor('README.md')).toBeNull()
     expect(notices.state.notices).toHaveLength(0)
+  })
+
+  // The strip is unsaved work of a third kind: text the user has written and not
+  // sent. It lives in useChat, which registers itself in the same keyed registry
+  // the buffers and the search results use, so one switch forgets all of them.
+  it('the composer\'s staged messages go with them, reported', async () => {
+    stubRoots()
+    const chat = useChat()
+    chat.state.draft = { raw: 'a brief never sent', html: '', renderedRaw: '' }
+    expect(chat.stage()).toBe(true)
+    chat.state.error = null
+
+    await tree.reRoot(NEW_ROOT)
+
+    expect(chat.state.staged).toEqual([])
+    // Reported rather than silently dropped: the chat error line above the
+    // composer is where the strip was.
+    expect(chat.state.error).toContain('1 staged message')
   })
 
   it('the git marks of the previous work tree go with the tabs', async () => {

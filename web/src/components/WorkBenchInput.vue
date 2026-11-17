@@ -37,6 +37,8 @@ const {
   registerDraftInput,
   attachImage,
   loadSession,
+  stage,
+  chatBusy,
 } = useChat()
 const { state: appShellState } = useAppShell()
 const {
@@ -74,6 +76,9 @@ function addBulletDialog() {
 }
 
 const streaming = computed(() => state.phase !== 'idle')
+// "There is an image to send" is "the list is non-empty": the composer holds a
+// list, and every read of it answers about the list.
+const hasPendingImages = computed(() => state.pendingImages.length > 0)
 // A batch owns every surface but Stop and Restart: `batch.active` is true for
 // the whole lot, including the momentary idle between two task turns, which is
 // why the composer cannot key on `streaming` alone here.
@@ -86,11 +91,17 @@ const showNoModelWarning = computed(
   () => agentModes.loaded && !!agentModes.current && !selectedCanRun.value,
 )
 const sendGateReason = computed(() => selectedAgentGateReason())
+// "Is there anything to send?" counts the strip as well as the composer: the
+// sending key flushes whatever is waiting, and a strip the user has emptied the
+// composer on top of is exactly what they mean to send — the draft is one more
+// turn on the end of it, not a precondition.
 const canSend = computed(
   () =>
     !locked.value &&
     !sendGateReason.value &&
-    (state.draft.raw.trim().length > 0 || state.pendingImage !== null),
+    (state.draft.raw.trim().length > 0 ||
+      state.pendingImages.length > 0 ||
+      state.staged.length > 0),
 )
 const sendTitle = computed(() => sendGateReason.value ?? 'Send')
 
@@ -99,12 +110,45 @@ function submit() {
   send()
 }
 
-// Which Enter sends, and which writes a newline: the composer's toggle inverts
-// the pair (see useComposerKeys). One predicate decides both, so the two keys
-// can never be read the same way — and the toggle is a keyboard habit, so it
-// changes nothing about the turn in flight: flipping it mid-reply is allowed.
+// "Is there something to stage?" — a non-empty draft or an attached image, the
+// same two things the stage verb itself accepts as content. The busy half of the
+// verdict is the composable's own `chatBusy`, read rather than re-derived here,
+// so this control cannot disagree with the verb a stray keypress reaches.
+const canStage = computed(
+  () =>
+    !chatBusy() &&
+    (state.draft.raw.trim().length > 0 || state.pendingImages.length > 0),
+)
+// The stage verb's own two refusals, said out loud: the composer is shut, or
+// there is nothing written to move. Neither may be guessed at here.
+const stageTitle = computed(() => {
+  if (chatBusy()) return 'Available when no reply is streaming and no batch runs'
+  if (!canStage.value) return 'Write a message to stage it first'
+  return 'Stage the draft (Ctrl+Enter)'
+})
+
+function stageDraft() {
+  if (!canStage.value) return
+  stage()
+}
+
+// Which Enter sends, which writes a newline, and which stages. The composer's
+// toggle inverts the send/newline pair (see useComposerKeys); staging is read
+// *before* that toggle is consulted, because a gesture whose meaning flipped
+// with a keyboard habit would be unusable. `Ctrl` or `Cmd`, matching how every
+// other modifier chord in the app is read. An Enter from an IME candidate window
+// belongs to the IME and does neither.
 function onKeydown(event) {
   if (event.key !== 'Enter' || event.isComposing) return
+  // Ctrl/Cmd+Enter stages. Shift is not consulted: Ctrl+Shift+Enter is still
+  // this chord, so a combination the user never pressed cannot reach staging.
+  if (event.ctrlKey || event.metaKey) {
+    // The textarea would otherwise insert a newline into the draft a stage just
+    // emptied.
+    event.preventDefault()
+    stageDraft()
+    return
+  }
   const sends = composerKeys.enterSends ? !event.shiftKey : event.shiftKey
   if (!sends) return
   // The newline is what the textarea would have done on its own, so only the
@@ -373,23 +417,28 @@ onBeforeUnmount(() => {
            memory bullets, which stay centered between the two button groups. -->
       <div class="chat-bullet-row">
         <div class="chat-bullet-actions chat-bullet-actions--left">
+          <!-- Attaching appends: a message may carry several images, so with
+               one already pending the button offers another rather than a
+               replacement. Its accessible name stays distinct from every other
+               control's in this column (the thumbnails' "View … at full size"
+               and the chips' "Remove attached image …"). -->
           <button
             class="icon-btn chat-attach"
             type="button"
             :disabled="!supportsVision || locked"
-            :class="{ 'chat-attach--pending': !!state.pendingImage }"
+            :class="{ 'chat-attach--pending': hasPendingImages }"
             :aria-label="
               supportsVision
-                ? state.pendingImage
-                  ? 'Replace attached image'
+                ? hasPendingImages
+                  ? 'Add another image'
                   : 'Attach image'
                 : 'Image input not supported'
             "
             :title="
               !supportsVision
                 ? 'The configured model does not support image input (enable it in Settings → LLM)'
-                : state.pendingImage
-                  ? 'Replace attached image'
+                : hasPendingImages
+                  ? 'Add another image'
                   : 'Attach image'
             "
             @click="pickImage"
@@ -400,7 +449,7 @@ onBeforeUnmount(() => {
               <circle cx="8.5" cy="8.5" r="1.5" />
               <path d="m21 15-5-5L5 21" />
             </svg>
-            <span v-if="state.pendingImage" class="chat-attach-badge" aria-hidden="true"></span>
+            <span v-if="hasPendingImages" class="chat-attach-badge" aria-hidden="true"></span>
           </button>
           <button
             class="icon-btn"
@@ -513,8 +562,9 @@ onBeforeUnmount(() => {
                 </option>
               </select>
               <!-- The pencil: the agent-list editor, immediately after the
-                   select and on its line, drawn with the glyph the app already
-                   uses for "Edit and resend". It opens the card that edits the
+                   select and on its line, drawn with the glyph the conversation
+                   already uses for pulling the last unanswered messages back
+                   into the strip. It opens the card that edits the
                    store's agents, so it is *not* gated on the dropdown having
                    loaded — a store whose list could not be read is exactly the
                    one worth opening. Its accessible name deliberately does not
@@ -610,10 +660,11 @@ onBeforeUnmount(() => {
             </svg>
           </button>
           <!-- Which Enter does what (see useComposerKeys): immediately left of
-               Send, because it is that button's keyboard twin — the same gesture
-               one key away. Off (the default) Enter sends; on, Enter writes a
-               newline and Shift+Enter sends, so a draft can be finished — and
-               reread — before it is handed to the model.
+               Stage, because the three buttons are the row's verbs in the order
+               the keys reach them — Enter/Shift+Enter first, then the staging
+               chord, then the sending key. Off (the default) Enter sends; on,
+               Enter writes a newline and Shift+Enter sends, so a draft can be
+               finished — and reread — before it is handed to the model.
 
                Always live: flipping it cannot touch a reply already in flight,
                and a textarea disabled for a lot is no reason to hide a
@@ -649,6 +700,34 @@ onBeforeUnmount(() => {
               <path d="M20 4v6a3 3 0 0 1-3 3H4" />
               <path d="m8 10-4 3 4 3" />
               <path d="M4 20h16" />
+            </svg>
+          </button>
+          <!-- Stage: the visible half of Ctrl/Cmd+Enter, because a keyboard-only
+               affordance for a state the user has never seen is undiscoverable.
+               It renders in every state — the row's three verbs keep their
+               order whatever the conversation is doing — and it is inert, with
+               the reason in its title, exactly when the verb would refuse: the
+               composer is shut, or there is nothing written to move. Clicking a
+               disabled button stages nothing.
+
+               Its names avoid "Send message", the phrase the Send button is found
+               by: staging does not send, and neither a reader nor a query may be
+               told that it does. -->
+          <button
+            class="icon-btn chat-stage"
+            type="button"
+            :disabled="!canStage"
+            aria-label="Stage the draft as a message not yet sent"
+            :title="stageTitle"
+            @click="stageDraft"
+          >
+            <!-- A stack: what staging does is add the draft under what is
+                 already waiting. -->
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 2 2 7l10 5 10-5-10-5z" />
+              <path d="m2 12 10 5 10-5" />
+              <path d="m2 17 10 5 10-5" />
             </svg>
           </button>
           <!-- Send and Stop swap on `streaming`, except during a batch: the lot
@@ -694,8 +773,8 @@ onBeforeUnmount(() => {
           batch.active
             ? 'A batch is running — only Stop and Restart are live.'
             : composerKeys.enterSends
-              ? 'Ask the model something… (Enter to send, Shift+Enter for a new line)'
-              : 'Ask the model something… (Shift+Enter to send, Enter for a new line)'
+              ? 'Ask the model something… (Enter to send, Shift+Enter for a new line, Ctrl+Enter to stage)'
+              : 'Ask the model something… (Shift+Enter to send, Enter for a new line, Ctrl+Enter to stage)'
         "
         :aria-label="
           batch.active

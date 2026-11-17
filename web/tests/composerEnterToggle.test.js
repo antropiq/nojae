@@ -11,11 +11,16 @@ import { useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
 
 // ---------------------------------------------------------------------------
-// The composer's Enter-key toggle.
+// The composer's Enter-key toggle, and the three Enter shapes it must not blur.
 //
 // Default (off): Enter sends, Shift+Enter writes a newline — the behaviour the
-// composer has always had. On: the pair is inverted, so a draft can be written
-// and reread before it is handed to the model.
+// composer has always had. On: the send/newline pair is inverted, so a draft can
+// be written and reread before it is handed to the model.
+//
+// The third shape is Ctrl/Cmd+Enter, which stages the draft: it reads *before*
+// the toggle, so it means the same thing in both settings. The staging cases
+// below therefore run twice, once under each setting, and assert the two runs
+// left the same state behind.
 //
 // Two things are asserted for every case: whether a send was *attempted* (the
 // `/api/chat` fetch), and whether the keydown's default was prevented — because
@@ -80,7 +85,8 @@ function resetAll() {
   chat.messages = []
   chat.error = null
   chat.pausePending = false
-  chat.pendingImage = null
+  chat.pendingImages = []
+  chat.staged = []
   chat.draft = { raw: '', html: '', renderedRaw: '' }
   chat.mcp = { connectors: [], enabled: {}, loaded: false, locked: false, restarting: false }
   chat.lsp = { servers: [], enabled: {}, loaded: false, locked: false, restarting: false }
@@ -122,16 +128,29 @@ function sendButton(w) {
   return w.find('.chat-send:not(.chat-stop)')
 }
 
+function stageButton(w) {
+  return w.find('.chat-stage')
+}
+
 // Dispatched by hand rather than through `trigger`, because what is being
 // asserted here is the event itself: `defaultPrevented` is the difference
 // between "Enter was swallowed and sent" and "Enter was left to the textarea".
-function pressEnter(w, { shift = false } = {}) {
+// `composing` is the IME candidate-window Enter, which the browser flags on the
+// event itself.
+function pressEnter(
+  w,
+  { shift = false, ctrl = false, meta = false, alt = false, composing = false } = {},
+) {
   const event = new window.KeyboardEvent('keydown', {
     key: 'Enter',
     shiftKey: shift,
+    ctrlKey: ctrl,
+    metaKey: meta,
+    altKey: alt,
     bubbles: true,
     cancelable: true,
   })
+  if (composing) Object.defineProperty(event, 'isComposing', { value: true })
   textarea(w).element.dispatchEvent(event)
   return event
 }
@@ -232,41 +251,58 @@ describe('the Enter-key toggle: on', () => {
   })
 })
 
-describe('the toggle button itself', () => {
-  it('sits immediately left of Send', async () => {
+describe('the row\'s three verbs, in the order the keys reach them', () => {
+  it('is toggle, then Stage, then Send, and the toggle is immediately left of Stage', async () => {
     stubRoutes()
     const w = await mountComposer()
     const button = toggle(w)
     expect(button.exists()).toBe(true)
-    expect(button.element.nextElementSibling).toBe(sendButton(w).element)
-    // Same action group as Send, so it joins the right-hand cluster and not the
-    // left one (which the layout spec measures).
-    expect(button.element.parentElement).toBe(sendButton(w).element.parentElement)
-    expect(button.element.parentElement.classList.contains('chat-bullet-actions--right')).toBe(
-      true,
-    )
+    expect(stageButton(w).exists()).toBe(true)
+    // The order is the point, and it is asserted on the elements themselves: the
+    // toggle is immediately left of Stage, and Stage immediately left of Send.
+    expect(button.element.nextElementSibling).toBe(stageButton(w).element)
+    expect(stageButton(w).element.nextElementSibling).toBe(sendButton(w).element)
+    // Same action group as Send, so the three join the right-hand cluster and
+    // not the left one (which the layout spec measures).
+    const group = sendButton(w).element.parentElement
+    expect(button.element.parentElement).toBe(group)
+    expect(stageButton(w).element.parentElement).toBe(group)
+    expect(group.classList.contains('chat-bullet-actions--right')).toBe(true)
   })
 
-  it('stays immediately left of Stop while a reply streams', async () => {
+  it('stays in that order while a reply streams, ending at Stop', async () => {
     stubRoutes()
     const w = await mountComposer()
     chat.phase = 'answering'
     await flushPromises()
     const stop = w.find('.chat-stop')
     expect(stop.exists()).toBe(true)
-    expect(toggle(w).element.nextElementSibling).toBe(stop.element)
+    expect(toggle(w).element.nextElementSibling).toBe(stageButton(w).element)
+    // Stop takes Send's place, and nothing else about the row moves.
+    expect(stageButton(w).element.nextElementSibling).toBe(stop.element)
+    expect(stageButton(w).element.parentElement).toBe(stop.element.parentElement)
   })
 
   it('is named after what Enter does, never after Send', async () => {
-    // `getByLabel('Send message')` is pinned by the e2e spec and must keep
-    // answering the Send button alone.
+    // One phrase names one control: "Send message" is the Send button's, so
+    // neither of the two controls beside it may carry it, in any of their states.
+    // A query or a screen reader asking for "Send message" therefore answers Send
+    // and nothing else — which is what the e2e suite's own locators assume.
     stubRoutes()
     const w = await mountComposer()
+    // The phrase has exactly one owner to begin with: without that, "the other
+    // two do not carry it" would be true of a composer with nobody carrying it.
+    expect(sendButton(w).attributes('aria-label')).toBe('Send message')
     const off = [toggle(w).attributes('aria-label'), toggle(w).attributes('title')]
     for (const name of off) {
       expect(name).not.toContain('Send message')
     }
     expect(off[0]).toContain('Enter sends')
+
+    const stageNames = [stageButton(w).attributes('aria-label'), stageButton(w).attributes('title')]
+    for (const name of stageNames) {
+      expect(name).not.toContain('Send message')
+    }
 
     await toggle(w).trigger('click')
     const on = [toggle(w).attributes('aria-label'), toggle(w).attributes('title')]
@@ -274,6 +310,24 @@ describe('the toggle button itself', () => {
       expect(name).not.toContain('Send message')
     }
     expect(on[0]).toContain('new line')
+
+    // …and still not once the draft gives the Stage button a live title, nor in
+    // the window where its title is the refusal.
+    chat.draft.raw = 'something to stage'
+    await flushPromises()
+    const live = [stageButton(w).attributes('aria-label'), stageButton(w).attributes('title')]
+    for (const name of live) {
+      expect(name).not.toContain('Send message')
+    }
+    expect(live[1]).toContain('Stage')
+
+    chat.phase = 'answering'
+    await flushPromises()
+    const busy = [stageButton(w).attributes('aria-label'), stageButton(w).attributes('title')]
+    for (const name of busy) {
+      expect(name).not.toContain('Send message')
+    }
+    expect(busy[1]).toContain('no reply is streaming')
   })
 
   it('changes its glyph with its state', async () => {
@@ -309,10 +363,301 @@ describe('the toggle button itself', () => {
     const w = await mountComposer()
     expect(textarea(w).attributes('placeholder')).toContain('Enter to send')
     expect(textarea(w).attributes('placeholder')).toContain('Shift+Enter for a new line')
+    // The staging chord is named too, and it is the same name in both settings:
+    // it is the one shape the toggle never moves.
+    expect(textarea(w).attributes('placeholder')).toContain('Ctrl+Enter to stage')
 
     await toggle(w).trigger('click')
     expect(textarea(w).attributes('placeholder')).toContain('Shift+Enter to send')
     expect(textarea(w).attributes('placeholder')).toContain('Enter for a new line')
+    expect(textarea(w).attributes('placeholder')).toContain('Ctrl+Enter to stage')
+  })
+})
+
+describe('Ctrl/Cmd+Enter stages, under both settings of the toggle', () => {
+  // The staging chord is read *before* the toggle, so its meaning cannot depend
+  // on a keyboard habit. Each case runs twice — toggle off and toggle on — and
+  // compares what the two runs left behind.
+  const SETTINGS = [
+    ['default (Enter sends)', false],
+    ['inverted (Shift+Enter sends)', true],
+  ]
+
+  async function stageWith(setting, press) {
+    const calls = stubRoutes()
+    const w = await mountComposer()
+    if (setting) await toggle(w).trigger('click')
+    chat.draft.raw = 'a first thought'
+    const event = press(w)
+    await flushPromises()
+    const result = {
+      staged: chat.staged.map((row) => row.raw),
+      draft: chat.draft.raw,
+      prevented: event.defaultPrevented,
+      requests: calls.filter((call) => call.key === '/api/chat').length,
+      phase: chat.phase,
+      messages: chat.messages.length,
+    }
+    w.unmount()
+    return result
+  }
+
+  for (const [label, inverted] of SETTINGS) {
+    it(`stages the draft and sends nothing under ${label}`, async () => {
+      stubRoutes()
+      const w = await mountComposer()
+      if (inverted) await toggle(w).trigger('click')
+      chat.draft.raw = 'a first thought'
+
+      const event = await pressEnter(w, { ctrl: true })
+      await flushPromises()
+
+      // The draft moved to the strip and the composer emptied — and the
+      // textarea's own newline was prevented, so nothing landed in its place.
+      expect(chat.staged.map((row) => row.raw)).toEqual(['a first thought'])
+      expect(chat.draft.raw).toBe('')
+      expect(event.defaultPrevented).toBe(true)
+      // A stage is not a turn: no request, no phase change, no bubble.
+      expect(chat.phase).toBe('idle')
+      expect(chat.messages).toHaveLength(0)
+      w.unmount()
+    })
+
+    it(`stages on Cmd+Enter under ${label}`, async () => {
+      const calls = stubRoutes()
+      const w = await mountComposer()
+      if (inverted) await toggle(w).trigger('click')
+      chat.draft.raw = 'a first thought'
+
+      const event = await pressEnter(w, { meta: true })
+      await flushPromises()
+
+      expect(chat.staged.map((row) => row.raw)).toEqual(['a first thought'])
+      expect(event.defaultPrevented).toBe(true)
+      expect(calls.some((call) => call.key === '/api/chat')).toBe(false)
+      w.unmount()
+    })
+  }
+
+  it('does the same thing in both settings, byte for byte', async () => {
+    const off = await stageWith(false, (w) => pressEnter(w, { ctrl: true }))
+    resetAll()
+    const on = await stageWith(true, (w) => pressEnter(w, { ctrl: true }))
+
+    expect(on).toEqual(off)
+    // Spelled out as well, so a change to `equal` cannot soften the pin.
+    expect(off).toEqual({
+      staged: ['a first thought'],
+      draft: '',
+      prevented: true,
+      requests: 0,
+      phase: 'idle',
+      messages: 0,
+    })
+  })
+
+  it('keeps Ctrl+Shift+Enter on the staging chord', async () => {
+    const calls = stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'a first thought'
+
+    // Shift does not join the chord, so the combination still stages.
+    const chord = await pressEnter(w, { ctrl: true, shift: true })
+    await flushPromises()
+    expect(chat.staged.map((row) => row.raw)).toEqual(['a first thought'])
+    expect(chord.defaultPrevented).toBe(true)
+    expect(calls.some((call) => call.key === '/api/chat')).toBe(false)
+    w.unmount()
+  })
+
+  it('leaves Alt+Enter out of the chord, so it still sends', async () => {
+    const calls = stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'a first thought'
+
+    // Alt is not part of the chord: the key keeps the meaning the toggle gives
+    // it — a send, under the default setting — and it stages nothing.
+    const alt = await pressEnter(w, { alt: true })
+    await flushPromises()
+
+    expect(chat.staged).toHaveLength(0)
+    expect(alt.defaultPrevented).toBe(true)
+    expect(calls.some((call) => call.key === '/api/chat')).toBe(true)
+    w.unmount()
+  })
+
+  it('stages nothing for an empty draft, with no error line', async () => {
+    const calls = stubRoutes()
+    const w = await mountComposer()
+
+    const event = await pressEnter(w, { ctrl: true })
+    await flushPromises()
+
+    expect(chat.staged).toHaveLength(0)
+    expect(chat.error).toBeNull()
+    // Swallowed rather than sent: the key is the chord's either way.
+    expect(event.defaultPrevented).toBe(true)
+    expect(calls.some((call) => call.key === '/api/chat')).toBe(false)
+    w.unmount()
+  })
+
+  it('neither sends nor stages an Enter that came from an IME', async () => {
+    const calls = stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'a first thought'
+
+    // The candidate window's Enter belongs to the IME, whatever modifier is held.
+    const plain = await pressEnter(w, { composing: true })
+    const chord = await pressEnter(w, { composing: true, ctrl: true })
+    await flushPromises()
+
+    expect(plain.defaultPrevented).toBe(false)
+    expect(chord.defaultPrevented).toBe(false)
+    expect(chat.staged).toHaveLength(0)
+    expect(chat.draft.raw).toBe('a first thought')
+    expect(calls.some((call) => call.key === '/api/chat')).toBe(false)
+    w.unmount()
+  })
+
+  it('stages nothing while a reply streams or a batch owns the conversation', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'typed mid-reply'
+
+    chat.phase = 'answering'
+    await flushPromises()
+    await pressEnter(w, { ctrl: true })
+    expect(chat.staged).toHaveLength(0)
+
+    chat.phase = 'idle'
+    batch.active = true
+    await flushPromises()
+    await pressEnter(w, { ctrl: true })
+    expect(chat.staged).toHaveLength(0)
+    // The draft survives both refusals intact.
+    expect(chat.draft.raw).toBe('typed mid-reply')
+    w.unmount()
+  })
+})
+
+describe('the Stage button', () => {
+  it('stages the draft and opens nothing', async () => {
+    const calls = stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'a first thought'
+    await flushPromises()
+
+    expect(stageButton(w).attributes('disabled')).toBeUndefined()
+    await stageButton(w).trigger('click')
+    await flushPromises()
+
+    expect(chat.staged.map((row) => row.raw)).toEqual(['a first thought'])
+    expect(chat.draft.raw).toBe('')
+    expect(chat.phase).toBe('idle')
+    expect(calls.some((call) => call.key === '/api/chat')).toBe(false)
+    w.unmount()
+  })
+
+  it('is inert with a stated reason when there is nothing to stage', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+
+    expect(stageButton(w).attributes('disabled')).toBeDefined()
+    expect(stageButton(w).attributes('title')).toContain('Write a message')
+
+    // A draft of whitespace is still nothing to stage.
+    chat.draft.raw = '   \n  '
+    await flushPromises()
+    expect(stageButton(w).attributes('disabled')).toBeDefined()
+
+    // Clicking it stages nothing, and says nothing either.
+    await stageButton(w).trigger('click')
+    await flushPromises()
+    expect(chat.staged).toHaveLength(0)
+    expect(chat.error).toBeNull()
+    w.unmount()
+  })
+
+  it('puts the caret back in the composer, so the next message is written on top', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'a first thought'
+    await flushPromises()
+
+    // What a click on the button really does: focus lands on the affordance, not
+    // on the textarea the user was writing in.
+    stageButton(w).element.focus()
+    expect(document.activeElement).toBe(stageButton(w).element)
+
+    await stageButton(w).trigger('click')
+    await flushPromises()
+
+    expect(chat.staged.map((row) => row.raw)).toEqual(['a first thought'])
+    expect(document.activeElement).toBe(textarea(w).element)
+    w.unmount()
+  })
+
+  it('is live for an attached image with no text', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+    chat.pendingImages = [{ dataUrl: 'data:image/png;base64,AAAA', name: 'a.png', size: 4 }]
+    await flushPromises()
+
+    expect(stageButton(w).attributes('disabled')).toBeUndefined()
+    await stageButton(w).trigger('click')
+    await flushPromises()
+
+    expect(chat.staged).toHaveLength(1)
+    expect(chat.staged[0].images.map((it) => it.name)).toEqual(['a.png'])
+    w.unmount()
+  })
+
+  it('is inert with the reason while a reply streams, and stages nothing', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'typed mid-reply'
+    chat.phase = 'answering'
+    await flushPromises()
+
+    expect(stageButton(w).attributes('disabled')).toBeDefined()
+    expect(stageButton(w).attributes('title')).toContain('no reply is streaming')
+    await stageButton(w).trigger('click')
+    await flushPromises()
+    expect(chat.staged).toHaveLength(0)
+    expect(chat.draft.raw).toBe('typed mid-reply')
+    w.unmount()
+  })
+
+  it('is inert with the reason while a batch owns the conversation', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'typed mid-lot'
+    batch.active = true
+    await flushPromises()
+
+    expect(stageButton(w).attributes('disabled')).toBeDefined()
+    expect(stageButton(w).attributes('title')).toContain('no batch runs')
+    await stageButton(w).trigger('click')
+    await flushPromises()
+    expect(chat.staged).toHaveLength(0)
+    w.unmount()
+  })
+
+  it('keeps its place in the row in every state, with one glyph', async () => {
+    stubRoutes()
+    const w = await mountComposer()
+    chat.draft.raw = 'something'
+    await flushPromises()
+    expect(stageButton(w).findAll('svg')).toHaveLength(1)
+    expect(stageButton(w).text()).toBe('')
+
+    // Nothing to stage, and mid-reply: it stays where it is rather than
+    // appearing and disappearing beside the keys it belongs to.
+    chat.draft.raw = ''
+    chat.phase = 'answering'
+    await flushPromises()
+    expect(stageButton(w).exists()).toBe(true)
+    w.unmount()
   })
 })
 

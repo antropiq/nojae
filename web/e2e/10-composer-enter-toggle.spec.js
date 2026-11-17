@@ -15,6 +15,7 @@ import { expect, test } from '@playwright/test'
 const CHAT_OUTPUT = '.chat-output'
 const TEXTAREA = '.chat-textarea'
 const TOGGLE = '.chat-enter-mode'
+const STAGE = '.chat-stage'
 // A **sent** turn only: the composer's markdown preview is a `.chat-bubble`
 // too, so an unscoped count would be answered by the draft nobody sent.
 const USER_TURN = `${CHAT_OUTPUT} .chat-turn .chat-bubble`
@@ -101,23 +102,32 @@ test('with the toggle on, Enter writes a new line and Shift+Enter sends', async 
   await expect(page.locator(TEXTAREA)).toHaveValue('')
 })
 
-test('the toggle sits immediately left of Send, and is lit when on', async ({
+test('the row reads toggle, Stage, Send, and the toggle is lit when on', async ({
   page,
 }) => {
   await stubChat(page)
   await openComposer(page)
 
   const toggle = page.locator(TOGGLE)
+  const stage = page.locator(STAGE)
   const send = page.locator('.chat-send:not(.chat-stop)')
   await expect(toggle).toBeVisible()
+  await expect(stage).toBeVisible()
   await expect(send).toBeVisible()
 
-  // Adjacent, and to its left: the button is Send's keyboard twin.
+  // Three rects on one line, left to right in the order the keys reach them:
+  // enter/Shift+Enter, then the staging chord, then the sending key. The
+  // geometry is measured, not queried by class order, because "immediately
+  // left of" is a statement about where the buttons land.
   const toggleBox = await toggle.boundingBox()
+  const stageBox = await stage.boundingBox()
   const sendBox = await send.boundingBox()
-  expect(toggleBox.x + toggleBox.width).toBeLessThanOrEqual(sendBox.x + 1)
-  expect(Math.round(toggleBox.y)).toBe(Math.round(sendBox.y))
+  expect(toggleBox.x + toggleBox.width).toBeLessThanOrEqual(stageBox.x + 1)
+  expect(stageBox.x + stageBox.width).toBeLessThanOrEqual(sendBox.x + 1)
+  expect(Math.round(toggleBox.y)).toBe(Math.round(stageBox.y))
+  expect(Math.round(stageBox.y)).toBe(Math.round(sendBox.y))
   expect(Math.round(toggleBox.height)).toBe(Math.round(sendBox.height))
+  expect(Math.round(stageBox.height)).toBe(Math.round(sendBox.height))
 
   // Off at rest, and the "on" state is carried by more than colour: the glyph
   // changes with it.

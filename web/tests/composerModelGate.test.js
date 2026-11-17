@@ -82,7 +82,7 @@ function resetAll() {
   chat.messages = []
   chat.error = null
   chat.pausePending = false
-  chat.pendingImage = null
+  chat.pendingImages = []
   chat.draft = { raw: '', html: '', renderedRaw: '' }
   chat.mcp = { connectors: [], enabled: {}, loaded: false, locked: false, restarting: false }
   chat.lsp = { servers: [], enabled: {}, loaded: false, locked: false, restarting: false }

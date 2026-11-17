@@ -1,5 +1,9 @@
 import { nextTick, reactive } from 'vue'
-import { renderMarkdown, TOOL_LINE_MARKER } from '../lib/markdown'
+import {
+  neutralizeControlTokenRuns,
+  renderMarkdown,
+  TOOL_LINE_MARKER,
+} from '../lib/markdown'
 import { createReasoningBuffer } from '../lib/reasoning-buffer'
 import {
   noteHubPayload,
@@ -7,6 +11,7 @@ import {
   withWorkspace,
   withWorkspaceRoot,
 } from './useWorkspaceSession'
+import { registerReRootHandler } from './useWorkspaceTree'
 import {
   agentModePayloadId,
   applySessionAgentMode,
@@ -22,8 +27,19 @@ const state = reactive({
   // Composer draft mirrored as rendered markdown so WorkBenchView can preview the
   // exact HTML that send() will attach to the user message (no re-parse).
   draft: { raw: '', html: '', renderedRaw: '' },
-  // Image picked for the next message: { dataUrl, name, size } | null.
-  pendingImage: null,
+  // Images picked for the next message, in the order they were attached:
+  // `{ dataUrl, name, size }` entries. A message may carry several, and every
+  // read of this field answers about the whole list ("is there an image to
+  // send?" is "is the list non-empty?"), never about a single one.
+  pendingImages: [],
+  // The strip: user messages the composer has accepted but no turn has carried
+  // yet, in flush order. Each row is what a user message is — `raw`, its
+  // rendered `html`, `streaming: false`, its own `images` — plus an `id`:
+  // rows are removed and pulled back by identity, because a position stops
+  // being a handle as soon as a row can be dropped. Composer input state, in
+  // the same order as the draft: never part of the conversation, so nothing
+  // that reads `messages` sees a row, and nothing here reaches a request.
+  staged: [],
   // Chat session clock (consumed by useSessionStats, rendered by the app bar's
   // SessionClock): ms timestamp of when the running reply started, plus the
   // milliseconds every reply of the conversation has already spent
@@ -92,6 +108,22 @@ let userPaused = false
 export const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
+// How many images one flush may carry, counted over everything that flush would
+// send: every staged message's images plus the composer's own. Images travel as
+// base64 in a POST body and nothing on the path bounds the aggregate, so this is
+// the bound that keeps one request small; the per-image size limit above stays
+// where it is. Checked as an image is added, never at flush time — the refusal
+// has to reach the user where they are attaching.
+export const MAX_FLUSH_IMAGES = 6
+
+// The images a flush would carry: every staged message's, in strip order, plus
+// the composer's own pending ones. The budget above bounds exactly this count,
+// so nothing else counts them a second way.
+function flushImageCount() {
+  const staged = state.staged.reduce((total, row) => total + (row.images?.length ?? 0), 0)
+  return state.pendingImages.length + staged
+}
+
 export function humanFileSize(bytes) {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
@@ -149,8 +181,9 @@ function flushDraftHtml(trimmed) {
   return renderMarkdown(trimmed)
 }
 
-// Validates and reads a picked file into state.pendingImage (replacing any
-// previous attachment). Returns false (with state.error set) when rejected.
+// Validates and reads a picked file into state.pendingImages (appending it to
+// the ones already attached, in attachment order). Returns false (with
+// state.error set) when rejected.
 function attachImage(file) {
   if (!file) return false
   state.error = null
@@ -162,13 +195,21 @@ function attachImage(file) {
     state.error = `Image too large (${humanFileSize(file.size)}, max ${humanFileSize(MAX_IMAGE_BYTES)}).`
     return false
   }
+  // The bound is on the request a flush would make, so it counts the strip's
+  // images too — and it is checked here, at the moment of attaching, because a
+  // refusal at flush time would arrive after the user had written everything.
+  const wouldBe = flushImageCount() + 1
+  if (wouldBe > MAX_FLUSH_IMAGES) {
+    state.error = `This image would make ${wouldBe} images in this message set; at most ${MAX_FLUSH_IMAGES} fit in one turn.`
+    return false
+  }
   const reader = new FileReader()
   reader.onload = () => {
-    state.pendingImage = {
+    state.pendingImages.push({
       dataUrl: String(reader.result),
       name: file.name || 'image',
       size: file.size,
-    }
+    })
   }
   reader.onerror = () => {
     state.error = 'Could not read the selected image.'
@@ -177,8 +218,109 @@ function attachImage(file) {
   return true
 }
 
+// Drops one attached image by its position in the list; a position the list no
+// longer holds (a double click on the remove button) touches nothing.
+function removeImage(index) {
+  if (index < 0 || index >= state.pendingImages.length) return
+  state.pendingImages.splice(index, 1)
+}
+
 function clearImage() {
-  state.pendingImage = null
+  state.pendingImages = []
+}
+
+// Strip rows are addressed by this rather than by their position: a row can be
+// removed or pulled back, and a position stops naming the same message the
+// moment one of those happens. Only ever increases, so two live rows cannot
+// share a name.
+let stagedSeq = 0
+
+function stagedId() {
+  stagedSeq += 1
+  return `staged-${stagedSeq}`
+}
+
+// Moves the composer's draft, with the composer's images, to the end of the
+// strip: same object shape and same rendering a sent turn has, so a staged row
+// and a sent turn are read the same way — but it is input state, so it is never
+// pushed to the conversation and it opens no stream (a stage is not a turn and
+// must not look like one). The order rows are appended in is the order a flush
+// sends them.
+//
+// Refused while a reply streams or a batch owns the conversation, and the
+// refusal is silent here: the affordance that would call this is disabled in
+// that window, so a stray keypress must not do anything at all.
+function stage() {
+  if (chatBusy()) return false
+  const trimmed = state.draft.raw.trim()
+  const images = state.pendingImages.map((image) => ({ ...image }))
+  // Nothing to stage: no empty row, no error line.
+  if (!trimmed && !images.length) return false
+  // The draft's HTML comes from the same path a send takes, so Enter arriving
+  // before the preview's debounce still stages the rendered draft.
+  const html = trimmed ? flushDraftHtml(trimmed) : ''
+  state.staged.push({
+    id: stagedId(),
+    role: 'user',
+    raw: trimmed,
+    html,
+    streaming: false,
+    images,
+  })
+  clearDraft()
+  clearImage()
+  nextTick(() => {
+    if (draftInputEl && document.activeElement !== draftInputEl) draftInputEl.focus()
+  })
+  return true
+}
+
+// Drops one staged row by its id; an id the strip no longer holds (a double
+// click on the remove button) touches nothing. Refused while the conversation
+// is busy, exactly as staging is: the strip is read-only then, never hidden.
+function removeStaged(id) {
+  if (chatBusy()) return false
+  const index = state.staged.findIndex((row) => row.id === id)
+  if (index === -1) return false
+  state.staged.splice(index, 1)
+  return true
+}
+
+// Moves one staged row back into the composer for editing: its text becomes the
+// draft and its images join the composer's pending list, in their own order
+// after the ones already there. This is the same images changing hands, so the
+// per-turn image budget cannot be exceeded by it and is deliberately not
+// re-checked. Refused while the conversation is busy, as every strip verb is.
+function pullBackStaged(id) {
+  if (chatBusy()) return false
+  const index = state.staged.findIndex((row) => row.id === id)
+  if (index === -1) return false
+  const [row] = state.staged.splice(index, 1)
+  setDraft(row.raw)
+  state.pendingImages = [
+    ...state.pendingImages,
+    ...(row.images ?? []).map((image) => ({ ...image })),
+  ]
+  return true
+}
+
+// The tab's folder moved: the strip goes with it. Staged text carries no path,
+// but a staged mockup and the intent behind it very well may, so the same rule
+// that forgets the Editor's open buffers applies here — and the loss is
+// *reported* rather than silently dropped. The report goes on the chat error
+// line above the composer: that is the app's alert line, it sits exactly where
+// the strip was, and it is visible whenever the WorkBench tab is — the Editor's
+// notices stack renders only on the other tab, where nobody would read it.
+// Nothing to lose moves silently, the way a folder switch with no unsaved buffer
+// says nothing at all.
+function discardStagedForReRoot({ workspace = '' } = {}) {
+  const lost = state.staged.length
+  if (!lost) return
+  state.staged = []
+  state.error =
+    `Working location switched${workspace ? ` to ${workspace}` : ''} — ` +
+    `${lost} staged ${lost === 1 ? 'message was' : 'messages were'} discarded ` +
+    'before being sent'
 }
 
 // Everything a conversation needs freshly snapshotted: the agent-mode list and
@@ -483,6 +625,32 @@ export function conversationMarkdown(messages) {
     })
     .filter(Boolean)
     .join('\n\n')
+}
+
+// Whether one user turn would be refused by the server if a flush carried it:
+// a sentence naming why, or null when it would be accepted.
+//
+// The server's rule is that a user turn carries text or an image, and a blank
+// user turn is refused as a whole *request* — which, for a flush, would discard
+// every other message that rode with it. So a flush validates every message it
+// is about to carry, and this is the one verdict that answers for one message.
+//
+// It judges the text as the server will see it: the incoming door strips
+// chat-template control-token runs from message text, so a message that looks
+// non-empty in the strip can arrive empty. The stripper used here is the
+// markdown module's — the seam that already says what such a run is — rather
+// than a second copy of the rule that could drift from it.
+export function flushGateReason(message) {
+  if ((message?.images ?? []).length) return null
+  if (neutralizeControlTokenRuns(message?.raw ?? '').trim()) return null
+  return 'This message would arrive empty, and the server rejects a blank user turn as a whole request.'
+}
+
+// "a", "a and b", "a, b and c" — for the sentence that names the rows a refused
+// flush is about, so it reads as prose whatever the strip holds.
+function joinNames(names) {
+  if (names.length <= 1) return names.join('')
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 // OpenAI content shape for one message: plain string when text-only (the
@@ -1020,18 +1188,48 @@ async function readStream(response, assistant) {
   }
 }
 
-// One streamed turn, end to end: push the two bubbles, open the SSE request
-// and run finish() in its finally. Both entry points call it — `send()` for an
-// interactive message, `sendBatchTurn()` for one batch task — because the
-// pause/truncation/measurement logic below has already been the source of bugs
-// once and must never be forked.
+// The last unanswered group of user turns: the maximal run of consecutive user
+// messages ending at the last user message, found by adjacency alone — nothing is
+// written into the thread to mark where a flush's run ended. Returns the index of
+// the group's **first** message, or -1 when the thread holds no user turn.
+//
+// A flush opens one turn carrying several user messages in a row, so the group is
+// what "my last message" means once a turn can carry more than one; adjacency also
+// gives the gesture a property worth having — after a reply the model left
+// unfinished, the run still holds every user turn that reply has not answered. A
+// saved session that happens to end with consecutive user turns is one group by
+// the same rule, which is defensible: they are all unanswered.
+export function lastUserGroupStart(messages) {
+  const list = Array.isArray(messages) ? messages : []
+  let end = -1
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i].role === 'user') {
+      end = i
+      break
+    }
+  }
+  if (end === -1) return -1
+  let start = end
+  while (start > 0 && list[start - 1].role === 'user') start -= 1
+  return start
+}
+
+// One streamed turn, end to end: push the user bubbles and the reply's, open
+// the SSE request and run finish() in its finally. Both entry points call it —
+// `send()` for an interactive flush, `sendBatchTurn()` for one batch task —
+// because the pause/truncation/measurement logic below has already been the
+// source of bugs once and must never be forked.
+//
+// `userMessages` is what this turn opens on: one message for a batch task or a
+// draft-only send, several for a flush (every staged message, then the draft),
+// which is still **one** turn — one request, one agent, one clock span.
 //
 // `history` is the message list posted to the server and is the ONLY thing
-// that varies between the two: an interactive send sends the whole accumulated
-// thread, a batch task sends its one instruction (B6 — the LLM context is reset
-// per task, while the displayed transcript keeps accumulating). The client
-// never sends a system message: `core/chat.py` stays the only place one is
-// created.
+// that varies between the two entry points: an interactive send sends the whole
+// accumulated thread, a batch task sends its one instruction (B6 — the LLM
+// context is reset per task, while the displayed transcript keeps accumulating).
+// The client never sends a system message: `core/chat.py` stays the only place
+// one is created.
 // `agentMode` (the last entry): the mode **this turn** runs in. An interactive
 // send passes the composer's selection; a batch task turn passes the runner's
 // pin (D13) — a lot is one job executed under one set of rules, and the
@@ -1039,7 +1237,7 @@ async function readStream(response, assistant) {
 // means "ask the server for its default" (the pre-feature shape), which is also
 // what `useBatch` passes when its pin could not be resolved.
 async function startTurn({
-  userMessage,
+  userMessages,
   history,
   batchContext = null,
   agentMode = undefined,
@@ -1050,7 +1248,10 @@ async function startTurn({
   // fragment already carries its own `paused` flag, which is per message).
   userPaused = false
   state.error = null
-  state.messages.push(userMessage)
+  // One turn may open on several user messages — a flush carries the whole
+  // strip in one request — so they all go in, in order, before the reply's
+  // bubble: the thread holds exactly what the payload below carried.
+  for (const userMessage of userMessages) state.messages.push(userMessage)
   state.messages.push({
     role: 'assistant',
     raw: '',
@@ -1191,41 +1392,102 @@ async function startTurn({
 }
 
 export function useChat() {
+  // A working location that is replaced takes the strip with it, through the
+  // same keyed registry the Editor's open buffers and the search results are
+  // forgotten through — this module never imports an Editor file composable, so
+  // the one-way dependency stays the registry's. Registered from the factory
+  // body, the shape every other holder uses: a re-registration replaces this
+  // key's entry instead of appending a second copy.
+  registerReRootHandler('chatStrip', discardStagedForReRoot)
+
+  // The sending key flushes: every staged message, then the draft if it has
+  // content, become consecutive user turns of **one** turn. A draft-only send —
+  // an empty strip — is the send this always was, down to the payload.
+  //
+  // Everything that can refuse runs first, and a refusal moves nothing: the
+  // draft, the strip and the composer's images all survive it, because a
+  // broken agent selection or a busy conversation must never eat a written
+  // brief. Validation is all-or-nothing for the same reason one step further
+  // along: the server rejects a request carrying a blank user turn, which would
+  // discard every message that rode with it, so each one is judged here first
+  // and a refused flush names its rows and sends nothing.
   async function send() {
     const trimmed = state.draft.raw.trim()
-    const pendingImage = state.pendingImage
-    // An interactive send is refused while a batch owns the conversation
-    // (chatBusy, not just the phase: the composer is also shut in the idle
-    // window between two task turns). sendBatchTurn below deliberately checks
-    // the phase only — that window is exactly when it must be able to fire.
-    if ((!trimmed && !pendingImage) || chatBusy()) return
+    const pendingImages = state.pendingImages.slice()
+    const hasDraft = !!trimmed || pendingImages.length > 0
+    // Nothing staged and nothing typed: nothing to flush, so nothing moves.
+    if ((!hasDraft && !state.staged.length) || chatBusy()) return
 
-    // §5.4: an agent with no model — or a list the composer never read — cannot
-    // be sent to. The same answer paints the warning icon and disables Send, so
-    // a keyboard send, an Enter keypress and a hand-made call all stop here.
+    // An agent with no model — or a list the composer never read — cannot be
+    // sent to. The same answer paints the warning icon and disables Send, so a
+    // keyboard send, an Enter keypress and a hand-made call all stop here.
     // Nothing has been posted or pushed, so the draft survives and no stream is
     // left half-open. The server's 422 stays behind this for a stale tab.
     if (selectedAgentGateReason()) return
 
-    // Reuse the preview HTML rendered by setDraft; re-render only if Enter
-    // beat the debounce (or nothing was ever rendered for this text).
-    const html = flushDraftHtml(trimmed)
-    clearDraft()
-    const userMessage = {
+    // The flush's turns, in flush order: every staged row as it stands, then
+    // the draft if it has content (an empty draft is not invented as a turn of
+    // its own). The draft's HTML is filled in only once the flush is accepted:
+    // rendering it now would cancel the preview's debounce, and a refusal must
+    // leave the composer exactly as it found it.
+    const userMessages = state.staged.map((row) => ({
       role: 'user',
-      raw: trimmed,
-      html,
+      raw: row.raw,
+      html: row.html,
       streaming: false,
-      images: pendingImage ? [{ ...pendingImage }] : [],
+      images: (row.images ?? []).map((image) => ({ ...image })),
+    }))
+    const draftMessage = hasDraft
+      ? {
+          role: 'user',
+          raw: trimmed,
+          html: '',
+          streaming: false,
+          // Every image the composer holds travels with this one message, in
+          // attachment order.
+          images: pendingImages.map((image) => ({ ...image })),
+        }
+      : null
+    if (draftMessage) userMessages.push(draftMessage)
+
+    // All-or-nothing: one message the server would refuse blocks the whole
+    // flush, so the good rows are not spent on a request that will not land.
+    // The strip names the offending rows off the same verdict; here it only has
+    // to say why nothing was sent.
+    const refused = []
+    userMessages.forEach((message, position) => {
+      const reason = flushGateReason(message)
+      if (!reason) return
+      // The row's number in flush order is what the strip shows and what a
+      // reader can point at; the draft, when it is the offender, is not a row.
+      refused.push(
+        position < state.staged.length
+          ? `message ${position + 1} (${reason})`
+          : `the draft (${reason})`,
+      )
+    })
+    if (refused.length) {
+      // The chat error line is where a refused send is already announced: the
+      // strip marks the offending rows off the same verdict, and this says why
+      // the whole flush stopped. Nothing has moved.
+      state.error = `Nothing was sent: ${joinNames(refused)}.`
+      return
     }
-    state.pendingImage = null
-    // The whole accumulated thread, the new turn last — exactly what send()
-    // posted before startTurn was factored out.
+
+    // Accepted: the strip and the composer empty as part of opening the turn,
+    // never before the gates. The MCP/LSP toggles lock where they always have —
+    // on the accepted request inside startTurn — so staging alone freezes
+    // nothing. The draft's HTML reuses what setDraft's preview already rendered;
+    // it re-renders only if the sending key beat the debounce.
+    if (draftMessage) draftMessage.html = trimmed ? flushDraftHtml(trimmed) : ''
+    state.staged = []
+    clearDraft()
+    clearImage()
     const history = [
       ...state.messages.map(messagePayload),
-      messagePayload(userMessage),
+      ...userMessages.map(messagePayload),
     ]
-    await startTurn({ userMessage, history })
+    await startTurn({ userMessages, history })
   }
 
   // Batch mode's entry point: one task instruction, one turn. Returns whether
@@ -1241,13 +1503,15 @@ export function useChat() {
     const trimmed = typeof text === 'string' ? text.trim() : ''
     if (!trimmed || state.phase !== 'idle') return false
     startTurn({
-      userMessage: {
-        role: 'user',
-        raw: trimmed,
-        html: renderMarkdown(trimmed),
-        streaming: false,
-        images: [],
-      },
+      userMessages: [
+        {
+          role: 'user',
+          raw: trimmed,
+          html: renderMarkdown(trimmed),
+          streaming: false,
+          images: [],
+        },
+      ],
       history: [{ role: 'user', content: trimmed }],
       batchContext,
       agentMode,
@@ -1256,6 +1520,10 @@ export function useChat() {
     return true
   }
 
+  // Ends the turn in flight, and nothing else: what the user staged is not part
+  // of that turn, so the strip is left exactly as it stands — same rows, same
+  // order, same images. The abort reaches the stream, never the composer's input
+  // state.
   function stop() {
     userStopped = true
     if (controller) controller.abort()
@@ -1266,6 +1534,11 @@ export function useChat() {
   // keeps the partial turn in the conversation. One-way — the ack puts the app
   // back to idle, and the user's next Send (their comment, riding on top of the
   // interrupted turn) is the only way back into inference.
+  //
+  // Like `stop()`, it ends a turn and leaves the strip alone: a staged message is
+  // the user's uncommitted input, not part of what is in flight, so neither this
+  // path, its local abort fallback below, nor the `finish()` that follows either
+  // one touches the composer's staged rows.
   async function pause() {
     // Blinking = waiting for the ack: not clickable, and nothing to pause once
     // the reply is over.
@@ -1290,22 +1563,46 @@ export function useChat() {
     }
   }
 
+  // Puts the last unanswered group of user turns back into the strip: every turn
+  // of the run, in order, each with all of its images, and drops the whole run
+  // plus everything after it from the thread. **Not one message** — a flush opens
+  // a turn with several user turns in a row, and a gesture that returned one
+  // mockup out of four would be worse than doing nothing. The name is kept as it
+  // was because it is still the gesture the pencil draws (the last thing the user
+  // wrote); what it now returns is the run that thing was part of.
+  //
+  // Splicing from the group's first message to the end takes a partial reply the
+  // model left after the last user turn with it — interrupted, truncated or still
+  // being written — which matches today's gesture and is right: the group is what
+  // is unanswered, so nothing after it was an answer to what is coming back.
+  //
+  // The group joins the strip **in front of** anything already staged, because the
+  // strip is the flush order and these messages were written before whatever the
+  // user is staging now. The draft is deliberately untouched: it is the user's
+  // in-progress typing and nothing here asked for it. No request is made — this
+  // only moves text between the thread and the strip.
   function editLast() {
     if (chatBusy()) return
-    let index = -1
-    for (let i = state.messages.length - 1; i >= 0; i -= 1) {
-      if (state.messages[i].role === 'user') {
-        index = i
-        break
-      }
-    }
-    if (index === -1) return
-    setDraft(state.messages[index].raw)
-    // Re-attach the message's image so it travels with the edited text.
-    state.pendingImage = state.messages[index].images?.[0] ?? null
-    // Drop the message and everything after it (its replies and tool badges)
-    // so the edited text re-sends onto a clean conversation tail.
-    state.messages.splice(index)
+    const start = lastUserGroupStart(state.messages)
+    if (start === -1) return
+    // Only the user turns of the run come back: a reply after the last of them is
+    // what is going away, not something to re-send.
+    const group = state.messages.slice(start).filter((message) => message.role === 'user')
+    state.staged = [
+      ...group.map((message) => ({
+        id: stagedId(),
+        role: 'user',
+        raw: message.raw,
+        html: message.html ?? (message.raw.trim() ? renderMarkdown(message.raw) : ''),
+        streaming: false,
+        // Every image travels with the message it was attached to, in order.
+        images: (message.images ?? []).map((image) => ({ ...image })),
+      })),
+      ...state.staged,
+    ]
+    // Drop the group and everything after it (a partial reply, its tool badges)
+    // so a re-flush opens onto a clean conversation tail.
+    state.messages.splice(start)
     state.error = null
   }
 
@@ -1329,8 +1626,9 @@ export function useChat() {
         html: renderMarkdown(raw, { mermaid: true }),
         streaming: false,
         // Images restored from the file (already `{ dataUrl, name, size }`), so
-        // the thumbnail renders again and the next send re-posts the image to
-        // the model — and editLast() can re-attach it to the edited draft.
+        // every thumbnail renders again and the next send re-posts them all to
+        // the model — and editLast() carries every one of them back to the strip
+        // with the message it belongs to.
         images: item.images ?? [],
       }
       if (item.role !== 'assistant') return message
@@ -1383,7 +1681,12 @@ export function useChat() {
     // never a silent swap of persona and never a refused load.
     applySessionAgentMode(parsed.agentMode)
     state.error = null
-    state.pendingImage = null
+    state.pendingImages = []
+    // The strip belonged to the conversation this file just replaced: those rows
+    // were written on top of a thread that no longer exists, and loading is a
+    // replacement, not an addition. A staged message never travels in either
+    // direction — `conversationJson()` renders the thread alone.
+    state.staged = []
     // A loaded conversation replaces the one the meters measured, so they start
     // from nothing: the file carries no timings (see the zeroed figures above),
     // and keeping the previous conversation's total would credit these turns
@@ -1401,7 +1704,13 @@ export function useChat() {
     if (controller) controller.abort()
     state.messages = []
     state.error = null
-    state.pendingImage = null
+    state.pendingImages = []
+    // Restart is the one gesture that wipes everything, so the strip goes with
+    // the conversation: a queue that outlived it would be the only survivor of a
+    // thread nobody can see any more. Batch mode's between-task wipe reaches this
+    // same function and means the same thing. Silent on purpose — Restart already
+    // means wipe, so a discarded row needs no message of its own.
+    state.staged = []
     // The conversation the meters described is gone, so they start over: this is
     // the **only** place the clock and the counters go back to blank (Restart in
     // the composer). Batch mode's between-task wipe reaches the same function,
@@ -1447,10 +1756,21 @@ export function useChat() {
     setDraft,
     appendDraft,
     registerDraftInput,
+    // Back to the strip, all of the last unanswered group — see its comment: this
+    // is not a one-message undo, whatever the name still says.
     editLast,
     loadSession,
     attachImage,
+    removeImage,
     clearImage,
+    // The strip's verbs: stage the draft (or the Stage button / chord), drop one
+    // row, pull one back into the composer. All three refuse while the composer
+    // is shut, and the strip is read-only then rather than hidden. What a row
+    // says about itself comes from the `flushGateReason` export above, so the
+    // strip quotes the one verdict instead of deriving a second one.
+    stage,
+    removeStaged,
+    pullBackStaged,
     loadChatMcp,
     setChatMcp,
     restartMcp: () => restartHub('mcp'),

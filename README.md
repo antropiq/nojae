@@ -702,9 +702,22 @@ reply, so they keep their figures when an answer lands and the next question
 continues the same totals. Only **Restart conversation** in the composer puts
 them back to zero.
 
-`Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Send
+`Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Stage
 button swaps the two, so a long message can be finished — and reread — before it
 is sent. It is a preference of this browser, remembered between sessions.
+
+`Ctrl`+`Enter` — `Cmd`+`Enter` on a Mac — or the **Stage** button beside that
+toggle stages the draft instead: the message, with its images, moves to a
+numbered strip above the draft preview, and the composer empties for the next one,
+so a brief spanning several messages is written before the model sees any of it.
+Staging is not about newlines, so it means the same under either setting of the
+toggle. A row of the strip can be removed, or pulled back into the composer to be
+edited, and the sending key then sends the whole set as **one** turn — the strip
+in its order, then the draft — on one connection, with one reply and one set of
+meters answering for all of it. Images belong to the message they were attached
+to, and a message may carry several; up to six images fit across what one turn
+carries, and the seventh is refused as you attach it. Restarting the conversation
+clears the strip with it.
 
 Every reply carries its own copy button, on the top-right corner of its panel:
 half-visible until the pointer enters the card, it puts that one answer on the

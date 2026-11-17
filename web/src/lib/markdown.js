@@ -59,9 +59,14 @@ function toolLineIcons(raw) {
 // the fixed-point loop of src/core/llmkit/sanitize.py (deleting an inner
 // run can splice an outer one). The delimiters are written escaped, so
 // this file never carries a complete pair either.
+//
+// Exported because the chat server strips the same runs from incoming text,
+// so anything asking "would this message still have content when it arrives?"
+// — the flush's own validation, chiefly — has to ask it with this rule and
+// not with a second copy of it.
 const CONTROL_TOKEN_RUN = /<\|[^<>|]*\|>/g
 
-function neutralizeControlTokenRuns(text) {
+export function neutralizeControlTokenRuns(text) {
   let out = text
   for (;;) {
     const next = out.replace(CONTROL_TOKEN_RUN, '')
