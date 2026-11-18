@@ -598,6 +598,22 @@ settings store is deliberately **not** part of that switch: the servers, the
 agents and the bullets are the install's, so moving a tab invalidates only that
 workspace's hubs, policy and tree caches.
 
+The skills folder is one path this switch answers about in a particular way,
+because what it governs is a folder the agent reads (see *Skills* under
+[What the app does](#3-what-the-app-does)):
+
+| mode on `.agents` | catalogue | the agent can read a skill | the agent can change one |
+|---|---|---|---|
+| `rw` (default) | yes | yes | yes — **prompted not to** |
+| `ro` | yes | yes | refused by the policy |
+| `hidden` | **no** | no — unreachable | no |
+
+**`ro` is the recommended setting** for a skills folder: it keeps the know-how
+readable by the agent and takes away the one thing it should not do, without
+touching your own editor. And **`hidden` is the per-workspace off switch** — it
+removes that project's skills from every turn, which is why the scan honours it
+rather than listing files the connectors would refuse.
+
 ### The install's technical keys — `.env`
 
 Copy `.env.example` to `.env` when you want to turn the request logging on, to
@@ -792,6 +808,75 @@ file* above.
 The Editor's writes are the browser's own surface — never reachable from a
 connector, a tool or a chat path — and they are refused while a reply streams.
 That is asserted by a test rather than trusted.
+
+### Skills — packaged know-how the agent reads on demand 📚
+
+A **skill** is a folder holding a `SKILL.md` file: one procedure, one file
+format, one house style, written down once. You put such a folder inside a
+`.agents/skills` folder — either in the **workspace**, so it travels with the
+checkout, or in your **home folder**, so it is available in every workspace —
+and the agent starts every conversation already knowing it exists.
+
+What the agent is given is the **catalogue**: every skill's name, its
+description, and the path of its `SKILL.md`. That is all it sees until it needs
+one — the body of the file reaches the conversation only when the model opens
+it, and only when the subject of the conversation actually matches the
+description. So the description is the part doing the work: write it as an
+answer to "when should this be used?".
+
+The header needs two fields: `name`, matching the folder that holds it, and a
+one-line `description` saying what the skill is for and when to use it.
+
+```markdown
+---
+name: commit-message
+description: How this project writes git commit messages. Use when committing, or when describing a change in words.
+---
+
+Subject line: imperative, under 50 characters, no trailing period.
+
+Body: what changed and why, wrapped at 72 columns. Never list files the diff
+already shows.
+```
+
+That is a whole skill — copy it to `.agents/skills/commit-message/SKILL.md` and
+it works. **Nothing needs enabling**: there is no setting, no dialog and no key
+for this. Put the folder there and the next message sees it; edit the file and
+the next message sees that; delete the folder and the next message has no such
+entry.
+
+One condition: a skill is offered only to a turn that has a connector able to
+open a file, so an agent with no tools is never told about a list it could not
+read.
+
+A skill stays **your file**: the catalogue tells the model never to create,
+rename, edit or delete one, so a skill is written by you — in the Editor, or by
+copying a folder in. It is an ordinary project folder, not a reserved one.
+
+**Skills are a convention, not one product's property**, so a collection
+installed for another agent product is usually a folder of valid skills
+already. nojae scans `.agents/skills` and nothing else, so the bridge is a link
+you make:
+
+```bash
+# reuse a machine-wide collection installed for another product
+ln -s ~/.other-product/skills ~/.agents/skills
+
+# reuse a project's collection
+ln -s ../.other-product/skills .agents/skills
+```
+
+Two things a link costs, both better read here than discovered by being
+confused:
+
+- **A link is followed, and it is judged where it lands.** Inside the workspace,
+  the connector resolves the link and applies the workspace policy to the
+  target, so a link out of the workspace is not a way to read a file the policy
+  refuses. Outside it, the connector's own deny-lists apply to the target — a
+  collection under a folder that holds credentials is refused there too.
+- **A link whose target is outside the workspace is catalogued with its real
+  path**, and that is the path the agent is told to open. Correct, but
+  surprising the first time: the entry does not sit under your project.
 
 ### One configuration, one streaming layer
 

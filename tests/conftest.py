@@ -703,6 +703,52 @@ def _every_test_runs_in_a_workspace_scope(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(autouse=True)
+def _every_test_gets_its_own_home(_hermetic: pytest.MonkeyPatch,
+                                  tmp_path: Path) -> Iterator[Path]:
+    """Pin the **user** skills root at a throw-away home, for every test (skl-06).
+
+    The fourth hermeticity guard, and the fourth file a test could otherwise read
+    on this machine: ``<home>/.agents/skills`` is one of the two roots
+    :func:`src.core.skills.scan` walks, and unlike the store, the workspace and
+    the environment it is read on **every chat turn** — so a suite running against
+    the real home folder would make the prompts under test depend on whatever
+    skills the developer happens to have installed there today, which is the
+    machine-dependence ``tests/test_env_isolation.py`` exists to forbid.
+
+    The move is the seam task 01 left for exactly this: :func:`user_home` is a
+    **function resolved per call**, so the guard is a patch on it rather than an
+    environment variable — a home-folder override in ``os.environ`` would make the
+    answer process state, which is what the workspace rule forbids for a folder
+    and would forbid here too. Patched on ``_hermetic``, not on the test's own
+    ``monkeypatch``, for the reason that instance's docstring gives: a guard the
+    test body can ``undo()`` is not a guard.
+
+    The folder is **created**, so a scan of it answers "absent" — which is silent
+    (§5.2) — rather than "unreadable", which would put a finding into every test's
+    log and make any ``caplog`` assertion elsewhere fragile.
+
+    It is a **sibling** of ``tmp_path``, for the reason the two guards above give
+    for the same choice: several suites assert that a folder they pointed at
+    stayed empty.
+
+    A test that wants a *user-level* skill plants one under this root, or patches
+    :func:`src.core.skills.user_home` on its own ``monkeypatch`` — both are
+    ordinary overrides, because guards set up first and the test body later. That
+    is what task 04's cases needed to do by hand before this guard existed; they
+    still may, and nothing else has to.
+    """
+    from src.core import skills
+    from src.core import workspace as workspace_seam
+
+    root = skills_guard_root(tmp_path)
+    root.mkdir(exist_ok=True)
+    _hermetic.setattr(
+        skills, "user_home", lambda: workspace_seam.canonical(str(root))
+    )
+    yield root
+
+
+@pytest.fixture(autouse=True)
 def _no_debug_switch_leak(_hermetic: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep the LLM debug switch off, and process state clean, for every test.
 
@@ -757,6 +803,15 @@ def store_guard_root(tmp_path: Path) -> Path:
 def workspace_guard_root(tmp_path: Path) -> Path:
     """The throw-away workspace :func:`_every_test_runs_in_a_workspace_scope` enters."""
     return tmp_path.parent / f"{tmp_path.name}-workspace"
+
+
+def skills_guard_root(tmp_path: Path) -> Path:
+    """The throw-away home :func:`_every_test_gets_its_own_home` pins.
+
+    Named ``-skills-home`` rather than ``-home`` because the skills suites' own
+    ``home`` fixtures predate the guard and keep a folder of that name.
+    """
+    return tmp_path.parent / f"{tmp_path.name}-skills-home"
 
 
 def make_the_install(

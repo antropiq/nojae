@@ -1,6 +1,6 @@
 """The suite's hermeticity, stated as tests rather than trusted as fixtures.
 
-Three things a test could otherwise read from the machine it runs on, and the
+Four things a test could otherwise read from the machine it runs on, and the
 guard that stops each:
 
 * **the settings store** — ``<install root>/nojae.db``, which holds the
@@ -18,12 +18,24 @@ guard that stops each:
   fixtures must keep protecting exactly those, because those keys *stay* in the
   environment. Drop one from the tuple and the ambient environment answers it
   here.
+* **the user's skills root** — ``<home>/.agents/skills``, one of the two folders
+  :func:`src.core.skills.scan` walks for the catalogue that goes into the system
+  prompt. The autouse :func:`_every_test_gets_its_own_home` pins the module's
+  ``user_home()`` seam at a throw-away folder. This one differs from the other
+  three in *how often* it is read: the store is opened by a request that needs a
+  connection, the workspace by a request that names one, the environment by a
+  lookup that falls back to it — but the home root is read on **every chat turn**,
+  so a suite running against the real one would make the prompts under test depend
+  on whatever skills the developer happens to have installed, and would do it
+  without a single test mentioning skills at all.
 
 Nothing here reads the values of, or writes to, this checkout's own ``.nojae``.
 """
 
+import logging
 import os
 from pathlib import Path
+from typing import List
 
 import pytest
 
@@ -32,6 +44,7 @@ from src.config import DEFAULT_MAX_TOOL_ITERATION, load_endpoints_config
 from tests.conftest import (
     clear_test_settings_mode,
     neutralise_store,
+    skills_guard_root,
     store_guard_root,
     workspace_guard_root,
 )
@@ -263,6 +276,179 @@ class TestTheTestSettingsSwitchCannotLeakIntoTheSuite:
         assert appdb.TEST_SETTINGS_KEY == "NOJAE_TEST_SETTINGS"
 
 
+class TestTheUserSkillsRootGuardPointsOffThisMachine:
+    """skl-06: no test may scan this machine's real ``<home>/.agents/skills``.
+
+    The catalogue a chat turn is given comes from two folders, and the second is
+    the developer's home folder — a file of *their* machine, read on every turn.
+    These cases assert the guard rather than trusting it, in the same style as the
+    store's: the answered path, the scan's actual reach, and the folder's silence.
+
+    Every case here fails if ``conftest._every_test_gets_its_own_home`` is removed
+    — checked once, by removing it and watching these fail — because a guard no
+    case notices is a guard that can rot.
+    """
+
+    def test_the_answered_home_is_the_guard_root_never_the_real_one(
+        self, tmp_path: Path
+    ):
+        """The seam's answer, compared as resolved paths like the store guard's.
+
+        ``user_home()`` canonicalises through ``realpath``, so a comparison that
+        assumed ``tmp_path`` is already resolved would pass or fail on the volume's
+        symlink layout rather than on the guard.
+        """
+        from src.core import skills
+
+        answered = os.path.normcase(skills.user_home())
+        guard_root = os.path.normcase(
+            os.path.realpath(str(skills_guard_root(tmp_path)))
+        )
+        real_home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
+
+        assert answered == guard_root, (
+            f"the user skills root answered {answered}, not this test's throw-away "
+            f"home {guard_root}: the guard is not holding, so the catalogue under "
+            "test is being built from this machine's installed skills"
+        )
+        assert answered != real_home
+
+    def test_the_guard_root_is_created_so_a_scan_of_it_is_silent(
+        self, tmp_path: Path
+    ):
+        """§5.2: an absent root makes no finding, an unreadable one makes one.
+
+        The guard's folder exists and holds no skills root, so a scan answers
+        nothing **and** says nothing. Were the folder left absent-but-unreadable, or
+        were the pin to name a path the walk cannot open, every test's log would
+        gain a skills finding and any ``caplog`` case anywhere would be fragile.
+        """
+        from src.core import skills
+
+        assert skills_guard_root(tmp_path).is_dir()
+
+        found, findings = skills.scan()
+
+        assert found == []
+        assert findings == []
+
+    def test_a_skill_under_the_guard_root_is_scanned_and_one_outside_is_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The guard moves the *scan*, not just a string.
+
+        Both halves are needed: a case that only asserted the answered path would
+        still pass if the scan computed the home some other way, and a case that
+        only asserted a sibling folder is ignored would pass if the scan read
+        nothing at all. So the second half points the seam at that sibling with the
+        test's own ``monkeypatch`` — the documented override, guards first and test
+        body later — and shows the scan follows it.
+        """
+        from src.core import skills
+
+        def plant(home: Path, folder: str) -> Path:
+            skill = home.joinpath(*skills.SKILLS_ROOT_PARTS) / folder
+            skill.mkdir(parents=True)
+            (skill / skills.SKILLS_FILENAME).write_text(
+                f"---\ndescription: About {folder}.\n---\n\nthe body\n",
+                encoding="utf-8",
+            )
+            return skill
+
+        plant(skills_guard_root(tmp_path), "inside-the-guard")
+        elsewhere = tmp_path.parent / f"{tmp_path.name}-not-the-home"
+        plant(elsewhere, "outside-the-guard")
+
+        offered, _findings = skills.scan()
+
+        assert [item.name for item in offered] == ["inside-the-guard"]
+        assert offered[0].scope == skills.SCOPE_USER
+
+        monkeypatch.setattr(
+            skills, "user_home", lambda: str(elsewhere.resolve())
+        )
+        moved, _ = skills.scan()
+        assert [item.name for item in moved] == ["outside-the-guard"]
+
+        # And the guard is back the moment the override is undone: the seam is
+        # resolved per call, so nothing here is process state that outlives a patch.
+        monkeypatch.undo()
+        assert [item.name for item in skills.scan()[0]] == ["inside-the-guard"]
+
+    def test_no_scan_of_this_suite_walks_the_real_home_skills_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The honest form of "never reads this machine's files": the **reach**.
+
+        The cases above assert what the seam *answers*; this one asserts what the
+        walk *opens*, because the claim under test is about bytes, not about a
+        function's return value. The trail asserts its own liveness too (the store
+        guard's lesson): the guard's root must be in it, or the refusal below would
+        pass on an empty list.
+        """
+        from src.core import skills
+
+        walked: List[str] = []
+        real_scandir = os.scandir
+
+        def recording_scandir(path, *args, **kwargs):  # noqa: ANN001, ANN202
+            walked.append(os.path.normcase(os.path.realpath(str(path))))
+            return real_scandir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "scandir", recording_scandir)
+        skills.scan()
+
+        def skills_root_under(base: Path) -> str:
+            return os.path.normcase(
+                os.path.realpath(str(base.joinpath(*skills.SKILLS_ROOT_PARTS)))
+            )
+
+        # The walk opens the two **roots**, never the home folder itself, so the
+        # trail is compared against the roots the guard moved.
+        assert skills_root_under(skills_guard_root(tmp_path)) in walked
+        assert skills_root_under(workspace_guard_root(tmp_path)) in walked
+        # And the hazard itself, stated as the absence: not this machine's root.
+        assert skills_root_under(Path(os.path.expanduser("~"))) not in walked
+
+    def test_a_damaged_skill_under_the_guard_root_is_named_on_the_console(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """§5.23 / D7, end to end: the log line **is** the diagnosis.
+
+        There is no UI for a skill that did not appear, so what it costs the user
+        is one console line naming the path. Tasks 02–04 wrote the logging; this is
+        the case that proves the story works from a damaged file on disk to a
+        readable line about it — nothing else in the suite asserts that whole rail
+        (the skills suite's own ``caplog`` cases check one finding's level or its
+        count, not that a scan of a real folder produces a line a user could act
+        on). It runs on the guard root, so it is also the case that shows a
+        *user-level* skill's damage is reportable without this machine's home.
+        """
+        from src.core import skills, workspace
+
+        damaged = (
+            skills_guard_root(tmp_path)
+            .joinpath(*skills.SKILLS_ROOT_PARTS)
+            / "broken-frontmatter"
+        )
+        damaged.mkdir(parents=True)
+        # Opens with the delimiter and never closes it: unparseable (§5.8), so the
+        # skill is dropped and the finding is an error.
+        (damaged / skills.SKILLS_FILENAME).write_text(
+            "---\ndescription: A skill whose header never closes.\n", encoding="utf-8"
+        )
+
+        with caplog.at_level(logging.WARNING, logger=skills.logger.name):
+            offered, findings = skills.scan()
+
+        assert offered == []
+        assert len(findings) == 1
+        assert findings[0].kind == skills.KIND_ERROR
+        # The path in the line is the one the module answered with, so a user can
+        # open that file rather than guess which of their skills was meant.
+        assert workspace.canonical(str(damaged / skills.SKILLS_FILENAME)) in caplog.text
+
+
 class TestAGuardSurvivesATestUndoingItsOwnPatches:
     """``monkeypatch.undo()`` lifts a test's patches, never a guard's.
 
@@ -343,3 +529,31 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
         assert os.environ.get("NOJAE_DISABLE_LSP") == "1"
         assert appdb.TEST_SETTINGS_KEY not in os.environ
         assert config_module.LLM_DEBUG_KEY not in os.environ
+
+    def test_the_user_skills_root_guard_still_answers_the_guard_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Extending this class with skl-06's guard: the home seam is a patch too.
+
+        The store and the working location are the two this class was written for,
+        but the skills guard is the same shape — a ``setattr`` on
+        ``conftest._hermetic`` — so it is the same leak. Had it been written against
+        the test's own ``monkeypatch``, this undo would have put every test's
+        catalogue back together out of the developer's own ``.agents/skills``, which
+        is the hazard the class above exists to stop.
+        """
+        from src.core import skills
+
+        guard_root = os.path.normcase(
+            os.path.realpath(str(skills_guard_root(tmp_path)))
+        )
+        assert os.path.normcase(skills.user_home()) == guard_root
+
+        monkeypatch.setenv("NOJAE_UNDO_PROBE", "1")
+        monkeypatch.undo()
+        assert "NOJAE_UNDO_PROBE" not in os.environ
+
+        assert os.path.normcase(skills.user_home()) == guard_root, (
+            "the skills guard was lifted by the test's undo: the user skills root "
+            "is this machine's own again"
+        )

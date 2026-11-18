@@ -17,12 +17,14 @@ from src.api.server import create_app
 from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
 from src.core import chat as chat_core
+from src.core import skills
+from src.core import workspace
 from src.core.llmkit import LLMRequestError
 from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
 #: ``workspace_params`` builds the field every workspace-scoped request names;
 #: the two hub helpers hand a test's manager double to the **workspace's own**
 #: set, which is the only place a hub lives now (clws-06).
-from tests.conftest import WorkspaceClient, set_workspace_hubs, workspace_params
+from tests.conftest import NO_HUB, WorkspaceClient, set_workspace_hubs, workspace_params
 # The chunk builders and the stream double come from ``tests/llmkit_fakes`` so
 # the stubs and ``llmkit.client.ChatStream`` are held to one interface.
 from tests.llmkit_fakes import (
@@ -419,13 +421,17 @@ class TestStreamChat:
         assert content.count(chat_core.TOOL_NOTICE.strip()) == 0
         assert content.startswith("Use the tools")
 
-    def test_five_part_order_is_persona_notice_agents_mode_lot(self, monkeypatch):
+    def test_six_part_order_is_persona_notice_agents_skills_mode_lot(self, monkeypatch):
+        # Extended by skl-04: §5.16 puts the skills catalogue between AGENTS.md
+        # and the mode's blocks, so this is the order the signature spells too
+        # (pinned by the case below).
         content = self._captured_system(
             monkeypatch,
             sysprompt="PERSONA.",
             tools=[{"type": "function", "function": {"name": "use_thing"}}],
             tool_executor=lambda name, args: "ok",
             agent_instructions="AGENTS_MD_BLOCK",
+            skills_instructions="SKILLS_CATALOGUE",
             mode_instructions="MODE_BLOCKS",
             batch_instructions="LOT_BIG_PICTURE",
         )
@@ -433,11 +439,68 @@ class TestStreamChat:
             content.index("PERSONA."),
             content.index(chat_core.TOOL_NOTICE.strip()),
             content.index("AGENTS_MD_BLOCK"),
+            content.index("SKILLS_CATALOGUE"),
             content.index("MODE_BLOCKS"),
             content.index("LOT_BIG_PICTURE"),
         ]
         assert order == sorted(order)
-        assert len(set(order)) == 5
+        assert len(set(order)) == 6
+
+    def test_a_blank_skills_block_leaves_the_system_content_untouched(
+        self, monkeypatch
+    ):
+        # The regression guard for the new rail position: for anyone whose turn
+        # has no catalogue, the system message is byte-identical to the one chat
+        # produced before this block existed.
+        plain = self._captured_system(
+            monkeypatch,
+            sysprompt="Answer concisely.",
+            agent_instructions="Project root /x",
+            mode_instructions="MODE BLOCKS",
+        )
+        for blank in (None, ""):
+            assert self._captured_system(
+                monkeypatch,
+                sysprompt="Answer concisely.",
+                agent_instructions="Project root /x",
+                skills_instructions=blank,
+                mode_instructions="MODE BLOCKS",
+            ) == plain
+        assert "Skills" not in plain
+
+    def test_the_block_adds_no_event_to_the_stream(self, monkeypatch):
+        # The catalogue is text decided before the worker starts: it adds no
+        # frame and no terminal path. One real stream with the block present
+        # still closes on exactly one ``done``.
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kw: FakeStream([content_chunk("hi"), finish_chunk("stop")]),
+        )
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi"}], "m", "http://s/v1", events.append,
+            skills_instructions="SKILLS_CATALOGUE",
+        )
+        assert [e["event"] for e in events][-1] == "done"
+        assert len([e for e in events
+                    if e["event"] in ("done", "error", "pause_ack")]) == 1
+
+    def test_a_catalogue_full_of_the_word_tool_does_not_silence_the_notice(
+        self, monkeypatch
+    ):
+        # §5.17's reason for the separate argument, asserted on the block itself:
+        # the catalogue is a list of things to open *with a tool*, and it is
+        # appended after the word check, so it cannot talk the notice out of
+        # existing.
+        content = self._captured_system(
+            monkeypatch,
+            sysprompt="Answer concisely.",
+            tools=[{"type": "function", "function": {"name": "use_thing"}}],
+            tool_executor=lambda name, args: "ok",
+            skills_instructions="SKILLS: read these tools with your tools",
+        )
+        assert chat_core.TOOL_NOTICE.strip() in content
+        assert content.endswith("SKILLS: read these tools with your tools")
 
     def test_stream_chat_never_learns_what_a_mode_is(self):
         """The seam: this module takes text, so its callers stay mode-blind."""
@@ -448,7 +511,8 @@ class TestStreamChat:
         assert "mode_instructions" in source
         names = list(inspect.signature(chat_core.stream_chat).parameters)
         assert "mode" not in names
-        assert names.index("agent_instructions") < names.index("mode_instructions")
+        assert names.index("agent_instructions") < names.index("skills_instructions")
+        assert names.index("skills_instructions") < names.index("mode_instructions")
         assert names.index("mode_instructions") < names.index("batch_instructions")
 
     def test_call_failure_emits_error(self, monkeypatch):
@@ -1018,7 +1082,8 @@ class TestARefusedRoundWaits:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["retry_budget"] = retry_budget
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1452,7 +1517,8 @@ class TestChatEndpoint:
     def test_happy_path_streams_frames(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             emit({"event": "token", "text": "Hel"})
             emit({"event": "token", "text": "lo"})
             emit({"event": "done", "took": 1.0, "ttft": 0.1, "tokens": 3,
@@ -1472,7 +1538,8 @@ class TestChatEndpoint:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["model"] = model
             seen["server_url"] = server_url
             seen["messages"] = messages
@@ -1499,7 +1566,8 @@ class TestChatEndpoint:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["messages"] = messages
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1526,7 +1594,8 @@ class TestChatEndpoint:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["messages"] = messages
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1594,7 +1663,8 @@ class TestChatIncomingSanitization:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["messages"] = messages
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1868,7 +1938,8 @@ class TestStreamedDisplayIsSanitized:
     def test_forwards_configured_api_key(self, monkeypatch, tmp_path):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             emit({"api_key_seen": api_key, "event": "done", "took": 0.0,
                   "ttft": 0.0, "tokens": 0, "tokensEstimated": False})
 
@@ -1906,7 +1977,8 @@ class TestStreamedDisplayIsSanitized:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["instructions"] = agent_instructions
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1928,7 +2000,8 @@ class TestStreamedDisplayIsSanitized:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["instructions"] = agent_instructions
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1990,7 +2063,8 @@ class TestStreamedDisplayIsSanitized:
     def test_error_event_terminates_stream(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             emit({"event": "error", "message": "boom"})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
@@ -2005,7 +2079,8 @@ class TestStreamedDisplayIsSanitized:
         # the WorkBench view needs to mark the bubble reaches the browser.
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             emit({"event": "error", "message": "cut short", "truncated": True})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
@@ -2278,7 +2353,8 @@ class TestChatPauseEndpoint:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             seen["pause_event"] = pause_event
             started.set()
             # The route always hands the stream a flag; the default None only
@@ -2328,7 +2404,8 @@ class TestChatPauseEndpoint:
     def test_handle_is_retired_once_the_reply_ended(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
-                 agent_instructions=None, mode_instructions=None):
+                 agent_instructions=None, mode_instructions=None,
+                 skills_instructions=None):
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 1,
                   "tokensEstimated": False})
 
@@ -3038,6 +3115,41 @@ class TestStreamChatPause:
         assert names == ["usage", "tool_call", "tool_result", "pause_ack"]
 
 
+# -- the skills fixtures (skl-04) -------------------------------------------------
+#
+# The catalogue cases below plant skills in **their own** throw-away folders and
+# pin the user scope's home at another one. skl-06's autouse guard
+# (``conftest._every_test_gets_its_own_home``) now pins it for every test; these
+# cases keep their own pin because they plant a *user-level* skill and so name the
+# folder they write into — an ordinary override of the guard, which is allowed.
+
+def write_skill(root: Path, folder: str, *, description: str) -> Path:
+    """A skill folder with a readable header under ``root``'s skills root."""
+    skill = root.joinpath(*skills.SKILLS_ROOT_PARTS) / folder
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / skills.SKILLS_FILENAME).write_text(
+        f"---\ndescription: {description}\n---\n\nthe body\n", encoding="utf-8"
+    )
+    return skill
+
+
+@pytest.fixture
+def pinned_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The user scope's home, pinned at a throw-away folder with no skills.
+
+    A **sibling** of ``tmp_path``, the way the suite's own guards are, so a case
+    asserting a folder it pointed at stayed empty is not disturbed by the home
+    tree. ``skills.user_home()`` is the seam (task 01): the one place the user
+    scope's folder is computed.
+    """
+    folder = tmp_path.parent / f"{tmp_path.name}-home"
+    folder.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        skills, "user_home", lambda: workspace.canonical(str(folder))
+    )
+    return folder
+
+
 def add_agent(client, agent_id: str, label: str, **fields: Any) -> Dict[str, Any]:
     """Create one agent through the route the dialog uses, and answer its row.
 
@@ -3068,7 +3180,7 @@ class TestAgentModePromptAssembly:
     The agents are rows now, so the persona a turn runs as is the row the route
     read — created through the very route the dialog uses, which is what makes
     this the request path rather than a mock of it. The stub records the
-    ``stream_chat`` kwargs, where the substitution happens; the five-part *order*
+    ``stream_chat`` kwargs, where the substitution happens; the six-part *order*
     belongs to ``core.chat`` and is pinned in ``TestStreamChat`` above.
     """
 
@@ -3080,10 +3192,12 @@ class TestAgentModePromptAssembly:
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
                  pause_event=None, api_key="none", sysprompt=None,
-                 agent_instructions=None, mode_instructions=None, **tools):
+                 agent_instructions=None, skills_instructions=None,
+                 mode_instructions=None, **tools):
             seen.clear()
             seen["sysprompt"] = sysprompt
             seen["agent_instructions"] = agent_instructions
+            seen["skills_instructions"] = skills_instructions
             if mode_instructions is not None:
                 seen["mode_instructions"] = mode_instructions
             seen.update(tools)
@@ -3190,6 +3304,20 @@ class TestAgentModePromptAssembly:
         # Neither the core, the agent vocabulary nor a request body carries a
         # knob for it, so no caller — a later feature or a hand-edited row —
         # can ask for a conversation without them.
+        #
+        # The skills catalogue (skl-04) is the **first conditional block on this
+        # rail**, and this case's whole technique is reading the route for a
+        # conditional shape — so it is worth stating what it actually forbids.
+        # The §5.19 gate is a *server-computed precondition*, not a suppression
+        # knob: it is derived from the tool set the turn was already given by the
+        # three admission gates, so no request body, no stored row and no caller
+        # can forge it (ask for a catalogue on a turn that cannot read a file) or
+        # waive it (hide one from a turn that can). And no parameter anywhere —
+        # in ``stream_chat``, in the route or in ``ChatIn`` — asks for or
+        # suppresses a catalogue: the route forwards the server's own text, and
+        # ``""`` is that text's "nothing to inject" answer. A precondition the
+        # server computes and a switch the caller holds are different kinds of
+        # thing, and only the second is what this case is written to catch.
         import inspect
 
         def suppressed_names(names) -> list:
@@ -3205,14 +3333,25 @@ class TestAgentModePromptAssembly:
             return sorted(out)
 
         assert suppressed_names(chat_core.stream_chat.__code__.co_varnames) == []
+        # Still empty with the skills block on the rail: ``skills_instructions``
+        # matches none of those prefixes, and no ``ChatIn`` field was added for
+        # it (§5.20) — the vocabulary check passes because the request model is
+        # byte-for-byte what it was.
         assert suppressed_names(routes.ChatIn.model_fields) == []
-        # The two instruction arguments are the only injection points, and both
-        # are appended to the system message, never allowed to replace it: the
-        # route passes ``agent_instructions=agent_instructions_block()`` with no
-        # condition anywhere around it.
+        # And no field of the request body mentions skills at all, in any
+        # spelling: the block has no client-facing switch.
+        assert [name for name in routes.ChatIn.model_fields
+                if "skill" in name.lower()] == []
+        # The instruction arguments are the only injection points, and each is
+        # appended to the system message, never allowed to replace it: the route
+        # passes ``agent_instructions=agent_instructions_block()`` with no
+        # condition anywhere around it. ``skills_instructions`` is named here
+        # explicitly, so a fifth instruction argument is a deliberate edit to
+        # this assertion and not an accident (spec §10).
         params = list(inspect.signature(chat_core.stream_chat).parameters)
         assert [p for p in params if "instructions" in p] == [
-            "agent_instructions", "mode_instructions", "batch_instructions",
+            "agent_instructions", "skills_instructions",
+            "mode_instructions", "batch_instructions",
         ]
         route_source = inspect.getsource(routes)
         # Exactly one call site, passed unconditionally — never through the
@@ -3220,17 +3359,32 @@ class TestAgentModePromptAssembly:
         assert route_source.count(
             "agent_instructions=agent_instructions_block(),") == 1
         assert '"agent_instructions"' not in route_source
+        # The same for the catalogue: one unconditional keyword whose value is
+        # the server's own string, never a conditional-kwarg shape and never a
+        # boolean.
+        assert route_source.count("skills_instructions=skills_block,") == 1
+        assert '"skills_instructions"' not in route_source
 
-    def test_the_five_parts_arrive_in_order_through_the_route(self, mode_client,
-                                                              monkeypatch):
-        """End to end: persona → notice → AGENTS.md → agent blocks → lot.
+    def test_the_six_parts_arrive_in_order_through_the_route(self, mode_client,
+                                                             pinned_home,
+                                                             monkeypatch):
+        """End to end, six parts: persona → notice → AGENTS.md → skills → blocks → lot.
 
-        The stub above only sees the kwargs; this lets the *real* ``stream_chat``
-        run (with the LLM client seam stubbed) so the assertion is on the system
-        message that would leave the process, with a persona, blocks and
-        ``batchContext`` all in play at once.
+        Extended (not replaced) by skl-04: this is the case spec §10 tells the
+        skills task to widen, because §5.16 inserts the catalogue between
+        ``AGENTS.md`` and the mode's blocks — so the six parts are asserted in
+        order, and the count is asserted too. The stub above only sees the
+        kwargs; this lets the *real* ``stream_chat`` run (with the LLM client
+        seam stubbed) so the assertion is on the system message that would leave
+        the process, with a persona, a skill, blocks and ``batchContext`` all in
+        play at once.
         """
         client, root, _seen = mode_client
+        # A real skill in the request's own workspace, so the block the route
+        # renders comes from the same scan a turn gets. The user scope is pinned
+        # empty by ``pinned_home`` (an override of skl-06's autouse guard, which
+        # already keeps every test off this machine's home).
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
 
         class Hub:
             def status(self):
@@ -3275,11 +3429,15 @@ class TestAgentModePromptAssembly:
             content.index("PERSONA TEXT"),
             content.index(chat_core.TOOL_NOTICE.strip()),
             content.index("# rules"),
+            content.index("pdf-processing"),
             content.index("MODE BLOCKS\n\nSECOND MODE BLOCK"),
             content.index("The lot: tasks 1 to 8."),
         ]
         assert parts == sorted(parts)
-        assert len(set(parts)) == 5
+        assert len(set(parts)) == 6
+        # The catalogue is the §5.16 block, not a stray mention: it carries the
+        # path the model is meant to open, in the workspace the request named.
+        assert str(root.joinpath(*skills.SKILLS_ROOT_PARTS)) in content
 
 
 
@@ -3549,9 +3707,14 @@ class TestAgentModeToolGate:
         with_mode = routes._chat_tool_kwargs(
             request, mode=self._mode(True, True), agent=agent
         )
+        # ``mcp_tool_names`` is the §5.19 gate's own bookkeeping: the merge
+        # records which admitted tools are MCP's, and the route pops the key
+        # before ``stream_chat`` sees the dict (pinned by
+        # ``TestTheSkillsCatalogueRidesTheSystemMessage``). Every key the loop
+        # itself consumes is exactly what it was.
         assert set(without) == {
             "tools", "tool_executor", "tool_servers", "max_tool_iterations",
-            "uncapped_tool_names",
+            "uncapped_tool_names", "mcp_tool_names",
         }
         assert without["max_tool_iterations"] == 7
         assert self._names(without) == ["use_console", "use_pyright"]
@@ -3653,6 +3816,290 @@ class TestAgentModeToolGate:
         system = captured["messages"][0]["content"]
         assert chat_core.TOOL_NOTICE.strip() not in system
         assert "PERSONA" not in system  # the real persona, not a stub's
+
+
+class TestTheSkillsCatalogueRidesTheSystemMessage:
+    """skl-04: the §5.19 gate, the route's one call site, and §5.18's freshness.
+
+    Every case here is over the real ``POST /api/chat`` with the hubs stubbed the
+    way the neighbouring classes stub them, because the gate is a fact about the
+    tool set the *route* resolved: a unit test of the helper alone could not tell
+    a turn that survived the three admission gates from one that only has a
+    connector declared. The scan is spied on rather than stubbed, so "the gate is
+    evaluated **before** the scan" (§5.19) is an assertion about the file system
+    being touched, not about a return value.
+
+    Hermeticity: each case plants its skills in its own throw-away workspace and
+    pins the user scope at an empty throw-away home (``pinned_home``). skl-06's
+    autouse guard now keeps every test off this machine's home; these cases keep
+    their own pin because they assert an *empty* user root and so name the folder
+    the guard moved — an ordinary override of it.
+    """
+
+    class Hub:
+        """Answers ``active_tool_defs`` from the ids it is given, as both hubs do.
+
+        ``tools_available=False`` is the §5.19 "declared and enabled but never
+        started" connector: Settings activates its id and the conversation ticks
+        it, yet it offers no tool, so it must not earn a catalogue.
+        """
+
+        installed = True
+
+        def __init__(self, tools_available: bool = True):
+            self.tools_available = tools_available
+            self.requested_ids: List[List[str]] = []
+
+        def status(self):
+            return []
+
+        def active_tool_defs(self, ids):
+            self.requested_ids.append(list(ids))
+            if not self.tools_available:
+                return [], {}
+            tools = [
+                {"type": "function", "function": {"name": f"use_{cid}"}}
+                for cid in ids
+            ]
+            return tools, {f"use_{cid}": cid for cid in ids}
+
+        def call_tool_sync(self, cid, name, args, timeout=30.0):
+            return "ok"
+
+    @pytest.fixture
+    def turn(self, client, tmp_path: Path, pinned_home: Path, monkeypatch):
+        """A scratch workspace, a recording stub, and a spy on the scan."""
+        (tmp_path / "AGENTS.md").write_text("# rules\n\nUse pytest.\n", encoding="utf-8")
+        seen: Dict[str, Any] = {}
+        scans: List[int] = []
+
+        real_scan = skills.scan
+
+        def spy_scan():
+            # Counts the scans the *route* asks for; the real scan still runs, so
+            # the block a case asserts on is the one the module rendered.
+            scans.append(1)
+            return real_scan()
+
+        # The route reaches the scan through the module, so patching the module
+        # attribute is patching what the route calls.
+        monkeypatch.setattr(skills, "scan", spy_scan)
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, skills_instructions=None,
+                 mode_instructions=None, **tools):
+            seen.clear()
+            seen["agent_instructions"] = agent_instructions
+            seen["skills_instructions"] = skills_instructions
+            seen.update(tools)
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        # Settings activates one connector and no language server, so a case that
+        # wants an LSP-only turn says so itself and the default is the MCP one.
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        yield client, tmp_path, seen, scans
+
+    @staticmethod
+    def _post(client, **extra) -> None:
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        body.update(extra)
+        response = client.post("/api/chat", json=body)
+        assert response.status_code == 200, response.text
+
+    # -- the gate says yes -------------------------------------------------------
+
+    def test_the_gate_reads_the_recorded_names_and_no_hub_at_all(self):
+        """The helper's own contract, with nothing to look a hub up in.
+
+        It takes the kwargs dict and nothing else, so "it must **not re-run the
+        hub lookup**" (§5.19) is a fact of its signature: the three answers below
+        are the three the route relies on, and an empty dict is what a tools-off
+        agent's mode gate leaves behind.
+        """
+        assert routes.turn_can_open_a_file({}) is False
+        assert routes.turn_can_open_a_file(
+            {"tool_servers": {"lsp_pyright_hover": "pyright"}}
+        ) is False
+        assert routes.turn_can_open_a_file(
+            {routes.MCP_TOOL_NAMES_KWARG: set()}
+        ) is False
+        assert routes.turn_can_open_a_file(
+            {routes.MCP_TOOL_NAMES_KWARG: {"read_file"}}
+        ) is True
+
+    def test_an_mcp_capable_turn_gets_the_catalogue(self, turn):
+        client, root, seen, scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        hub = self.Hub()
+        set_workspace_hubs(client.app, root, mcp=hub)
+        self._post(client)  # ``code``: both hub flags open
+        assert seen["skills_instructions"].startswith(skills.CATALOGUE_HEADING)
+        assert "pdf-processing" in seen["skills_instructions"]
+        # The path the model is told to open is the workspace's own (§5.11).
+        assert str(root.joinpath(*skills.SKILLS_ROOT_PARTS)) in seen["skills_instructions"]
+        assert scans == [1]
+        # The hub was consulted **once** for the turn: the gate answers from the
+        # recorded names, never from a second lookup that could disagree.
+        assert hub.requested_ids == [["console"]]
+        # The gate's own data is the merge's bookkeeping, not a keyword: the route
+        # pops it, so nothing the helper read arrives in the splat.
+        assert "mcp_tool_names" not in seen
+
+    def test_the_gate_data_never_reaches_stream_chat_as_a_keyword(self, turn,
+                                                                 monkeypatch):
+        """The one shape that would break every tool-capable turn, pinned.
+
+        ``tool_kwargs`` is splatted into the call, so a key the merge adds for the
+        gate and the route forgot to drop would arrive as an unexpected keyword
+        argument. This stub spells ``stream_chat``'s documented parameters out and
+        takes **no** ``**kwargs``, so the leak is a ``TypeError`` — and the pump
+        turns that into an ``error`` frame, which is what the assertion reads.
+        """
+        client, root, _seen, _scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        set_workspace_hubs(client.app, root, mcp=self.Hub())
+
+        def strict(messages, model, server_url, emit, sampling=None,
+                   cancel_event=None, pause_event=None, api_key="none",
+                   sysprompt=None, tools=None, tool_executor=None,
+                   tool_servers=None, max_tool_iterations=25,
+                   uncapped_tool_names=None, retry_budget=None,
+                   agent_instructions=None, skills_instructions=None,
+                   mode_instructions=None, batch_instructions=None):
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", strict)
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert [name for name, _payload in _events(response.text)] == ["done"]
+
+    # -- the gate says no --------------------------------------------------------
+
+    def test_an_lsp_only_turn_gets_nothing(self, turn, monkeypatch):
+        # LSP tools answer queries and never file bytes, so a catalogue would tell
+        # the model to open a file it has no way to open (§5.19).
+        client, root, seen, scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
+        monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
+        set_workspace_hubs(client.app, root, mcp=NO_HUB, lsp=self.Hub())
+        self._post(client)
+        assert seen["skills_instructions"] == ""
+        assert scans == []
+        # The turn really was tool-capable, so this is the gate and not an
+        # accident of an empty request.
+        assert seen["tool_servers"] == {"use_pyright": "pyright"}
+
+    def test_a_tools_off_agent_gets_nothing(self, turn):
+        client, root, seen, scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT",
+                  mcpEnable=False, lspEnable=False)
+        set_workspace_hubs(client.app, root, mcp=self.Hub())
+        # The conversation ticks the connector: it is the mode's gate that empties
+        # the tool set, which is what the reserved ``todoBuilder`` looks like.
+        self._post(client, agentMode="builder", mcpEnabled=["console"])
+        assert seen["skills_instructions"] == ""
+        assert scans == []
+        # AGENTS.md is unaffected — the opposite rule, and its own case above.
+        assert seen["agent_instructions"].endswith("Use pytest.")
+
+    def test_a_connector_that_offers_no_tool_earns_no_catalogue(self, turn):
+        # The "survived the three admission gates" clause: declared, enabled,
+        # ticked — and never started, so it has no tool to read a file with.
+        client, root, seen, scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        hub = self.Hub(tools_available=False)
+        set_workspace_hubs(client.app, root, mcp=hub)
+        self._post(client, mcpEnabled=["console"])
+        assert hub.requested_ids == [["console"]]
+        assert seen["skills_instructions"] == ""
+        assert scans == []
+
+    def test_the_scan_is_never_asked_when_the_gate_is_false(self, turn):
+        """§5.19's last constraint, as its own case: the cheap answer comes first."""
+        client, root, _seen, scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT",
+                  mcpEnable=False, lspEnable=False)
+        set_workspace_hubs(client.app, root, mcp=self.Hub())
+        self._post(client, agentMode="builder")
+        assert scans == []
+
+    def test_a_workspace_with_no_skills_root_gets_an_empty_block(self, turn):
+        # No skills anywhere: the §5.13 answer is ``""``, forwarded as-is — not a
+        # heading, not a sentence about there being none.
+        client, root, seen, scans = turn
+        set_workspace_hubs(client.app, root, mcp=self.Hub())
+        self._post(client)
+        assert seen["skills_instructions"] == ""
+        # The gate said yes, so the scan *did* run: an absent root is not a
+        # refusal, it is just nothing found.
+        assert scans == [1]
+
+    # -- the block is the server's, and it is fresh ------------------------------
+
+    def test_the_block_is_re_read_for_every_turn(self, turn):
+        """§5.18: edit a ``SKILL.md`` and the next message sees it."""
+        client, root, seen, scans = turn
+        set_workspace_hubs(client.app, root, mcp=self.Hub())
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        self._post(client)
+        first = seen["skills_instructions"]
+        assert "Handles PDF files." in first
+
+        write_skill(root, "pdf-processing", description="Now also fills forms.")
+        self._post(client)
+        second = seen["skills_instructions"]
+        assert "Now also fills forms." in second
+        assert "Handles PDF files." not in second
+        assert first != second
+        assert scans == [1, 1]
+
+    def test_no_request_body_can_add_or_remove_the_block(self, turn):
+        """§5.20: the gate is the block's only condition, and it is not a field.
+
+        The body vocabulary is what the guard case checks statically; this is the
+        same claim on the wire — a field that *sounds* like the knob §5.20 forbids
+        is ignored like any other unknown key, and the server's decision stands
+        either way.
+        """
+        client, root, seen, _scans = turn
+        write_skill(root, "pdf-processing", description="Handles PDF files.")
+        set_workspace_hubs(client.app, root, mcp=self.Hub())
+
+        for extra in (
+            {},
+            {"skillsEnabled": True},
+            {"skipSkills": True},
+            {"withoutSkills": True},
+            {"includeSkills": False},
+            {"noSkills": True},
+            {"suppressSkills": True},
+            {"agentsMd": False, "skills": "everything"},
+            {"batchContext": "The lot: tasks 1 to 8."},
+            {"batchContext": None, "mcpEnabled": ["console"]},
+        ):
+            self._post(client, **extra)
+            assert "pdf-processing" in seen["skills_instructions"], extra
+
+        # And the other way round: nothing a caller sends manufactures a
+        # catalogue for a turn that cannot read a file.
+        add_agent(client, "builder", "Builder", systemMessage="PERSONA TEXT",
+                  mcpEnable=False, lspEnable=False)
+        for extra in (
+            {"skillsEnabled": True},
+            {"includeSkills": True},
+            {"batchContext": "The lot: tasks 1 to 8."},
+        ):
+            self._post(client, agentMode="builder", **extra)
+            assert seen["skills_instructions"] == "", extra
 
 
 class TestAToolCallWrittenAsTextIsRepaired:

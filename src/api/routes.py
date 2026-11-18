@@ -55,6 +55,7 @@ from src.core import termhub
 from src.core.termhub import policy as term_policy
 from src.core.termhub import drivers as term_drivers
 from src.core import batch as batch_core
+from src.core import skills as skills_core
 from src.core import workspace as workspace_seam
 from src.core.chat import stream_chat
 from src.core.llmkit.client import models_url
@@ -1041,6 +1042,36 @@ def _allowed_server_ids(enabled: Optional[List[str]]) -> List[str]:
     return server_ids
 
 
+#: The key :func:`_mcp_tool_kwargs` records the admitted MCP tool names under,
+#: for :func:`turn_can_open_a_file` alone. It is **not** a ``stream_chat``
+#: keyword: the route pops it out of the merged dict before the splat, and the
+#: pop is pinned by a test — a key left in would arrive as an unexpected
+#: keyword argument and break every tool-capable turn.
+MCP_TOOL_NAMES_KWARG = "mcp_tool_names"
+
+
+def turn_can_open_a_file(tool_kwargs: Dict[str, Any]) -> bool:
+    """Can this turn open a file at all? (spec §5.19, D8)
+
+    The skills catalogue is an instruction to *read a file*, so it is only ever
+    issued when reading one is possible: the answer is yes exactly when at least
+    one **MCP** tool survived the three admission gates into the turn's tool
+    kwargs. MCP tools are this app's only file-reading surface; LSP tools answer
+    queries only and never file bytes — so an LSP-only turn, a tools-off agent
+    (whose mode gate already empties the kwargs) and a connector that is declared
+    and enabled but never started (it offers no tool) all answer no.
+
+    The verdict reads the names :func:`_mcp_tool_kwargs` recorded at admission —
+    data the merge itself produces — rather than a name pattern, a tool count or
+    a hub lookup: §5.19's two constraints are that this never re-runs the hub
+    lookup (a second lookup could disagree with the first) and that the rule
+    outlives any change in how the two hubs merge. The caller passes the kwargs
+    **as the merge returned them**: the recorded key is read here, and the route
+    pops it before ``stream_chat`` sees the dict.
+    """
+    return bool(tool_kwargs.get(MCP_TOOL_NAMES_KWARG))
+
+
 def _mcp_tool_kwargs(
     manager: Any,
     enabled: Optional[List[str]] = None,
@@ -1060,7 +1091,10 @@ def _mcp_tool_kwargs(
     or stale ids silently drop and a connector deactivated in Settings can
     never leak back into a running conversation. ``None`` means no filter.
     Returns ``{}`` when nothing is active so the no-MCP call shape (and the
-    existing chat tests that stub ``stream_chat``) stays untouched.
+    existing chat tests that stub ``stream_chat``) stays untouched. When tools
+    *are* admitted the dict also carries :data:`MCP_TOOL_NAMES_KWARG` — the
+    names, for :func:`turn_can_open_a_file` — which the route pops before
+    ``stream_chat`` is called.
 
     ``agent`` is the row the turn resolved at its start, and it is where the
     tool-loop cap comes from (D9) — the cap is a per-agent column now, so a save
@@ -1087,6 +1121,11 @@ def _mcp_tool_kwargs(
         "tool_executor": tool_executor,
         "tool_servers": tool_to_server,
         "max_tool_iterations": max_tool_iteration(agent),
+        # The names this hub admitted, recorded for :func:`turn_can_open_a_file`
+        # (spec §5.19): the merged dict below does not keep provenance, so the
+        # admission site is the only place that can say which tools are MCP's.
+        # The route drops the key before ``stream_chat`` is called.
+        MCP_TOOL_NAMES_KWARG: set(tool_to_server),
     }
 
 
@@ -1218,6 +1257,10 @@ def _chat_tool_kwargs(
         "tool_servers": tool_to_server,
         "uncapped_tool_names": lsp_tool_names,
         "max_tool_iterations": max_tool_iteration(agent),
+        # Carried through the merge so :func:`turn_can_open_a_file` still sees
+        # the MCP admission (the merged ``tool_servers`` cannot tell provenance
+        # apart). The route pops it before ``stream_chat`` is called.
+        MCP_TOOL_NAMES_KWARG: mcp_kwargs[MCP_TOOL_NAMES_KWARG],
     }
 
 
@@ -3241,6 +3284,28 @@ def build_router() -> APIRouter:
         tool_kwargs = _chat_tool_kwargs(
             hub_set, body.mcpEnabled, body.lspEnabled, mode=mode, agent=agent
         )
+        # The skills catalogue is resolved **here** too — once, at the turn's
+        # start, beside the agent row, the connection and the tool set (§5.21),
+        # so a skill folder edited mid-turn cannot split this reply. The gate is
+        # evaluated **before** the scan (§5.19): a turn with no way to open a
+        # file must not walk two folder trees and read every header it finds in
+        # order to throw the result away, so a refusal forwards ``""`` and never
+        # touches the file system. When it says yes, the scan and the render run
+        # now and are never cached — §5.18, the same freshness AGENTS.md has:
+        # edit a SKILL.md and the next message sees it. No exception is caught
+        # around the scan: it cannot raise over a damaged input (a broken root or
+        # file is one finding and the rest still answers), and the workspace seam
+        # cannot raise here because this request already entered its scope — a
+        # silent catch would turn a real bug into a turn that quietly has no
+        # catalogue.
+        skills_block = ""
+        if turn_can_open_a_file(tool_kwargs):
+            found_skills, _skill_findings = skills_core.scan()
+            skills_block = skills_core.catalogue_block(found_skills)
+        # The MCP names the gate read are the merge's own bookkeeping, not a
+        # ``stream_chat`` keyword: out of the dict before the splat below, or
+        # every tool-capable turn would arrive with an unexpected argument.
+        tool_kwargs.pop(MCP_TOOL_NAMES_KWARG, None)
 
         def emit(event: Any) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -3275,6 +3340,15 @@ def build_router() -> APIRouter:
                     # there so every conversation starts already knowing the
                     # project's conventions (see ``config.load_agent_instructions``).
                     agent_instructions=agent_instructions_block(),
+                    # The skills catalogue rides beside it, as its own keyword and
+                    # **unconditionally**: ``""`` is already the "nothing to inject"
+                    # answer the other blocks use, so the §5.19 gate needs no
+                    # conditional shape here — and none may have one, because a
+                    # conditional is the shape a switch takes. The value is the
+                    # server's own decision, computed above from the tool set this
+                    # turn was already given, so no request body, stored row or
+                    # caller can ask for a catalogue or waive one (§5.20).
+                    skills_instructions=skills_block,
                     # The mode's generated blocks (only the reserved Todo builder
                     # has any) join after them, and are passed only when present
                     # — same conditional shape as ``batch_instructions`` below, so

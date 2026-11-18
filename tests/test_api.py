@@ -1271,9 +1271,14 @@ class TestChatAgentModeField:
         client, seen, hub, asked = chat_stub
         assert _chat(client, agentMode="code").status_code == 200
         assert asked == ["code"]
+        # ``skills_instructions`` is in the set because the route now always
+        # forwards the catalogue block (its value here is ``""``: this stub's hub
+        # is reached, but the test workspace holds no skills). It is an
+        # instruction block, not a tool argument — the tool kwargs below are
+        # exactly what they were.
         assert set(seen) == {
             "sysprompt", "tools", "tool_executor", "tool_servers",
-            "max_tool_iterations",
+            "max_tool_iterations", "skills_instructions",
         }
         assert hub.requested_ids == [["console"]]
         assert seen["tool_servers"] == {"use_console": "console"}

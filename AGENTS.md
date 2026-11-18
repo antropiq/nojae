@@ -86,6 +86,10 @@ The exact route list belongs to the API module; what matters architecturally:
 - **Every WorkBench turn runs in an agent mode** — an install-owned persona that
   replaces the configured system prompt, names the model the turn runs on, and may
   switch a whole hub off. It only narrows what settings and the conversation allow.
+- **A workspace's `.agents/skills` and the home folder's user-level one are
+  catalogued into the same system message** — name and description only; a
+  skill's body is read by the agent, on the model's own judgement, never by the
+  app. The catalogue is offered only to a turn that has a connector to read with.
 - **A refused round waits, and only it does.** An endpoint answer that says *try
   again* is waited out and the identical request re-sent — nothing had streamed,
   so an outage resumes instead of ending a run. That is the tool loop's only
@@ -113,6 +117,7 @@ ack, keeping its partial turn. The measurement rules hold for every stream:
 | `.env.test`, `.nojae/nojae-test-settings.json` | The e2e suite's own configuration and model connection, read only under the test switch. |
 | Connector and language-server declarations | Which ones exist and how to reach them — files in the workspace's reserved folder. |
 | Reserved workspace folder | This workspace's read/write policy and its hub declarations. |
+| `.agents/skills/*/SKILL.md` | Packaged know-how, catalogued into chat turns on this workspace. The user's files: no app path writes them. |
 
 Those files may hold secrets, so they are gitignored. These rules tie them
 together:

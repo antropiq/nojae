@@ -316,6 +316,7 @@ def stream_chat(
     max_tool_iterations: int = 25,
     uncapped_tool_names: Optional[Set[str]] = None,
     agent_instructions: Optional[str] = None,
+    skills_instructions: Optional[str] = None,
     mode_instructions: Optional[str] = None,
     batch_instructions: Optional[str] = None,
     retry_budget: Optional[Callable[[], Tuple[int, float]]] = None,
@@ -370,13 +371,24 @@ def stream_chat(
     user configured. Like the notice above, it is appended to the text of the
     system message (the Chat API only ever sends plain-text system messages).
 
+    ``skills_instructions`` (when non-empty) is the catalogue of the skills this
+    workspace and the user's home folder hold: one line per skill — name, what it
+    is for, and the path of its file — so the turn starts knowing which know-how
+    exists without any of it being read. ``""`` or an omitted argument means
+    "nothing to inject", exactly as for the blocks above, and this function
+    caches nothing: the caller re-resolves the text for every turn, so an edited
+    skill shows up in the next message. It is a separate argument for the same
+    documented reason as every other block here — the ``TOOL_NOTICE`` word check
+    must judge prompt-like text only, and a catalogue is written for a model that
+    has tools.
+
     ``mode_instructions`` (an agent mode's own generated blocks) rides between
     the two below — text only; this function never learns what a mode is.
 
     ``batch_instructions`` (batch mode's lot big picture) is appended *after*
     the project instructions and the mode blocks, so the system message reads
-    sysprompt → tool notice → control-token notice → AGENTS.md → mode blocks
-    → big picture: the project's rules stay the closest thing to the
+    sysprompt → tool notice → control-token notice → AGENTS.md → skills → mode
+    blocks → big picture: the project's rules stay the closest thing to the
     conversation, and the lot description — framed as context below, not as a
     task — is the furthest. It is re-sent on every task turn because the
     per-task context reset means nothing else carries it.
@@ -426,6 +438,19 @@ def stream_chat(
         messages[0] = {
             "role": "system",
             "content": _content_text(messages[0]) + "\n\n" + agent_instructions,
+        }
+    if skills_instructions:
+        # Between the project's instructions and the mode's own blocks: AGENTS.md
+        # and the skills catalogue are both standing reference material about the
+        # folder this conversation is about, so they sit adjacent, while the
+        # mode's blocks and the lot's big picture stay further from the
+        # conversation. It is a separate argument rather than text appended to
+        # ``agent_instructions`` for the reason every block here has one: the
+        # TOOL_NOTICE word check above must judge prompt-like text only, and a
+        # catalogue is a list of things to open with a tool.
+        messages[0] = {
+            "role": "system",
+            "content": _content_text(messages[0]) + "\n\n" + skills_instructions,
         }
     if mode_instructions:
         # The active mode's own standing instructions (the reserved Todo
