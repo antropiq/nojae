@@ -10,12 +10,14 @@ it passed them to the streamed call this package replaces. Layout mirrors
 * :mod:`llmkit.sanitize` -- neutralising delimiter-wrapped control-token
   runs in outgoing message content, applied by both call shapes
 * :mod:`llmkit.sse` -- SSE lines to parsed chat-completion chunk dicts
-* :mod:`llmkit.client` -- the two call shapes, the error type, the URL rules
+* :mod:`llmkit.client` -- the two call shapes, the error type, the verdict on
+  a failed call (retryable or final), the URL rules
 """
 
 from .client import (
     ChatStream,
     LLMRequestError,
+    another_attempt_may_help,
     chat_completion,
     chat_completions_url,
     models_url,
@@ -25,6 +27,7 @@ from .client import (
 __all__ = [
     "ChatStream",
     "LLMRequestError",
+    "another_attempt_may_help",
     "chat_completion",
     "chat_completions_url",
     "models_url",

@@ -230,6 +230,37 @@ body {
   border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
 }
 
+/* The clock's column: the digits, and under them the last turn's own span with
+   the waited part beside it (spec §5.17). Two rows in one column is the shape
+   the working-location field already uses in this bar, so a two-row readout is
+   nothing new; the column only becomes two rows when a turn has reported a
+   span, because the caption is not rendered at all before that. */
+.session-clock-col {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+/* `.caption.mono` carries the voice (muted, small, machine-reported) and the
+   monospace digits; this only fits it under the clock — same measure as the
+   digits, so the two rows line up, and it truncates rather than wrapping the
+   bar. The whole figure is carried in the element's `title`. */
+.session-clock-turn {
+  min-width: 8ch;
+  box-sizing: border-box;
+  padding: 0 0.5rem;
+  font-size: 0.65rem;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* The token-rate and context counters (SessionStatBadges.vue), left of the tab
    strip. They never take part in the centre cell's stretching, so the tab
    strip stays centred. */
@@ -310,6 +341,21 @@ body {
 
 .status-thinking .status-dot,
 .status-reasoning .status-dot {
+  animation: bi-pulse 1.2s ease-in-out infinite;
+}
+
+/* The endpoint refused a round and the app is waiting to ask again. The pill
+   stays lit — the turn is still in flight — so it keeps the same "a reply is
+   running" violet as the thinking/reasoning phases above: the theme has no
+   separate tone for "waiting on someone else", and inventing one would read as
+   a fourth status rather than as the same reply, paused. The distinction is in
+   the label, never in the colour (spec §5.11). */
+.status-reconnecting {
+  color: var(--bi-violet);
+  border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
+}
+
+.status-reconnecting .status-dot {
   animation: bi-pulse 1.2s ease-in-out infinite;
 }
 
@@ -2007,6 +2053,23 @@ input.appbar-location-input {
   height: auto;
   min-height: 0;
   margin: 0;
+}
+
+/* The endpoint wait's status line (WorkBenchInput.vue, spec §5.6). It is a
+   status line and not an alert, so it wears the theme's existing caption
+   vocabulary — muted colour, small type — plus `.mono`, the same voice the
+   batch meter's counter and every machine-reported figure already use: the
+   sentence in the middle is the endpoint's own, quoted rather than written by
+   the app. No border, no background and no reserved height: with nothing to
+   say the element is not rendered at all, so the composer is exactly what it
+   was. A long provider sentence is cut to one line and the `title` carries the
+   whole of it, which keeps the composer's strip a strip — the diagnosis is
+   never re-worded here (spec §9), only shortened. */
+.chat-endpoint-wait {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The composer row (WorkBenchInput.vue): session icon buttons on the left

@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { mount } from '@vue/test-utils'
+
+import SessionClock from '../src/components/SessionClock.vue'
 import { useSessionStats } from '../src/composables/useSessionStats'
 import { useAppShell } from '../src/composables/useAppShell'
 import { useBatch } from '../src/composables/useBatch'
@@ -130,6 +133,86 @@ describe('useSessionStats: one clock and two counters, whichever session is live
   })
 })
 
+// ---------------------------------------------------------------------------
+// Task 07 — the clock and the wait.
+//
+// Spec §5.16 and §5.17 in figures: the session total **excludes** the seconds a
+// turn spent waiting on a refused endpoint (a 40-minute provider outage must
+// not read as a 40-minute session), while the turn's **own span keeps them**
+// and states the waited part separately ("took 41 minutes" vs "took 1 minute
+// and waited 40"). The token rate is in neither rule and must not move: a wait
+// has no chunk arrival, so it enters no decode window.
+//
+// Asserted on the figures, not the pixels — the caption's look stays an e2e
+// concern, exactly like the rest of the meters.
+// ---------------------------------------------------------------------------
+
+describe('the wait: excluded from the session total, kept in the turn span', () => {
+  beforeEach(reset)
+
+  it('answers no span at all until a turn reports one', () => {
+    expect(stats.turnSpan.value).toBe(null)
+    expect(stats.turnSpanText.value).toBe('')
+  })
+
+  it('keeps the whole span and exposes the waited part separately', () => {
+    chat.messages = [measuredReply({ took: 2460, ttft: 30, decode: 25, waited: 2400 })]
+    expect(stats.turnSpan.value).toEqual({ span: 2460, waited: 2400 })
+    expect(stats.turnSpanText.value).toBe('turn 41m · 40m waited')
+    // The tooltip spells out which of the two figures excludes the wait, so the
+    // pair cannot be read as the same number twice.
+    expect(stats.turnSpanTitle.value).toContain('spent waiting')
+    expect(stats.turnSpanTitle.value).toContain('excludes')
+  })
+
+  it('says nothing about waiting for a turn that waited nothing', () => {
+    chat.messages = [measuredReply({ took: 8.2, waited: 0 })]
+    expect(stats.turnSpan.value).toEqual({ span: 8.2, waited: 0 })
+    expect(stats.turnSpanText.value).toBe('turn 8s')
+  })
+
+  it('reads a payload with no waited key as no wait (an older server)', () => {
+    const reply = measuredReply({ took: 90 })
+    expect('waited' in reply).toBe(false)
+    chat.messages = [reply]
+    expect(stats.turnSpan.value).toEqual({ span: 90, waited: 0 })
+    expect(stats.turnSpanText.value).toBe('turn 1m 30s')
+  })
+
+  it('leaves the token rate untouched: the same tokens over the same decode', () => {
+    // One turn waited 40 minutes of a 41-minute span, the other never waited;
+    // both generated the same tokens in the same decode window, so both must
+    // read the same t/s. The wait is a third category: it enters the turn's
+    // span and the session clock's exclusion, and nothing else.
+    const unwaited = measuredReply({ tokens: 100, took: 5, ttft: 1, decode: 4 })
+    const waited = measuredReply({
+      tokens: 100,
+      took: 2465,
+      ttft: 1,
+      decode: 4,
+      waited: 2460,
+    })
+
+    chat.messages = [unwaited]
+    expect(stats.rateText.value).toBe('25.0 t/s')
+    const rateOfTheUnwaitedTurn = stats.rate.value.value
+
+    chat.messages = [waited]
+    expect(stats.rateText.value).toBe('25.0 t/s')
+    expect(stats.rate.value.value).toBe(rateOfTheUnwaitedTurn)
+  })
+
+  it('formats a span tersely, since the clock beside it is already hh:mm:ss', () => {
+    expect(stats.formatSpan(0)).toBe('0s')
+    expect(stats.formatSpan(8.2)).toBe('8s')
+    expect(stats.formatSpan(59.6)).toBe('1m')
+    expect(stats.formatSpan(122)).toBe('2m 02s')
+    expect(stats.formatSpan(2400)).toBe('40m')
+    expect(stats.formatSpan(3840)).toBe('01h 04m')
+    expect(stats.formatSpan(86_400)).toBe('24h 00m')
+  })
+})
+
 // The other half of the rule: the composable's own carrying-over must be driven
 // by useChat — a turn banks its span when it ends, and reset() is the only thing
 // that zeroes the total. Asserted against a stubbed stream so the real start/finish
@@ -200,6 +283,116 @@ describe('useChat keeps the session total across turns', () => {
     await send()
   }
 
+  // Re-points only the chat route at a scripted stream, leaving the agent list
+  // (and every other route) as `stubRoutes` answered them: the turn's `done`
+  // payload is the thing under test here.
+  function chatStream(frames) {
+    const routes = globalThis.fetch.getMockImplementation()
+    globalThis.fetch.mockImplementation((url, init) => {
+      const key = String(url)
+      if (key.startsWith('/api/agents')) return routes(url, init)
+      if (key.startsWith('/api/chat')) {
+        return { ok: true, body: sseBody(frames) }
+      }
+      return jsonResponse({})
+    })
+  }
+
+  const DONE = (payload) => `event: done\ndata: ${payload}\n\n`
+  const TOKEN = (text) => `event: token\ndata: {"text":"${text}"}\n\n`
+
+  it('banks a turn with no wait at all as exactly its span', async () => {
+    // The shape before this feature, restated so the exclusion is proven to
+    // change only the waited case: no key, `waited: 0`, both bank the span.
+    chatStream(DONE('{"tokens":12,"took":1.5,"ttft":0.4,"decode":1.1,"waited":0}'))
+    const now = vi.spyOn(Date, 'now').mockReturnValue(99_000)
+    now.mockReturnValueOnce(10_000).mockReturnValueOnce(11_500)
+    await turn('no wait')
+    expect(chat.session.spentMs).toBe(1500)
+  })
+
+  it('banks the span less the seconds the turn waited on the endpoint', async () => {
+    // spec §5.16: a 41-minute turn that spent 40 of them waiting on a refused
+    // endpoint credits the conversation with 1 minute, not 41 — a provider
+    // outage is not a session.
+    chatStream(
+      TOKEN('late but fine') +
+        DONE('{"tokens":12,"took":2460.0,"ttft":0.4,"decode":1.1,"waited":2400.0}'),
+    )
+    // Three reads of the scripted clock: opening the turn (startedAt), the
+    // streamed chunk's generation window, and finish()'s span.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(99_000)
+    now
+      .mockReturnValueOnce(10_000)
+      .mockReturnValueOnce(610_000)
+      .mockReturnValueOnce(2_470_000)
+    await turn('outage')
+
+    expect(chat.session.spentMs).toBe(60_000) // 2460s of span − 2400s of wait
+    // The same turn's own figures keep the wait and say it separately (§5.17),
+    // and the clock's total is what excludes it.
+    expect(stats.turnSpan.value).toEqual({ span: 2460, waited: 2400 })
+    expect(stats.turnSpanText.value).toBe('turn 41m · 40m waited')
+    expect(stats.elapsedMs(99_000)).toBe(60_000)
+    // The clock reads the excluded total, and the turn line beside it keeps the
+    // whole span: the two readings the spec refuses to let be conflated.
+    expect(stats.formatElapsed(stats.elapsedMs(99_000))).toBe('00:01:00')
+  })
+
+  it('banks the whole span when the payload carries no waited key (older server)', async () => {
+    // `waited` must read as 0 and not as `undefined`, or the bank would be NaN.
+    chatStream(DONE('{"tokens":12,"took":1.5,"ttft":0.4,"decode":1.1}'))
+    const now = vi.spyOn(Date, 'now').mockReturnValue(99_000)
+    now.mockReturnValueOnce(20_000).mockReturnValueOnce(21_500)
+    await turn('old server')
+    expect(chat.session.spentMs).toBe(1500)
+  })
+
+  it('banks a paused turn its whole span too — no frame reported a wait for it', async () => {
+    // spec §5.15 puts `waited` on `done` only, and a paused turn ends on
+    // `pause_ack` instead. So the bank is the span with `waited` read as 0:
+    // a decision, not an oversight — the app cannot know what that turn
+    // waited, and inventing a figure would be worse.
+    chatStream(
+      TOKEN('interrupted mid-way') + 'event: pause_ack\ndata: {"paused":true}\n\n',
+    )
+    const now = vi.spyOn(Date, 'now').mockReturnValue(99_000)
+    now.mockReturnValueOnce(30_000).mockReturnValueOnce(31_000).mockReturnValueOnce(33_000)
+    await turn('paused')
+    expect(chat.session.spentMs).toBe(3000)
+    // The partial turn is kept in the conversation, and it reported no span.
+    expect(chat.messages.some((m) => m.role === 'assistant' && m.paused)).toBe(true)
+    expect(stats.turnSpanText.value).toBe('')
+  })
+
+  it('banks a stopped turn its whole span, since no frame told it what it waited', async () => {
+    // A turn cut short before its `done` frame: the app cannot know what it
+    // waited, so it banks the raw span — an honest 0 rather than an invented
+    // figure. Nothing is subtracted from a number nobody reported.
+    chatStream(TOKEN('half an answer'))
+    const now = vi.spyOn(Date, 'now').mockReturnValue(99_000)
+    now.mockReturnValueOnce(10_000).mockReturnValueOnce(12_000).mockReturnValueOnce(14_000)
+    await turn('no terminal frame')
+    expect(chat.session.spentMs).toBe(4000)
+    // No `done` frame means no reported span either, so the turn line stays out.
+    expect(stats.turnSpanText.value).toBe('')
+  })
+
+  it('leaves the token rate exactly where a wait does not reach it', async () => {
+    // The same generation figures, waited and unwaited: the badge reads the
+    // same t/s, because `decode` never contains a wait (task 04) and this task
+    // changes no rate arithmetic.
+    chatStream(DONE('{"tokens":100,"took":5,"ttft":1,"decode":4,"waited":0}'))
+    await turn('plain')
+    expect(stats.rateText.value).toBe('25.0 t/s')
+
+    chatStream(
+      TOKEN('x') + DONE('{"tokens":100,"took":2465,"ttft":1,"decode":4,"waited":2460}'),
+    )
+    await turn('waited')
+    expect(stats.rateText.value).toBe('25.0 t/s')
+  })
+
   it('banks a failed turn once, even though finish() runs twice on that path', async () => {
     // A refused send finishes in the error branch *and* again in `finally`; the
     // clock must not charge the same span twice.
@@ -266,5 +459,41 @@ describe('useChat keeps the session total across turns', () => {
     expect(stats.elapsedMs(99_000)).toBe(0)
     expect(stats.rateText.value).toBe('— t/s')
     expect(stats.contextText.value).toBe('— ctx')
+  })
+})
+
+// The rendered half of spec §5.17: the waited figure sits **beside** the clock,
+// drawn from the composable's answer rather than computed in the template, and
+// it is absent — not an empty box — while no turn has reported a span.
+describe('the app bar clock states the turn span beside its own total', () => {
+  function mountClock() {
+    const wrapper = mount(SessionClock)
+    return {
+      wrapper,
+      clock: () => wrapper.get('.session-clock').text().trim(),
+      turn: () => {
+        const line = wrapper.find('.session-clock-turn')
+        return line.exists() ? line.text().trim() : null
+      },
+    }
+  }
+
+  it('renders no turn line until a turn has reported a span', () => {
+    reset()
+    const view = mountClock()
+    expect(view.clock()).toBe('00:00:00')
+    expect(view.turn()).toBe(null)
+    view.wrapper.unmount()
+  })
+
+  it('renders the whole span and the waited part on one terse line', async () => {
+    reset()
+    chat.messages = [measuredReply({ took: 2460, ttft: 30, decode: 25, waited: 2400 })]
+    chat.session.spentMs = 60_000 // that 2460s turn banked 60s of it
+    const view = mountClock()
+    await view.wrapper.vm.$nextTick()
+    expect(view.clock()).toBe('00:01:00')
+    expect(view.turn()).toBe('turn 41m · 40m waited')
+    view.wrapper.unmount()
   })
 })

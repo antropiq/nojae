@@ -255,7 +255,7 @@ only settings a folder carries.
 | | Holds | Written by |
 |---|---|---|
 | `nojae.db` (install root) | The servers and the models under them, each server with its key; the agents; the prompt helpers. | the Settings and Agent-modes dialogs — and nothing else |
-| `.env` (from `.env.example`) | The two install-scoped technical keys: `LLM_DEBUG` (log every request payload) and `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on). | by hand; nothing in the dialog edits them |
+| `.env` (from `.env.example`) | The install-scoped technical keys: `LLM_DEBUG` (log every request payload), `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on), and the two numbers of the model-endpoint wait. | by hand; nothing in the dialog edits them |
 | `.nojae/mcp-settings.json` (seeded from `mcp_connectors/mcp-settings.default.json`) | The MCP connectors the agent may call. | by hand; the dialog's toggles write each entry's `enable` flag |
 | `.nojae/lsp-settings.json` (written from the seeded `.nojae/lsp-settings.template.json`) | The language servers. | by hand; same |
 
@@ -600,23 +600,42 @@ workspace's hubs, policy and tree caches.
 
 ### The install's technical keys — `.env`
 
-Copy `.env.example` to `.env` when you want to turn the request logging on or to
-name the interpreter your connectors run on. This file holds only what is scoped
-to **this nojae install** and edited by hand: the model connection — servers,
-their models, keys, prompts, sampling and the vision flag — is in the settings
-store, edited from the Settings dialog, and the tool-loop cap is a number on each
-agent (see the table at the top of this section). What is left here are the two
-technical keys below, and nothing in the dialog edits them:
+Copy `.env.example` to `.env` when you want to turn the request logging on, to
+name the interpreter your connectors run on, or to change how long a refused
+model round is waited on. This file holds only what is scoped to **this nojae
+install** and edited by hand: the model connection — servers, their models,
+keys, prompts, sampling and the vision flag — is in the settings store, edited
+from the Settings dialog, and the tool-loop cap is a number on each agent (see
+the table at the top of this section). What is left here are the technical keys
+below, and nothing in the dialog edits them:
 
 ```bash
 #LLM_DEBUG=1                # logs every request payload to the console
 #NOJAE_PYTHON_ROOT=         # the python the stdio connectors run on
+#NETWORK_FAIL_MAX_RETRY=3   # how many times a refused round is asked again
+#NETWORK_FAIL_WAIT_FOR=10   # seconds between two attempts at that round
 ```
 
-`LLM_DEBUG` and `NOJAE_PYTHON_ROOT` are **hand-edited**: they are managed
-keys, so a settings save keeps them, but nothing in the dialog edits them.
-`LLM_DEBUG=1` makes the LLM client log the payload of every request to the
-server console — very verbose, and switched back off once the failure is read.
+All four are **hand-edited managed keys**: a settings save keeps them, but
+nothing in the dialog edits them. `LLM_DEBUG=1` makes the LLM client log the
+payload of every request to the server console — very verbose, and switched back
+off once the failure is read.
+
+`NETWORK_FAIL_MAX_RETRY` and `NETWORK_FAIL_WAIT_FOR` are the two numbers of the
+endpoint wait described under
+[One configuration, one streaming layer](#one-configuration-one-streaming-layer):
+how many times one refused round is asked again, and the seconds between two
+attempts at it. Both defaults are non-zero, so the wait is **on with no
+configuration at all**; `NETWORK_FAIL_MAX_RETRY=0` switches it off and a refused
+round fails on its first attempt. One round can hold the turn for at most the
+product of the two — `120 × 30s` is two hours — and that hold is not free: a
+reply stays in flight through the wait, so **the Editor refuses every write to
+its folder** until the round lands. A generous budget is therefore a long window
+in which that workspace cannot save, and **Stop** closes it at once. A blank,
+non-numeric or negative value is never silently coerced: the default answers for
+that key alone, and `GET /api/config` answers the effective pair with a note
+naming every key whose written value was unusable — so a typo there is visible
+instead of being a stall with extra steps.
 
 A `.env` save **regenerates the file from a fixed template**: fixed key set and
 order, empty optional keys commented out, hand-written extras lost. Add or rename
@@ -679,8 +698,13 @@ task counts as finished when its **file has left the folder** — the agent move
 it into `todos/done`, which is its own acknowledgement — so a file still in place
 is relaunched with a note saying why, up to three times, after which the lot
 aborts. Each relaunch first waits a rising interval (5s, then 15s, then 30s), so
-a slow trailing move or a brief network cut is absorbed rather than costing a
-wasted turn; Stop cuts the wait short. The agent is pinned when the lot launches
+a slow trailing move is absorbed rather than costing a wasted turn; Stop cuts
+that wait short. An endpoint that refuses mid-task is waited out by the round
+wait described under
+[One configuration, one streaming layer](#one-configuration-one-streaming-layer),
+not by a relaunch: the turn is not lost, so the lot sees its usual outcome and
+its own rules are untouched — a wait that runs out of budget still ends the lot.
+The agent is pinned when the lot launches
 — the one the composer's dropdown shows, the same agent a standard session of that
 choice would run as — so moving the composer's choice mid-lot reaches no task, and
 a lot whose selected agent is missing or has no model refuses at launch rather
@@ -696,11 +720,25 @@ workspace — as many as you have added, and no fixed count), and Save / Load of
 conversation as a plain JSON file. Markdown renders with KaTeX, highlighted code
 and Mermaid diagrams, always through the sanitizer.
 
+When the model endpoint refuses and could answer later, one quiet line appears in
+that strip for as long as the wait lasts — **`Reconnecting 2/3`**, then the
+endpoint's own sentence quoted exactly as it came, and the seconds until the
+request goes out again. Nothing else changes on screen: the conversation gains no
+message and no marker for a wait, the composer stays shut and the running
+indicator stays lit, because the reply is still in flight — and **Stop** ends the
+wait at once.
+
 The app bar carries the session meters: the elapsed clock, the generation speed
 and the context-window occupancy. They describe the **conversation**, not one
 reply, so they keep their figures when an answer lands and the next question
 continues the same totals. Only **Restart conversation** in the composer puts
-them back to zero.
+them back to zero. The clock counts the time the conversation worked: it
+**excludes** the seconds a turn spent waiting on the model endpoint — a wait is
+neither inference nor thinking, so a 40-minute provider outage is not a
+40-minute session — while the turn's own span **keeps** them and states the
+waited part beside it. That pair is how "took 41 minutes" is told apart from
+"took 1 minute and waited 40"; the speed figure holds either way, since a wait
+contributes no token.
 
 `Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Stage
 button swaps the two, so a long message can be finished — and reread — before it
@@ -764,3 +802,24 @@ one terminal event, so a paused answer still ends as a kept partial turn.
 Configuration changes are live the moment the Settings dialog saves them; a
 hand-edit of a hub declaration file is picked up by its **Refresh**, and only a
 hand-edit of `.env` waits for a server restart.
+
+When that endpoint answers a request with a failure that says *ask again later* —
+a provider-side `5xx`, a rate limit, a refusal to connect, a stalled read — the
+turn does not end there: nojae waits out the pause and sends the **identical**
+request again, until the endpoint answers usefully or the budget of
+`NETWORK_FAIL_MAX_RETRY` is spent. That is where the whole guard sits and why it
+is invisible to the browser: the link that broke is between **this server and the
+endpoint**, never the one between the page and the server — the page's own
+connectivity is innocent and is never watched. The resume is exact rather than
+approximate, because the failure lands before a single byte of the reply exists:
+the replay carries what the failed attempt was about to send, the earlier rounds'
+tool results still in the message list, and the turn closes on its normal
+terminal frame — so a batch lot reads its usual outcome and moves on, which is
+how an unattended lot finishes by itself instead of waiting for someone to press
+Start again.
+
+Two things are deliberately **not** waited on: a hard refusal — a revoked key, an
+unknown model, a malformed request, anything the endpoint is certain about — and
+any stream that broke *after* text had arrived. Both stay final because waiting
+on a diagnosis turns a one-second error line into a silent stall, and replaying a
+cut stream would duplicate the text on screen or discard it without saying so.

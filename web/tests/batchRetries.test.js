@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -167,23 +169,83 @@ function chatDoneFrame() {
   return 'event: done\ndata: {"tokens":12,"took":1.5,"ttft":0.4,"decode":1.1}\n\n'
 }
 
-// A body useChat's reader loop accepts: one chunk holding the frame, then the
+// A body useChat's reader loop accepts: one chunk holding the frames, then the
 // stream ends. jsdom has no ReadableStream, so the reader is the minimal shape
 // the loop actually calls.
-function sseBody(text) {
-  const bytes = new TextEncoder().encode(text)
-  let delivered = false
+function sseBody(text, onFrameApplied = null) {
+  return sseBodyChunks([text], onFrameApplied)
+}
+
+// The same body handed over **one read per frame**, which is what a real stream
+// does — and what makes the cases below able to look at the batch meter *while*
+// a turn is still in flight. `readStream` drains the buffer after every read, so
+// each chunk's frame reaches `applyEvent` before the next read is asked for: the
+// `reconnecting` frame's phase and status line are the app's state while the
+// remaining chunk is still owed, i.e. while the lot's own `await` has not
+// returned.
+function sseBodyChunks(frameTexts, onFrameApplied = null) {
+  const encoder = new TextEncoder()
+  const chunks = frameTexts.map((text) => encoder.encode(text))
+  let next = 0
   return {
     getReader() {
       return {
         async read() {
-          if (delivered) return { done: true, value: undefined }
-          delivered = true
-          return { done: false, value: bytes }
+          // `readStream` drains the buffer it has just read before asking for
+          // the next chunk, so entering this call with a chunk already delivered
+          // is exactly the moment its frames have reached `applyEvent` and the
+          // turn is still in flight — the only window in which a case can read
+          // the app's *mid-turn* state. The observer also gets this body's whole
+          // frame list, so it can tell the stream it is watching from the plain
+          // ones the same lot sends.
+          if (next > 0 && onFrameApplied) await onFrameApplied(next, frameTexts)
+          if (next >= chunks.length) return { done: true, value: undefined }
+          return { done: false, value: chunks[next++] }
         },
       }
     },
   }
+}
+
+// One task turn's stream **with an endpoint wait in it** — the frames a server
+// that ran tasks 03–07 could actually send for one round: the guard announcing
+// its wait, then the replayed round answering. `waitSeconds`/`waited` carry the
+// figures of spec §6's defaults (`NETWORK_FAIL_WAIT_FOR=10`, three waits spent
+// = 30s) but no test sleeps for them: the client reads them, it never counts
+// them.
+function reconnectingFrame({ attempt = 1, budget = 3, waitSeconds = 10 } = {}) {
+  return (
+    'event: reconnecting\n' +
+    `data: {"attempt":${attempt},"budget":${budget},"waitSeconds":${waitSeconds},` +
+    '"message":"the model endpoint answered HTTP 502 for ' +
+    'https://api.example/v1/chat/completions: Bad Gateway"}\n\n'
+  )
+}
+
+function doneFrameWithWait(waited = 30) {
+  return (
+    'event: done\n' +
+    `data: {"tokens":12,"took":31.5,"ttft":0.4,"decode":1.1,"waited":${waited}}` +
+    '\n\n'
+  )
+}
+
+// A wait that ran out its budget: the three waits announced, then the guard's
+// final error (spec §5.10 — the endpoint's sentence plus what the app already
+// did about it). One frame per chunk, so the reads land between them.
+function exhaustedFrames({ waits = 3, budget = 3, waitSeconds = 10 } = {}) {
+  const frames = []
+  for (let attempt = 1; attempt <= waits; attempt += 1) {
+    frames.push(reconnectingFrame({ attempt, budget, waitSeconds }))
+  }
+  frames.push(
+    'event: error\n' +
+      `data: {"message":"LLM call failed: the model endpoint answered HTTP 502 ` +
+      `for https://api.example/v1/chat/completions: Bad Gateway (waited ` +
+      `${waits * waitSeconds}s over ${waits} further attempts; the model ` +
+      'endpoint is still refusing)"}\n\n',
+  )
+  return frames
 }
 
 function task(number, name) {
@@ -238,6 +300,15 @@ function stubRoutes({
   // completion check's re-listing. Both are the lot's own folder's lot, which is
   // what keeps a moved tab from judging A's lot by B's listing (spec §5.7 rule 32).
   listingCalls = null,
+  // The frames of one task turn's SSE body, scripted per task: called with the
+  // task whose turn this is and how many turns of it have run, answering the
+  // frame list to stream. `null` (the default, and what every case that does not
+  // pass it gets) is the plain `done` frame.
+  framesFor = null,
+  // Called with the index of the frame the stream has just delivered, *before*
+  // the next one is read — i.e. with that frame's effect on the app's state
+  // applied and the turn still in flight.
+  onFrameApplied = null,
 }) {
   const stillInLot = tasks.slice()
   const turnsOf = new Map()
@@ -276,7 +347,11 @@ function stubRoutes({
         }
       }
       if (duringTurn) duringTurn()
-      return { ok: true, body: sseBody(chatDoneFrame()) }
+      const frames = framesFor ? framesFor(task, turnsOf.get(task?.number) ?? 1) : null
+      return {
+        ok: true,
+        body: sseBodyChunks(frames ?? [chatDoneFrame()], onFrameApplied),
+      }
     }
     if (key.startsWith('/api/batch/tasks')) {
       if (listingCalls) listingCalls.push(key)
@@ -1099,4 +1174,337 @@ describe("two tabs' batch guards are independent", () => {
     expect(sent).toHaveLength(1)
     expect(batch.error).toBeNull()
   })
+})
+
+// ---------------------------------------------------------------------------
+// ereco-08 — *"the batch loop needs no change"* (spec §2), proved rather than
+// asserted about.
+//
+// **What is deliberately untouched, and why that is the claim.** Nothing in
+// `src/core/batch.py`, `web/src/composables/useBatch.js` or
+// `web/src/components/BatchProgressBar.vue` changed for this feature: the
+// endpoint guard lives in the chat loop's handler around the LLM seam
+// (`core/chat.py`) and in `useChat`'s phase handling, so a **retried round
+// never becomes an error at all** — the turn still ends on its normal `done`
+// frame, the loop reads its normal outcome, and the lot moves on. Its decision
+// table (`nextBatchAction`), its task-relaunch budget (`MAX_TASK_RETRIES`,
+// `RELAUNCH_DELAYS_MS` — the *task* relaunch, a different thing from a round's
+// wait, spec §3), its delays and its meter are the code that was left alone, and
+// the cases below drive a lot over a stream such a server really produces.
+//
+// The proof of an absence cannot be a git-diff check: a test that reads
+// `HEAD` or a working tree is a test that changes meaning with every unrelated
+// commit, and it would fail on the very commit that adds it. So what is asserted
+// instead is behaviour — the waited turn and the clean turn are
+// **indistinguishable to the loop** — plus the one source rule that cannot rot:
+// the three batch files hold none of the round-wait vocabulary, so there is no
+// per-mode branch for a later change to grow out of.
+//
+// Hermetic throughout (AGENTS.md): the SSE body is a string, the loop is a
+// function, and no case sleeps for a wait's seconds — the client reads the
+// figures, it never counts them.
+
+const WAIT_TOKEN_FRAME = 'event: token\ndata: {"text":"task 1, done"}\n\n'
+
+// A whole lot over a scripted stream, reported as the loop itself leaves things:
+// what it sent, what it recorded per turn, where it ended. The two halves of the
+// claim are then a comparison between two runs, not a hand-written expectation.
+async function runLotOver({ framesFor = null, chatUrls = null, payloads = null }) {
+  reset()
+  const sent = []
+  const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
+  stubRoutes({ sent, tasks, framesFor, chatUrls, payloads })
+  await seedLot(tasks)
+
+  await launch()
+
+  return {
+    sent,
+    outcomes: batch.outcomes.map((item) => ({ ...item })),
+    status: batch.status,
+    index: batch.index,
+    error: chat.error,
+  }
+}
+
+describe('a task turn that waited on a refused endpoint is an ordinary turn', () => {
+  beforeEach(reset)
+
+  // Spec §2's sentence, executable: a retried round never became an error, so
+  // the lot's record of a lot that waited is its record of the same lot that
+  // never waited — same instructions, same per-turn outcomes, same ending.
+  it('a lot whose task turn waited reads exactly as the same lot without the wait', async () => {
+    const waited = await runLotOver({
+      framesFor: (item) =>
+        item.number === 1
+          ? [reconnectingFrame({ attempt: 3, budget: 3 }), WAIT_TOKEN_FRAME, doneFrameWithWait(30)]
+          : null,
+    })
+    const clean = await runLotOver({})
+
+    // The loop asked each task once, with the plain instruction: the wait cost
+    // the lot no relaunch and no retry note (that vocabulary is for a task file
+    // that never left the folder, and the wait is not that).
+    expect(waited.sent).toEqual(clean.sent)
+    expect(waited.sent).toEqual([
+      taskInstruction('todos/ed-01-a.md'),
+      taskInstruction('todos/ed-02-b.md'),
+    ])
+    // One record per turn, with the loop's own outcome word — no new one.
+    expect(waited.outcomes).toEqual(clean.outcomes)
+    expect(waited.outcomes).toEqual([
+      { number: 1, attempt: 0, outcome: 'done', moved: true },
+      { number: 2, attempt: 0, outcome: 'done', moved: true },
+    ])
+    for (const record of waited.outcomes) {
+      expect(Object.keys(record).sort()).toEqual(['attempt', 'moved', 'number', 'outcome'])
+    }
+    expect(waited.status).toBe('finished')
+    expect(waited.status).toBe(clean.status)
+    expect(waited.index).toBe(clean.index)
+    expect(waited.error).toBeNull()
+  })
+
+  // The loop's table is the whole decision, and a waited turn's record goes
+  // through it like any other: the shared functions are asked the same question
+  // here that the loop asks them after a clean turn.
+  it('the decision table answers the waited turn as it answers a clean one', () => {
+    // The record the waited turn leaves and the record a turn with no wait in
+    // its stream leave are the same shape and the same values, so the two
+    // shared functions answer them alike — no new branch, no new word.
+    const clean = { outcome: 'done', moved: true, attempt: 0, active: true }
+    const waited = { outcome: 'done', moved: true, attempt: 0, active: true }
+    expect(nextBatchAction(waited)).toBe(nextBatchAction(clean))
+    expect(nextBatchAction(waited)).toBe('next')
+    expect(taskCountedForProgress(waited)).toBe(taskCountedForProgress(clean))
+    expect(taskCountedForProgress(waited)).toBe(true)
+  })
+
+  // D4: no frontend layer retries anything. The whole wait is inside **one**
+  // request, so the loop posts its task turn exactly once — and that request
+  // still carries the lot's pins, untouched by the wait (spec §5.9).
+  it('the wait is one POST: the client retries nothing', async () => {
+    const chatUrls = []
+    const payloads = []
+    const run = await runLotOver({
+      chatUrls,
+      payloads,
+      framesFor: (item) =>
+        item.number === 1 ? [reconnectingFrame(), WAIT_TOKEN_FRAME, doneFrameWithWait()] : null,
+    })
+
+    expect(run.sent).toHaveLength(2)
+    // Two tasks, two posts: task 1's turn spent its whole budget inside its own
+    // stream and never came back around to the loop.
+    expect(chatUrls).toHaveLength(2)
+    for (const url of chatUrls) {
+      expect(workspaceOf(url)).toBe(LOT_WORKSPACE)
+    }
+    expect(payloads.map((payload) => payload.agentMode)).toEqual(['code', 'code'])
+  })
+
+  // spec §5.13 inside a lot: the wait is a status line, not content, so the
+  // transcript the loop reads its outcome from is unpolluted by it.
+  it('writes nothing into the thread for the wait', async () => {
+    const midTurn = []
+    const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
+    stubRoutes({
+      sent: [],
+      tasks,
+      framesFor: (item) =>
+        item.number === 1
+          ? [
+              reconnectingFrame({ attempt: 1, budget: 3 }),
+              WAIT_TOKEN_FRAME,
+              doneFrameWithWait(),
+            ]
+          : null,
+      // Only the watched stream is read: the observer is told which frames the
+      // body it is streaming holds, so the lot's other, plain turn is skipped.
+      onFrameApplied: async (index, frameTexts) => {
+        // Only the waited stream, and only right after its first frame: the
+        // lot's other turn streams a plain `done`, which this observer skips.
+        if (index !== 1 || !frameTexts.some((text) => text.startsWith('event: reconnecting'))) {
+          return
+        }
+        // The frame has landed and the turn is still in flight: the phase says
+        // the guard is waiting, and the thread is the two bubbles the turn
+        // opened — no third row for the wait.
+        expect(chat.phase).toBe('reconnecting')
+        expect(chat.endpointWait?.attempt).toBe(1)
+        midTurn.push({
+          messages: chat.messages.length,
+          text: chat.messages.map((message) => message.raw).join(''),
+        })
+      },
+    })
+    await seedLot(tasks)
+    await launch()
+
+    expect(midTurn).toHaveLength(1)
+    expect(midTurn[0].messages).toBe(2) // the instruction, and the reply's placeholder
+    expect(midTurn[0].text).not.toContain('Reconnecting')
+    expect(midTurn[0].text).not.toContain('502')
+    // …and the lot itself went on normally.
+    expect(batch.status).toBe('finished')
+  })
+})
+
+describe('a lot whose wait ran out its budget still fails, exactly as today', () => {
+  beforeEach(reset)
+
+  // E3 / D7 unchanged: the budget running out produces the error frame, and the
+  // lot is one job — the remaining tasks are never started.
+  it('an exhausted budget ends the lot on the failure it always ended on', async () => {
+    const chatUrls = []
+    const run = await runLotOver({
+      chatUrls,
+      framesFor: (item) => (item.number === 1 ? exhaustedFrames({ waits: 3 }) : null),
+    })
+
+    expect(chatUrls).toHaveLength(1)
+    expect(run.sent).toHaveLength(1) // task 2 never started
+    expect(run.outcomes).toEqual([
+      { number: 1, attempt: 0, outcome: 'error', moved: null },
+    ])
+    expect(run.status).toBe('failed')
+    expect(batch.active).toBe(false)
+    expect(batch.current).toBeNull()
+    // The endpoint's sentence plus what the app already did (spec §5.10), and
+    // the loop re-spells nothing of its own — it has no new wording for a wait.
+    expect(run.error).toContain('the model endpoint answered HTTP 502')
+    expect(run.error).toContain('Bad Gateway')
+    expect(run.error).toContain('3 further attempts')
+    expect(run.error).not.toContain('Batch aborted')
+  })
+
+  // "as it does today": the same lot over a bare error frame — no wait at all —
+  // leaves the identical lot behind. The wait changed the sentence, not the
+  // lot's ending.
+  it('ends it identically to a turn that errored with no wait in its stream', async () => {
+    const exhausted = await runLotOver({
+      framesFor: (item) =>
+        item.number === 1 ? exhaustedFrames({ waits: 3 }) : null,
+    })
+    const plain = await runLotOver({
+      framesFor: (item) =>
+        item.number === 1
+          ? [
+              'event: error\ndata: {"message":"LLM call failed: the model ' +
+                'endpoint answered HTTP 502"}\n\n',
+            ]
+          : null,
+    })
+
+    expect(exhausted.outcomes).toEqual(plain.outcomes)
+    expect(exhausted.status).toBe(plain.status)
+    expect(exhausted.index).toBe(plain.index)
+    expect(exhausted.sent).toEqual(plain.sent)
+    expect(nextBatchAction({ outcome: 'error', moved: null, attempt: 0, active: true })).toBe(
+      'failed',
+    )
+  })
+})
+
+// "The only batch-visible difference is that the transcript shows the wait and
+// **the bar holds still during it**" (spec §2). The bar renders from
+// `state.index` and `state.current`; a wait touches neither — and the reading
+// below happens while the wait really is on screen, mid-turn, with the stream
+// still owed.
+describe('the batch meter holds still through a wait', () => {
+  beforeEach(reset)
+
+  it('its value and its counter do not move while a waited turn is in flight', async () => {
+    const { mount } = await import('@vue/test-utils')
+    const { nextTick } = await import('vue')
+    const { default: BatchProgressBar } = await import(
+      '../src/components/BatchProgressBar.vue'
+    )
+
+    const readings = []
+    let bar = null
+    const tasks = [task(1, 'ed-01-a.md'), task(2, 'ed-02-b.md')]
+    stubRoutes({
+      sent: [],
+      tasks,
+      framesFor: (item) =>
+        item.number === 1
+          ? [
+              reconnectingFrame({ attempt: 1, budget: 3, waitSeconds: 10 }),
+              WAIT_TOKEN_FRAME,
+              doneFrameWithWait(30),
+            ]
+          : null,
+      // Read at every frame boundary of the waited stream only: task 2's plain
+      // turn holds no wait frame and is skipped.
+      onFrameApplied: async (index, frameTexts) => {
+        if (!frameTexts.some((text) => text.startsWith('event: reconnecting'))) return
+        if (!bar) bar = mount(BatchProgressBar) // mounted while the lot runs
+        await nextTick()
+        readings.push({
+          afterFrame: index,
+          phase: chat.phase,
+          value: bar.find('progress').element.value,
+          counter: bar.find('.caption.mono').text(),
+          aria: bar.find('progress').element.ariaLabel,
+        })
+      },
+    })
+    await seedLot(tasks)
+    await launch()
+
+    // Three readings: after the wait's frame, after the replayed round's answer,
+    // after its `done` — i.e. the whole of the wait and its end, all before the
+    // completion check could move anything.
+    expect(readings.map((item) => item.afterFrame)).toEqual([1, 2, 3])
+    // The first one is the wait itself: the phase is the new one and the
+    // composer's line holds the frame's four fields.
+    expect(readings[0].phase).toBe('reconnecting')
+    for (const reading of readings) {
+      // Nothing completed and nothing else started, so the meter reads exactly
+      // what it did one frame ago: task 1 in flight, no task finished yet.
+      expect(reading.value).toBe(0)
+      expect(reading.counter).toBe('1/2 task')
+      expect(reading.aria).toContain('task 1 of 2')
+    }
+    // And the lot went on to finish, filling the bar the ordinary way.
+    expect(batch.status).toBe('finished')
+    expect(batch.index).toBe(2)
+    bar.unmount()
+  })
+})
+
+// The absence, asserted as the one source rule that cannot rot: no batch file's
+// **code** knows the feature's names, so there is no per-mode branch for a
+// later change to grow out of. (`retry` and `retries` in those files stay: they
+// name the **task** relaunch, which is a different thing and was not touched —
+// spec §3's warning about the word.)
+describe('the batch files grew no part of the endpoint wait', () => {
+  const BATCH_FILES = [
+    ['src/composables/useBatch.js', 'the lot loop'],
+    ['src/components/BatchProgressBar.vue', 'the meter'],
+    ['../src/core/batch.py', 'the backend lot listing'],
+  ]
+
+  // The round wait's own vocabulary: every spelling only that feature uses, in
+  // the source spelling it would need to reach this file's code.
+  const ROUND_WAIT_VOCABULARY = [
+    'reconnecting',
+    'endpointWait',
+    'waitSeconds',
+    'NETWORK_FAIL',
+    'another_attempt_may_help',
+    'retryBudget',
+  ]
+
+  for (const [file, role] of BATCH_FILES) {
+    it(`${role} names no part of the round wait`, () => {
+      // The whole file, prose included: a comment about the wait in the lot
+      // loop is the first sign of the branch this task exists to keep out.
+      const source = readFileSync(resolve(...file.split('/')), 'utf8')
+      for (const spelling of ROUND_WAIT_VOCABULARY) {
+        expect(source).not.toContain(spelling)
+      }
+    })
+  }
 })

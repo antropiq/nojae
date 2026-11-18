@@ -12,9 +12,15 @@ from src.core import appdb
 from src.core import workspace as workspace_seam
 from src.config import (
     DEFAULT_MAX_TOOL_ITERATION,
+    DEFAULT_NETWORK_FAIL_MAX_RETRY,
+    DEFAULT_NETWORK_FAIL_WAIT_FOR,
     LLM_DEBUG_KEY,
     LEGACY_LLM_DEBUG_KEY,
+    NETWORK_FAIL_MAX_RETRY_KEY,
+    NETWORK_FAIL_WAIT_FOR_KEY,
+    SETTING_KEYS,
     _DebugStreamHandler,
+    _RESERVED_ENV_NAMES,
     agent_instructions_block,
     apply_llm_debug,
     agent_connection_refusal,
@@ -22,6 +28,8 @@ from src.config import (
     load_agent_instructions,
     max_tool_iteration,
     load_endpoints_config,
+    network_fail_budget,
+    network_fail_readout,
 )
 from src.core.models import DEFAULT_LLM_SYSPROMPT
 from tests.conftest import neutralise_store, scoped, write_store_connection
@@ -386,3 +394,153 @@ class TestLLMDebugFlag:
         assert logger.propagate is True
         assert llmkit_client.debug_enabled is llm_debug_enabled
         assert llmkit_client.debug_enabled() is False
+
+
+class TestTheNetworkFailBudget:
+    """``network_fail_budget()``: the endpoint wait's ``(max_retry, seconds)``.
+
+    Spec §6 is the authority. Every case clears both keys first, so an ambient
+    value on the machine that runs the suite cannot answer for the test.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _both_keys_unset(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv(NETWORK_FAIL_MAX_RETRY_KEY, raising=False)
+        monkeypatch.delenv(NETWORK_FAIL_WAIT_FOR_KEY, raising=False)
+
+    def test_the_defaults_are_three_waits_of_ten_seconds(self):
+        """Non-zero on purpose: the feature is on without configuration."""
+        assert DEFAULT_NETWORK_FAIL_MAX_RETRY == 3
+        assert DEFAULT_NETWORK_FAIL_WAIT_FOR == 10
+        assert network_fail_budget() == (3, 10)
+
+    def test_a_written_zero_stays_zero(self, monkeypatch: pytest.MonkeyPatch):
+        """Zero is a value, not a missing one: it switches the guard off."""
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "0")
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "0")
+        assert network_fail_budget() == (0, 0)
+
+    @pytest.mark.parametrize("raw", ["", "ten", "-1", "1.5"])
+    def test_an_unusable_value_answers_the_default_for_that_key_only(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ):
+        """The other key's written value still applies — the keys are independent."""
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, raw)
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "25")
+        assert network_fail_budget() == (3, 25)
+
+    @pytest.mark.parametrize("raw", ["", "ten", "-1", "1.5"])
+    def test_the_sibling_key_falls_back_on_its_own_too(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ):
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "7")
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, raw)
+        assert network_fail_budget() == (7, 10)
+
+    def test_it_is_read_at_call_time_not_at_import(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Spec §6: read when the retry decision is made, never cached at boot."""
+        assert network_fail_budget() == (3, 10)
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "5")
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "2")
+        assert network_fail_budget() == (5, 2)
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "0")
+        assert network_fail_budget() == (0, 2)
+
+    def test_it_never_raises_on_anything_written(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        for raw in ("  ", "0x10", "-0", "1e3", "٣", "99999999999999999999"):
+            monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, raw)
+            max_retry, wait_seconds = network_fail_budget()
+            assert isinstance(max_retry, int) and isinstance(wait_seconds, int)
+            assert max_retry >= 0 and wait_seconds > 0
+
+    def test_the_readout_names_exactly_the_keys_that_fell_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The data the settings surface reports, so a typo is visible."""
+        readout = network_fail_readout()
+        assert readout[NETWORK_FAIL_MAX_RETRY_KEY] == {"raw": "", "fellBack": False}
+        assert readout[NETWORK_FAIL_WAIT_FOR_KEY] == {"raw": "", "fellBack": False}
+
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "ten")
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "25")
+        readout = network_fail_readout()
+        assert readout[NETWORK_FAIL_MAX_RETRY_KEY] == {"raw": "ten", "fellBack": True}
+        assert readout[NETWORK_FAIL_WAIT_FOR_KEY] == {"raw": "25", "fellBack": False}
+
+    def test_an_unset_key_is_quiet_but_a_blank_line_is_a_mistake(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Unset is every install's normal state; a written blank line is not.
+
+        The renderer comments an empty key out instead of writing ``KEY=``, and
+        ``save_settings`` drops it from the environment, so the app itself never
+        produces the blank spelling — a note here therefore only ever reports a
+        hand-edit somebody meant to fill in.
+        """
+        assert network_fail_readout()[NETWORK_FAIL_MAX_RETRY_KEY]["fellBack"] is False
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "")
+        entry = network_fail_readout()[NETWORK_FAIL_MAX_RETRY_KEY]
+        assert entry == {"raw": "", "fellBack": True}
+        assert network_fail_budget()[0] == DEFAULT_NETWORK_FAIL_MAX_RETRY
+
+    def test_a_written_ten_can_be_told_from_a_written_word(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The whole point: the effective pair alone cannot show the mistake."""
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "10")
+        assert network_fail_readout()[NETWORK_FAIL_WAIT_FOR_KEY]["fellBack"] is False
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "ten")
+        assert network_fail_budget()[1] == 10
+        assert network_fail_readout()[NETWORK_FAIL_WAIT_FOR_KEY] == {
+            "raw": "ten",
+            "fellBack": True,
+        }
+
+
+class TestTheNetworkFailKeysAreManagedInstallKeys:
+    """The trio's first place: the names are managed, and no OS variable owns one."""
+
+    def test_both_names_are_managed(self):
+        for key in (NETWORK_FAIL_MAX_RETRY_KEY, NETWORK_FAIL_WAIT_FOR_KEY):
+            assert key in SETTING_KEYS
+
+    def test_neither_name_can_be_an_operating_system_variable(self):
+        """The ``TEMP`` lesson, checked rather than assumed.
+
+        ``load_dotenv_once`` keeps dotenv's "existing environment wins"
+        precedence, so a managed key that named an OS variable would never set a
+        value: the OS value would survive and the app would read something it
+        never wrote. The check is the module's own reserved list **plus** the
+        names a supported platform is known to own, because that list is a floor
+        rather than the whole story.
+        """
+        os_owned = {
+            "PATH",
+            "HOME",
+            "USER",
+            "USERNAME",
+            "USERPROFILE",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "SHELL",
+            "LANG",
+            "OS",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "PROGRAMFILES",
+            "SYSTEMROOT",
+            "COMSPEC",
+            "COMPUTERNAME",
+            "NUMBER_OF_PROCESSORS",
+            "LOGNAME",
+            "PWD",
+        }
+        for key in (NETWORK_FAIL_MAX_RETRY_KEY, NETWORK_FAIL_WAIT_FOR_KEY):
+            assert key not in _RESERVED_ENV_NAMES
+            assert key not in os_owned
+            assert key == key.upper()

@@ -78,10 +78,46 @@ class TestConfigEndpoint:
         }
         # The store-level question, and no answer that would imply "the" model.
         assert body["store"] == {"usable": True, "sentence": None}
-        assert set(body) == {"models", "store"}
+        assert set(body) == {"models", "store", "retryBudget"}
         for absent in ("serverUrl", "samplingSummary", "supportsVision",
                        "contextWindow"):
             assert absent not in body
+
+    def test_the_retry_budget_block_answers_the_effective_pair(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Spec §6's read-out: the pair the endpoint-wait guard runs on now."""
+        from src.config import NETWORK_FAIL_MAX_RETRY_KEY, NETWORK_FAIL_WAIT_FOR_KEY
+
+        monkeypatch.delenv(NETWORK_FAIL_MAX_RETRY_KEY, raising=False)
+        monkeypatch.delenv(NETWORK_FAIL_WAIT_FOR_KEY, raising=False)
+
+        block = client.get("/api/config").json()["retryBudget"]
+        # Both defaults, and no note: nothing was written, so nothing is wrong.
+        assert block == {"maxRetry": 3, "waitSeconds": 10, "notes": []}
+
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "0")
+        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "25")
+        block = client.get("/api/config").json()["retryBudget"]
+        # Zero is a value someone chose, not a missing one.
+        assert block == {"maxRetry": 0, "waitSeconds": 25, "notes": []}
+
+    def test_the_retry_budget_block_names_an_unusable_value(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        from src.config import NETWORK_FAIL_MAX_RETRY_KEY, NETWORK_FAIL_WAIT_FOR_KEY
+
+        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "ten")
+        monkeypatch.delenv(NETWORK_FAIL_WAIT_FOR_KEY, raising=False)
+
+        block = client.get("/api/config").json()["retryBudget"]
+        # The default answered, and the note says which key fell back and why,
+        # so a typo in .env is not a stall nobody can read off the screen.
+        assert block["maxRetry"] == 3
+        assert block["waitSeconds"] == 10
+        assert len(block["notes"]) == 1
+        assert NETWORK_FAIL_MAX_RETRY_KEY in block["notes"][0]
+        assert "ten" in block["notes"][0]
 
     def test_supports_vision_rides_with_the_model_it_describes(
         self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1142,6 +1178,7 @@ def chat_stub(client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
              pause_event=None, api_key="none", sysprompt=None,
+             retry_budget=None,
              agent_instructions=None, mode_instructions=None, **tools):
         seen["sysprompt"] = sysprompt
         if mode_instructions is not None:

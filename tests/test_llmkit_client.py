@@ -13,6 +13,7 @@ Hermetic by construction: a call whose test installed no handler fails the
 test instead of reaching a network, and nothing here reads ``.env``.
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List
@@ -21,12 +22,15 @@ import httpx
 import pytest
 
 from src.core import chat as chat_core
+from src.core import llmkit
 from src.core.llm import TRUNCATION_EVENT_FLAG, TRUNCATION_MESSAGE
 from src.core.llmkit import client as client_module
 from src.core.llmkit import constants
 from src.core.llmkit.client import (
     ChatStream,
     LLMRequestError,
+    TRANSIENT_STATUSES,
+    another_attempt_may_help,
     chat_completion,
     chat_completions_url,
     models_url,
@@ -525,6 +529,144 @@ class TestErrorSurface:
             chat_completion(model=MODEL, server_url=SERVER, messages=[])
         assert excinfo.value.status == 400
         assert "context length exceeded" in str(excinfo.value)
+
+
+# --- the verdict on a failed call (ereco-02, spec §3, §5.2, §5.3, D1) ----------
+#
+# The one judgement the wait feature hangs on, asserted where it lives. Every
+# case builds the exception the seam itself raises -- from its ``status`` field
+# or its type -- and never from a sentence: an assertion that only holds by
+# finding "502" inside ``str(exc)`` is the bug this predicate exists to
+# prevent. Nothing here acts on the answer: task 03 is what asks the question.
+
+
+def refused(status: int, message: str = "upstream said no") -> LLMRequestError:
+    """The seam's own refusal, built from its fields and nothing else."""
+    return LLMRequestError(status=status, message=message, url=URL)
+
+
+class TestTheRetryableSetIsWrittenOutPositively:
+    @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+    def test_a_transient_status_says_another_attempt_may_help(self, status: int):
+        # spec §3's list, and §1's motivating 502: the provider's gateway
+        # could not reach its upstream, which is a blip, not a diagnosis.
+        assert another_attempt_may_help(refused(status)) is True
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+    def test_a_status_that_names_the_request_as_wrong_is_final(self, status: int):
+        # spec §5.2: a revoked key or a renamed model must never be waited on.
+        assert another_attempt_may_help(refused(status)) is False
+
+    @pytest.mark.parametrize("status", [405, 409, 413, 418, 451, 501, 505, 599])
+    def test_a_status_outside_the_list_is_final(self, status: int):
+        # D1: the set is positive, so an invented code -- including a 5xx a
+        # provider may introduce tomorrow -- falls through to final.
+        assert another_attempt_may_help(refused(status)) is False
+
+    def test_the_status_field_is_what_decides_never_the_wording(self):
+        # The anti-string-parsing case, in both directions at once: a 400
+        # whose text quotes a 502 is final, and a 502 whose text never says
+        # 502 is retryable.
+        decoy = refused(400, message="upstream reported 502 Bad Gateway")
+        assert "502" in str(decoy)
+        assert another_attempt_may_help(decoy) is False
+
+        mute = refused(502, message="Bad Gateway")
+        assert "502" not in mute.message
+        assert another_attempt_may_help(mute) is True
+
+    def test_the_positive_set_is_the_six_statuses_the_spec_names(self):
+        # Pinned as data: adding a status here is a spec decision, not a
+        # local convenience, and this is where a drift becomes visible.
+        assert set(TRANSIENT_STATUSES) == {408, 429, 500, 502, 503, 504}
+
+
+class TestAnUnrecognisedFailureIsFinal:
+    @pytest.mark.parametrize(
+        "exc",
+        [RuntimeError("a bug in the loop"), ValueError("bad literal"),
+         KeyError("model"), OSError("disk went away")],
+    )
+    def test_an_exception_the_seam_does_not_own_is_final(self, exc: BaseException):
+        # spec §5.3: a feature that retries by default would eventually retry
+        # a bug, so unknown means today's error path.
+        assert another_attempt_may_help(exc) is False
+
+    @pytest.mark.parametrize(
+        "exc",
+        [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit()],
+    )
+    def test_a_control_exception_is_final(self, exc: BaseException):
+        # Stop and shutdown ride on exceptions too; none of them is an
+        # endpoint refusing to answer.
+        assert another_attempt_may_help(exc) is False
+
+
+class TestTheTransportHalfIsWhatTheCallCanActuallyRaise:
+    @pytest.mark.parametrize(
+        "exc",
+        [httpx.ConnectError("connection refused"),
+         httpx.ConnectTimeout("connect timed out"),
+         httpx.ReadTimeout("no response head"),
+         httpx.WriteTimeout("body never written"),
+         httpx.PoolTimeout("no connection in the pool"),
+         httpx.ReadError("socket died before the head"),
+         httpx.RemoteProtocolError("head never came")],
+    )
+    def test_a_failure_before_the_response_head_says_try_again(
+        self, exc: BaseException
+    ):
+        # spec §3's connect/read failures: all of them are
+        # ``httpx.TransportError`` subclasses, and all of them can only come
+        # from the eager ``client.send(...)`` of ``stream_completion``.
+        assert isinstance(exc, httpx.TransportError)
+        assert another_attempt_may_help(exc) is True
+
+    def test_a_dead_endpoint_raises_the_family_the_verdict_covers(
+        self, wire: _Wire
+    ):
+        # Not a hand-built exception: the real call, the real client, the
+        # real send -- the transport refuses and the seam lets the transport
+        # type through untouched (task 02 wraps nothing).
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        wire.handler = refuse
+        with pytest.raises(httpx.TransportError) as excinfo:
+            start()
+        assert another_attempt_may_help(excinfo.value) is True
+        assert wire.clients[-1].is_closed  # the refused call still closed
+
+    def test_the_same_family_raised_mid_stream_never_reaches_the_verdict(
+        self, wire: _Wire
+    ):
+        # D2's boundary, from the seam's side: a socket that dies after the
+        # head raises while the *caller iterates*, so the ``except`` around
+        # the call -- the only place this verdict is asked -- never sees it.
+        # The predicate is honest about the call, not about the whole turn.
+        class _Cut(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"half an"}}]}\n\n'
+                raise httpx.ReadError("the socket died mid-reply")
+
+        wire.handler = lambda request: httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_Cut(),
+        )
+        stream = start()  # the call itself succeeded: bytes did arrive
+        with pytest.raises(httpx.TransportError) as excinfo:
+            list(stream)
+        assert another_attempt_may_help(excinfo.value) is True  # the data says so
+        assert stream.saw_finish_reason is False  # and it is still a cut stream
+
+
+class TestTheVerdictIsThePackageSurface:
+    def test_the_package_exports_the_predicate(self):
+        # The seam owns the judgement (spec §4), so a caller reaches it
+        # through the package's own surface -- the name task 03 asks.
+        assert "another_attempt_may_help" in llmkit.__all__
+        assert llmkit.another_attempt_may_help is client_module.another_attempt_may_help
 
 
 # --- the non-streaming shape -----------------------------------------------------

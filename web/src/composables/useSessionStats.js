@@ -6,7 +6,8 @@ import { inferenceRunning } from '../lib/inference-state'
 
 // ---------------------------------------------------------------------------
 // The session meters: one elapsed clock and two counters (token rate, context
-// occupancy). One source of truth, because the app can only ever have one
+// occupancy), plus one short caption stating the last turn's own span. One
+// source of truth, because the app can only ever have one
 // session at a time: the WorkBench reply or a batch turn, and a batch lot owns
 // the conversation across the gap between its turns. The Editor tab stays open
 // read-only while one runs. So the app bar can show a single clock and a single
@@ -63,7 +64,12 @@ const running = computed(() => source.value !== null)
 // Elapsed milliseconds of the conversation at instant `now` (the component
 // driving the display owns the ticking): every reply already banked in
 // `session.spentMs`, plus the open one counted from `session.startedAt` —
-// covering waiting, thinking and every tool round.
+// thinking and every tool round included, but **not the seconds a turn spent
+// waiting on a refused endpoint**: useChat's finish() banks `span − waited`
+// rather than the raw span, because a wait is neither inference nor thinking
+// and a 40-minute provider outage must not read as a 40-minute session
+// (spec §5.16). The open turn counts wall time until it banks, which is the
+// only honest live number: the wait it will spend is not known yet.
 //
 // `startedAt` is itself the "a turn is open" marker: startTurn() sets it and
 // only finish() (which banks the span) or reset() (which drops it) clears it.
@@ -86,12 +92,85 @@ function formatElapsed(ms) {
   return parts.map((n) => String(n).padStart(2, '0')).join(':')
 }
 
+// -- the turn span -----------------------------------------------------------
+
+// Spec §5.17's pair, in the app bar next to the clock: **why the bar and not a
+// caption on the reply card** — the conversation is where the clock already
+// answers "how long", the card already carries its own status captions
+// (cut-short, interrupted), and spec §5.13 keeps a wait out of the transcript;
+// the meters' neighbourhood is the only place the app has ever told the user how
+// long one turn took, and `waited` arrives with `took` on the same frame.
+//
+// The newest reply that reported a span (`took`, off its `done` frame), the
+// same carried-over reading the rate badge uses: it holds between turns and is
+// cleared by reset() with the rest. A turn still streaming but past its `done`
+// frame counts too, so the figure does not flicker back to the previous turn
+// for the instant the stream spends closing. A turn that never got a `done`
+// frame (Stop, an abort, a dropped connection) reported no span, so it is
+// skipped rather than invented.
+function lastMeasuredSpan() {
+  return (
+    [...chatState.messages]
+      .reverse()
+      .find((m) => m.role === 'assistant' && (m.took || 0) > 0) ?? null
+  )
+}
+
+// `{ span, waited }` in seconds, `waited` always a number (a payload from an
+// older server, or a paused turn whose `pause_ack` carries no `waited`, reads
+// as no wait). `span` is the **whole request, waiting included** — the meaning
+// task 04 documented and kept: this is the figure that answers "this turn took
+// 41 minutes", and `waited` is what separates it from "took 1 minute and
+// waited 40".
+const turnSpan = computed(() => {
+  const message = lastMeasuredSpan()
+  if (!message) return null
+  return { span: message.took, waited: message.waited || 0 }
+})
+
+// Terse wall-clock shape for a turn's figures: `8s`, `2m 02s`, `40m`, `1h 04m`.
+// The clock's own `formatElapsed` is `hh:mm:ss`, which is right for a running
+// total and too wide for a figure that sits beside it. Each unit is stated once
+// and a zero unit is left out, so a 40-minute wait reads `40m` rather than
+// `40m 00s`; the parts that are stated are padded, the way the clock's digits
+// are.
+function formatSpan(seconds) {
+  const total = Math.max(0, Math.round(seconds))
+  if (total < 60) return `${total}s`
+  const mins = Math.floor(total / 60)
+  const secs = String(total % 60).padStart(2, '0')
+  if (mins < 60) return total % 60 ? `${mins}m ${secs}s` : `${mins}m`
+  // Past an hour the minutes are always stated: dropping a zero minute unit
+  // there would lose a real figure (`1h 04m` must not read as `1h`).
+  const hours = String(Math.floor(mins / 60)).padStart(2, '0')
+  return `${hours}h ${String(mins % 60).padStart(2, '0')}m`
+}
+
+// The pair as one short line: `turn 41m · 40m waited`. The wait segment only
+// appears when the turn actually waited — a line about a turn that waited
+// nothing has nothing to say about waiting — and the whole element is absent
+// when no turn has reported a span.
+const turnSpanText = computed(() => {
+  const turn = turnSpan.value
+  if (!turn) return ''
+  const head = `turn ${formatSpan(turn.span)}`
+  return turn.waited > 0 ? `${head} · ${formatSpan(turn.waited)} waited` : head
+})
+
+const turnSpanTitle = computed(() =>
+  turnSpan.value
+    ? 'The last WorkBench turn: its whole span — endpoint waits, thinking and every tool round included — and the part of it spent waiting on a refused endpoint. The clock above excludes that waiting; this figure keeps it.'
+    : 'No turn has reported its span yet.',
+)
+
 // -- token rate --------------------------------------------------------------
 
 // tokens / decode window. The server-side `decode` (cumulative generation
 // seconds across all tool rounds, tool execution and re-prefill gaps excluded)
 // is the preferred denominator; `took - ttft` only backs up payloads without it
 // (old servers — where there were no tool rounds, so the window is exact).
+// `waited` is in none of it: a wait has no chunk arrival and enters neither the
+// decode window nor the estimate, so the rate is the same figure waited or not.
 function exactRate(message) {
   const secs = message.decode > 0 ? message.decode : message.took - message.ttft
   return secs > 0 ? message.tokens / secs : null
@@ -216,6 +295,10 @@ export function useSessionStats() {
     running,
     elapsedMs,
     formatElapsed,
+    turnSpan,
+    turnSpanText,
+    turnSpanTitle,
+    formatSpan,
     rate,
     rateText,
     rateTitle,

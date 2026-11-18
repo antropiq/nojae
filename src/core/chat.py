@@ -22,9 +22,10 @@ and the loop continues — see :data:`BAD_TOOL_CALL_MESSAGE`.
 """
 
 import json
+import math
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from src.core.llm import (
     Emit,
@@ -36,7 +37,7 @@ from src.core.llm import (
     safe_get_choice_content,
     saw_finish_reason,
 )
-from src.core.llmkit import stream_completion
+from src.core.llmkit import another_attempt_may_help, stream_completion
 from src.core.llmkit.sanitize import StreamNeutralizer, neutralize
 from src.core.models import DEFAULT_LLM_SYSPROMPT
 from src.core.tooltext import TextToolCallFilter
@@ -216,6 +217,89 @@ def _emit_paused(
     emit({"event": "pause_ack", "partial": True})
 
 
+# A wait is slept in slices, and the cancel flag is re-checked between them:
+# that is what makes the wait interruptible (spec §5.7 — a Stop must not cost
+# the remaining seconds), and the slice length decides how soon it notices.
+WAIT_SLICE_SECONDS = 0.2
+
+#: The sleep itself, as a module attribute so a test can record and skip it
+#: instead of sleeping the configured ten seconds. The wait's *behaviour* —
+#: interruptible by Stop, never shortened by a Pause — is then asserted on the
+#: recorded slices rather than on elapsed wall time.
+_wait_slice = time.sleep
+
+
+def _budget_pair(source: Optional[Callable[[], Any]]) -> Tuple[int, float]:
+    """The ``(waits, seconds)`` a round may spend, read **now**.
+
+    The source is the caller's own accessor rather than a number handed over at
+    the turn's start: the two keys are read when the retry decision is made
+    (spec §6) and ``core/`` reads no ``.env`` itself. An answer this cannot use
+    — the source raising, a pair that is not a pair, a non-numeric or negative
+    value — reads as *no waiting*, the same shape the feature has when it is
+    switched off, so a mis-set budget can never itself become the reason a turn
+    fails.
+    """
+    if source is None:
+        return 0, 0.0
+    try:
+        pair = source()
+        max_retry, wait_seconds = pair
+        max_retry = int(max_retry)
+        wait_seconds = float(wait_seconds)
+    except (TypeError, ValueError):
+        return 0, 0.0
+    return max(max_retry, 0), max(wait_seconds, 0.0)
+
+
+def _exhausted_failure_message(exc: BaseException, waits: int, waited: float) -> str:
+    """The final error sentence once a round's whole budget is spent.
+
+    Today's line, unchanged up to and including the endpoint's own sentence
+    verbatim (spec §9: nothing here interprets it), with what the app already
+    did about it appended — spec §5.10: the old sentence alone would hide the
+    fact that it tried. ``waits`` is this round's waits and ``waited`` the
+    seconds this round slept, so the sentence carries both.
+    """
+    plural = "" if waits == 1 else "s"
+    return (
+        f"LLM call failed: {exc} "
+        f"(waited {waited:.0f}s over {waits} further attempt{plural}; "
+        "the model endpoint is still refusing)"
+    )
+
+
+def _wait_for_endpoint(
+    wait_seconds: float,
+    cancel_event: Optional[threading.Event],
+) -> bool:
+    """Sleep ``wait_seconds``, cutting short when Stop is asked for.
+
+    Returns whether the wait ran its full length (``False`` = Stop landed in
+    it). The flag is consulted after every slice, so a Stop costs at most one
+    slice of it and none of the seconds still to come.
+
+    ``pause_event`` is deliberately **not** consulted here (spec §5.8): a Pause
+    armed during a wait arms the flag and is answered where it is always
+    answered — at the first chunk of the next successful round — so the wait
+    keeps its full length. "Handle the pause here too" is the tempting wrong
+    edit: pause means *interrupt the reply and keep what arrived*, and during a
+    wait nothing has arrived to keep. Stop is the affordance that ends a wait.
+    """
+    total = float(wait_seconds)
+    if total <= 0:
+        return True
+    # The length divided into whole slices up front, rather than subtracted from
+    # it in a loop: no rounding residue, so the slept seconds are exactly what
+    # was announced.
+    slice_count = max(1, math.ceil(total / WAIT_SLICE_SECONDS))
+    for _ in range(slice_count):
+        _wait_slice(total / slice_count)
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+    return True
+
+
 def stream_chat(
     messages: List[Dict[str, Any]],
     model_name: str,
@@ -234,6 +318,7 @@ def stream_chat(
     agent_instructions: Optional[str] = None,
     mode_instructions: Optional[str] = None,
     batch_instructions: Optional[str] = None,
+    retry_budget: Optional[Callable[[], Tuple[int, float]]] = None,
 ) -> None:
     """Stream one chat reply, emitting ``token`` / ``reasoning`` / ``done``.
 
@@ -258,7 +343,12 @@ def stream_chat(
     ``usage.contextTokens`` carry the LAST (resp. just-ended) round's
     prompt + generation — the context-window occupancy figure, which can
     exceed nothing but is NOT summed across rounds; ``contextEstimated``
-    flags it when a fallback estimate was involved.
+    flags it when a fallback estimate was involved. ``done`` also carries
+    ``waited``: the seconds the turn spent waiting on a refused endpoint,
+    summed over every round's waits and ``0`` when it waited on nothing
+    (spec §5.15). It is a figure of its own — a wait has no chunk arrival,
+    so it enters neither ``decode`` nor the token rate — while ``took``
+    keeps spanning the whole request, waits included (spec §5.17).
     Terminal event is exactly one of ``done``, ``error`` or ``pause_ack``
     (unless the call was cancelled — then the client is gone and nothing is
     emitted). ``pause_ack`` (carrying ``partial: True``) closes a reply the
@@ -290,6 +380,23 @@ def stream_chat(
     conversation, and the lot description — framed as context below, not as a
     task — is the furthest. It is re-sent on every task turn because the
     per-task context reset means nothing else carries it.
+
+    ``retry_budget`` is the **round** wait's budget source: a callable answering
+    ``(waits, seconds)``, called at the moment a refused round is about to be
+    waited on and never before (spec §6 reads the two keys when the decision is
+    made, and this module reads no ``.env`` — hence a callable rather than a
+    number). Omitting it, or a budget of ``0`` waits, means today's behaviour
+    exactly: one seam call per round and the plain error frame. When it allows a
+    wait, a round whose seam call raises a **retryable** failure (the seam's own
+    verdict, see :func:`src.core.llmkit.another_attempt_may_help`) emits one
+    non-terminal ``reconnecting`` event — ``attempt`` (1-based within this
+    round), ``budget``, ``waitSeconds`` and the endpoint's own ``message`` —
+    sleeps, and re-sends the identical request, so the turn still ends on its
+    normal terminal frame (spec §2: the retry lives *inside* the stream, which
+    is why the batch loop reads an ordinary outcome). A final failure, and
+    anything the seam does not recognise, still ends the turn on today's error
+    frame on the first attempt. A mid-stream cut is never replayed (spec §5.4):
+    text already reached the panel, so only the seam *call* is guarded.
     """
     if not messages or messages[0].get("role") != "system":
         messages = [
@@ -366,6 +473,11 @@ def stream_chat(
     t_first: Optional[float] = None
     t_last: Optional[float] = None
     decode_seconds = 0.0
+    # Seconds this turn spent waiting on a refused endpoint, summed over every
+    # round's waits. A wait produces no chunk arrival, so it enters no timing
+    # accumulator above (measurement rule) — it is kept as a figure of its own,
+    # ready for the terminal frame to carry it.
+    waited_seconds = 0.0
     capped = False
 
     iteration = 0
@@ -375,20 +487,77 @@ def stream_chat(
         # usable usage for the round (floor: invisible server-side template
         # tokens are not in it, hence the estimated flag).
         round_prompt_est = _prompt_estimate(messages)
-        try:
-            response_generator: Any = stream_completion(
-                model=model_name,
-                server_url=server_url,
-                messages=messages,
-                api_key=api_key,
-                sampling=sampling_kwargs,
-                # The client omits an empty/``None`` ``tools``, so a tool-less
-                # request still carries no ``tools`` key rather than ``[]``.
-                tools=tools if use_tools else None,
-            )
-        except Exception as exc:
-            emit({"event": "error", "message": f"LLM call failed: {exc}"})
-            return
+        # The one retry site of the whole feature (spec §4, §5.1): this round's
+        # seam call, wrapped in a loop over the round's own budget. The chunk
+        # loop below is never reached by a replay — a refused call raises before
+        # a byte of the reply exists (spec §2) — which is also why both shapes
+        # of a mid-stream cut keep their current paths untouched (spec §5.4).
+        round_waits = 0
+        round_waited = 0.0
+        while True:
+            try:
+                response_generator: Any = stream_completion(
+                    model=model_name,
+                    server_url=server_url,
+                    messages=messages,
+                    api_key=api_key,
+                    sampling=sampling_kwargs,
+                    # The client omits an empty/``None`` ``tools``, so a
+                    # tool-less request still carries no ``tools`` key rather
+                    # than ``[]``.
+                    tools=tools if use_tools else None,
+                )
+                break
+            except Exception as exc:
+                # The seam owns the verdict (spec §4): a final status, or an
+                # exception it does not recognise, is today's error path —
+                # unchanged in wording and in shape.
+                if not another_attempt_may_help(exc):
+                    emit({"event": "error", "message": f"LLM call failed: {exc}"})
+                    return
+                # The budget is read *here*, at the decision, not at the turn's
+                # start (spec §6); ``_budget_pair`` turns a missing source into
+                # the feature switched off.
+                waits_left, wait_seconds = _budget_pair(retry_budget)
+                if round_waits >= waits_left:
+                    message = (
+                        _exhausted_failure_message(exc, round_waits, round_waited)
+                        if round_waits
+                        else f"LLM call failed: {exc}"
+                    )
+                    emit({"event": "error", "message": message})
+                    return
+                if cancel_event is not None and cancel_event.is_set():
+                    # Stop arrived before this wait could be announced: end the
+                    # turn the way a Stop during a stream ends one — the client
+                    # is gone, so not even the wait's own frame goes out.
+                    return
+                # Announce the wait (the UI's only signal that the turn is not
+                # stuck) with the endpoint's own sentence verbatim, sleep, then
+                # re-send the *identical* request: same ``messages`` object as
+                # it stands, same model, URL, key, sampling and tools (spec
+                # §5.9 — the wait re-arms nothing; the turn's connection was
+                # resolved at its start).
+                emit(
+                    {
+                        "event": "reconnecting",
+                        "attempt": round_waits + 1,
+                        "budget": waits_left,
+                        "waitSeconds": wait_seconds,
+                        "message": str(exc),
+                    }
+                )
+                if not _wait_for_endpoint(wait_seconds, cancel_event):
+                    # Stop landed inside the wait: nothing emitted, the partial
+                    # turn discarded, none of the remaining seconds spent
+                    # (spec §5.7).
+                    return
+                round_waits += 1
+                round_waited += wait_seconds
+                # The turn's running total, kept for the terminal frame. A wait
+                # enters no other measurement: it produced no chunk arrival to
+                # anchor to.
+                waited_seconds += wait_seconds
 
         iteration_content = ""
         iteration_chars = ""
@@ -852,12 +1021,22 @@ def stream_chat(
 
     emit({
         "event": "done",
+        # The turn's whole span: ``t0`` to the last chunk arrival, so it spans
+        # the endpoint waits too. That is the documented meaning and it stays —
+        # do NOT subtract ``waited`` from it. The separate field is what lets the
+        # UI tell "this turn took 41 minutes" from "this turn took 1 minute and
+        # waited 40" (spec §5.17), with neither number re-derived.
         "took": took,
         "ttft": ttft,
         # Cumulative decode seconds across all rounds — the tok/s denominator
         # once tools ran (took - ttft would wrongly include tool execution
         # and inter-round gaps). Equals took - ttft for a single round.
         "decode": decode_seconds,
+        # Seconds this turn waited on a refused endpoint, summed over every
+        # round's waits (spec §5.15) — 0 when it waited on nothing, never
+        # omitted, so a client reads one shape. A wait has no chunk arrival, so
+        # it is its own number: it enters neither ``decode`` nor the token rate.
+        "waited": waited_seconds,
         "tokens": completion_tokens or 0,
         "tokensEstimated": tokens_estimated,
         # Context occupancy of the FINAL round (prompt + generation — what

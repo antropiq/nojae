@@ -1,4 +1,4 @@
-"""The two call shapes, the error type and the URL rules.
+"""The two call shapes, the error types, the verdict on a failure, the URL rules.
 
 The mechanism half of the package that speaks HTTP to a model endpoint
 (spec §4.3): one POST to ``{server_url}/chat/completions``, streaming or
@@ -68,6 +68,63 @@ class LLMRequestError(Exception):
         super().__init__(
             f"the model endpoint answered HTTP {status} for {url}: {message}"
         )
+
+
+# The statuses that answer *try again* (spec §3): a gateway that could not
+# reach its own upstream, a rate limit, a request the server gave up on in
+# time. The set is a **positive list**: a status outside it is a diagnosis,
+# not a blip, and waiting on one would turn a one-second error line into a
+# silent stall (spec §5.2, D1). A provider inventing a new code tomorrow is
+# therefore final until someone decides otherwise here.
+TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def another_attempt_may_help(exc: BaseException) -> bool:
+    """Whether the failure a seam call raised says *ask the same thing again*.
+
+    The seam owns this verdict because it owns the failure shapes -- and it is
+    a decision on **data**, never on a sentence: the status is the
+    :attr:`LLMRequestError.status` field, a transport failure is an exception
+    *type*. Nothing outside this package may grow an opinion about an HTTP
+    status (one LLM layer).
+
+    Two rules, and both are rules rather than a list of reasons:
+
+    * **A refused call is retryable only for a status in
+      :data:`TRANSIENT_STATUSES`.** Every other status is final -- notably
+      ``400``, ``401``, ``403``, ``404`` and ``422``, which say the request
+      itself is wrong: a revoked key or a renamed model must never be waited
+      on (spec §5.2).
+    * **Anything not in the retryable set is final.** The set is written out
+      positively, so an unrecognised exception -- a ``RuntimeError`` from a
+      bug, a ``ValueError``, a cancellation -- answers ``False`` and today's
+      error path runs (spec §5.3, D1: a feature that retries by default would
+      eventually retry a bug).
+
+    **The transport half is the whole ``httpx.TransportError`` subtree**, and
+    the reason is the call shape: :func:`stream_completion` sends the request
+    eagerly (``client.send(request, stream=True)``), so everything that can go
+    wrong **before the response head arrives** raises out of the call itself --
+    a refused or unresolvable host (``ConnectError``, ``NetworkError``), a
+    deadline that expires in connect / write / pool (``ConnectTimeout``,
+    ``WriteTimeout``, ``PoolTimeout``, all ``TimeoutException``), a stalled
+    read (``ReadTimeout``, which is both a ``TimeoutException`` and a
+    ``ReadError``), and a socket or TLS break (``ProtocolError`` and its
+    children). Every one of those is a ``TransportError`` subclass, so naming
+    the base covers the connect/read failures spec §3 lists without
+    enumerating leaves -- and nothing else the call can raise is one:
+    ``InvalidURL``, a decoding failure and a cancellation are not
+    ``TransportError``, so they stay final.
+
+    Covering the subtree cannot reach a **mid-stream** failure: that one is
+    raised while the caller iterates the returned :class:`ChatStream`, not
+    from the call, and spec §5.4/D2 keeps both shapes of a cut stream on
+    today's path. Whoever asks this question asks it about the exception the
+    *call* raised.
+    """
+    if isinstance(exc, LLMRequestError):
+        return exc.status in TRANSIENT_STATUSES
+    return isinstance(exc, httpx.TransportError)
 
 
 def _v1_base(server_url: str) -> str:

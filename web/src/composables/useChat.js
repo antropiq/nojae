@@ -22,7 +22,7 @@ import {
 
 const state = reactive({
   messages: [], // { role, raw, html, streaming, images } in conversation order
-  phase: 'idle', // idle | waiting | reasoning | answering
+  phase: 'idle', // idle | waiting | reasoning | answering | reconnecting
   error: null,
   // Composer draft mirrored as rendered markdown so WorkBenchView can preview the
   // exact HTML that send() will attach to the user message (no re-parse).
@@ -43,10 +43,12 @@ const state = reactive({
   // Chat session clock (consumed by useSessionStats, rendered by the app bar's
   // SessionClock): ms timestamp of when the running reply started, plus the
   // milliseconds every reply of the conversation has already spent
-  // (`spentMs`). A turn covers the whole request — waiting, thinking and every
-  // MCP/LSP tool round — and its span is added to `spentMs` when it ends, is
-  // stopped or errors out, so the app bar keeps the conversation's total time
-  // between two turns. Both are zeroed by reset() alone: that is the Restart
+  // (`spentMs`). A turn's span is added to `spentMs` when it ends, is stopped
+  // or errors out — **less the seconds it spent waiting on a refused
+  // endpoint**: a wait is not inference and not thinking, so a 40-minute
+  // provider outage must not read as a 40-minute session (spec §5.16). The
+  // turn's own span keeps the wait, and useSessionStats shows it beside it
+  // (spec §5.17). Both are zeroed by reset() alone: that is the Restart
   // button, the one gesture that starts the counters over.
   // `agentMode` is the agent **this** turn was sent as, recorded when the
   // request is opened (null = no turn running). The app bar names the running
@@ -65,6 +67,21 @@ const state = reactive({
   // button blinks and is disabled, and the composer stays shut (the ack is
   // what reopens it). Cleared by the ack, by finish(), and by reset().
   pausePending: false,
+  // The endpoint refused the current round and the worker is waiting before it
+  // re-sends (spec §5.6): the four fields of the one `reconnecting` frame that
+  // announced it — `{ attempt, budget, waitSeconds, message }` — or **null**
+  // when no wait is in progress. It is a status line's content and nothing
+  // else: never a message, never a marker in the thread (spec §5.13).
+  //
+  // One field, cleared in one place (`clearEndpointWait`): every arrival that
+  // means the endpoint answered again (a `token`, a `reasoning_delta`, a
+  // `reasoning` frame, a `tool_call`) and every terminal path (`done`, `error`,
+  // the `pause_ack`, and finish()'s fallback for an abort or a stream that
+  // ended between two waits), plus reset()'s own call — Restart does not wait
+  // for the abort it starts to settle, and a line must not survive it. So the
+  // line a frame drew can never outlive the wait it described, and there is no
+  // second copy of that rule to forget.
+  endpointWait: null,
   // Conversation-scoped MCP toggles (independent from the SettingsDialog):
   // the Settings-activated connectors snapshotted on tab entry, each ON by
   // default, frozen once the first message is accepted by the server.
@@ -937,9 +954,40 @@ function describeError(body, fallback) {
   return fallback
 }
 
+// Ends the wait's status line (see `state.endpointWait`). One function is the
+// whole clearing rule: every arrival that proves the endpoint answered again
+// and every terminal path calls this, so a line can never outlive the wait it
+// described and there is no second list of places to remember.
+function clearEndpointWait() {
+  state.endpointWait = null
+}
+
+// The one line a wait says about itself, spec §5.6's shape:
+//
+//   Reconnecting 2/3 — the model endpoint answered HTTP 502 · retrying in 10s
+//
+// Built here rather than in the template (this project's rule: the decision is
+// a plain function, so a test can hold the composable to it). `Reconnecting` is
+// the **label** and the only place that word survives (spec §3, D6); the
+// sentence between the separators is the endpoint's own, passed through
+// verbatim and never re-worded (spec §9), and the line says no "network" and
+// calls nothing a reconnect. A missing figure reads 0 rather than hiding the
+// segment: the label is what tells the user the app is not stuck.
+export function endpointWaitLine(wait) {
+  if (!wait) return ''
+  const attempt = Number.isFinite(wait.attempt) ? wait.attempt : 0
+  const budget = Number.isFinite(wait.budget) ? wait.budget : 0
+  const seconds = Number.isFinite(wait.waitSeconds) ? wait.waitSeconds : 0
+  const sentence = typeof wait.message === 'string' ? wait.message : ''
+  return `Reconnecting ${attempt}/${budget} — ${sentence} · retrying in ${seconds}s`
+}
+
 function applyEvent(name, data, assistant) {
   switch (name) {
     case 'token': {
+      // A token is the replayed round answering: the wait is over, so its line
+      // goes (spec §5.13 — it was a status line, never content).
+      clearEndpointWait()
       if (state.phase !== 'answering') state.phase = 'answering'
       // Tool-loop continuation: the first token after a tool_result opens a
       // fresh line prefixed with the tool icon (sentinel replaced at render
@@ -957,6 +1005,10 @@ function applyEvent(name, data, assistant) {
       break
     }
     case 'done':
+      // Terminal frame: whatever it carries, no wait is in progress any more,
+      // so the wait's line goes with it (task 07 is what reads the frame's own
+      // `waited` figure; nothing here shows it).
+      clearEndpointWait()
       assistant.tokens = data.tokens ?? 0
       assistant.took = data.took ?? 0
       assistant.ttft = data.ttft ?? 0
@@ -964,6 +1016,14 @@ function applyEvent(name, data, assistant) {
       // tok/s denominator once tools ran (took - ttft would include tool
       // execution and inter-round gaps). 0 on payloads from an old server.
       assistant.decode = data.decode ?? 0
+      // Seconds this turn spent waiting on a refused endpoint, summed over
+      // every round's waits (task 04, spec §5.15). Defaulted to 0 for the same
+      // reason as `decode` above — an older server's payload has no such key,
+      // and it must read as "no wait" rather than as `undefined`: finish()
+      // subtracts it from the banked span and `undefined` would make that NaN.
+      // It is neither a decode window nor a token figure (spec §5.16/§5.17):
+      // it enters the session clock's exclusion and the per-turn caption only.
+      assistant.waited = data.waited ?? 0
       assistant.tokensEstimated = !!data.tokensEstimated
       // Context occupancy of the FINAL round: the figure to compare against
       // the server window: it never accumulates across rounds.
@@ -1002,9 +1062,15 @@ function applyEvent(name, data, assistant) {
         state.messages.splice(state.messages.indexOf(assistant), 1)
       }
       state.pausePending = false
+      // Terminal frame too: a pause cannot be armed across a wait, and the ack
+      // ends the turn the wait was inside (spec §5.8).
+      clearEndpointWait()
       state.phase = 'idle'
       break
     case 'tool_call':
+      // A call the replayed round submitted: it answered, so the wait's line is
+      // stale from this frame on.
+      clearEndpointWait()
       assistant.tools.push({
         id: data.id ?? `${data.tool}-${assistant.tools.length}`,
         tool: data.tool ?? 'tool',
@@ -1069,13 +1135,55 @@ function applyEvent(name, data, assistant) {
       assistant.pendingStreamQuote = true
       break
     }
+    case 'reconnecting':
+      // The endpoint refused this round and the worker is waiting before it
+      // re-sends (spec §5.6): a **progress** frame, not a terminal one, so the
+      // turn still closes on exactly one of `done` / `error` / `pause_ack` and
+      // only those (plus finish()'s fallback) may put the phase back to idle.
+      //
+      // Unlike the `reasoning` case below, this one deliberately *can* leave
+      // `answering`, and that choice is the whole shape of the feature: a wait
+      // after a tool round follows an `answering` phase (round 1 answered with
+      // a call, round 2 is the one that was refused), so a phase that could not
+      // leave `answering` would never show at all. The honest rule is that a
+      // refused round genuinely is not answering any more — the failure landed
+      // before a byte of the reply existed, which is what makes the replay a
+      // replay (spec §2) — and the next round's first `token` opens
+      // `answering` again, exactly as it does after a tool round.
+      state.phase = 'reconnecting'
+      // Keep the frame's four fields as the composer strip's status line. The
+      // endpoint's sentence is stored as it arrived — the UI quotes it and
+      // never re-words it (spec §9) — and nothing is written to the thread
+      // (spec §5.13): this is a status line, not content.
+      state.endpointWait = {
+        attempt: data.attempt ?? 0,
+        budget: data.budget ?? 0,
+        waitSeconds: data.waitSeconds ?? 0,
+        message: data.message ?? '',
+      }
+      break
     case 'reasoning':
-      // Never downgrade to reasoning once answer text started.
-      if (state.phase === 'waiting' || state.phase === 'reasoning') {
+      // The replayed round is thinking: the wait ended with this frame, and a
+      // line still reading `Reconnecting` would say the opposite of what is
+      // happening — the confusion spec §5.11 rules out.
+      clearEndpointWait()
+      // Never downgrade to reasoning once answer text started. `reconnecting`
+      // is in the set because the wait is over the moment this frame arrives:
+      // the replayed round is thinking, and a pill still reading
+      // `Reconnecting` then would say the opposite of what is happening — the
+      // confusion spec §5.11 rules out.
+      if (
+        state.phase === 'waiting' ||
+        state.phase === 'reasoning' ||
+        state.phase === 'reconnecting'
+      ) {
         state.phase = 'reasoning'
       }
       break
     case 'reasoning_delta': {
+      // Streamed thinking is an arrival too: the endpoint answered again, so
+      // this round is no longer a wait.
+      clearEndpointWait()
       // Thinking text, streamed live. The text is buffered and lands in the
       // panel timeline once per animation frame (see lib/reasoning-buffer):
       // chunks arrive at a network-set rate, and each write into the reactive
@@ -1094,6 +1202,10 @@ function applyEvent(name, data, assistant) {
       break
     }
     case 'error':
+      // Terminal frame: the budget ran out (or the error was final), so the
+      // wait this line described is over — the failure is what the user reads
+      // now, on the error line above the composer.
+      clearEndpointWait()
       state.error = data.message || 'Chat request failed.'
       // A server-cut reply keeps its partial text in the conversation (unlike
       // an explicit Stop, which discards it) and that fragment is re-posted on
@@ -1155,8 +1267,24 @@ function finish(assistant) {
   // Bank this turn's span: the app bar's clock reads the conversation's total
   // time, so an ended reply stops ticking without losing what it counted. Only
   // reset() zeroes it — the Restart button is what starts the counters over.
+  //
+  // The banked span **excludes the seconds this turn waited on a refused
+  // endpoint** (`waited`, off the `done` frame): a wait is not inference and
+  // not thinking, so a 40-minute provider outage must not read as a
+  // 40-minute session (spec §5.16). The turn's own span keeps them and is
+  // shown beside the clock (useSessionStats' `turnSpanText`, spec §5.17) —
+  // this subtraction is why that separate figure has to exist.
+  //
+  // A turn that ended with no `done` frame (Stop, an abort, a dropped
+  // connection, a `pause_ack` — that frame carries no `waited`, task 04) banks
+  // its whole span with `waited` read as 0: the app cannot know what such a
+  // turn waited, and inventing a figure would be worse than the honest 0. This
+  // changes an amount, never *when* the amount moves — the flicker rule (only
+  // the terminal paths bank, and the restart clears) is untouched.
   if (state.session.startedAt > 0) {
-    state.session.spentMs += Math.max(Date.now() - state.session.startedAt, 0)
+    const span = Math.max(Date.now() - state.session.startedAt, 0)
+    const waitedMs = (assistant.waited || 0) * 1000
+    state.session.spentMs += Math.max(span - waitedMs, 0)
     state.session.startedAt = 0
   }
   // The turn is over, so nothing is running on any agent: the app bar's running
@@ -1168,6 +1296,11 @@ function finish(assistant) {
   // must stop blinking. The per-message `paused` flag is left alone — it only
   // drives a caption.
   state.pausePending = false
+  // The local fallback for every ending that reached no terminal frame — Stop's
+  // abort, a dropped connection, a stream that closed between two waits: the
+  // turn is over, so a wait's line cannot survive it either. This is why a
+  // stream ending between waits leaves nothing on screen.
+  clearEndpointWait()
 }
 
 async function readStream(response, assistant) {
@@ -1279,6 +1412,10 @@ async function startTurn({
     usageGeneratedChars: 0, // generated chars at the last `usage` baseline
     usageGeneratedSeconds: 0, // client-measured seconds at that same baseline
     decode: 0, // cumulative decode seconds from the `done` event
+    // Seconds this turn waited on a refused endpoint, from the same `done`
+    // event: keeps the turn span (which includes them) tellable apart from the
+    // session total (which excludes them). 0 until the frame arrives.
+    waited: 0,
     contextTokens: 0, // LAST round's prompt + completion = context occupancy
     contextEstimated: false, // occupancy figure involves a char estimate
     // Set by a `truncated` error frame: the server ended the stream before
@@ -1723,6 +1860,10 @@ export function useChat() {
     // conversation that no longer streams. The ack itself is a no-op then —
     // `assistant.streaming` is already false (the guard in applyEvent).
     state.pausePending = false
+    // The abort above ends a turn that never reached a terminal frame, so the
+    // wait's status line needs the same sweep here: Restart during a wait would
+    // otherwise leave `Reconnecting 1/3` under a composer holding no turn.
+    clearEndpointWait()
     userPaused = false
     // The session-mode notice explained a conversation that no longer exists.
     // It goes before the `refetchHubs` early return, because batch mode's

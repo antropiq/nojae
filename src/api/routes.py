@@ -26,9 +26,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from src.api.events import sse_format
 from src.config import (
+    NETWORK_FAIL_MAX_RETRY_KEY,
+    NETWORK_FAIL_WAIT_FOR_KEY,
     agent_instructions_block,
     load_endpoints_config,
     max_tool_iteration,
+    network_fail_budget,
+    network_fail_readout,
 )
 from src.core.mcphub import (
     load_externals,
@@ -1406,12 +1410,35 @@ def build_router() -> APIRouter:
             "sentence": None if state["state"] == "ok" else state["sentence"],
         }
 
+    def _retry_budget_block() -> Dict[str, Any]:
+        """The endpoint-wait budget, as spec §6 says it must be readable.
+
+        ``{"maxRetry": 3, "waitSeconds": 10, "notes": []}`` — the effective pair
+        plus, per key, a sentence when a written value was unusable and the
+        default answered instead. Without that note, a typo in ``.env`` would be
+        a stall nobody can read off the screen; the values themselves are read
+        at call time, so this block is what the install currently runs on.
+        """
+        max_retry, wait_seconds = network_fail_budget()
+        effective = {
+            NETWORK_FAIL_MAX_RETRY_KEY: max_retry,
+            NETWORK_FAIL_WAIT_FOR_KEY: wait_seconds,
+        }
+        notes = [
+            f"{key} was set to {entry['raw'].strip()!r}, which is not a whole "
+            f"number of 0 or more; {effective[key]} answers instead."
+            for key, entry in network_fail_readout().items()
+            if entry["fellBack"]
+        ]
+        return {"maxRetry": max_retry, "waitSeconds": wait_seconds, "notes": notes}
+
     @router.get("/config")
     def get_config() -> Dict[str, Any]:
         """Everything the two views read about the connection, **per model**.
 
         ``{"models": [{id, name, serverId, serverName, serverUrl,
-        supportsVision, contextWindow}], "store": {usable, sentence}}``.
+        supportsVision, contextWindow}], "store": {usable, sentence},
+        "retryBudget": {maxRetry, waitSeconds, notes}}``.
 
         A **list**, not one connection, and deliberately so: which model a view
         is looking at is the composer's answer, not this route's, so the vision
@@ -1420,6 +1447,10 @@ def build_router() -> APIRouter:
         an agent and nothing here invents a default model (D5): an install with
         no models answers an empty list, and the app bar's store-level line then
         says so.
+
+        The ``retryBudget`` block is the read-out spec §6 demands: the effective
+        pair the endpoint-wait guard reads at call time, plus a note per key
+        whose written value was unusable.
         """
         try:
             servers = appdb.load_servers()
@@ -1442,7 +1473,11 @@ def build_router() -> APIRouter:
             for server in servers
             for model in server["models"]
         ]
-        return {"models": models, "store": _store_block()}
+        return {
+            "models": models,
+            "store": _store_block(),
+            "retryBudget": _retry_budget_block(),
+        }
 
     def _helper_write(
         slots: Optional[List[Dict[str, Any]]], what: str, helper_id: Optional[int]
@@ -3226,6 +3261,13 @@ def build_router() -> APIRouter:
                     # declares none (D1: the two are alternatives, never
                     # stacked).
                     sysprompt=persona,
+                    # The wait's budget **accessor**, not its numbers: the two
+                    # keys are read when a refused round is about to be waited
+                    # on, never at the turn's start (spec §6), and ``core/``
+                    # reads no ``.env`` — so the route hands over the reader.
+                    # It is the *module* function, not this route's local
+                    # ``config`` (that name is the turn's ``EndpointsConfig``).
+                    retry_budget=network_fail_budget,
                     # Keywords from here on: the flag pair is optional on
                     # ``stream_chat``, so a stub may omit it (tests do).
                     # Project instructions ride on the system message: when the

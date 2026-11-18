@@ -23,8 +23,7 @@ live over Server-Sent Events. Desktop browsers only.
   actually holds. When the code a paragraph described changes, shrink or cut the
   paragraph instead of appending a newer one beside it.
 
-Setup, run and test commands live in the README; read that when you need to
-build, install or launch something on this machine.
+Setup, run and test commands live in the README, never here.
 
 ## Shape of the app
 
@@ -33,26 +32,22 @@ The tabs share one settings store and one streaming layer:
 - **WorkBench** — interactive streaming chat with the configured model,
   optionally augmented with MCP connectors and language servers, plus a batch
   mode that works through a folder of task files.
-- **Editor** — the tab's folder as a file tree, a code pane and a terminal.
-  Its writes form one bounded surface, reachable from the browser only, never
-  from a hub or a tool. The code pane is served by the same language servers, the
-  same declaration and the same path policy as the WorkBench tools, and answers
-  queries only — never file bytes. The terminal is a human surface, never an
-  agent tool.
+- **Editor** — the tab's folder as a file tree, a code pane and a terminal, all
+  one bounded write surface. The code pane is served by the same language servers,
+  the same declaration and the same path policy as the WorkBench tools, and
+  answers queries only — never file bytes. The terminal is a human surface, never
+  an agent tool.
 
 ## Code layout
 
 ### Backend (`src/`)
 
-A UI-free **core** and the **API** in front of it. Core functions never touch
-FastAPI — they take an injected `emit(event: dict)` callable and report progress
-through it.
+A UI-free **core** and the **API** in front of it. Core functions report progress
+through an injected `emit(event: dict)` callable.
 
 - `config` — `.env`, the connection an agent resolves from the settings store, and
   the project-instructions block for chat; `core/workspace.py` answers which folder.
-- `api` — the REST and SSE endpoints under one route prefix, and the chat
-  stream's own SSE channel: one worker thread feeding it, one terminal frame
-  closing it.
+- `api` — the REST and SSE endpoints under one route prefix.
 - `core` — the streamed chat reply with its shared tool-call loop; the
   batch-mode lot listing; the agent modes; `appdb`, the store's only opener.
 - `core/mcphub/` and `core/lsphub/` — the MCP and language-server hubs, one per
@@ -60,10 +55,9 @@ through it.
   keep that symmetry when touching either one. Both read their declarations from
   that workspace's reserved folder and are hot-toggled from the UI.
 - `core/editorfs/` — the Editor's file surface. Paths are relative to the
-  request's workspace and every call answers from the workspace policy's verdict.
-  Reads are bounded, writes to `ro`/`hidden` are refused, and no write destroys
-  bytes. What the tree lists, what search can answer about, and what is
-  invisible to both are the same set of paths.
+  request's workspace, reads are bounded, no write destroys bytes, and every call
+  answers from the workspace policy's verdict. What the tree lists, what search
+  answers about, and what is invisible to both are the same set of paths.
 - `core/termhub/` — one shell per WebSocket, on the platform's pseudo-terminal; a
   new shell starts in its tab's folder, and a live one keeps the folder it was born in.
 - `core/proctree.py` — the process-tree teardown the hubs and the terminal share.
@@ -91,16 +85,19 @@ The exact route list belongs to the API module; what matters architecturally:
   and its remembered agent. The client re-posts the history; the server keeps no state.
 - **Every WorkBench turn runs in an agent mode** — an install-owned persona that
   replaces the configured system prompt, names the model the turn runs on, and may
-  switch a whole hub off. It only ever narrows what settings and the conversation
-  already allow. This file is injected into every chat turn whatever the mode.
+  switch a whole hub off. It only narrows what settings and the conversation allow.
+- **A refused round waits, and only it does.** An endpoint answer that says *try
+  again* is waited out and the identical request re-sent — nothing had streamed,
+  so an outage resumes instead of ending a run. That is the tool loop's only
+  waiting site: a final refusal or an unknown failure ends the turn as before. A
+  wait is a status line, never transcript; the session clock excludes it, the
+  turn's span keeps it.
 
 ### SSE is the UI's only source of truth
 
-Core emits plain dicts; the streaming endpoint is the only thing that turns them
-into frames. Each stream has its own channel and closes with exactly one terminal
-event; a paused reply still ends on its own ack, keeping its partial turn.
-
-Measurement rules hold across every stream:
+Core emits plain dicts; the streaming endpoint alone turns them into frames. Each
+channel closes with exactly one terminal event; a paused reply ends on its own
+ack, keeping its partial turn. The measurement rules hold for every stream:
 
 - **Timing is app-side**, anchored to content-chunk arrivals — tool execution
   never enters the numbers.
@@ -142,21 +139,22 @@ together:
   workspace's file is always active and can tighten them but never loosen them.
   A hidden path is indistinguishable from an absent one to a reader and named to a
   writer; a read-only path is searchable but named to a writer.
-- **The connectors answer the workspace level for their own root**, each reading
-  that policy in its own process, so a read-only folder is uneditable by an agent
-  too — app and connector share one parser, one matcher and one refusal sentence.
-  The deny-lists guarding everything outside a root stay separate from the
-  workspace's rules: merging them would move secrets into a per-project file.
+- **The connectors answer the workspace level for their own root**, so a
+  read-only folder is uneditable by an agent too — app and connector reach one
+  verdict with one matcher. The deny-lists guarding everything outside a root stay
+  separate from the workspace's rules: merging them would move secrets into a
+  per-project file.
 
 ## Key patterns
 
 - **One LLM layer.** Every model call — every chat reply, a batch task's turns
   included — goes through `core/llmkit`, the only seam that speaks HTTP to an
-  OpenAI-compatible endpoint, so adding a model is configuration, never new
-  code. The connection comes from the settings store, resolved per agent **once,
-  at a turn's start**, so a mid-turn save cannot split a streaming turn.
+  OpenAI-compatible endpoint, so adding a model is configuration, never new code;
+  that seam also owns the verdict on whether a refused round may be waited out.
+  The connection comes from the settings store, resolved per agent **once, at a
+  turn's start**, so a mid-turn save cannot split it.
 - **Core owns logic, the API owns transport.** The blocking model call runs in a
-  worker thread publishing events; the streaming endpoint consumes them. That
+  worker thread publishing events, which the streaming endpoint consumes; that
   worker-plus-cancellation pattern is the chat's, and nothing under `core` may
   import the API layer.
 - **The app holds one hub pool, keyed by folder.** A workspace's own hubs are
@@ -176,18 +174,18 @@ together:
   streams **on that workspace**. Batch mode lists its lot through the shared path
   policy but never reads or writes its contents — only the connectors do.
 - **A lot runs every task in one agent and one workspace, both pinned at launch**
-  — the agent from the composer's dropdown, the folder from the tab that started
-  it, the same as a standard session of that choice — so moving either mid-lot
-  reaches no task. An unresolvable selection, or one with no model, stops the lot.
+  — the agent the composer shows, the folder of the tab that started it — so
+  moving either mid-lot reaches no task. An unresolvable selection, or one with no
+  model, stops the lot.
 - **A task is finished when its file leaves the lot folder**; that move is the
   agent's own acknowledgement, and re-listing is the only way the loop can see it.
   A file still there is relaunched up to the loop's budget, then the lot aborts.
 - **This file feeds the chat**: when the workspace the request names carries it,
-  it is injected into every chat turn and re-read per request. The model acts on
-  it, so accuracy matters more than volume.
+  it is injected into every chat turn whatever the mode, and re-read per request.
+  The model acts on it, so accuracy matters more than volume.
 - **Tests stay hermetic**: no test reads a real model connection, reaches a live
-  hub or opens the install's settings store — the hubs are disabled by an
-  environment flag and each test runs on a temporary store of its own.
+  hub or opens the settings store — the hubs are disabled by an environment flag
+  and each test runs on a temporary store of its own.
 
 ## Tool use
 
@@ -218,7 +216,8 @@ chains, redirections or backgrounding, and no variable, glob or home expansion.
 
 - **A stream cut by the server looks like a finished answer** at the chunk level.
   The honest signal is whether a real finish marker was seen after the loop drains.
-  A truncated reply ends as an error, which also stops a half-streamed tool call.
+  A truncated reply ends as an error, stopping a half-streamed tool call — bytes
+  arrived, so it is never waited on, unlike a round refused before the first one.
 - **Token counts can look server-reported when they are not**: a stream that dies
   before any usage chunk gets a re-counted back-fill, so keep the estimated flag honest.
 - **A core surface reached outside a workspace scope is an error, never a fallback**
@@ -229,7 +228,7 @@ chains, redirections or backgrounding, and no variable, glob or home expansion.
 
 ## Maintaining this file
 
-Apply the rules above whenever you edit it: keep the big picture, cut what the
-code already says, and name the invariant rather than the implementation a
-routine change would move. One idea per bullet. A test that exists to enforce an
-invariant is worth naming as a pointer — the invariant stays the point.
+Apply the rules above: keep the big picture, cut what the code already says, and
+name the invariant rather than the implementation a routine change moves. One
+idea per bullet. A test that enforces an invariant is worth naming as a pointer —
+the invariant stays the point.

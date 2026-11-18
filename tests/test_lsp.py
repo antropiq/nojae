@@ -2861,7 +2861,7 @@ class TestChatLspWiring:
         def fake_stream(messages, model, server_url, emit, sampling=None,
                         cancel_event=None, pause_event=None, api_key="none", sysprompt=None,
                         tools=None, tool_executor=None, tool_servers=None,
-                        max_tool_iterations=25, uncapped_tool_names=None,
+                        max_tool_iterations=25, uncapped_tool_names=None, retry_budget=None,
                         agent_instructions=None):
             captured["tools"] = tools
             captured["tool_servers"] = tool_servers

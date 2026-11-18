@@ -7,6 +7,7 @@ import RegistrationMemoryDlg from './RegistrationMemoryDlg.vue'
 import {
   conversationJson,
   conversationMarkdown,
+  endpointWaitLine,
   humanFileSize,
   parseSessionFile,
   useChat,
@@ -76,6 +77,12 @@ function addBulletDialog() {
 }
 
 const streaming = computed(() => state.phase !== 'idle')
+// The wait's one line, or '' when no wait is in progress. The text is built in
+// the composable (`endpointWaitLine`) — this component renders an answer and
+// decides nothing about the wording, so the strip and a test of the rule read
+// the same function. Nothing here watches a clock: the line exists because a
+// frame said so, and it goes when the frames say the wait is over.
+const waitLine = computed(() => endpointWaitLine(state.endpointWait))
 // "There is an image to send" is "the list is non-empty": the composer holds a
 // list, and every read of it answers about the list.
 const hasPendingImages = computed(() => state.pendingImages.length > 0)
@@ -413,6 +420,26 @@ onBeforeUnmount(() => {
            width now that no side panel stands next to the textarea, and it
            only renders while a lot runs (or just after it ended). -->
       <BatchProgressBar />
+      <!-- The wait's status line (spec §5.6): one quiet caption in the strip
+           whose layout the short label exists for, so it stays on screen while
+           the conversation scrolls away above it. Drawn from the frame alone —
+           no timer and no client-side guess fills it in or takes it down, and
+           the text is the composable's own `endpointWaitLine`, with the
+           endpoint's sentence quoted verbatim as plain text (never markdown,
+           never HTML). A wait is not a failure, so this is a `caption` and not
+           an `error-line`; the theme's existing caption/mono vocabulary is all
+           it borrows. It renders **nothing at all** when no wait is in
+           progress — no box, no reserved space, the discipline the staged
+           strip follows — and it adds no control: Stop is already here,
+           because the composer is locked through the wait. -->
+      <p
+        v-if="state.endpointWait"
+        class="caption mono chat-endpoint-wait"
+        role="status"
+        :title="waitLine"
+      >
+        {{ waitLine }}
+      </p>
       <!-- One row above the textarea: the session icon buttons flanking the
            memory bullets, which stay centered between the two button groups. -->
       <div class="chat-bullet-row">

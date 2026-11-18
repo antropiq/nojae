@@ -14,6 +14,7 @@ import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
 import { useWorkspaceTree } from '../composables/useWorkspaceTree'
 import { modeById, runningOnLine } from '../composables/useAgentModes'
+import { phaseInFlight } from '../lib/inference-state'
 
 const { state, openSettings, applyWorkspaceHubs } = useAppShell()
 const { state: session, setWorkspaceFromField } = useWorkspaceSession()
@@ -42,9 +43,14 @@ const storeLine = computed(() => {
 
 // One pill for the app: a chat reply in flight reports its own phase
 // (including the reasoning flag).
-const chatBusy = computed(() =>
-  ['waiting', 'reasoning', 'answering'].includes(chat.phase),
-)
+//
+// The "in flight" half is the shared predicate's answer, not a list spelled out
+// here (spec §5.12 calls the two copies the feature's most likely bug): the bar
+// and the tab glyph / end-of-session chime must never disagree about whether a
+// reply is still running, or the app goes quiet mid-turn while the composer
+// stays locked. A phase that is not idle reaches this through
+// `phaseInFlight`, so a later phase needs no edit here at all.
+const chatBusy = computed(() => phaseInFlight(chat.phase))
 
 // A running batch reads `Batch`, ahead of the chat branch: the lot owns the
 // conversation across the gap between two task turns, where the chat phase is
@@ -165,12 +171,37 @@ async function applyLocation() {
   }
 }
 
+// What each phase the pill can be reading says about itself, and which tone it
+// wears. Two rules the phase vocabulary forces (spec §5.11):
+//
+//   * `reconnecting` must not borrow the `thinking` / `reasoning...` wording —
+//     one phase means "the endpoint refused", the other "it is thinking", and
+//     the two must never be confusable on screen. So it gets its own label,
+//     the short one spec §3 keeps for the composer strip's layout; the
+//     endpoint's own sentence belongs to the composer's detail line, not here.
+//   * it stays **lit**: the turn is still in flight, so the tone is the violet
+//     pulse the bar already uses for "a reply is running" — an `idle` pill
+//     during a wait would tell the user the app had given up.
+//
+// The tables cover every in-flight phase, and the fallbacks below keep a phase
+// that arrives later reading as busy rather than blank.
+const PILL_LABEL = {
+  waiting: 'thinking',
+  reasoning: 'reasoning...',
+  answering: 'thinking',
+  reconnecting: 'Reconnecting',
+}
+const PILL_CLASS = {
+  waiting: 'status-thinking',
+  reasoning: 'status-reasoning',
+  answering: 'status-thinking',
+  reconnecting: 'status-reconnecting',
+}
+
 const pillLabel = computed(() => {
   if (batch.active) return 'Batch'
   if (batchOutcome.value) return `batch ${batchOutcome.value}`
-  if (chatBusy.value) {
-    return chat.phase === 'reasoning' ? 'reasoning...' : 'thinking'
-  }
+  if (chatBusy.value) return PILL_LABEL[chat.phase] ?? 'thinking'
   return 'idle'
 })
 const pillClass = computed(() => {
@@ -178,9 +209,7 @@ const pillClass = computed(() => {
   if (batchOutcome.value) {
     return BATCH_OUTCOME_CLASS[batchOutcome.value] ?? 'status-idle'
   }
-  if (chatBusy.value) {
-    return chat.phase === 'reasoning' ? 'status-reasoning' : 'status-thinking'
-  }
+  if (chatBusy.value) return PILL_CLASS[chat.phase] ?? 'status-thinking'
   return 'status-idle'
 })
 

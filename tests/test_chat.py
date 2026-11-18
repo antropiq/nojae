@@ -2,11 +2,13 @@
 
 import base64
 import json
+import math
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,6 +17,7 @@ from src.api.server import create_app
 from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
 from src.core import chat as chat_core
+from src.core.llmkit import LLMRequestError
 from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
 #: ``workspace_params`` builds the field every workspace-scoped request names;
 #: the two hub helpers hand a test's manager double to the **workspace's own**
@@ -549,6 +552,822 @@ class TestStreamChat:
         assert captured["messages"][1] == {"role": "user", "content": parts}
 
 
+class TestARefusedRoundWaits:
+    """A round the endpoint refused waits and re-sends (spec §5).
+
+    Two things hold across the class. The failures are the seam's **own** shapes
+    — :class:`LLMRequestError` for a refused status, an ``httpx`` transport error
+    for a connect/read failure — because the guard acts on the seam's verdict on
+    those types, never on a sentence (task 02). And the wait's sleep is patched
+    (``chat_core._wait_slice``), so the numbers asserted here are recorded slice
+    lengths and call counts: no case here sleeps anything like the configured ten
+    seconds.
+    """
+
+    #: The budget a case hands the guard unless it says otherwise: 3 waits of
+    #: 10 seconds — the two keys' default values, stated here rather than read
+    #: from the environment.
+    BUDGET: Tuple[int, float] = (3, 10)
+
+    def _run(self, monkeypatch, refusals,
+             *, budget: Tuple[int, float] = BUDGET,
+             budget_source: Optional[Callable[[], Tuple[int, float]]] = None,
+             chunks=None, during_wait: Optional[Callable[[], None]] = None,
+             **kwargs):
+        """One turn over a seam that refuses ``refusals`` times, then answers.
+
+        ``chunks`` are the frames of the stream it answers with once it stops
+        refusing; ``during_wait`` is called inside the first slept slice, which
+        is how a case arms Stop or Pause *during* a wait; ``budget_source``
+        replaces the accessor the guard reads, for the case that watches *when*
+        it reads it. Returns the events, the captured seam calls, and the wait
+        slices the guard slept.
+        """
+        calls: List[Dict[str, Any]] = []
+        slept: List[float] = []
+        pending = list(refusals)
+        frames = list(chunks or [])
+        source: Callable[[], Tuple[int, float]] = budget_source or (
+            lambda: budget
+        )
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            if pending:
+                raise pending.pop(0)
+            return FakeStream(frames)
+
+        def sleep_slice(seconds: float) -> None:
+            slept.append(seconds)
+            if during_wait is not None:
+                during_wait()
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        monkeypatch.setattr(chat_core, "_wait_slice", sleep_slice)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            retry_budget=source,
+            **kwargs,
+        )
+        return events, calls, slept
+
+    @staticmethod
+    def _refused(status: int) -> LLMRequestError:
+        """One refused round, built from the seam's error type and its status."""
+        return LLMRequestError(
+            status=status,
+            message="Bad Gateway",
+            url="http://server:8080/v1/chat/completions",
+        )
+
+    @staticmethod
+    def _terminal(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [e for e in events if e["event"] in ("done", "error", "pause_ack")]
+
+    @staticmethod
+    def _slices(wait_seconds: float, times: int = 1) -> List[float]:
+        """The slices ``times`` waits of ``wait_seconds`` are slept in.
+
+        A wait is slept as ``ceil(wait / WAIT_SLICE_SECONDS)`` equal slices, the
+        flag re-checked between them so a Stop can cut it (spec §5.7) — so the
+        assertions here name that shape, and stay right whatever the slice
+        length is set to.
+        """
+        per_wait = max(1, math.ceil(wait_seconds / chat_core.WAIT_SLICE_SECONDS))
+        slice_seconds = wait_seconds / per_wait
+        return [slice_seconds] * (per_wait * times)
+
+    # -- the replay ----------------------------------------------------------
+
+    def test_two_refusals_then_an_answer_completes_the_turn(self, monkeypatch):
+        events, calls, slept = self._run(
+            monkeypatch,
+            [self._refused(502), self._refused(503)],
+            chunks=[content_chunk("answer"), finish_chunk("stop")],
+        )
+        assert len(calls) == 3
+        assert slept == self._slices(10, 2)
+        assert [e["event"] for e in events] == [
+            "reconnecting", "reconnecting", "token", "done",
+        ]
+        # ``reconnecting`` is a *progress* event: the turn still closes with
+        # exactly one terminal frame, and it is the normal one.
+        assert self._terminal(events) == [events[-1]]
+
+    def test_a_replay_sends_the_identical_request(self, monkeypatch):
+        _events, calls, _slept = self._run(
+            monkeypatch,
+            [self._refused(502), self._refused(502)],
+            chunks=[content_chunk("answer"), finish_chunk("stop")],
+        )
+        # A pure replay (spec §2): every argument of the failed attempt again —
+        # and the *same* ``messages`` object, so nothing was rebuilt. The wait
+        # re-arms nothing: not the connection, not the tools (spec §5.9).
+        assert calls[0] == calls[1] == calls[2]
+        assert calls[0]["messages"] is calls[2]["messages"]
+        assert calls[0]["model"] == "model-a"
+        assert calls[0]["server_url"] == "http://server:8080/v1"
+
+    def test_each_wait_is_announced_with_the_pinned_fields(self, monkeypatch):
+        events, _calls, _slept = self._run(
+            monkeypatch,
+            [self._refused(502)] * 3,
+            budget=(3, 7),
+            chunks=[content_chunk("late but fine"), finish_chunk("stop")],
+        )
+        waits = [e for e in events if e["event"] == "reconnecting"]
+        # ``attempt`` is 1-based *within the round*, ``budget`` the key's value:
+        # three waits of a budget of 3, so the label can read 1/3, 2/3, 3/3.
+        assert [e["attempt"] for e in waits] == [1, 2, 3]
+        assert [e["budget"] for e in waits] == [3, 3, 3]
+        assert [e["waitSeconds"] for e in waits] == [7, 7, 7]
+        # The endpoint's own sentence, verbatim — nothing here re-words it.
+        assert [e["message"] for e in waits] == [str(self._refused(502))] * 3
+        assert "HTTP 502" in waits[0]["message"]
+        assert set(waits[0]) == {
+            "event", "attempt", "budget", "waitSeconds", "message",
+        }
+
+    def test_the_budget_is_read_at_the_decision_not_at_the_turn_start(
+        self, monkeypatch
+    ):
+        reads: List[int] = []
+
+        def accessor():
+            reads.append(1)
+            return (3, 4)
+
+        # A round that is never refused never reads it at all.
+        _events, calls, slept = self._run(
+            monkeypatch, [], budget_source=accessor,
+            chunks=[content_chunk("ok"), finish_chunk("stop")],
+        )
+        assert len(calls) == 1 and slept == [] and reads == []
+        # A refused round reads it once, at the failure, and the wait plus its
+        # frame carry what the accessor answered *then*.
+        events, _calls, slept = self._run(
+            monkeypatch, [self._refused(502)], budget_source=accessor,
+            chunks=[content_chunk("ok"), finish_chunk("stop")],
+        )
+        assert reads == [1]
+        assert slept == self._slices(4)
+        assert events[0]["waitSeconds"] == 4
+
+    # -- what never waits ----------------------------------------------------
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+    def test_a_final_status_fails_on_the_first_attempt(self, monkeypatch, status):
+        events, calls, slept = self._run(
+            monkeypatch, [self._refused(status)],
+            chunks=[content_chunk("never"), finish_chunk("stop")],
+        )
+        assert len(calls) == 1
+        assert slept == []
+        assert [e["event"] for e in events] == ["error"]
+        # Today's wording, untouched.
+        assert events[0]["message"] == f"LLM call failed: {self._refused(status)}"
+
+    def test_an_unrecognised_exception_is_final(self, monkeypatch):
+        events, calls, slept = self._run(
+            monkeypatch, [RuntimeError("a bug of ours")],
+            chunks=[content_chunk("never"), finish_chunk("stop")],
+        )
+        assert len(calls) == 1
+        assert slept == []
+        assert [e["event"] for e in events] == ["error"]
+        assert events[0]["message"] == "LLM call failed: a bug of ours"
+
+    def test_a_connect_failure_does_wait(self, monkeypatch):
+        """The other retryable half: no answer at all, and no byte streamed."""
+        events, calls, slept = self._run(
+            monkeypatch, [httpx.ConnectError("connection refused")],
+            chunks=[content_chunk("back up"), finish_chunk("stop")],
+        )
+        assert len(calls) == 2
+        assert slept == self._slices(10)
+        assert [e["event"] for e in events] == ["reconnecting", "token", "done"]
+
+    def test_a_budget_of_zero_is_today_behaviour_exactly(self, monkeypatch):
+        events, calls, slept = self._run(
+            monkeypatch, [self._refused(502)], budget=(0, 10),
+            chunks=[content_chunk("never"), finish_chunk("stop")],
+        )
+        assert len(calls) == 1
+        assert slept == []
+        assert [e["event"] for e in events] == ["error"]
+        assert events[0]["message"] == f"LLM call failed: {self._refused(502)}"
+
+    def test_a_caller_that_passes_no_budget_never_waits(self, monkeypatch):
+        # The keyword is optional: every existing caller and every stub that
+        # omits it keeps the old behaviour, which is the guard switched off.
+        def seam(**kw):
+            raise self._refused(502)
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}], "m", "http://s/v1", events.append,
+        )
+        assert [e["event"] for e in events] == ["error"]
+        assert events[0]["message"] == f"LLM call failed: {self._refused(502)}"
+
+    # -- a cut stream is not a refused round (spec §5.4) ---------------------
+
+    def test_a_stream_that_dies_mid_read_is_not_replayed(self, monkeypatch):
+        calls: List[Dict[str, Any]] = []
+        slept: List[float] = []
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            return FakeStream(
+                [content_chunk("half an "), content_chunk("answer")],
+                error_after=1,
+                error=ConnectionError("the server cut the stream"),
+            )
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        monkeypatch.setattr(chat_core, "_wait_slice", lambda s: slept.append(s))
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}], "m", "http://s/v1", events.append,
+            retry_budget=lambda: self.BUDGET,
+        )
+        # Text already reached the panel: a replay would duplicate it.
+        assert len(calls) == 1
+        assert slept == []
+        assert [e for e in events if e["event"] == "reconnecting"] == []
+        assert [e["event"] for e in events][-1] == "error"
+        assert events[-1]["message"].startswith("Stream error:")
+
+    def test_a_stream_with_no_finish_reason_is_not_replayed(self, monkeypatch):
+        calls: List[Dict[str, Any]] = []
+        slept: List[float] = []
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            return FakeStream([content_chunk("half an answer")])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        monkeypatch.setattr(chat_core, "_wait_slice", lambda s: slept.append(s))
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}], "m", "http://s/v1", events.append,
+            retry_budget=lambda: self.BUDGET,
+        )
+        assert len(calls) == 1
+        assert slept == []
+        assert events[-1]["message"] == chat_core.TRUNCATION_MESSAGE
+        assert events[-1][chat_core.TRUNCATION_EVENT_FLAG] is True
+
+    # -- every round of the loop, the ones after tool calls included ---------
+
+    def test_a_replay_after_a_tool_round_keeps_the_earlier_work(self, monkeypatch):
+        calls: List[Dict[str, Any]] = []
+        # Round 1 answers with a real tool call; round 2 refuses twice before
+        # its third attempt streams the answer.
+        plan = [
+            FakeStream([
+                tool_call_chunk(0, "call-1", "read_file", '{"path": "a.txt"}'),
+                finish_chunk("tool_calls"),
+            ]),
+            None,
+            None,
+            FakeStream([content_chunk("done reading"), finish_chunk("stop")]),
+        ]
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            item = plan[len(calls) - 1]
+            if item is None:
+                raise self._refused(502)
+            return item
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        monkeypatch.setattr(chat_core, "_wait_slice", lambda s: None)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "read a.txt"}], "m", "http://s/v1",
+            events.append,
+            tools=[{"type": "function", "function": {"name": "read_file"}}],
+            tool_executor=lambda name, args: "the file's contents",
+            retry_budget=lambda: (3, 5),
+        )
+        assert len(calls) == 4
+        replay = calls[-1]["messages"]
+        # The earlier rounds' work is still in the list: that is what makes
+        # "continue where it left off" literal rather than approximate.
+        assistant_turn = next(m for m in replay if m.get("tool_calls"))
+        assert assistant_turn["tool_calls"][0]["id"] == "call-1"
+        assert assistant_turn["tool_calls"][0]["function"]["name"] == "read_file"
+        tool_turn = next(m for m in replay if m["role"] == "tool")
+        assert tool_turn["tool_call_id"] == "call-1"
+        assert tool_turn["content"] == "the file's contents"
+        assert events[-1]["event"] == "done"
+
+    # -- inside the wait: Stop ends it, Pause does not (spec §5.7, §5.8) -----
+
+    def test_stop_during_a_wait_ends_the_turn_without_a_re_send(self, monkeypatch):
+        cancel = threading.Event()
+        events, calls, slept = self._run(
+            monkeypatch,
+            [self._refused(502), self._refused(502)],
+            cancel_event=cancel,
+            # Stop is armed inside the first slept slice: the wait is cut there.
+            during_wait=cancel.set,
+            chunks=[content_chunk("never"), finish_chunk("stop")],
+        )
+        # A Stop emits no frame at all — the turn ends as a Stop during a stream
+        # does — and the re-send never happened.
+        assert [e["event"] for e in events] == ["reconnecting"]
+        assert len(calls) == 1
+        # The wait's own accounting stops where the Stop landed: the guard asked
+        # for no further slice, so the rest of the wait was never spent.
+        assert slept == [chat_core.WAIT_SLICE_SECONDS]
+
+    def test_a_pause_armed_during_a_wait_does_not_shorten_it(self, monkeypatch):
+        pause = threading.Event()
+        events, calls, slept = self._run(
+            monkeypatch,
+            [self._refused(502)],
+            pause_event=pause,
+            # The flag goes up inside the very first slice of the wait.
+            during_wait=pause.set,
+            budget=(1, 2),
+            chunks=[content_chunk("partial"), content_chunk(" more")],
+        )
+        # The wait ran its full 2 seconds even though the flag was armed inside
+        # it: pause means *keep what arrived*, and a wait has streamed nothing.
+        assert slept == self._slices(2)
+        # The replay really happened: the re-send was not skipped by the flag.
+        assert len(calls) == 2
+        # And the Pause is answered where it is always answered — at the first
+        # chunk of that next round, whose flag check comes before the chunk is
+        # handled. The flag was armed before that round began, so nothing of it
+        # streams; that is today's pause shape, unchanged (compare the pause
+        # cases in ``TestStreamChatPause``).
+        assert [e["text"] for e in events if e["event"] == "token"] == []
+        assert [e["event"] for e in events] == ["reconnecting", "usage", "pause_ack"]
+        assert events[-1]["partial"] is True
+        # Not an error and not a truncation: the wait ended on its own length and
+        # the turn closed on the ack, once.
+        assert self._terminal(events) == [events[-1]]
+
+    def test_the_round_after_a_wait_streams_and_a_pause_keeps_its_partial(self,
+                                                                          monkeypatch):
+        """The other half of §5.8: the wait does not swallow the Pause request.
+
+        The flag is armed *inside* the replayed round instead of inside the wait,
+        so what is asserted is that the replay really streams and the pause is
+        answered where it always is — the partial turn is kept and the turn ends
+        on ``pause_ack``, the same shape a pause has when no wait came first.
+        """
+        pause = threading.Event()
+        calls: List[Dict[str, Any]] = []
+
+        def replayed_round():
+            yield content_chunk("partial")
+            pause.set()          # the interrupt lands mid-round, as it always does
+            yield content_chunk(" more")
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            if len(calls) == 1:
+                raise self._refused(502)
+            return replayed_round()
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}], "m", "http://s/v1",
+            events.append, pause_event=pause, retry_budget=lambda: (1, 1),
+        )
+        assert len(calls) == 2
+        assert [e["text"] for e in events if e["event"] == "token"] == ["partial"]
+        assert events[-1]["event"] == "pause_ack"
+        assert events[-1]["partial"] is True
+
+    def test_the_wait_primitive_is_cut_by_stop_and_nothing_else(self):
+        """The wait on the real clock and a short budget.
+
+        Asserted on the primitive because a patched sleep cannot show
+        *interruptibility*. A 10-second wait whose Stop arrives after 50ms comes
+        back in the slice it was sleeping, so this costs milliseconds and still
+        proves the seconds after a Stop are never spent; the sibling branch — a
+        flag that is **not** Stop — is the pause armed below, which the guard
+        never reads (the case above shows its full wait slept anyway).
+        """
+        stop = threading.Event()
+
+        started = time.monotonic()
+        stop_later = threading.Timer(0.05, stop.set)
+        stop_later.start()
+        try:
+            completed = chat_core._wait_for_endpoint(10.0, stop)
+        finally:
+            stop_later.cancel()
+        elapsed = time.monotonic() - started
+        assert completed is False
+        assert elapsed < 1.0
+
+        # No cancel flag at all: the wait runs its (short) full length.
+        started = time.monotonic()
+        assert chat_core._wait_for_endpoint(0.05, None) is True
+        assert time.monotonic() - started >= 0.05
+
+    # -- the budget spent (spec §5.10) --------------------------------------
+
+    def test_an_exhausted_budget_names_the_attempts_and_the_sentence(
+        self, monkeypatch
+    ):
+        events, calls, slept = self._run(
+            monkeypatch, [self._refused(502)] * 5, budget=(2, 5),
+            chunks=[content_chunk("never"), finish_chunk("stop")],
+        )
+        # 2 waits of a budget of 2, then the failure is final.
+        assert len(calls) == 3
+        assert slept == self._slices(5, 2)
+        assert [e["event"] for e in events] == [
+            "reconnecting", "reconnecting", "error",
+        ]
+        message = events[-1]["message"]
+        # The endpoint's sentence verbatim, plus what the app already did: the
+        # round's own wait count and the seconds it slept.
+        assert str(self._refused(502)) in message
+        assert "2 further attempts" in message
+        assert "10s" in message
+        assert self._terminal(events) == [events[-1]]
+
+    # -- a wait is not inference (measurement rule) -------------------------
+
+    def test_the_route_hands_over_the_accessor_not_its_numbers(
+        self, client, monkeypatch
+    ):
+        """End to end: the browser's turn carries the guard, without a stub in
+        the middle knowing about it.
+
+        The route passes the **accessor** (so the keys are read at the decision,
+        not at the turn's start) — an ordinary keyword whose value is a callable.
+        A stub that spells the parameters out receives it and nothing else about
+        the feature changes in its call shape.
+        """
+        seen = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
+            seen["retry_budget"] = retry_budget
+            emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
+                  "tokensEstimated": False})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+        assert client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        ).status_code == 200
+        # Not a number and not a snapshot of one: the route hands over the
+        # accessor itself, which is what makes the keys read at the decision.
+        assert seen["retry_budget"] is routes.network_fail_budget
+        assert callable(seen["retry_budget"])
+
+    def test_a_wait_crosses_the_sse_channel_without_ending_the_stream(
+        self, client, monkeypatch
+    ):
+        """The real loop over the real route: one progress frame, then ``done``.
+
+        ``reconnecting`` rides the browser's channel as an ordinary non-terminal
+        frame — the generator must neither stop on it nor swallow it. What the UI
+        *does* with it is tasks 05 and 06; here it is enough that a stream which
+        waited still looks like one stream that finished.
+        """
+        calls: List[Dict[str, Any]] = []
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            if len(calls) == 1:
+                raise self._refused(502)
+            return FakeStream([content_chunk("recovered"), finish_chunk("stop")])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        # The real loop this time, so the frames are the ones a browser is sent.
+        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        # A millisecond budget: the wait is real but costs nothing.
+        monkeypatch.setattr(
+            routes, "network_fail_budget", lambda: (1, chat_core.WAIT_SLICE_SECONDS)
+        )
+        response = client.post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        frames = _events(response.text)
+        names = [name for name, _payload in frames]
+        assert len(calls) == 2
+        assert names == ["reconnecting", "token", "done"]
+        # The transport forwards the emitted dict as it is, so the ``done``
+        # payload a browser reads already carries the turn's wait (task 04) —
+        # the one waited second this case's millisecond budget allowed.
+        assert frames[-1][1]["waited"] == pytest.approx(chat_core.WAIT_SLICE_SECONDS)
+
+    def test_a_wait_enters_no_measurement(self, monkeypatch):
+        """One real wait of a real (tiny) length, on the real clock.
+
+        The turn's *span* (``took``) necessarily covers it, while every figure
+        anchored to chunk arrivals — ``ttft`` and the decode window — cannot:
+        a wait produces no arrival. The budget here is in milliseconds, so the
+        case costs nothing and sleeps for real.
+        """
+        calls: List[Dict[str, Any]] = []
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            if len(calls) == 1:
+                raise self._refused(502)
+            return FakeStream([
+                content_chunk("ab"),
+                content_chunk("cd"),
+                finish_chunk("stop", usage={"prompt_tokens": 4,
+                                           "completion_tokens": 2,
+                                           "total_tokens": 6}),
+            ])
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        events: List[Dict[str, Any]] = []
+        started = time.monotonic()
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}], "m", "http://s/v1",
+            events.append, retry_budget=lambda: (1, 0.3),
+        )
+        elapsed = time.monotonic() - started
+        assert len(calls) == 2
+        done = events[-1]
+        # The wait really happened, and it is nowhere in the measurement: the
+        # decode window is the span between two arrivals of the last round.
+        assert elapsed >= 0.3
+        assert done["decode"] == done["took"] - done["ttft"]
+        assert done["decode"] < 0.3
+        assert done["tokens"] == 2
+
+
+class _HandDrivenClock:
+    """A ``time.monotonic`` stand-in a case drives by hand.
+
+    Task 04 is about *which* numbers a wait touches, so they are stated rather
+    than measured: with the clock in the test's hands the span of a waited turn,
+    the span of the same turn unwaited, and every decode window are known
+    exactly, and the patched sleep advances the very clock the waits are slept
+    on. ``step`` is what a chunk arrival costs; ``advance`` is a wait.
+    """
+
+    def __init__(self, step: float = 1.0) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        answered = self.now
+        self.now += self.step
+        return answered
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestTheDoneFrameCarriesTheWait:
+    """The turn's ``done`` frame totals the seconds it waited (spec §5.15, D5).
+
+    Same discipline as ``TestARefusedRoundWaits``: the seam is a stub and the
+    wait's sleep is patched, so every figure asserted here is one the case
+    handed the guard — no test sleeps, and the expected ``waited`` is known
+    rather than raced. The hand-driven clock is what lets the class pin that
+    ``took`` keeps the wait (spec §5.17) while ``decode`` never gains it.
+    """
+
+    #: The pair a case hands the guard unless it says otherwise.
+    BUDGET: Tuple[int, float] = (3, 9)
+
+    @staticmethod
+    def _refused(status: int = 502) -> LLMRequestError:
+        return LLMRequestError(
+            status=status,
+            message="Bad Gateway",
+            url="http://server:8080/v1/chat/completions",
+        )
+
+    def _run(self, monkeypatch, refusals,
+             *, budget: Tuple[int, float] = BUDGET,
+             chunks=None, clock: Optional[_HandDrivenClock] = None,
+             during_wait: Optional[Callable[[], None]] = None, **kwargs):
+        """One turn over a seam that refuses ``refusals`` times, then answers.
+
+        Returns the events, the seam calls, and the wait slices it slept: those
+        slices are exactly what ``waited`` must add up to. ``during_wait`` runs
+        inside the first slept slice — how a case arms Pause *during* a wait.
+        """
+        calls: List[Dict[str, Any]] = []
+        slept: List[float] = []
+        pending = list(refusals)
+        frames = list(chunks or [])
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            if pending:
+                raise pending.pop(0)
+            return FakeStream(frames)
+
+        def sleep_slice(seconds: float) -> None:
+            slept.append(seconds)
+            if clock is not None:
+                clock.advance(seconds)
+            if during_wait is not None:
+                during_wait()
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        monkeypatch.setattr(chat_core, "_wait_slice", sleep_slice)
+        if clock is not None:
+            monkeypatch.setattr(chat_core.time, "monotonic", clock)
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}],
+            "model-a",
+            "http://server:8080/v1",
+            events.append,
+            retry_budget=lambda: budget,
+            **kwargs,
+        )
+        return events, calls, slept
+
+    # -- the field itself ----------------------------------------------------
+
+    def test_a_waited_turn_reports_the_seconds_it_slept(self, monkeypatch):
+        events, calls, slept = self._run(
+            monkeypatch,
+            [self._refused(502), self._refused(503)],
+            chunks=[content_chunk("answer"), finish_chunk("stop")],
+        )
+        assert len(calls) == 3
+        # Two waits of the budget's 9 seconds, slept in slices summing to them.
+        assert slept == TestARefusedRoundWaits._slices(9, 2)
+        done = events[-1]
+        assert done["event"] == "done"
+        # The sum of the waits this turn slept — and it rides on ``done`` only.
+        assert done["waited"] == pytest.approx(sum(slept))
+        assert done["waited"] == pytest.approx(18.0)
+        assert [e for e in events if e["event"] == "done"] == [done]
+
+    def test_a_turn_that_never_waits_reports_waited_zero(self, monkeypatch):
+        # A refusal-free turn under a real budget: the guard ran and slept
+        # nothing.
+        events, _calls, slept = self._run(
+            monkeypatch, [],
+            chunks=[content_chunk("answer"), finish_chunk("stop")],
+        )
+        assert slept == []
+        done = events[-1]
+        assert "waited" in done, "the field is never omitted"
+        assert done["waited"] == 0
+
+        # The same for a caller that passes no budget at all: every existing
+        # caller and every stub keeps the shape it always had, plus the field.
+        monkeypatch.setattr(
+            "src.core.chat.stream_completion",
+            lambda **kw: FakeStream([content_chunk("answer"), finish_chunk("stop")]),
+        )
+        plain: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "hi?"}], "m", "http://s/v1", plain.append,
+        )
+        assert plain[-1]["event"] == "done"
+        assert plain[-1]["waited"] == 0
+
+    def test_waits_in_two_rounds_are_summed(self, monkeypatch):
+        """The figure is the **turn's** total, not the last round's."""
+        calls: List[Dict[str, Any]] = []
+        slept: List[float] = []
+        # Round 1 answers with a tool call after two refusals; round 2 refuses
+        # once before streaming the answer. Same turn, three waits.
+        plan = [
+            None,
+            None,
+            FakeStream([
+                tool_call_chunk(0, "call-1", "read_file", '{"path": "a.txt"}'),
+                finish_chunk("tool_calls"),
+            ]),
+            None,
+            FakeStream([content_chunk("done reading"), finish_chunk("stop")]),
+        ]
+
+        def seam(**kw):
+            calls.append(dict(kw))
+            item = plan[len(calls) - 1]
+            if item is None:
+                raise self._refused(502)
+            return item
+
+        monkeypatch.setattr("src.core.chat.stream_completion", seam)
+        monkeypatch.setattr(chat_core, "_wait_slice", lambda s: slept.append(s))
+        events: List[Dict[str, Any]] = []
+        chat_core.stream_chat(
+            [{"role": "user", "content": "read a.txt"}], "m", "http://s/v1",
+            events.append,
+            tools=[{"type": "function", "function": {"name": "read_file"}}],
+            tool_executor=lambda name, args: "the file's contents",
+            retry_budget=lambda: (3, 4),
+        )
+        assert len(calls) == 5
+        assert slept == TestARefusedRoundWaits._slices(4, 3)
+        done = events[-1]
+        assert done["event"] == "done"
+        # round 1: two waits of 4s, round 2: one — 12s for the turn.
+        assert done["waited"] == pytest.approx(12.0)
+
+    # -- the other numbers, untouched ----------------------------------------
+
+    def test_took_keeps_the_wait_and_waited_is_the_separate_figure(
+        self, monkeypatch
+    ):
+        """Same turn, same chunk arrival, with and without a wait (spec §5.17).
+
+        The clock is driven by the test, so both spans are exact: the waited
+        turn's ``took`` is the unwaited one's plus the seconds it slept, which
+        is the sentence "the turn's span is the whole request, waiting included"
+        made testable. ``decode`` is identical in both — that is what D5 keeps
+        apart, and why a later reader must not subtract ``waited`` from ``took``
+        to recover it.
+        """
+        frames = [content_chunk("ab"), content_chunk("cd"), finish_chunk("stop")]
+
+        unwaited, _calls1, slept1 = self._run(
+            monkeypatch, [], chunks=frames, clock=_HandDrivenClock(),
+        )
+        waited, calls2, slept2 = self._run(
+            monkeypatch, [self._refused(502), self._refused(502)],
+            chunks=frames, clock=_HandDrivenClock(),
+        )
+        assert len(calls2) == 3 and slept2 and not slept1
+        slept_total = sum(slept2)
+
+        first, second = unwaited[-1], waited[-1]
+        assert (first["event"], second["event"]) == ("done", "done")
+        # Both turns stream the same two content chunks: one arrival each, so
+        # the decode window is one clock step in both, waited or not.
+        assert first["decode"] == 1.0 and second["decode"] == 1.0
+        assert first["took"] == 2.0 and first["ttft"] == 1.0
+        # The waited turn's span grew by exactly the wait and nothing else…
+        assert second["took"] == pytest.approx(first["took"] + slept_total)
+        # …and is reported as it was measured, not reduced by the new field:
+        # subtracting ``waited`` from ``took`` here would be the wrong edit.
+        assert second["waited"] == pytest.approx(slept_total)
+        # What the wait did move is the time to first token — the only arrival
+        # figure a wait can reach, because it delays the arrivals.
+        assert second["ttft"] == pytest.approx(first["ttft"] + slept_total)
+
+    # -- on ``done`` and on nothing else -------------------------------------
+
+    def test_an_error_frame_gains_nothing(self, monkeypatch):
+        events, _calls, _slept = self._run(
+            monkeypatch, [self._refused(502)] * 5, budget=(2, 5),
+            chunks=[content_chunk("never"), finish_chunk("stop")],
+        )
+        assert [e["event"] for e in events][-1] == "error"
+        assert "waited" not in events[-1]
+        assert set(events[-1]) == {"event", "message"}
+
+    def test_a_pause_ack_gains_nothing(self, monkeypatch):
+        """A turn that waited and then paused still reports the wait nowhere.
+
+        The flag is armed *inside* the wait, so the turn really did wait (task
+        03: the wait runs its full length) and closed on the ack — the shape
+        task 04 keeps simple: one frame, one place to read the figure.
+        """
+        pause = threading.Event()
+        events, calls, slept = self._run(
+            monkeypatch, [self._refused(502)], budget=(1, 2),
+            pause_event=pause, during_wait=pause.set,
+            chunks=[content_chunk("partial")],
+        )
+        assert slept == TestARefusedRoundWaits._slices(2)
+        assert len(calls) == 2
+        assert [e["event"] for e in events] == ["reconnecting", "usage", "pause_ack"]
+        assert "waited" not in events[-1]
+        assert not [e for e in events if "waited" in e]
+
+    def test_the_field_is_additive_to_the_existing_shape(self, monkeypatch):
+        # A client that does not know ``waited`` keeps working: every key it
+        # read before is still there, same name, same kind.
+        events, _calls, _slept = self._run(
+            monkeypatch, [],
+            chunks=[content_chunk("answer"),
+                    finish_chunk("stop", usage={"prompt_tokens": 4,
+                                                "completion_tokens": 2,
+                                                "total_tokens": 6})],
+        )
+        done = events[-1]
+        assert done["waited"] == 0
+        for key in ("took", "ttft", "decode", "tokens", "tokensEstimated",
+                    "contextTokens", "contextEstimated"):
+            assert key in done
+
+
 def _config(endpoint: Optional[str] = "model-a") -> EndpointsConfig:
     return EndpointsConfig(
         serverUrl="http://localhost:8080/v1",
@@ -632,7 +1451,8 @@ def _oversized_data_url() -> str:
 class TestChatEndpoint:
     def test_happy_path_streams_frames(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             emit({"event": "token", "text": "Hel"})
             emit({"event": "token", "text": "lo"})
             emit({"event": "done", "took": 1.0, "ttft": 0.1, "tokens": 3,
@@ -651,7 +1471,8 @@ class TestChatEndpoint:
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["model"] = model
             seen["server_url"] = server_url
             seen["messages"] = messages
@@ -677,7 +1498,8 @@ class TestChatEndpoint:
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["messages"] = messages
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -703,7 +1525,8 @@ class TestChatEndpoint:
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["messages"] = messages
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -770,7 +1593,8 @@ class TestChatIncomingSanitization:
         seen: Dict[str, Any] = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["messages"] = messages
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1043,7 +1867,8 @@ class TestStreamedDisplayIsSanitized:
 
     def test_forwards_configured_api_key(self, monkeypatch, tmp_path):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             emit({"api_key_seen": api_key, "event": "done", "took": 0.0,
                   "ttft": 0.0, "tokens": 0, "tokensEstimated": False})
 
@@ -1080,7 +1905,8 @@ class TestStreamedDisplayIsSanitized:
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["instructions"] = agent_instructions
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1101,7 +1927,8 @@ class TestStreamedDisplayIsSanitized:
         seen = {}
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["instructions"] = agent_instructions
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
@@ -1162,7 +1989,8 @@ class TestStreamedDisplayIsSanitized:
 
     def test_error_event_terminates_stream(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             emit({"event": "error", "message": "boom"})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
@@ -1176,7 +2004,8 @@ class TestStreamedDisplayIsSanitized:
         # The whole event dict is JSON-serialized into the frame, so the flag
         # the WorkBench view needs to mark the bubble reaches the browser.
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             emit({"event": "error", "message": "cut short", "truncated": True})
 
         monkeypatch.setattr(routes, "stream_chat", fake)
@@ -1448,7 +2277,8 @@ class TestChatPauseEndpoint:
         released = threading.Event()
 
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             seen["pause_event"] = pause_event
             started.set()
             # The route always hands the stream a flag; the default None only
@@ -1497,7 +2327,8 @@ class TestChatPauseEndpoint:
 
     def test_handle_is_retired_once_the_reply_ended(self, client, monkeypatch):
         def fake(messages, model, server_url, emit, sampling=None, cancel_event=None,
-                 pause_event=None, api_key="none", sysprompt=None, agent_instructions=None, mode_instructions=None):
+                 pause_event=None, api_key="none", sysprompt=None, retry_budget=None,
+                 agent_instructions=None, mode_instructions=None):
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 1,
                   "tokensEstimated": False})
 

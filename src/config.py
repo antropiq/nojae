@@ -22,11 +22,14 @@ DEFAULT_MAX_TOOL_ITERATION = 25
 # Managed .env keys, in the order they are written to the file. The model
 # connection left this list for nojaé's own settings store, and
 # the tool-loop cap left it for a per-agent column: what is left is the
-# install's own scope — the debug switch and the connector interpreter, both
-# hand-edited like ``NOJAE_PYTHON_ROOT`` itself.
+# install's own scope — the debug switch, the connector interpreter and the
+# model-endpoint wait's two numbers, all hand-edited like ``NOJAE_PYTHON_ROOT``
+# itself.
 SETTING_KEYS: Tuple[str, ...] = (
     "LLM_DEBUG",
     "NOJAE_PYTHON_ROOT",
+    "NETWORK_FAIL_MAX_RETRY",
+    "NETWORK_FAIL_WAIT_FOR",
 )
 
 # Names an operating system already owns, which a managed key may therefore
@@ -121,6 +124,93 @@ def llm_debug_enabled() -> bool:
         else LEGACY_LLM_DEBUG_KEY
     )
     return env_flag(key)
+
+
+# The model-endpoint wait's two numbers (spec §6). Both are managed ``.env``
+# keys, hand-edited like ``NOJAE_PYTHON_ROOT`` — the settings dialog carries no
+# ``.env`` key any more — and neither name collides with an OS variable, so the
+# ``_RESERVED_ENV_NAMES`` rule above is satisfied.
+#
+# ``NETWORK_FAIL_MAX_RETRY`` is how many waits one *round* of the tool loop may
+# spend before the failure is final; a written ``0`` switches the whole guard
+# off and restores today's behaviour exactly. ``NETWORK_FAIL_WAIT_FOR`` is the
+# seconds between two attempts. The defaults are non-zero on purpose: the
+# feature has to be on without configuration, or it would not have saved the run
+# that motivated it.
+NETWORK_FAIL_MAX_RETRY_KEY = "NETWORK_FAIL_MAX_RETRY"
+NETWORK_FAIL_WAIT_FOR_KEY = "NETWORK_FAIL_WAIT_FOR"
+DEFAULT_NETWORK_FAIL_MAX_RETRY = 3
+DEFAULT_NETWORK_FAIL_WAIT_FOR = 10
+
+
+def _non_negative_int(raw: Optional[str], default: int) -> Tuple[int, bool]:
+    """``(value, fell_back)`` for one key's raw text (``None`` when unset).
+
+    A written value must be a whole number of ``0`` or more; anything else —
+    blank, ``ten``, ``-1``, ``1.5`` — is **not** coerced silently but answered
+    as the default for this key, and ``fell_back`` says so. Zero is a real
+    value, never a missing one: ``0`` retries is the feature switched off.
+
+    An **unset** key is not a mistake and answers the default quietly; one that
+    is *written* but blank is, because a hand-edited line saying nothing is a
+    value somebody meant to fill in.
+    """
+    if raw is None:
+        return default, False
+    text = raw.strip()
+    if not text:
+        return default, True
+    try:
+        value = int(text)
+    except ValueError:
+        return default, True
+    if value < 0:
+        return default, True
+    return value, False
+
+
+def network_fail_budget() -> Tuple[int, int]:
+    """The effective ``(max_retry, wait_seconds)`` of the endpoint-wait guard.
+
+    Read from ``os.environ`` **at call time**, never cached at boot (spec §6):
+    the decision this answers belongs to the moment a refused round is about to
+    be retried, which is why the chat route passes this function itself into
+    ``stream_chat`` rather than a number. A hand-edit of ``.env`` still waits for
+    a restart like every other key there, because that is when the file is read.
+
+    Never raises. Each key is coerced on its own, so one unusable value leaves
+    the other key's written value in force.
+    """
+    max_retry, _ = _non_negative_int(
+        os.environ.get(NETWORK_FAIL_MAX_RETRY_KEY),
+        DEFAULT_NETWORK_FAIL_MAX_RETRY,
+    )
+    wait_seconds, _ = _non_negative_int(
+        os.environ.get(NETWORK_FAIL_WAIT_FOR_KEY),
+        DEFAULT_NETWORK_FAIL_WAIT_FOR,
+    )
+    return max_retry, wait_seconds
+
+
+def network_fail_readout() -> Dict[str, Dict[str, Any]]:
+    """Per key: the raw text found in the environment, and whether it fell back.
+
+    ``{"NETWORK_FAIL_MAX_RETRY": {"raw": "ten", "fellBack": True}, …}`` — the
+    data ``GET /api/config`` reports so a written ``10`` can be told from a
+    written ``ten``, which is what spec §6 means by "the settings surface
+    reports the key's effective value so the mistake is visible". ``raw`` is
+    empty when the key is unset (or blank), and ``fellBack`` is true only when a
+    written value was unusable and the default answered instead.
+    """
+    readout: Dict[str, Dict[str, Any]] = {}
+    for key, default in (
+        (NETWORK_FAIL_MAX_RETRY_KEY, DEFAULT_NETWORK_FAIL_MAX_RETRY),
+        (NETWORK_FAIL_WAIT_FOR_KEY, DEFAULT_NETWORK_FAIL_WAIT_FOR),
+    ):
+        raw = os.environ.get(key)
+        _value, fell_back = _non_negative_int(raw, default)
+        readout[key] = {"raw": raw or "", "fellBack": fell_back}
+    return readout
 
 
 class _DebugStreamHandler(logging.StreamHandler):
@@ -480,7 +570,9 @@ def load_settings() -> Dict[str, str]:
 
     ``os.environ`` already reflects the .env file loaded at startup (real
     environment variables keep precedence) and is refreshed on every save.
-    Every managed key answers empty when unset — no managed key defaults.
+    Every managed key answers empty when unset — no managed key defaults here:
+    the *raw* text is what a save must keep, so the endpoint-wait pair's
+    effective values come from :func:`network_fail_budget` instead.
     """
     return {key: os.environ.get(key) or "" for key in SETTING_KEYS}
 
@@ -552,6 +644,15 @@ def _render_env(values: Dict[str, str]) -> str:
         "# expand ${NOJAE_PYTHON_ROOT} from it). Unset leaves their",
         "# commands unresolved — the MCP panel names the key.",
         line("NOJAE_PYTHON_ROOT"),
+        "",
+        "# How many times a refused model round is asked again before the",
+        "# failure is final (default 3). 0 switches the waiting off, so a",
+        "# refused round fails on its first attempt as it did before.",
+        line("NETWORK_FAIL_MAX_RETRY"),
+        "",
+        "# Seconds to wait between two attempts at the same round (default",
+        "# 10). 0 asks again at once, spending the same budget with no pause.",
+        line("NETWORK_FAIL_WAIT_FOR"),
         "",
     ]
     return "\n".join(lines)

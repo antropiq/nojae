@@ -969,3 +969,118 @@ class TestChatStreamSlotIsFreed:
         while routes._CHAT_TASKS and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not routes._CHAT_TASKS
+
+
+# ---------------------------------------------------------------------------
+# ereco-08 — *"the batch loop needs no change"* (spec §2), the backend half of
+# the proof. The rest of it is in ``web/tests/batchRetries.test.js``, which runs
+# whole lots over a scripted stream: that is where the outcome a retried turn
+# reaches the loop is asserted. What belongs here is the two things only the
+# server can say about such a turn, both for **task turns** — a batch task's
+# turn is an ordinary chat turn (spec §5.14: one mechanism, no per-mode branch):
+#
+#   * a turn that spent its whole round budget answering with its normal
+#     terminal frame, carrying the waited figure and **no error frame**; and
+#   * a turn whose budget ran out answering with the error frame — the frame a
+#     lot reads as a failure — and with no second terminal frame either.
+#
+# Both are read off the route's own SSE body, so the claim is about what reaches
+# a client and not about what ``stream_chat`` happens to emit in a unit test.
+# The seam stays stubbed (hermetic rule): the wait itself, its budget and its
+# Stop semantics are tested against a stubbed seam in ``tests/test_chat.py``.
+
+class TestATaskTurnWithAnEndpointWaitStillEndsNormally:
+    """A waited-on round is not an error, so a lot reads a normal outcome."""
+
+    def test_a_task_turn_outlasting_a_wait_carries_its_done_frame(
+        self, chat_client, monkeypatch
+    ):
+        seen: Dict[str, Any] = {}
+
+        def fake(messages, model, server_url, emit, sampling=None, **kwargs):
+            seen.update(kwargs)
+            # The guard's three emissions in order: announced, waited, answered.
+            emit({"event": "reconnecting", "attempt": 1, "budget": 3,
+                  "waitSeconds": 10,
+                  "message": "the model endpoint answered HTTP 502"})
+            emit({"event": "token", "text": "the task, done"})
+            emit({"event": "done", "took": 31.5, "ttft": 0.4, "tokens": 8,
+                  "decode": 1.1, "tokensEstimated": False, "waited": 30.0})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        response = _post_chat(chat_client, {"batchContext": "The lot: 2 tasks."})
+
+        assert response.status_code == 200
+        # The lot's own turn carried the lot's big picture, so this really is a
+        # task turn and not an interactive one dressed up as one.
+        assert seen["batch_instructions"] == "The lot: 2 tasks."
+        # A progress frame, not a terminal one: exactly one terminal frame, and
+        # it is the ``done`` the batch loop reads as a finished turn.
+        assert response.text.count("event: done") == 1
+        assert "event: error" not in response.text
+        # The waited figure rides on that frame (task 04) — the loop never reads
+        # it, and nothing else in the stream's shape changed for it.
+        assert json.loads(
+            response.text.split("event: done\ndata: ")[1].split("\n\n")[0]
+        )["waited"] == 30.0
+
+    def test_a_task_turn_whose_budget_ran_out_still_answers_with_the_error(
+        self, chat_client, monkeypatch
+    ):
+        """E3 / D7 unchanged: exhaustion ends the turn on the failure frame."""
+
+        def fake(messages, model, server_url, emit, sampling=None, **kwargs):
+            emit({"event": "reconnecting", "attempt": 1, "budget": 1,
+                  "waitSeconds": 0,
+                  "message": "the model endpoint answered HTTP 502"})
+            emit({"event": "error",
+                  "message": "LLM call failed: the model endpoint answered "
+                             "HTTP 502 (waited 0s over 1 further attempt; "
+                             "the model endpoint is still refusing)"})
+
+        monkeypatch.setattr(routes, "stream_chat", fake)
+
+        response = _post_chat(chat_client, {"batchContext": "The lot: 2 tasks."})
+
+        assert response.status_code == 200
+        # One terminal frame again — the wait added none — and it is the error
+        # the client turns into ``outcome: 'error'``, which ends the lot.
+        assert response.text.count("event: error") == 1
+        assert "event: done" not in response.text
+
+    def test_the_batch_module_grew_no_part_of_this_feature(self):
+        """The absence, asserted: ``core/batch.py`` knows nothing about waits.
+
+        Spec §2's claim is about *absence* — the decision table, the
+        task-relaunch budget, the delays and the meter are untouched — and the
+        strongest non-git check of that is that the module the lot is made of
+        never mentions the feature. It could not: every event below comes out of
+        ``core/chat.py``'s worker, and batch mode's backend surface reads no turn
+        outcome and no event at all (it lists files and moves them). A real wait
+        here would be a name the loop would have to branch on.
+        """
+        source = (REPO_ROOT / "src" / "core" / "batch.py").read_text(
+            encoding="utf-8"
+        )
+
+        for spelling in (
+            "reconnecting",       # the event name
+            "waitSeconds",        # its own field
+            "NETWORK_FAIL",       # the two .env keys
+            "another_attempt_may_help",  # the seam's verdict
+            "retry_budget",       # the accessor the chat route injects
+        ):
+            assert spelling not in source
+
+        # And the module's own surface: the lot listing plus task numbering, and
+        # no verdict about how a turn ended. Nothing under here decides what a
+        # turn's ending means for the lot — that is the client loop's table.
+        surface = {
+            name
+            for name, value in vars(batch_core).items()
+            if not name.startswith("_")
+            and (callable(value) or isinstance(value, (str, int, float, tuple)))
+        }
+        assert "stream_chat" not in surface
+        assert not [name for name in surface if "retry" in name.lower()]

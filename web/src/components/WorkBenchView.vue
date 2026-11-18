@@ -50,6 +50,24 @@ watch(
 // `useChat`'s; the view renders its answer and derives no index of its own.
 const lastGroupStart = computed(() => lastUserGroupStart(state.messages))
 
+// The card's "Thinking…" caption has to stop while the endpoint is refusing.
+// Its condition — a streaming reply that has produced no text yet — is true
+// during a wait on the **first** round too, which is exactly the confusion
+// spec §5.11 forbids: `waiting` means "sent, no first token yet", a wait means
+// "the endpoint refused". Of the two honest treatments the task offers
+// (suppress the caption, or make it say what the strip says), this one
+// **suppresses** it: the composer strip already carries the one line that
+// names the wait, and repeating it in the card would be two captions for one
+// wait — the drift this lot keeps refusing. The caption comes back on its own
+// for the replayed round, because the wait's state clears at that round's
+// first arrival (see `useChat`'s `endpointWait`).
+//
+// The read is the composable's state, not a phase list here: `endpointWait` is
+// set by the wait's own frame and cleared by every arrival and every ending, so
+// the caption and the strip's line cannot disagree about whether a wait is
+// running.
+const waitInProgress = computed(() => !!state.endpointWait)
+
 const input = ref(null)
 const panel = ref(null)
 
@@ -227,7 +245,7 @@ const {
               the conversation.
             </p>
             <p
-              v-if="message.streaming && !message.raw"
+              v-if="message.streaming && !message.raw && !waitInProgress"
               class="caption chat-typing"
               role="status"
             >

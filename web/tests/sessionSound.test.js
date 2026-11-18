@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
-import { inferenceRunning } from '../src/lib/inference-state'
+import {
+  inferenceRunning,
+  PHASES_IN_FLIGHT,
+} from '../src/lib/inference-state'
 import { useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
 import { playSessionEnded, useSessionSound } from '../src/composables/useSessionSound'
@@ -61,6 +64,26 @@ describe('inferenceRunning: one predicate, two indicators', () => {
       inferenceRunning({ chat: { phase: 'idle' }, batch: { active: true } }),
     ).toBe(true)
   })
+
+  // The wait on a refused endpoint is a busy phase too (spec §5.12): the turn is
+  // still in flight, so the glyph keeps ⚡ and the chime stays silent. Derived
+  // from the exported list, so the case cannot go stale when a phase is added.
+  it('stays busy for every phase the composable calls in flight', () => {
+    for (const phase of PHASES_IN_FLIGHT) {
+      expect(
+        inferenceRunning({ chat: { phase }, batch: { active: false } }),
+      ).toBe(true)
+    }
+  })
+
+  // The list is not "any phase at all": 'idle' stays outside it, so the chime
+  // still has an edge to ring on.
+  it('is idle for a phase the list does not name', () => {
+    expect(PHASES_IN_FLIGHT).not.toContain('idle')
+    expect(
+      inferenceRunning({ chat: { phase: 'idle' }, batch: { active: false } }),
+    ).toBe(false)
+  })
 })
 
 describe('useSessionSound: rings on the busy -> idle edge only', () => {
@@ -89,6 +112,23 @@ describe('useSessionSound: rings on the busy -> idle edge only', () => {
     batch.active = false // lot over
     await settle()
     expect(played).toHaveLength(1)
+  })
+
+  // A wait on a refused endpoint must not read as the end of a reply: the phase
+  // moves from `answering` to `reconnecting` mid-turn, and that step crosses no
+  // busy -> idle edge. Getting this wrong is what spec §5.12 calls the feature's
+  // most likely bug — the chime ringing, and the tab glyph going to ✨, while the
+  // composer is still locked.
+  it('does not chime while a reply waits on a refused endpoint', async () => {
+    chat.phase = 'answering'
+    await settle()
+    chat.phase = 'reconnecting'
+    await settle()
+    expect(played).toHaveLength(0)
+
+    chat.phase = 'answering' // the replayed round answered
+    await settle()
+    expect(played).toHaveLength(0)
   })
 
   it('stays silent while muted', async () => {
