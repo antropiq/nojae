@@ -1,0 +1,301 @@
+{
+  "playwright": {
+    "identity": {
+      "name": "Playwright",
+      "description": "Browser automation: drives a real browser through accessibility snapshots, not screenshots.",
+      "docs": "https://github.com/microsoft/playwright-mcp"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "npx",
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "@playwright/mcp",
+          "install": "npm install -g @playwright/mcp"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "browser",
+        "e2e",
+        "frontend",
+        "javascript",
+        "typescript"
+      ]
+    }
+  },
+  "chrome-devtools": {
+    "identity": {
+      "name": "Chrome DevTools",
+      "description": "Browser debugging: inspects a live Chrome — network, console, performance traces, screenshots.",
+      "docs": "https://github.com/ChromeDevTools/chrome-devtools-mcp"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "chrome-devtools-mcp",
+          "install": "npm install -g chrome-devtools-mcp"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "browser",
+        "frontend",
+        "javascript",
+        "typescript",
+        "performance"
+      ]
+    }
+  },
+  "context7": {
+    "identity": {
+      "name": "Context7",
+      "description": "Live library docs: fetches up-to-date, version-specific documentation and code examples.",
+      "docs": "https://github.com/upstash/context7"
+    },
+    "member": {
+      "type": "remote",
+      "enable": true,
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "__put_your_api_key_here__"
+      }
+    },
+    "requirements": {
+      "requires": {},
+      "inputs": [
+        {
+          "name": "CONTEXT7_API_KEY",
+          "label": "Context7 API key",
+          "slot": "headers.CONTEXT7_API_KEY",
+          "required": true
+        }
+      ]
+    },
+    "relevance": {
+      "signals": [
+        "documentation",
+        "library",
+        "framework",
+        "api"
+      ]
+    }
+  },
+  "filesystem": {
+    "identity": {
+      "name": "Filesystem",
+      "description": "File operations inside this folder: read, write, move and search, bounded by the roots it is given.",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${NOJAE_PATH_LOCATION}"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "@modelcontextprotocol/server-filesystem",
+          "install": "npm install -g @modelcontextprotocol/server-filesystem"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "files",
+        "search",
+        "any"
+      ]
+    }
+  },
+  "fetch": {
+    "identity": {
+      "name": "Fetch",
+      "description": "Web fetching: retrieves a page and hands it over as markdown, in slices.",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "uvx",
+        "mcp-server-fetch"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "mcp-server-fetch",
+          "install": "pip install mcp-server-fetch"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "web",
+        "documentation",
+        "http"
+      ]
+    }
+  },
+  "git": {
+    "identity": {
+      "name": "Git",
+      "description": "Git: status, diffs, log, branches and commits, confined to the repository it is pointed at.",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/git"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "uvx",
+        "mcp-server-git",
+        "--repository",
+        "${NOJAE_PATH_LOCATION}"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "mcp-server-git",
+          "install": "pip install mcp-server-git"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "git",
+        "version-control",
+        "any"
+      ]
+    }
+  },
+  "memory": {
+    "identity": {
+      "name": "Memory",
+      "description": "Persistent memory: a knowledge graph of entities, relations and observations kept between chats.",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "${NOJAE_PATH_LOCATION}/memory.jsonl"
+      }
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "@modelcontextprotocol/server-memory",
+          "install": "npm install -g @modelcontextprotocol/server-memory"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "notes",
+        "knowledge",
+        "any"
+      ]
+    }
+  },
+  "sequential-thinking": {
+    "identity": {
+      "name": "Sequential Thinking",
+      "description": "Structured thinking: a numbered, revisable thought sequence for planning problems.",
+      "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "@modelcontextprotocol/server-sequential-thinking",
+          "install": "npm install -g @modelcontextprotocol/server-sequential-thinking"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "planning",
+        "reasoning",
+        "any"
+      ]
+    }
+  },
+  "sqlite": {
+    "identity": {
+      "name": "SQLite",
+      "description": "SQLite: queries a database file, lists its tables and reads their schemas.",
+      "docs": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/sqlite"
+    },
+    "member": {
+      "type": "local",
+      "enable": true,
+      "command": [
+        "uvx",
+        "mcp-server-sqlite",
+        "--db-path",
+        "${NOJAE_PATH_LOCATION}/db.sqlite"
+      ]
+    },
+    "requirements": {
+      "requires": {
+        "any": {
+          "package": "mcp-server-sqlite",
+          "install": "pip install mcp-server-sqlite"
+        }
+      },
+      "inputs": []
+    },
+    "relevance": {
+      "signals": [
+        "database",
+        "sql",
+        "sqlite"
+      ]
+    }
+  }
+}

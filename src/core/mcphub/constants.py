@@ -61,6 +61,13 @@ MCP_SETTINGS_FILENAME = "mcp-settings.json"
 # every machine and across every workspace switch.
 MCP_SETTINGS_TEMPLATE = MCP_CONNECTORS_DIR / "mcp-settings.default.json"
 
+# The committed catalogue of well-known connectors the wizard offers (§9) —
+# *catalogue*, never declaration: no hub reads it, no process starts because of
+# it, and it is never copied into a workspace. It is looked up through this
+# attribute at call time (``mcphub.catalogue.load_catalogue``), exactly like the
+# template above, so a test redirects the read by patching one name.
+MCP_CATALOGUE_PATH = MCP_CONNECTORS_DIR / "catalog-mcp.json"
+
 # **A pin, not the default.** When not ``None`` it wins over the computed path
 # below — the ``editorfs.constants.TRASH_DIR`` precedent: one patchable
 # override keeps the tests' one-attribute redirect without re-introducing an
