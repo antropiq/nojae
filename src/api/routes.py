@@ -7,6 +7,7 @@ import json
 import re
 import threading
 from contextlib import suppress
+from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -28,6 +29,7 @@ from src.api.events import sse_format
 from src.config import (
     NETWORK_FAIL_MAX_RETRY_KEY,
     NETWORK_FAIL_WAIT_FOR_KEY,
+    agent_connection_refusal,
     agent_instructions_block,
     load_endpoints_config,
     max_tool_iteration,
@@ -39,6 +41,7 @@ from src.core.mcphub import (
     mcp_settings_file_state,
     set_externals_enabled,
 )
+from src.core.mcphub import catalogue as mcp_catalogue
 from src.core.lsphub import (
     all_servers,
     lsp_settings_file_state,
@@ -56,6 +59,7 @@ from src.core.termhub import policy as term_policy
 from src.core.termhub import drivers as term_drivers
 from src.core import batch as batch_core
 from src.core import skills as skills_core
+from src.core import wizard as wizard_core
 from src.core import workspace as workspace_seam
 from src.core.chat import stream_chat
 from src.core.llmkit.client import models_url
@@ -623,6 +627,44 @@ class AgentDeleteIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str = ""
+
+
+# -- the connector wizard's bodies ----------------------------------------------
+#
+# Two posts, and both name the agent the panel is showing: the wizard's model
+# steps run on **that** agent's connection, resolved once per request, and there
+# is no server-side default agent to fall back to (D5). A blank or unknown id is
+# the 422 naming ``agentMode``, exactly as a chat turn's is.
+
+
+class WizardProposeIn(BaseModel):
+    """The LSP flow's first step: propose servers for this folder.
+
+    Nothing else travels: the scan facts are *this server's* answer about the
+    folder the request names, so a client cannot hand the model facts about a
+    project it is not working on.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    agentMode: str = ""
+
+
+class WizardPrepareIn(BaseModel):
+    """The second step of either family: prepare one chosen candidate.
+
+    ``candidate`` is page 1's own answer, handed back unread: for ``mcp`` it
+    carries the catalogue entry's ``id`` (the entry itself is looked up again
+    here, so a command line can only ever come from the catalogue), and for
+    ``lsp`` it is the proposal the model made. ``family`` is the one the button
+    that opened the dialog fixed — never a question, and never a third name.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    agentMode: str = ""
+    family: str = ""
+    candidate: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Base64-decoded image size limit for multimodal chat messages (the client
@@ -1278,12 +1320,20 @@ WORKSPACE_QUERY = "workspace"
 #: keep answering even while a tab's folder has gone away (spec §4.2). Listed
 #: here so the invariant is a fact of this module rather than of a habit, and
 #: asserted by ``tests/test_workspace_seam.py``.
+#:
+#: The connector wizard's two reads are here for the wizard's own reason: page 1's
+#: MCP list is committed data and the header line names whose reasoning the dialog
+#: spends, so both are about the install and neither is about a folder — a tab
+#: whose folder was deleted can still open the wizard and be told who it runs as.
+#: Its scan and its two posts are workspace-scoped, and are not here.
 INSTALLATION_SCOPED_PATHS = (
     "/api/config",
     "/api/prompt-helpers",
     "/api/servers",
     "/api/models",
     "/api/agents",
+    "/api/wizard/catalogue",
+    "/api/wizard/connection",
 )
 
 
@@ -2940,6 +2990,378 @@ def build_router() -> APIRouter:
             return batch_core.task_prefixes(dir)
         except batch_core.BatchListingError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    # -- the connector wizard's routes ------------------------------------------
+    #
+    # One dialog, two families, and every route here is **transport**: it resolves
+    # the workspace and the connection, calls core, and turns the answer into a
+    # status. No rule about the wizard lives in this file — the catalogue, the
+    # scan, the two prompts and the three snippet checks each own their half, and
+    # these functions only join them.
+    #
+    # What none of them may do is the feature's whole design (§4): nothing here
+    # writes a declaration, starts a connector or a language server, installs a
+    # package, or reaches a declaration writer, a `/api/fs` write, the seeding
+    # path or a settings-store write. Discovery writes nothing and starts nothing,
+    # so it acquires no hub set either: the declared ids come from the loaders
+    # directly, which is also why a folder the pool refused is still scannable and
+    # still preparable (§10).
+
+    def _wizard_agent(agent_id: str) -> Dict[str, Any]:
+        """The store's row for the agent the panel is showing, or a 422 naming it.
+
+        The app's standing rule, never a silent default agent (D5): an id that
+        names no row is a typo — a stale tab after a rename, or a hand-made
+        request — and answering it with another agent would answer the user's
+        question with the wrong one. The detail lists what *is* available, in the
+        chat route's own words, with the field's name in front so the client can
+        place it.
+        """
+        raw = (agent_id or "").strip()
+        mode, _mode_findings = agent_modes.resolve_mode(raw)
+        if mode is None:
+            available = ", ".join(
+                entry.id for entry in agent_modes.resolve_modes()["modes"]
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"agentMode: unknown agent mode {raw!r}. "
+                    f"Available: {available}"
+                ),
+            )
+        return _agent_row_for(mode)
+
+    def _wizard_connection(agent: Dict[str, Any]) -> wizard_core.modelstep.Connection:
+        """The connection **this request** runs on, resolved once and held.
+
+        Exactly the chat turn's rule applied to a wizard: one resolution at the
+        step's start, so a settings save landing mid-dialog cannot split it. The
+        refusal is :func:`src.config.agent_connection_refusal`'s sentence — the
+        one the chat route answers with, reused verbatim rather than rewritten
+        for this feature — and it costs 422 here because a dialog that was opened
+        on a live button must not then answer with a model the user never chose.
+        """
+        config = _load_config(agent)
+        models = config.model_list()
+        if not models:
+            raise HTTPException(
+                status_code=400, detail="No models configured (ENDPOINT)"
+            )
+        return wizard_core.modelstep.Connection(
+            model=models[0],
+            server_url=config.serverUrl,
+            api_key=config.apiKey,
+            sampling=config.to_kwargs(),
+        )
+
+    def _wizard_names(
+        agent: Dict[str, Any]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """``(model name, server name)`` for the header line, or ``(None, None)``.
+
+        Three names and no numbers is the whole of what the dialog shows (§5), and
+        the read must answer even when the store is damaged — that is exactly the
+        state in which the button has to explain itself rather than 500. So an
+        unusable row, a model whose server is gone and an unopenable store all
+        degrade to "this is not known", beside the refusal
+        :func:`agent_connection_refusal` already answered with.
+        """
+        model_id = agent.get("modelId")
+        if model_id is None:
+            return None, None
+        try:
+            model = appdb.model_row(model_id)
+            server = appdb.server_row(model["serverId"]) if model else None
+        except appdb.AppStoreError:
+            # The refusal already names the store's path; this read adds nothing
+            # to it, and a 500 here would hide the sentence behind a stack trace.
+            return None, None
+        return (
+            model["name"] if model else None,
+            server["name"] if server else None,
+        )
+
+    def _wizard_declared() -> Dict[str, Any]:
+        """This workspace's declared servers, as :func:`project_facts` wants them.
+
+        Read from the two hubs' **loaders**, not from a hub set: the scan takes
+        the declared ids as data (``editorfs`` must not import a hub — the LSP hub
+        already reaches into ``editorfs.policy``), and joining them is exactly what
+        a route is for. Nothing is started by reading a declaration, and a
+        declaration file that does not exist is ``([], [])``, never an error.
+        """
+        connectors, _connector_errors = load_externals()
+        servers, _server_errors = all_servers()
+        return {
+            "mcp": [connector["id"] for connector in connectors],
+            "lsp": [
+                {
+                    "id": server["id"],
+                    "extensions": list(server.get("extensions") or []),
+                }
+                for server in servers
+            ],
+        }
+
+    def _wizard_facts() -> Dict[str, Any]:
+        """The scan's derived facts about the folder this request named."""
+        return editorfs.project_facts(_wizard_declared())
+
+    def _wizard_declaration_path(family: str) -> Path:
+        """The **absolute** path of the declaration file this family's entry
+        belongs in, resolved through the family's own hub at call time.
+
+        A :class:`pathlib.Path`, because page 3 needs both halves: the text to
+        print and whether the file is there at all. Never created — a file that
+        is missing is reported, not fixed (§4).
+        """
+        return wizard_core.snippet.declaration_file(family)
+
+    def _catalogue_entry(entry_id: Any) -> Dict[str, Any]:
+        """One catalogue entry by id, or a 422 naming ``candidate``.
+
+        The catalogue is the **only** source of a package name (§9), so the entry
+        is looked up again here rather than trusted from the request: a body that
+        carried its own member could hand the model — and then the user — a
+        command line no reviewer ever saw.
+        """
+        entries, notes = mcp_catalogue.load_catalogue()
+        for entry in entries:
+            if entry["id"] == entry_id:
+                return entry
+        reason = notes[0] if notes else "the catalogue holds no entry of that id"
+        raise HTTPException(
+            status_code=422,
+            detail=f"candidate: unknown catalogue entry {entry_id!r} — {reason}",
+        )
+
+    def _catalogue_install(entry: Dict[str, Any]) -> Dict[str, str]:
+        """The install lines the catalogue itself carries, per platform.
+
+        The entry's ``requires`` group and nothing else: it is guidance, so it
+        never becomes part of the member, and the app never invents a line of its
+        own (§4). ``any`` is the line where no platform differs, and a platform's
+        own key beside it overrides that one.
+        """
+        requires = (entry.get("requirements") or {}).get("requires") or {}
+        return {
+            platform: item["install"]
+            for platform, item in requires.items()
+            if isinstance(item, dict) and isinstance(item.get("install"), str)
+        }
+
+    @router.get("/wizard/catalogue")
+    def get_wizard_catalogue() -> Dict[str, Any]:
+        """The committed MCP catalogue, for page 1's list — **installation-scoped**.
+
+        No model runs for this page: the list is the same on every machine and in
+        every folder, so it is a read of a committed file and nothing else. It
+        answers the same way whatever folder the request names, which is what lets
+        a tab whose folder has been deleted still open the wizard (the
+        installation-scoped rule the app bar relies on).
+
+        ``{"entries": [{id, identity, member, requirements, relevance}],
+        "notes": [...]}`` — the four groups exactly as the file carries them, plus
+        the reader's notes. A file that cannot be read answers an empty list **and
+        the sentence naming it**, never a silent empty list.
+        """
+        entries, notes = mcp_catalogue.load_catalogue()
+        return {"entries": entries, "notes": notes}
+
+    @router.get("/wizard/connection")
+    def get_wizard_connection(agentMode: str = "") -> Dict[str, Any]:
+        """What the dialog's header line and the buttons' gate are built from.
+
+        **Installation-scoped**, like the catalogue above: the header names whose
+        reasoning the wizard spends, and a tab whose folder has gone must still be
+        able to say who it would run as.
+
+        ``{"agentMode", "agent", "server", "model", "canRun", "refusal"}`` — three
+        **names** and one verdict. Nothing else travels: no ``api_key``, no URL, no
+        sampler value and no number of any kind, because the dialog shows none of
+        those and the credential never leaves the server (§8).
+
+        ``canRun`` false carries :func:`src.config.agent_connection_refusal`'s
+        sentence verbatim, which is the one the chat route and the app bar answer
+        with — "the app's existing agent-refusal words, reused, not rewritten".
+        """
+        agent = _wizard_agent(agentMode)
+        refusal = agent_connection_refusal(agent)
+        model, server = _wizard_names(agent)
+        return {
+            "agentMode": agent["id"],
+            "agent": agent.get("label") or agent["id"],
+            "server": server,
+            "model": model,
+            "canRun": refusal is None,
+            "refusal": refusal,
+        }
+
+    @router.get("/wizard/scan")
+    def get_wizard_scan(request: Request) -> Dict[str, Any]:
+        """The derived facts about **this request's** folder, and never its bytes.
+
+        The scan the LSP flow is grounded in: extension counts, the manifests on
+        the fixed allow-list and the dependency **names** they declare, the
+        servers already declared, the folder that looks like the front end, and
+        whether the walk stopped at its own cap. Every rule (the policy verdict per
+        path, the allow-list, the cap, the one-level symlink rule) is
+        :func:`src.core.editorfs.projectfacts.project_facts`'s — this route only
+        fills in the declared ids, which the scan takes as data because
+        ``editorfs`` must not import a hub.
+
+        The field is asked for **first** (``require_workspace``), so a folder that
+        was named and refused is the seam's 422 and never a scan of some other
+        folder. Nothing is cached across requests: moving a tab's folder
+        invalidates this answer by construction.
+        """
+        require_workspace(request)
+        return {"facts": _wizard_facts()}
+
+    @router.post("/wizard/propose")
+    def post_wizard_propose(body: WizardProposeIn, request: Request) -> Dict[str, Any]:
+        """The LSP flow's first step: the servers this folder lacks, best first.
+
+        A **plain JSON post**, not SSE: one answer, no frames, no terminal event,
+        nothing entering the stream layer. The connection is resolved once, from
+        the agent the panel is showing, and held for this one call.
+
+        ``{"outcome", "sentence", "proposals", "notes", "declarationPath"}`` where
+        ``outcome`` is ``ok`` / ``empty`` / ``failed``. A model step that failed
+        answers **200** with its sentence — the client renders it on the page and
+        the user presses the button again — because a 5xx would read like the
+        app's own fault and invite the retry loop §5 forbids. Only a bad request
+        (an unknown agent, a folder that was refused) is a 4xx.
+        """
+        require_workspace(request)
+        connection = _wizard_connection(_wizard_agent(body.agentMode))
+        declaration_path = _wizard_declaration_path("lsp")
+        answer = wizard_core.modelstep.propose(
+            connection, _wizard_facts(), str(declaration_path)
+        )
+        return {**answer, "declarationPath": str(declaration_path)}
+
+    @router.post("/wizard/prepare")
+    def post_wizard_prepare(body: WizardPrepareIn, request: Request) -> Dict[str, Any]:
+        """Both families' second step: the complete member, and page 3's verdict.
+
+        The same resolution as the propose post — one call, one answer, a plain
+        JSON body, no frames — then task 03's prepare and task 04's three checks:
+        the hubs' **own loader's** verdict, the command *resolved* (never spawned),
+        and a duplicate id as a warning rather than a stop.
+
+        The answer carries, page by page:
+
+        * ``id`` / ``member`` / ``snippet`` — always a **member**, never a whole
+          file, and page 3's block verbatim;
+        * ``accepted`` / ``verdict`` / ``verdictNotes`` — the loader's own words,
+          so the words the user reads are the words the panel would have shown
+          after a restart;
+        * ``readiness`` / ``program`` / ``searched`` — "looks installed" or "not
+          installed", from resolving the program the way the hub resolves it;
+        * ``install`` (per platform) / ``requiresInstall`` / ``decisions`` — what
+          to run, whether anything has to be, and the lines that shaped the member;
+        * ``duplicate`` — the non-blocking warning;
+        * ``valueForm`` / ``valueWarning`` / ``valueFindings`` — which of the two
+          value forms the member shows, what the page must say about it, and any
+          literal path or secret it carries;
+        * ``declarationPath`` / ``declarationExists`` — the **absolute** path of
+          the file it belongs in, and whether the user has to create it;
+        * ``offered`` — the page's one gate on presenting the snippet.
+
+        Nothing is written: the declaration file is read (to warn and to name its
+        path) and never touched, and no connector or language server is started.
+        """
+        resolved = require_workspace(request)
+        family = (body.family or "").strip()
+        if family not in wizard_core.prompts.FAMILIES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"family: unknown wizard family {body.family!r} — expected "
+                    f"one of {', '.join(wizard_core.prompts.FAMILIES)}"
+                ),
+            )
+        connection = _wizard_connection(_wizard_agent(body.agentMode))
+        declaration_path = _wizard_declaration_path(family)
+        install: Dict[str, str] = {}
+        if family == "mcp":
+            # Which connector this is comes from the catalogue and nowhere else,
+            # so the candidate is looked up here and the model is handed the
+            # reviewed entry's own member group.
+            entry = _catalogue_entry((body.candidate or {}).get("id"))
+            candidate: Dict[str, Any] = dict(entry["member"])
+            install = _catalogue_install(entry)
+        else:
+            candidate = dict(body.candidate or {})
+        answer = wizard_core.modelstep.prepare(
+            family, connection, candidate, _wizard_facts(), str(declaration_path)
+        )
+        # One **shape** whatever happened, so the dialog renders answers only:
+        # a failed step answers the same keys as a prepared one, with the member
+        # and the verdict empty. A second shape for the failure would put an
+        # "which one is this" test in the template, which is the rule this
+        # feature is built on not doing.
+        page: Dict[str, Any] = {
+            "family": family,
+            "outcome": answer["outcome"],
+            "sentence": answer["sentence"],
+            "notes": answer["notes"],
+            "declarationPath": str(declaration_path),
+            "declarationExists": declaration_path.is_file(),
+            "id": None,
+            "member": None,
+            "snippet": None,
+            "accepted": None,
+            "verdict": None,
+            "verdictNotes": [],
+            "readiness": None,
+            "program": None,
+            "searched": None,
+            "install": install,
+            "requiresInstall": False,
+            "decisions": [],
+            "duplicate": None,
+            "valueForm": None,
+            "valueWarning": None,
+            "valueFindings": [],
+            "offered": False,
+        }
+        prepared = answer["prepared"]
+        if prepared is None:
+            return page
+        assessed = wizard_core.snippet.assess(
+            family,
+            prepared["id"],
+            prepared["member"],
+            declaration_path=declaration_path,
+            # The catalogue's install lines win for MCP: they are reviewed data,
+            # and an install line the app invented is exactly what §4 forbids.
+            # LSP has no catalogue, so the model's own line stands.
+            install=install or prepared["install"],
+            workspace_root=resolved.root,
+        )
+        return {
+            **page,
+            "id": prepared["id"],
+            "member": assessed["member"],
+            "snippet": assessed["snippet"],
+            "accepted": assessed["accepted"],
+            "verdict": assessed["verdict"],
+            "verdictNotes": assessed["notes"],
+            "readiness": assessed["readiness"],
+            "program": assessed["program"],
+            "searched": assessed["searched"],
+            "install": assessed["install"],
+            "requiresInstall": prepared["requiresInstall"],
+            "decisions": prepared["decisions"],
+            "duplicate": assessed["duplicate"],
+            "valueForm": assessed["valueForm"],
+            "valueWarning": assessed["valueWarning"],
+            "valueFindings": assessed["valueFindings"],
+            "offered": assessed["offered"],
+        }
 
     # -- the agents routes (appdb-10) --------------------------------------------
 

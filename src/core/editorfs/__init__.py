@@ -62,6 +62,13 @@ Core-only (no FastAPI, no browser concerns), a sibling of ``mcphub/`` and
   prune as ``tree``, then ``ro`` excluded — in the tree's order, bounded by
   ``MAX_QUICKOPEN_FILES`` with an honest count past it. Names only: no file is
   ever opened.
+* :mod:`editorfs.projectfacts` the connector wizard's read-only scan
+  (``project_facts``): derived facts about the active folder — extension counts,
+  the manifests present and the dependency **names** they declare, the already
+  declared servers handed in as data, and where the project's front end looks to
+  be. The same verdict per path and the same walk cap as ``quickopen``, plus a
+  **fixed manifest allow-list** (``projectfacts.MANIFESTS``): it is not a second
+  file reader, it opens nothing else, and it writes nothing.
 
 Two invariants the whole Editor surface rests on:
 
@@ -109,6 +116,7 @@ from .policy import (
     workspace_root,
 )
 from .policy_modes import mode_for, refusal_message
+from .projectfacts import project_facts
 from .quickopen import list_workspace_files
 from .search import SearchQueryError, search_workspace
 from .tree import list_dir

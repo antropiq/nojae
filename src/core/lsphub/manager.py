@@ -23,7 +23,6 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-import shutil
 import threading
 from contextlib import suppress
 from pathlib import Path
@@ -38,7 +37,7 @@ from src.core.editorfs.policy import (
     resolve_in_workspace,
     workspace_root,
 )
-from src.core.mcphub import connector_environment
+from src.core.mcphub.process import child_environment, resolve_command, searched_paths
 
 from . import actions, constants, editor
 from .discovery import lsp_installed, lsp_reach_is_refused
@@ -262,48 +261,25 @@ class LspManager:
     def _searched_paths(command: str, env: Dict[str, str]) -> str:
         r"""The folders a lookup of ``command`` in ``env`` walks, as one string.
 
-        The *search* path, not the variable: ``shutil.which`` consults ``PATH``
-        only for a bare name, and for a command that already spells a path
-        (``C:\tools\langserver``, ``./x``) the directory it spells is the whole
-        search. Naming ``PATH`` there would report folders the lookup never
-        opened — a refusal has to say what was actually looked in.
+        ``mcphub.process.searched_paths`` — the shared rule, so a refusal here
+        and the wizard's readiness line name the same folders: one search, one
+        verdict. Reached through this hub rather than restated, because a copy
+        is how the two drift.
         """
-        directory, _name = os.path.split(command)
-        if directory:
-            return directory
-        # The child's ``PATH`` and nothing else — see :meth:`_resolve_command`
-        # for why the app's own PATH is never the one searched.
-        return env.get("PATH") or "nothing: the child environment has no PATH"
+        return searched_paths(command, env)
 
     def _resolve_command(
         self, command: str, env: Dict[str, str]
     ) -> Optional[str]:
         """The program the declaration names, or ``None`` when nothing answers it.
 
-        ``shutil.which`` honours ``PATHEXT``, so the extensionless shim a POSIX
-        user would write (npm/volta's ``pyright-langserver``, a ``#!/bin/bash``
-        script Windows cannot exec) resolves to the ``.cmd`` beside it — and
-        skips the script when there is no shim beside it. It is asked with **the
-        environment the child actually gets** (see :meth:`_environment`, which
-        replaces ``PATH`` wholesale with the declaration's own ``env.PATH``):
-        resolving with the app's PATH and spawning with the child's is two
-        different searches, and a declaration can make the second one fail. One
-        search, one verdict — the same rule the shared path policy runs on.
-
-        No platform branch: on POSIX an absolute command that exists resolves to
-        itself, so the answer there is the unchanged path.
+        ``mcphub.process.resolve_command`` — the hub's one lookup of a declared
+        ``argv[0]``, asked with the environment the child actually gets (see
+        :meth:`_environment`), and shared with the wizard's snippet check so the
+        page cannot call a command installed that the panel would refuse to
+        start.
         """
-        resolved = shutil.which(command, path=env.get("PATH", ""))
-        if resolved is not None:
-            return resolved
-        # A file the search refused — no ``PATHEXT`` entry matches it on Windows,
-        # no executable bit on POSIX — is still handed to the OS: its own error
-        # (``[WinError 193]``, ``PermissionError``) is the accurate answer to
-        # *why that file cannot run*, and :meth:`_spawn_failure_sentence` puts it
-        # in a sentence. Refusing it here would replace a fact with a guess.
-        if os.path.isfile(command):
-            return command
-        return None
+        return resolve_command(command, env)
 
     def _resolve_spawn(
         self, server_id: str, info: Dict[str, Any]
@@ -363,13 +339,11 @@ class LspManager:
         return constants.SPAWN_FAILURE_LEAD + note
 
     def _environment(self, info: Dict[str, Any]) -> Dict[str, str]:
-        """Spawn environment: ``connector_environment`` pins a valid TMPDIR
+        """Spawn environment: ``child_environment`` pins a valid TMPDIR
         (a relative ``TMPDIR``/``TMP``/``TEMP`` would otherwise break Node),
         then the entry's own ``env`` overrides (volta shims need a PATH that
-        resolves ``node``)."""
-        env = connector_environment(self._project_root)
-        env.update(info.get("env") or {})
-        return env
+        resolves ``node``) — the one rule the command search also asks."""
+        return child_environment(self._project_root, info.get("env") or {})
 
     def _refuse_reach(self, server_id: str, info: Dict[str, Any]) -> None:
         """Mark one server refused: its reach cannot be bounded here (A-D4).

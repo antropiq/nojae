@@ -12,7 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 # The path-*text* questions the shared connector policy answers (win-02): what
 # root a prefix is spelled with, on either platform, with no ``os.path`` branch.
@@ -158,6 +158,188 @@ def lsp_reach_is_refused() -> bool:
     return not constants.guardrails_speak_here(restricted_lsp_roots() or None)
 
 
+def denied_roots() -> Tuple[List[str], bool]:
+    """``(real deny-list, one fold answer)`` — the pair a scan computes once.
+
+    Two facts, asked together because they always travel together and both are
+    properties of the running configuration rather than of one entry: the
+    deny-list's entries as real paths, and whether the *workspace's* filesystem
+    folds case (``_is_within``'s docstring records why that is the fold). The
+    file walk hands the pair to :func:`entry_from_declaration`, and so does the
+    wizard's snippet check — one computation, one verdict, and no probe of a
+    folder the hub is about to refuse.
+    """
+    denied = [os.path.realpath(entry) for entry in restricted_lsp_roots()]
+    return denied, fscase.case_folded(active_workspace_root()) if denied else False
+
+
+def entry_from_declaration(
+    name: str,
+    server_id: str,
+    entry: Any,
+    *,
+    denied: Sequence[str] = (),
+    fold: bool = False,
+    refused_reach: Optional[bool] = None,
+) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """One declared language server, read and validated — the per-entry rule.
+
+    The **only** place the shape of a server entry is judged, so the file walk
+    (:func:`load_lsp_servers`) and the connector wizard's snippet check
+    (:mod:`wizard.snippet`) cannot drift: a member the wizard accepts is a
+    member this loader accepts, in the same words, because it is this function
+    that answers both. Its mirror is
+    :func:`mcphub.discovery.entry_from_declaration` — same name, same shape, so
+    the two hubs keep mirroring each other (AGENTS.md).
+
+    ``name`` is the declaration file's name, which the sentences begin with.
+    Answers ``(server, errors)``: a refused entry is ``None`` with its refusal
+    as the last error, a loaded one a dict plus the notes it earned (an
+    unresolved ``${NAME}``, a refused reach).
+
+    ``denied``/``fold`` are the scan's deny-list and its one fold answer — a
+    property of the running configuration, computed once per load.
+    ``refused_reach`` likewise; ``None`` asks the seam here, which is what a
+    caller checking a single entry wants.
+    """
+    prefix = f"{name}: '{server_id}'"
+    errors: List[str] = []
+    if refused_reach is None:
+        refused_reach = lsp_reach_is_refused()
+    if not isinstance(entry, dict):
+        errors.append(f"{prefix}: entry must be a JSON object — skipped")
+        return None, errors
+    # Everything that may carry a ``${NAME}`` reference is expanded here,
+    # in one block, before the checks that consume it — so an unresolved
+    # reference is reported by name *and* explains the shape error it
+    # causes below (an unset ``${ROOT}`` turns into a relative path, which
+    # would otherwise read like a typo in the file).
+    missing: List[str] = []
+    command = argv_from_command(entry.get("command"), entry.get("args"))
+    if command is None:
+        errors.append(f"{prefix}: an LSP server needs a command — skipped")
+        return None, errors
+    command, names = expand_env_list(command)
+    missing.extend(names)
+    env = str_map(entry.get("env"))
+    if env is None:
+        errors.append(f"{prefix}: env must be an object of string values — skipped")
+        return None, errors
+    env, names = expand_env_map(env)
+    missing.extend(names)
+    workspace_root = entry.get("workspaceRoot")
+    if isinstance(workspace_root, str):
+        workspace_root, names = expand_env(workspace_root)
+        missing.extend(names)
+    initialization_options = entry.get("initializationOptions")
+    if initialization_options is not None and not isinstance(
+        initialization_options, dict
+    ):
+        errors.append(
+            f"{prefix}: initializationOptions must be an object — skipped"
+        )
+        return None, errors
+    initialization_options, names = expand_env_json(initialization_options)
+    missing.extend(names)
+    # Answers handed back to the server's own workspace/configuration
+    # requests, keyed by LSP section ('html.customData',
+    # 'vue.suggest.propNameCasing', …). Anything not listed is answered
+    # null, i.e. "not set", which is what the LSP spec prescribes and
+    # what makes a server's own ?? fallback land on its default.
+    settings = entry.get("settings")
+    if settings is not None and not isinstance(settings, dict):
+        errors.append(f"{prefix}: settings must be an object — skipped")
+        return None, errors
+    settings, names = expand_env_json(settings)
+    missing.extend(names)
+    note = unresolved_env_note(prefix, missing)
+    if note is not None:
+        errors.append(note)
+    extensions = entry.get("extensions")
+    if extensions is None:
+        extensions = []
+    if not isinstance(extensions, list) or not all(
+        isinstance(item, str) and item.startswith(".") for item in extensions
+    ):
+        errors.append(
+            f"{prefix}: extensions must be a list of '.ext' strings — skipped"
+        )
+        return None, errors
+    if not isinstance(workspace_root, str) or not os.path.isabs(workspace_root):
+        errors.append(f"{prefix}: workspaceRoot must be an absolute path — skipped")
+        return None, errors
+    real_root = os.path.realpath(workspace_root)
+    if not os.path.isdir(real_root):
+        errors.append(f"{prefix}: workspaceRoot does not exist — skipped")
+        return None, errors
+    if any(
+        _is_within(denied_entry, real_root, fold=fold) for denied_entry in denied
+    ):
+        errors.append(f"{prefix}: workspaceRoot is on the deny-list — skipped")
+        return None, errors
+    tools = entry.get("tools")
+    if tools is not None and (
+        not isinstance(tools, list)
+        or not all(isinstance(item, str) and item for item in tools)
+    ):
+        errors.append(f"{prefix}: tools must be a list of names — skipped")
+        return None, errors
+    max_diagnostics = entry.get("maxDiagnostics", constants.DEFAULT_MAX_DIAGNOSTICS)
+    if not isinstance(max_diagnostics, int) or max_diagnostics < 1:
+        errors.append(
+            f"{prefix}: maxDiagnostics must be a positive integer — skipped"
+        )
+        return None, errors
+    idle_shutdown = entry.get(
+        "idleShutdownSeconds", constants.DEFAULT_IDLE_SHUTDOWN_SECONDS
+    )
+    if not isinstance(idle_shutdown, int) or idle_shutdown < 0:
+        errors.append(
+            f"{prefix}: idleShutdownSeconds must be an integer (0 disables) — skipped"
+        )
+        return None, errors
+    if refused_reach and bool(entry.get("enable", False)):
+        # Every declared server here is a stdio child process, and the lists
+        # above are what confines its path reach — so when no entry in them
+        # can name this filesystem's paths (win-07 / A-D4), there is no bound
+        # to claim. The tree half of that bound is a capability on either
+        # platform (the spawn's Job Object, the shared ``proctree`` teardown),
+        # so it is no longer part of this question. The entry is still
+        # loaded, because a card naming the gap beats a vanished server, and
+        # the hub marks it ``error`` with these same words rather than
+        # spawning it. Asked only of an entry that wants to run: a disabled
+        # server is not a missing capability, it is a switch the user made.
+        errors.append(
+            f"{prefix}: {constants.LOCAL_REACH_REFUSAL} — not started"
+        )
+    label = entry.get("label")
+    language_id = entry.get("languageId")
+    return (
+        {
+            "id": server_id,
+            "label": label if isinstance(label, str) and label else server_id,
+            "description": (
+                entry["description"]
+                if isinstance(entry.get("description"), str)
+                else ""
+            ),
+            "command": command,
+            "workspaceRoot": workspace_root,
+            "extensions": sorted({item.lower() for item in extensions}),
+            "languageId": language_id if isinstance(language_id, str) else "",
+            "enable": bool(entry.get("enable", False)),
+            "lazy": bool(entry.get("lazy", False)),
+            "initializationOptions": initialization_options or {},
+            "tools": list(tools) if tools is not None else None,
+            "env": env or {},
+            "settings": settings or {},
+            "maxDiagnostics": max_diagnostics,
+            "idleShutdownSeconds": idle_shutdown,
+        },
+        errors,
+    )
+
+
 def load_lsp_servers(
     path: Optional[Path] = None, reserved_ids: Optional[Set[str]] = None
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -175,6 +357,10 @@ def load_lsp_servers(
     reference and one declaration file works on every machine. An entry that
     references an unset name is still loaded (subject to the usual checks)
     with a note saying so.
+
+    One entry is judged by :func:`entry_from_declaration`, which this walk only
+    calls — the rule has one home, so a caller checking a member that does not
+    exist yet reads the same verdict as this walk.
     """
     root = path or constants.lsp_settings_path()
     servers: List[Dict[str, Any]] = []
@@ -188,157 +374,30 @@ def load_lsp_servers(
         return [], [f"{root.name} is not readable JSON: {exc}"]
     if not isinstance(data, dict):
         return [], [f"{root.name} must contain an object of servers keyed by id"]
-    denied = [os.path.realpath(entry) for entry in restricted_lsp_roots()]
-    # One reach answer per scan, not per server: the capability is a property of
-    # the deployment, so every note in one load has to agree with every other.
-    # This hub is asked about its own deny-list, the rules that would confine a
-    # server's reach (``lsp_reach_is_refused``).
+    # The deny-list and its one fold answer, and one reach answer: both are
+    # properties of the running configuration, so every note in one load has to
+    # agree with every other. This hub is asked about its own deny-list, the
+    # rules that would confine a server's reach (``lsp_reach_is_refused``).
+    denied, fold = denied_roots()
     refused_reach = lsp_reach_is_refused()
     for server_id in sorted(data):
-        prefix = f"{root.name}: '{server_id}'"
         if server_id in reserved:
-            errors.append(f"{prefix}: id is reserved — skipped")
+            errors.append(f"{root.name}: '{server_id}': id is reserved — skipped")
             continue
         if server_id.startswith("_"):
             # Convention: an underscore key is a comment, not a server.
             continue
-        entry = data[server_id]
-        if not isinstance(entry, dict):
-            errors.append(f"{prefix}: entry must be a JSON object — skipped")
-            continue
-        # Everything that may carry a ``${NAME}`` reference is expanded here,
-        # in one block, before the checks that consume it — so an unresolved
-        # reference is reported by name *and* explains the shape error it
-        # causes below (an unset ``${ROOT}`` turns into a relative path, which
-        # would otherwise read like a typo in the file).
-        missing: List[str] = []
-        command = argv_from_command(entry.get("command"), entry.get("args"))
-        if command is None:
-            errors.append(f"{prefix}: an LSP server needs a command — skipped")
-            continue
-        command, names = expand_env_list(command)
-        missing.extend(names)
-        env = str_map(entry.get("env"))
-        if env is None:
-            errors.append(f"{prefix}: env must be an object of string values — skipped")
-            continue
-        env, names = expand_env_map(env)
-        missing.extend(names)
-        workspace_root = entry.get("workspaceRoot")
-        if isinstance(workspace_root, str):
-            workspace_root, names = expand_env(workspace_root)
-            missing.extend(names)
-        initialization_options = entry.get("initializationOptions")
-        if initialization_options is not None and not isinstance(
-            initialization_options, dict
-        ):
-            errors.append(
-                f"{prefix}: initializationOptions must be an object — skipped"
-            )
-            continue
-        initialization_options, names = expand_env_json(initialization_options)
-        missing.extend(names)
-        # Answers handed back to the server's own workspace/configuration
-        # requests, keyed by LSP section ('html.customData',
-        # 'vue.suggest.propNameCasing', …). Anything not listed is answered
-        # null, i.e. "not set", which is what the LSP spec prescribes and
-        # what makes a server's own ?? fallback land on its default.
-        settings = entry.get("settings")
-        if settings is not None and not isinstance(settings, dict):
-            errors.append(f"{prefix}: settings must be an object — skipped")
-            continue
-        settings, names = expand_env_json(settings)
-        missing.extend(names)
-        note = unresolved_env_note(prefix, missing)
-        if note is not None:
-            errors.append(note)
-        extensions = entry.get("extensions")
-        if extensions is None:
-            extensions = []
-        if not isinstance(extensions, list) or not all(
-            isinstance(item, str) and item.startswith(".") for item in extensions
-        ):
-            errors.append(
-                f"{prefix}: extensions must be a list of '.ext' strings — skipped"
-            )
-            continue
-        if not isinstance(workspace_root, str) or not os.path.isabs(workspace_root):
-            errors.append(f"{prefix}: workspaceRoot must be an absolute path — skipped")
-            continue
-        real_root = os.path.realpath(workspace_root)
-        if not os.path.isdir(real_root):
-            errors.append(f"{prefix}: workspaceRoot does not exist — skipped")
-            continue
-        # The fold is the active workspace's answer, not this entry's: one
-        # answer per running configuration, and no probe of a folder the hub is
-        # about to refuse (``_is_within``'s docstring records that choice). Asked
-        # only when the list has entries, so an empty deny-list costs no probe.
-        fold = fscase.case_folded(active_workspace_root()) if denied else False
-        if any(
-            _is_within(denied_entry, real_root, fold=fold) for denied_entry in denied
-        ):
-            errors.append(f"{prefix}: workspaceRoot is on the deny-list — skipped")
-            continue
-        tools = entry.get("tools")
-        if tools is not None and (
-            not isinstance(tools, list)
-            or not all(isinstance(item, str) and item for item in tools)
-        ):
-            errors.append(f"{prefix}: tools must be a list of names — skipped")
-            continue
-        max_diagnostics = entry.get("maxDiagnostics", constants.DEFAULT_MAX_DIAGNOSTICS)
-        if not isinstance(max_diagnostics, int) or max_diagnostics < 1:
-            errors.append(
-                f"{prefix}: maxDiagnostics must be a positive integer — skipped"
-            )
-            continue
-        idle_shutdown = entry.get(
-            "idleShutdownSeconds", constants.DEFAULT_IDLE_SHUTDOWN_SECONDS
+        server, entry_errors = entry_from_declaration(
+            root.name,
+            server_id,
+            data[server_id],
+            denied=denied,
+            fold=fold,
+            refused_reach=refused_reach,
         )
-        if not isinstance(idle_shutdown, int) or idle_shutdown < 0:
-            errors.append(
-                f"{prefix}: idleShutdownSeconds must be an integer (0 disables) — skipped"
-            )
-            continue
-        if refused_reach and bool(entry.get("enable", False)):
-            # Every declared server here is a stdio child process, and the lists
-            # above are what confines its path reach — so when no entry in them
-            # can name this filesystem's paths (win-07 / A-D4), there is no bound
-            # to claim. The tree half of that bound is a capability on either
-            # platform (the spawn's Job Object, the shared ``proctree`` teardown),
-            # so it is no longer part of this question. The entry is still
-            # loaded, because a card naming the gap beats a vanished server, and
-            # the hub marks it ``error`` with these same words rather than
-            # spawning it. Asked only of an entry that wants to run: a disabled
-            # server is not a missing capability, it is a switch the user made.
-            errors.append(
-                f"{prefix}: {constants.LOCAL_REACH_REFUSAL} — not started"
-            )
-        label = entry.get("label")
-        language_id = entry.get("languageId")
-        servers.append(
-            {
-                "id": server_id,
-                "label": label if isinstance(label, str) and label else server_id,
-                "description": (
-                    entry["description"]
-                    if isinstance(entry.get("description"), str)
-                    else ""
-                ),
-                "command": command,
-                "workspaceRoot": workspace_root,
-                "extensions": sorted({item.lower() for item in extensions}),
-                "languageId": language_id if isinstance(language_id, str) else "",
-                "enable": bool(entry.get("enable", False)),
-                "lazy": bool(entry.get("lazy", False)),
-                "initializationOptions": initialization_options or {},
-                "tools": list(tools) if tools is not None else None,
-                "env": env or {},
-                "settings": settings or {},
-                "maxDiagnostics": max_diagnostics,
-                "idleShutdownSeconds": idle_shutdown,
-            }
-        )
+        errors.extend(entry_errors)
+        if server is not None:
+            servers.append(server)
     return servers, errors
 
 

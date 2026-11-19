@@ -1127,6 +1127,12 @@ class TestTheFieldIsSpelledInOnePlace:
             "/api/servers",
             "/api/models",
             "/api/agents",
+            # The connector wizard's two reads: page 1's committed list and the
+            # header line's names. Both are about the install, so a tab whose
+            # folder has gone can still open the dialog and be told who it runs
+            # as. Its scan and its two posts are workspace-scoped, and stay out.
+            "/api/wizard/catalogue",
+            "/api/wizard/connection",
         }
 
 
@@ -1169,6 +1175,14 @@ SCOPED_HTTP_REQUESTS: Dict[Tuple[str, str], Dict[str, Any]] = {
     ("GET", "/api/lsp/log"): {"params": {"server": "x"}},
     ("GET", "/api/batch/tasks"): {},
     ("GET", "/api/batch/prefixes"): {},
+    # The connector wizard's workspace-scoped half: the scan about this folder and
+    # the two model steps, which answer about *this* folder's facts whatever the
+    # dialog's installation-scoped reads said.
+    ("GET", "/api/wizard/scan"): {},
+    ("POST", "/api/wizard/propose"): {"json": {"agentMode": "code"}},
+    ("POST", "/api/wizard/prepare"): {
+        "json": {"agentMode": "code", "family": "mcp", "candidate": {"id": "fetch"}}
+    },
     ("POST", "/api/chat"): {
         "json": {
             "messages": [{"role": "user", "content": "hi"}],
