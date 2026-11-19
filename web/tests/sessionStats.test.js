@@ -462,38 +462,36 @@ describe('useChat keeps the session total across turns', () => {
   })
 })
 
-// The rendered half of spec §5.17: the waited figure sits **beside** the clock,
-// drawn from the composable's answer rather than computed in the template, and
-// it is absent — not an empty box — while no turn has reported a span.
-describe('the app bar clock states the turn span beside its own total', () => {
+// The clock renders **its digits alone**: the turn-span caption that used to sit
+// under them made the actions row taller than the app bar, so it is gone from
+// the bar. The figures behind it (spec §5.17) are still the composable's answer
+// and still asserted above — this test only guards that the bar no longer draws
+// them.
+describe('the app bar clock renders the digits alone', () => {
   function mountClock() {
     const wrapper = mount(SessionClock)
     return {
       wrapper,
       clock: () => wrapper.get('.session-clock').text().trim(),
-      turn: () => {
-        const line = wrapper.find('.session-clock-turn')
-        return line.exists() ? line.text().trim() : null
-      },
     }
   }
 
-  it('renders no turn line until a turn has reported a span', () => {
+  it('renders no caption while no turn has reported a span', () => {
     reset()
     const view = mountClock()
     expect(view.clock()).toBe('00:00:00')
-    expect(view.turn()).toBe(null)
+    expect(view.wrapper.find('.session-clock-turn').exists()).toBe(false)
     view.wrapper.unmount()
   })
 
-  it('renders the whole span and the waited part on one terse line', async () => {
+  it('still renders no caption once a turn has reported a span', async () => {
     reset()
     chat.messages = [measuredReply({ took: 2460, ttft: 30, decode: 25, waited: 2400 })]
     chat.session.spentMs = 60_000 // that 2460s turn banked 60s of it
     const view = mountClock()
     await view.wrapper.vm.$nextTick()
     expect(view.clock()).toBe('00:01:00')
-    expect(view.turn()).toBe('turn 41m · 40m waited')
+    expect(view.wrapper.find('.session-clock-turn').exists()).toBe(false)
     view.wrapper.unmount()
   })
 })

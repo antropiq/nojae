@@ -230,37 +230,6 @@ body {
   border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
 }
 
-/* The clock's column: the digits, and under them the last turn's own span with
-   the waited part beside it (spec §5.17). Two rows in one column is the shape
-   the working-location field already uses in this bar, so a two-row readout is
-   nothing new; the column only becomes two rows when a turn has reported a
-   span, because the caption is not rendered at all before that. */
-.session-clock-col {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 1px;
-  flex: 0 0 auto;
-}
-
-/* `.caption.mono` carries the voice (muted, small, machine-reported) and the
-   monospace digits; this only fits it under the clock — same measure as the
-   digits, so the two rows line up, and it truncates rather than wrapping the
-   bar. The whole figure is carried in the element's `title`. */
-.session-clock-turn {
-  min-width: 8ch;
-  box-sizing: border-box;
-  padding: 0 0.5rem;
-  font-size: 0.65rem;
-  line-height: 1.2;
-  letter-spacing: 0.04em;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* The token-rate and context counters (SessionStatBadges.vue), left of the tab
    strip. They never take part in the centre cell's stretching, so the tab
    strip stays centred. */

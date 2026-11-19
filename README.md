@@ -751,10 +751,8 @@ continues the same totals. Only **Restart conversation** in the composer puts
 them back to zero. The clock counts the time the conversation worked: it
 **excludes** the seconds a turn spent waiting on the model endpoint — a wait is
 neither inference nor thinking, so a 40-minute provider outage is not a
-40-minute session — while the turn's own span **keeps** them and states the
-waited part beside it. That pair is how "took 41 minutes" is told apart from
-"took 1 minute and waited 40"; the speed figure holds either way, since a wait
-contributes no token.
+40-minute session — while the turn's own span **keeps** them. The speed figure
+holds either way, since a wait contributes no token.
 
 `Enter` sends and `Shift`+`Enter` writes a new line. The toggle left of the Stage
 button swaps the two, so a long message can be finished — and reread — before it
