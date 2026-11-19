@@ -30,7 +30,12 @@ import { fileURLToPath } from 'node:url'
 // see each other's files; each resets the folder before its own test.
 const SCRATCH = 'e2e-workspace'
 const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
-const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+// The folder as **the server canonicalises it**, because that is the string this
+// spec compares against: `resolve()` answers `realpath`, so the app bar's field
+// holds the host's own separators (`/` on Linux, `\` on Windows). Forcing `/`
+// here would be a second spelling of one folder — the tab accepts either, but
+// only the canonical one is ever displayed.
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH)
 const WS = { workspace: WORKSPACE }
 const TRASH_BATCH = '.nojae/trash'
 
@@ -53,6 +58,15 @@ const BASELINE_POLICY = {
 // same folder, so the helper is a no-op when the field already holds it.
 async function pointTabAt(page) {
   const field = page.locator('.appbar-location-input')
+  // Wait for the boot read to settle **before** inspecting the field. The input
+  // is disabled while `loadWorkspace` is in flight and enabled only once it has
+  // adopted this tab's remembered folder, so an enabled field is the witness
+  // that the value read below is the tab's real folder rather than the empty
+  // string of the first render frame. Without it, the call after a reload reads
+  // `''`, so the return below is missed and the `fill` it then performs is
+  // overwritten by that adoption — leaving the field equal to the workspace,
+  // `workspaceChanged` false, and Set disabled for the rest of the test.
+  await expect(field).toBeEnabled()
   if ((await field.inputValue()) === WORKSPACE) return
   await field.fill(WORKSPACE)
   const button = page.locator('.appbar-location-set')
@@ -152,7 +166,33 @@ async function typeAtEnd(page, text) {
   await page.keyboard.type(text)
 }
 
-test.beforeEach(async () => {
+// Deleting the scratch is a Windows ordering problem, not a permission bug:
+// the Editor pane's terminal shell is born in the tab's workspace, and a
+// folder a live process names as its cwd cannot be removed (`EPERM`) — and
+// `rmSync` does not retry that error. The wait is therefore on the server's
+// own witness: `GET /api/terminal` drops a session only after its teardown
+// killed the process tree and released the terminal, so once no session
+// reports this cwd, the folder is removable. (A 422 — the scratch is already
+// gone — trivially means no shell lives in it.)
+async function waitForShellsGone(request) {
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get('/api/terminal', { params: WS })
+        if (!res.ok()) return 0
+        const sessions = (await res.json()).sessions ?? []
+        return sessions.filter(
+          (s) => (s.cwd ?? '').toLowerCase() === WORKSPACE.toLowerCase(),
+        ).length
+      },
+      { message: 'a terminal shell still holds the scratch as its cwd', timeout: 30_000 },
+    )
+    .toBe(0)
+}
+
+test.beforeEach(async ({ request }) => {
+  // The previous test's shell can still be dying when this hook runs.
+  await waitForShellsGone(request)
   // From outside the app: `.nojae` is reserved, so no Editor route may remove
   // the subtree that holds this fixture's policy.
   fs.rmSync(WORKSPACE, { recursive: true, force: true })
@@ -164,7 +204,11 @@ test.beforeEach(async () => {
   )
 })
 
-test.afterEach(async () => {
+test.afterEach(async ({ page, request }) => {
+  // Fixtures outlive `afterEach`, so the tab that holds the shell is still
+  // open when this hook runs: close it first, wait for its teardown, delete.
+  await page.close()
+  await waitForShellsGone(request)
   fs.rmSync(WORKSPACE, { recursive: true, force: true })
 })
 

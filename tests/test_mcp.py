@@ -28,7 +28,7 @@ from src.core.mcphub import (
 #: The pool is the only place a hub lives now (clws-06 deleted the
 #: ``app.state.mcp`` read-through), so a hub test hands its double to the
 #: workspace's own set through these two.
-from tests.conftest import NO_HUB, WorkspaceClient, set_workspace_hubs
+from tests.conftest import NO_HUB, WorkspaceClient, scripted_clock, set_workspace_hubs
 
 
 # ---------------------------------------------------------------------------
@@ -1594,14 +1594,20 @@ class TestChatToolLoop:
         # argument deltas must still open/extend the decode window (their
         # tokens are in completion_tokens), and the cumulative done.decode
         # must sum the rounds' windows without any tool-execution time.
-        clock = [
-            0.0,   # t0
-            1.0,   # first tool-call argument delta (round 1 opens)
-            3.0,   # second argument delta (round 1 closes at 2.0s)
-            20.0,  # first content delta of the final round (opens)
-            22.0,  # second content delta (final round closes at 2.0s)
-        ]
-        monkeypatch.setattr("src.core.chat.time.monotonic", lambda: clock.pop(0))
+        # The clock answers for ``src.core.chat`` alone — a process-wide patch
+        # of the stdlib's ``time.monotonic`` lets anything else (a dropped
+        # ``IocpProactor`` finalised by the GC, on Windows) drain this script
+        # before the turn reads it. See ``tests.conftest.scripted_clock``.
+        clock = scripted_clock(
+            monkeypatch,
+            [
+                0.0,   # t0
+                1.0,   # first tool-call argument delta (round 1 opens)
+                3.0,   # second argument delta (round 1 closes at 2.0s)
+                20.0,  # first content delta of the final round (opens)
+                22.0,  # second content delta (final round closes at 2.0s)
+            ],
+        )
         events, _ = self._run(
             monkeypatch,
             [

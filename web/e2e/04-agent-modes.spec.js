@@ -274,7 +274,12 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
 
     await select.selectOption(gated.id)
     await expect(select).toHaveValue(gated.id)
-    expect((await select.getAttribute('title')) ?? '').toBe(titleFor(gated))
+    // A **retrying** assertion, not a one-shot read: the title's server name is
+    // the composer's computed over the `/api/config` catalogue, so the line is
+    // only complete once that read has landed — a fixed-time `getAttribute`
+    // would race it (and did, in a full-suite run where the response arrived a
+    // beat later than on a cold boot).
+    await expect(select).toHaveAttribute('title', titleFor(gated))
 
     if (mcpConnectors.length) {
       await expect(page.locator('.chat-mcp-panel')).toBeVisible()
@@ -292,7 +297,7 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
 
     await select.selectOption(open.id)
     await expect(select).toHaveValue(open.id)
-    expect((await select.getAttribute('title')) ?? '').toBe(titleFor(open))
+    await expect(select).toHaveAttribute('title', titleFor(open))
     if (mcpConnectors.length) {
       await expect(
         page.locator('.chat-mcp-panel input[role="switch"]').first(),

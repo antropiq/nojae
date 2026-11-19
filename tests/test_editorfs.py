@@ -683,8 +683,14 @@ class TestAppsOwnWorkspaceAtTheRoutes:
     def own(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         root = tmp_path / "app"
         (root / "src").mkdir(parents=True)
-        (root / ".env").write_text("ENDPOINT=x\n", encoding="utf-8")
-        (root / "src" / ".env.local").write_text("SECRET=1\n", encoding="utf-8")
+        # ``newline=""`` for the reason the module-level fixture gives: the read
+        # surface returns the file's exact characters, so a planted ``\n`` that
+        # text mode translated to the host's line ending is bytes this test no
+        # longer wrote.
+        (root / ".env").write_text("ENDPOINT=x\n", encoding="utf-8", newline="")
+        (root / "src" / ".env.local").write_text(
+            "SECRET=1\n", encoding="utf-8", newline=""
+        )
         # ``logs/`` is level A's *backups* folder. A batch under the legacy
         # ``logs/trash`` name is planted here because the rule is about the whole
         # tree, not about which artefact still lives in it — the live trash is in
@@ -700,8 +706,13 @@ class TestAppsOwnWorkspaceAtTheRoutes:
         """The **same three names**, in a folder that is not the installation."""
         root = tmp_path / "someone-elses-project"
         (root / "src").mkdir(parents=True)
-        (root / ".env").write_text("ENDPOINT=x\n", encoding="utf-8")
-        (root / "src" / ".env.local").write_text("SECRET=1\n", encoding="utf-8")
+        # The pair's ``.env`` is byte-identical to the installation's, and it is
+        # this half whose content the read assertion names — so both fixtures
+        # plant bytes, not line endings (see ``own``).
+        (root / ".env").write_text("ENDPOINT=x\n", encoding="utf-8", newline="")
+        (root / "src" / ".env.local").write_text(
+            "SECRET=1\n", encoding="utf-8", newline=""
+        )
         (root / "logs" / "trash").mkdir(parents=True)
         (root / "logs" / "trash" / "x").write_text("kept\n", encoding="utf-8")
         return root

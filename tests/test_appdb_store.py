@@ -118,6 +118,10 @@ class TestThePath:
         assert appdb.DB_FILENAME == "nojae.db"
         assert appdb.WAL_SIDECAR_SUFFIXES == ("-wal", "-shm")
 
+    @pytest.mark.posix_behaviour(
+        "the invariant is that a ``?`` in the store's path is not read as a query, "
+        "and a folder whose name holds a ``?`` is not a name Windows allows"
+    )
     def test_a_root_whose_name_holds_a_uri_marker_still_gets_its_own_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -126,6 +130,10 @@ class TestThePath:
         Opened by URI so the ``mode=rw`` rule can hold, which means a path that
         is not encoded correctly becomes a query string: the store would open
         somewhere else while every sentence named this path.
+
+        The ``?`` is the part that bites (SQLite splits a URI's query at the first
+        one; a ``#`` it leaves alone), so the state this plants is one Windows
+        cannot name — hence the marker rather than a Windows-side variant.
         """
         root = tmp_path / "we?ird #1"
         root.mkdir()

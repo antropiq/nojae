@@ -31,7 +31,11 @@ import { fileURLToPath } from 'node:url'
 // holds it.
 const SCRATCH = 'e2e-ws-root'
 const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
-const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+// The folder as **the server canonicalises it** (win-01): `resolve()` answers
+// `realpath`, so a canonical root carries the host separator on every request
+// the browser builds from it. Comparisons that must survive both spellings
+// fold both sides (`fold`, below) — that is what it is for.
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH)
 const WS = { workspace: WORKSPACE }
 
 // The app-level bullet this spec adds and removes again. It is the witness that
@@ -154,12 +158,12 @@ test('a move closes the tabs of the root it leaves', async ({ page, request }) =
   const panelMcp = page.waitForResponse(
     (res) =>
       new URL(res.url()).pathname === '/api/mcp' &&
-      new URL(res.url()).searchParams.get('workspace') === WORKSPACE,
+      fold(new URL(res.url()).searchParams.get('workspace')) === fold(WORKSPACE),
   )
   const panelLsp = page.waitForResponse(
     (res) =>
       new URL(res.url()).pathname === '/api/lsp' &&
-      new URL(res.url()).searchParams.get('workspace') === WORKSPACE,
+      fold(new URL(res.url()).searchParams.get('workspace')) === fold(WORKSPACE),
   )
   await setRoot(page, WORKSPACE)
   const [mcpAnswer, lspAnswer] = await Promise.all([panelMcp, panelLsp])
@@ -305,8 +309,13 @@ test('a move leaves the store unchanged and seeds no store files', async ({
     'policy',
     'workspace',
   ])
-  expect(location.workspace).toBe(fold(WORKSPACE))
-  expect(location.default).toBe(fold(original))
+  // These two are **roots**, and a root is answered canonically (win-01) — the
+  // `/`-joined rule is for workspace-*relative* payload fields (trashedTo
+  // above), never for the folder itself. `fold` stays for the comparisons where
+  // one side is a spelling the browser chose; here both sides come from the
+  // same server, so they are byte-identical.
+  expect(location.workspace).toBe(WORKSPACE)
+  expect(location.default).toBe(original)
 })
 
 // The other half of "one value moves everything": the trash moves with the root

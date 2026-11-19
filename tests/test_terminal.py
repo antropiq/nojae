@@ -143,6 +143,27 @@ def read_until(session, marker: str, frames: int = 60) -> str:
     return seen
 
 
+def cwd_probe(root: Path, label: str) -> Tuple[str, str]:
+    """``(command, answer)`` proving a shell sitting in ``root``.
+
+    The proof is a **relative** read: a file holding ``label`` is planted in
+    ``root``, so the answer can only come from a process whose cwd is that
+    folder. Nothing here asks the shell to spell a path, which is the part that
+    cannot survive the pane's own choice of program — Git Bash answers ``pwd``
+    with the MSYS spelling (``/c/temp/x``) of the one folder, while the test
+    planted and the seam reports the Windows spelling (``C:\\temp\\x``). One
+    folder, two spellings, and a marker no output can ever contain: the read
+    then blocks on the frame that never comes.
+
+    The wrapped markers keep the original guard against matching the **echoed
+    command line** — what is matched is the expansion's result, and the typed
+    line carries the unexpanded text.
+    """
+    (root / f"{label}.cwd-probe").write_text(label, encoding="utf-8", newline="")
+    command = f'echo "::$(cat {label}.cwd-probe)::"\r'
+    return command, f"::{label}::"
+
+
 def wait_until(predicate, timeout=4.0, step=0.05) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -235,15 +256,17 @@ class TestTheShellIsBornInItsTabsFolder:
             right, right_frame = open_session_in(client, second)
             try:
                 # The frame the pane renders, and the folder the *process* got:
-                # the shell is asked for its own `pwd`, wrapped in markers so
-                # what is matched is the expansion's *result* and never the
-                # echoed command line (which carries the unexpanded text).
+                # each shell reads a marker out of its own folder, so the answer
+                # can only have come from a shell born there — and neither
+                # answer can be the other's.
                 assert left_frame["cwd"] == str(first)
                 assert right_frame["cwd"] == str(second)
-                left.send_json({"type": "input", "data": 'echo "::{$(pwd)}::"\r'})
-                right.send_json({"type": "input", "data": 'echo "::{$(pwd)}::"\r'})
-                assert f"::{{{first}}}::" in read_until(left, f"::{{{first}}}::")
-                assert f"::{{{second}}}::" in read_until(right, f"::{{{second}}}::")
+                left_command, left_answer = cwd_probe(first, "alpha")
+                right_command, right_answer = cwd_probe(second, "beta")
+                left.send_json({"type": "input", "data": left_command})
+                right.send_json({"type": "input", "data": right_command})
+                assert left_answer in read_until(left, left_answer)
+                assert right_answer in read_until(right, right_answer)
 
                 # One registry, both sessions, each reporting its own folder.
                 rows = {row["cwd"]: row for row in client.get(WS_URL).json()["sessions"]}
@@ -290,9 +313,11 @@ class TestTheShellIsBornInItsTabsFolder:
                 after = identity_rows(first)
                 assert after == before
                 assert left_frame["cwd"] == str(first)
-                # And the live shell still answers, in the folder it was born in.
-                left.send_json({"type": "input", "data": 'echo "::{$(pwd)}::"\r'})
-                assert f"::{{{first}}}::" in read_until(left, f"::{{{first}}}::")
+                # And the live shell still answers, in the folder it was born
+                # in — the marker it reads is the one planted there.
+                command, answer = cwd_probe(first, "stays")
+                left.send_json({"type": "input", "data": command})
+                assert answer in read_until(left, answer)
             finally:
                 right.__exit__(None, None, None)
         finally:

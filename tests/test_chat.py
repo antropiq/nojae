@@ -24,7 +24,13 @@ from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
 #: ``workspace_params`` builds the field every workspace-scoped request names;
 #: the two hub helpers hand a test's manager double to the **workspace's own**
 #: set, which is the only place a hub lives now (clws-06).
-from tests.conftest import NO_HUB, WorkspaceClient, set_workspace_hubs, workspace_params
+from tests.conftest import (
+    NO_HUB,
+    WorkspaceClient,
+    scripted_clock,
+    set_workspace_hubs,
+    workspace_params,
+)
 # The chunk builders and the stream double come from ``tests/llmkit_fakes`` so
 # the stubs and ``llmkit.client.ChatStream`` are held to one interface.
 from tests.llmkit_fakes import (
@@ -216,10 +222,12 @@ class TestStreamChat:
         # t0, reasoning, reasoning, content — the usage-only chunk is not
         # timed. The window must start at the first reasoning delta, so tok/s
         # does not pretend thinking was free.
-        clock = [0.0, 1.0, 2.0, 6.0]  # t0 + one arrival per generated chunk
-        monkeypatch.setattr(
-            "src.core.chat.time.monotonic", lambda: clock.pop(0)
-        )
+        # t0 + one arrival per generated chunk. The clock answers for
+        # ``src.core.chat`` alone: a process-wide patch of the stdlib's
+        # ``time.monotonic`` lets anything else (a dropped ``IocpProactor``
+        # finalised by the GC, on Windows) drain the script before the turn
+        # reads it. See ``tests.conftest.scripted_clock``.
+        clock = scripted_clock(monkeypatch, [0.0, 1.0, 2.0, 6.0])
         events = self._run(
             monkeypatch,
             [
@@ -633,6 +641,16 @@ class TestARefusedRoundWaits:
     #: from the environment.
     BUDGET: Tuple[int, float] = (3, 10)
 
+    #: What a **real-clock** lower bound of this class may come up short by.
+    #: The two cases that sleep for real measure the wait with
+    #: ``time.monotonic`` around it, and a sleep returns within one system
+    #: timer tick of what it was asked — a tick is 15.6ms on Windows (64Hz, and
+    #: coarser still on a VM's clock) against Linux's 1ms, so a wait that ran
+    #: its whole length measures a few milliseconds **under** its length. The
+    #: bound pins that the wait happened, which is what a few tens of
+    #: milliseconds cannot dispute: a wait that was skipped measures ~0.
+    CLOCK_SLACK_SECONDS = 0.02
+
     def _run(self, monkeypatch, refusals,
              *, budget: Tuple[int, float] = BUDGET,
              budget_source: Optional[Callable[[], Tuple[int, float]]] = None,
@@ -1037,10 +1055,12 @@ class TestARefusedRoundWaits:
         assert completed is False
         assert elapsed < 1.0
 
-        # No cancel flag at all: the wait runs its (short) full length.
+        # No cancel flag at all: the wait runs its (short) full length. The
+        # bound is the length less the clock's own slack — the point is that it
+        # was not cut short, which a wait of 0.05s measures either way.
         started = time.monotonic()
         assert chat_core._wait_for_endpoint(0.05, None) is True
-        assert time.monotonic() - started >= 0.05
+        assert time.monotonic() - started >= 0.05 - self.CLOCK_SLACK_SECONDS
 
     # -- the budget spent (spec §5.10) --------------------------------------
 
@@ -1168,7 +1188,9 @@ class TestARefusedRoundWaits:
         done = events[-1]
         # The wait really happened, and it is nowhere in the measurement: the
         # decode window is the span between two arrivals of the last round.
-        assert elapsed >= 0.3
+        # ``>=`` carries the clock's slack, not a demand on the timer: the
+        # separation this asserts is 0.3s against a sub-millisecond window.
+        assert elapsed >= 0.3 - self.CLOCK_SLACK_SECONDS
         assert done["decode"] == done["took"] - done["ttft"]
         assert done["decode"] < 0.3
         assert done["tokens"] == 2

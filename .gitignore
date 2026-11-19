@@ -31,5 +31,8 @@ build/
 .coverage
 htmlcov/
 
+# Editor
+.vscode/
+
 # OS
 .DS_Store

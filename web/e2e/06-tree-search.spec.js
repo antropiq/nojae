@@ -26,7 +26,11 @@ import { fileURLToPath } from 'node:url'
 // run's create into a 409.
 const SCRATCH = 'e2e-workspace'
 const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
-const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+// The folder as **the server canonicalises it** (win-01): `resolve()` answers
+// `realpath`, so the app bar's field holds the host's own separators. Forcing
+// `/` here is a second spelling of one folder that never matches what the tab
+// displays on Windows.
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH)
 const WS = { workspace: WORKSPACE }
 const NEEDLE = 'needle'
 
@@ -203,12 +207,42 @@ async function expectCaretOnLine(page, line) {
   await expect(activeLineNumberRows(page)).toHaveText([String(line)])
 }
 
-test.beforeEach(async () => {
+// Deleting the scratch is a Windows ordering problem, not a permission bug
+// (win-02, same as `02-editor-write.spec.js`): the Editor pane's terminal shell
+// is born in the tab's workspace, and a folder a live process names as its cwd
+// cannot be removed (`EPERM`) — which `rmSync` does not retry. The wait is on
+// the server's own witness: `GET /api/terminal` drops a session only after its
+// teardown killed the process tree, so once no session reports this cwd, the
+// folder is removable. (A 422 — the scratch is already gone — trivially means
+// no shell lives in it.)
+async function waitForShellsGone(request) {
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get('/api/terminal', { params: WS })
+        if (!res.ok()) return 0
+        const sessions = (await res.json()).sessions ?? []
+        return sessions.filter(
+          (s) => (s.cwd ?? '').toLowerCase() === WORKSPACE.toLowerCase(),
+        ).length
+      },
+      { message: 'a terminal shell still holds the scratch as its cwd', timeout: 30_000 },
+    )
+    .toBe(0)
+}
+
+test.beforeEach(async ({ request }) => {
+  // The previous test's shell can still be dying when this hook runs.
+  await waitForShellsGone(request)
   fs.rmSync(WORKSPACE, { recursive: true, force: true })
   fs.mkdirSync(WORKSPACE, { recursive: true })
 })
 
-test.afterEach(async () => {
+test.afterEach(async ({ page, request }) => {
+  // Fixtures outlive `afterEach`, so the tab that holds the shell is still
+  // open when this hook runs: close it first, wait for its teardown, delete.
+  await page.close()
+  await waitForShellsGone(request)
   fs.rmSync(WORKSPACE, { recursive: true, force: true })
 })
 

@@ -156,8 +156,15 @@ class TestLoadEndpointsConfig:
         row = agent_row()
         # Move the store out from under the read: the file is gone, so every
         # answer has to come from the named state rather than from empty rows.
-        appdb.database_path().unlink()
+        #
+        # The handle is dropped **first**. `connection()` re-opens on use, so
+        # what makes the read refuse is the absent path, not the closed handle.
+        # POSIX lets a delete happen with a handle still open (an unlinked file
+        # stays reachable through it); Windows refuses to remove a file a handle
+        # is on, so the other order fails there with a sharing violation on an
+        # assertion about nothing of the sort.
         appdb.close_thread_connection()
+        appdb.database_path().unlink()
 
         config, error = load_endpoints_config(row)
         assert config is None

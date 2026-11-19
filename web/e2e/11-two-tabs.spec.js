@@ -39,8 +39,12 @@ import { fileURLToPath } from 'node:url'
 // invisible to a tab that has not refreshed (spec D7), which is why the tree
 // assertions read the folder each tab was pointed at and nothing else.
 const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
-const ROOT_A = path.join(REPO_ROOT, 'e2e-two-tabs-a').replaceAll(path.sep, '/')
-const ROOT_B = path.join(REPO_ROOT, 'e2e-two-tabs-b').replaceAll(path.sep, '/')
+// Both as **the server canonicalises them** (win-01): `resolve()` answers
+// `realpath`, so the app bar's field holds the host's own separators. Forcing
+// `/` here is a second spelling of one folder that never matches what the tab
+// displays on Windows.
+const ROOT_A = path.join(REPO_ROOT, 'e2e-two-tabs-a')
+const ROOT_B = path.join(REPO_ROOT, 'e2e-two-tabs-b')
 const FILE_A = 'alpha.txt'
 const FILE_B = 'beta.txt'
 
@@ -113,7 +117,36 @@ test.beforeEach(() => {
   resetFolders()
 })
 
-test.afterEach(() => {
+// The Editor pane's terminal shell is born in the tab's workspace, and a folder
+// a live process names as its cwd cannot be removed on Windows (`EPERM`, which
+// `rmSync` does not retry — win-02, same as `02-editor-write.spec.js`). The
+// wait is on the server's own witness: `GET /api/terminal` drops a session only
+// after its teardown killed the process tree. (A 422 — the folder is already
+// gone — trivially means no shell lives in it.)
+async function waitForShellsGone(request, root) {
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get('/api/terminal', { params: { workspace: root } })
+        if (!res.ok()) return 0
+        const sessions = (await res.json()).sessions ?? []
+        return sessions.filter(
+          (s) => (s.cwd ?? '').toLowerCase() === root.toLowerCase(),
+        ).length
+      },
+      { message: `a terminal shell still holds ${root} as its cwd`, timeout: 30_000 },
+    )
+    .toBe(0)
+}
+
+test.afterEach(async ({ context, request }) => {
+  // These tabs come from the **context**, whose pages outlive `afterEach`:
+  // close them first, wait for each shell's teardown, then delete the folders.
+  for (const page of context.pages()) {
+    await page.close()
+  }
+  await waitForShellsGone(request, ROOT_A)
+  await waitForShellsGone(request, ROOT_B)
   removeFolders()
 })
 

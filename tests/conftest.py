@@ -1248,3 +1248,58 @@ def _pane_shell_is_the_apps_default(_hermetic: pytest.MonkeyPatch) -> None:
     # The probe caches its verdict for the session, and the markers consult it;
     # a verdict taken from the ambient shell is the machine's, not this test's.
     shell_probe.clear_verdict()
+
+
+# --- the scripted clock ------------------------------------------------------
+
+
+class _ClockForOneModule:
+    """The ``time`` module as one module sees it, with ``monotonic`` scripted.
+
+    Every other name still answers as the real module does, so a turn that
+    reaches for ``time.sleep`` under a scripted clock really sleeps: what is
+    narrowed is the *audience* of the script, never the behaviour around it.
+    """
+
+    def __init__(self, real: Any, monotonic: Callable[[], float]) -> None:
+        self._real = real
+        self.monotonic = monotonic
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def scripted_clock(
+    patch: pytest.MonkeyPatch, values: List[float]
+) -> List[float]:
+    """Script ``src.core.chat``'s clock to answer ``values`` in order.
+
+    Returns a list whose ``pop()`` the scripted clock drains, so a case can keep
+    asserting ``clock == []``: the script was read to the last number, which is
+    what makes a hand-written sequence a statement about the code's read order
+    rather than a guess at it.
+
+    The patch goes on the ``time`` name *inside* :mod:`src.core.chat`. It must
+    not go on ``chat.time.monotonic``, which resolves to the stdlib module and
+    therefore scripts ``time.monotonic()`` for the **whole process**: anything
+    else that reads the clock while the script is up silently drains it. On
+    Windows something else always does — ``asyncio``'s ``IocpProactor.close()``
+    calls ``time.monotonic()``, and the garbage collector can finalise a
+    dropped proactor (a hub thread's loop, a test client's portal) at any
+    point, including inside an unrelated later test once the patch has been
+    undone. The failure that leaves behind is a fixed-size script emptied
+    before the turn read it, so it surfaces in the ordering of a full run and
+    not in the module that owns the case — and it is invisible on Linux, where
+    the selector loop reads no such clock.
+    """
+    from src.core import chat as chat_module
+
+    remaining = list(values)
+
+    def next_value() -> float:
+        return remaining.pop(0)
+
+    patch.setattr(
+        chat_module, "time", _ClockForOneModule(chat_module.time, next_value)
+    )
+    return remaining

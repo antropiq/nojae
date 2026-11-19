@@ -547,8 +547,34 @@ class TestWorkspaceEndpoint:
         _resolved, sentence = workspace_seam.resolve(str(ghost))
         assert response.json()["detail"] == sentence
 
-    def test_a_denied_folder_is_refused(self, hub_client):
-        response = hub_client.get("/api/workspace", params=workspace_params("/etc"))
+    def test_a_denied_folder_is_refused(
+        self, hub_client, tmp_path, monkeypatch
+    ):
+        """A folder the list holds is refused by **that** rule.
+
+        The seam asks its four questions in order — existence before the
+        deny-list — so the folder has to be one that exists. ``/etc`` was the
+        name written here, and it is a directory on POSIX only: on a Windows
+        runner the request is refused by the **existence** sentence, so the
+        assertion below fails on a folder that is not on any list. Not because
+        the deny-list stopped binding — because the name planted was one this
+        filesystem cannot hold.
+        """
+        from src.core import lsphub
+
+        # The ``hub_client`` list holds ``/etc``, which is a directory only on
+        # POSIX; this case needs a denied folder that **exists** here, so it
+        # states its own one entry — the same arrangement the two tests below
+        # this one make for the other halves of the list.
+        denied = tmp_path / "system-tree"
+        denied.mkdir()
+        list_file = tmp_path / "restricted-paths.txt"
+        list_file.write_text(f"{denied}\n", encoding="utf-8")
+        monkeypatch.setattr(lsphub.constants, "LSP_RESTRICTED_PATHS", list_file)
+
+        response = hub_client.get(
+            "/api/workspace", params=workspace_params(denied)
+        )
         assert response.status_code == 422
         assert "deny-list" in response.json()["detail"]
 

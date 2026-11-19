@@ -23,7 +23,11 @@ import { fileURLToPath } from 'node:url'
 // the subtree that contains it. Same shape as 03-workspace-switch.
 const SCRATCH = 'e2e-workspace'
 const REPO_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))))
-const WORKSPACE = path.join(REPO_ROOT, SCRATCH).replaceAll(path.sep, '/')
+// The folder as **the server canonicalises it** (win-01): `resolve()` answers
+// `realpath`, so the app bar's field holds the host's own separators. Forcing
+// `/` here is a second spelling of one folder that never matches what the tab
+// displays on Windows.
+const WORKSPACE = path.join(REPO_ROOT, SCRATCH)
 const WS = { workspace: WORKSPACE }
 
 // The fixture's own rules — the two exclusions scenario 3 asserts, and nothing
@@ -134,7 +138,33 @@ test.beforeEach(async ({ request }) => {
   await seedFixture(request)
 })
 
-test.afterEach(async () => {
+// The Editor pane's terminal shell is born in the tab's workspace, and a folder
+// a live process names as its cwd cannot be removed on Windows (`EPERM`, which
+// `rmSync` does not retry — win-02, same as `02-editor-write.spec.js`). The wait
+// is on the server's own witness: `GET /api/terminal` drops a session only after
+// its teardown killed the process tree. (A 422 — the scratch is already gone —
+// trivially means no shell lives in it.)
+async function waitForShellsGone(request) {
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get('/api/terminal', { params: WS })
+        if (!res.ok()) return 0
+        const sessions = (await res.json()).sessions ?? []
+        return sessions.filter(
+          (s) => (s.cwd ?? '').toLowerCase() === WORKSPACE.toLowerCase(),
+        ).length
+      },
+      { message: 'a terminal shell still holds the scratch as its cwd', timeout: 30_000 },
+    )
+    .toBe(0)
+}
+
+test.afterEach(async ({ page, request }) => {
+  // Fixtures outlive `afterEach`, so the tab that holds the shell is still
+  // open when this hook runs: close it first, wait for its teardown, delete.
+  await page.close()
+  await waitForShellsGone(request)
   fs.rmSync(WORKSPACE, { recursive: true, force: true })
 })
 
