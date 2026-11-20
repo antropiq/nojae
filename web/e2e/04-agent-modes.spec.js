@@ -357,7 +357,13 @@ test.describe('Agent mode dropdown: the composer, the gate, the hint', () => {
     await page.goto('/')
     await page.getByRole('tab', { name: 'WorkBench' }).click()
 
-    await expect(page.getByLabel('Agent mode')).toHaveCount(0)
+    // The **select**, by role and its exact name — not `getByLabel('Agent mode')`.
+    // With no resolvable agent the two panels' wizard buttons are inert, and
+    // AC-6 requires each inert button's accessible name to be the app's existing
+    // no-model sentence, which names the "Agent modes dialog": a bare label query
+    // now matches those two buttons as well. The claim this row guards is
+    // unchanged — the composer's own dropdown is absent.
+    await expect(page.getByRole('combobox', { name: 'Agent mode' })).toHaveCount(0)
     // Everything else about the composer is still there.
     const textarea = page.locator('.chat-textarea')
     await expect(textarea).toBeVisible()

@@ -3,10 +3,16 @@ import { computed } from 'vue'
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
 import { currentMode, modeBlocksHub } from '../composables/useAgentModes'
+import {
+  FAMILY_LSP,
+  SET_ME_UP_LABEL,
+  useConnectorWizard,
+} from '../composables/useConnectorWizard'
 import { lspHasEntries } from '../lib/chat-hubs'
 
 const { state, setChatLsp, restartLsp } = useChat()
 const { state: batch } = useBatch()
+const wizard = useConnectorWizard()
 
 // Status dot next to each switch: green when the language server serves its
 // tools, red on a startup/configuration error, gray otherwise (stopped,
@@ -63,12 +69,52 @@ const restartTitle = computed(() => {
   if (state.lsp.restarting) return 'Restarting language servers…'
   return 'Restart the LSP hub: respawn every server from .nojae/lsp-settings.json'
 })
+
+// The wizard's entry point — the same one gate verdict as the MCP panel's, read
+// for this family. Deliberately **not** `locked` / `gatedByMode` / `canRestart`:
+// those are the restart's rules, and preparation touches no hub (§10).
+const setMeUp = computed(() => wizard.setMeUpSlot(FAMILY_LSP))
+
+// Opening the wizard on this panel's family and nothing else.
+function openWizard() {
+  wizard.open(FAMILY_LSP)
+}
+
+// The empty panel's one sentence: the two paths it already named — the seeded
+// template and the file the hub actually reads — and the switch that arms them,
+// plus the click this feature adds. Composed here so the template renders a value,
+// and built around the composable's own `SET_ME_UP_LABEL` so the sentence and the
+// button above it cannot drift.
+const emptyLine = computed(
+  () =>
+    'No language server is switched on for this conversation — copy the seeded ' +
+    '.nojae/lsp-settings.template.json to .nojae/lsp-settings.json, or press ' +
+    `${SET_ME_UP_LABEL} and it prepares an entry to paste there, then switch the ` +
+    'servers on in Settings.',
+)
 </script>
 
 <template>
   <aside class="chat-lsp-panel" aria-label="LSP language servers for this conversation">
     <div class="chat-hub-head">
       <p class="caption chat-mcp-title">LSP tools</p>
+      <!-- The wizard's entry point, left of the restart and in the same 1.5rem
+           box (the restart's own class): one line in the head, so the panel's
+           width, height and head layout are untouched. -->
+      <button
+        class="icon-btn chat-hub-setup"
+        type="button"
+        :disabled="setMeUp.disabled"
+        :aria-label="setMeUp.label"
+        :title="setMeUp.label"
+        @click="openWizard"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 3.5 11.4 7.6 15.5 9 11.4 10.4 10 14.5 8.6 10.4 4.5 9 8.6 7.6z" />
+          <path d="M17.5 13 18.3 15.2 20.5 16 18.3 16.8 17.5 19 16.7 16.8 14.5 16 16.7 15.2z" />
+        </svg>
+      </button>
       <button
         class="icon-btn chat-hub-restart"
         :class="{ 'chat-hub-restart--busy': state.lsp.restarting }"
@@ -89,12 +135,9 @@ const restartTitle = computed(() => {
     <p v-if="state.lsp.error" class="caption alert-error chat-hub-error" role="alert">
       {{ state.lsp.error }}
     </p>
-    <p v-if="!hasEntries" class="caption chat-hub-empty">
-      No language server is switched on for this conversation — copy the seeded
-      <code>.nojae/lsp-settings.template.json</code> to
-      <code>.nojae/lsp-settings.json</code>, then switch the servers on in
-      Settings.
-    </p>
+    <!-- The same rule as the MCP panel's: the composable's sentence, which keeps
+         both paths this line already named and now invites the click. -->
+    <p v-if="!hasEntries" class="caption chat-hub-empty">{{ emptyLine }}</p>
     <label
       v-for="server in state.lsp.servers"
       :key="server.id"

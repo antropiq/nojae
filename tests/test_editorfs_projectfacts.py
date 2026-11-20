@@ -365,9 +365,29 @@ class TestPolicy:
 
 class TestAllowList:
     def test_a_credential_file_is_never_opened(self, workspace: Path, monkeypatch):
-        """The poisoned-file proof: content that would be reported if it were read."""
+        """The poisoned-file proof, in the shape the readers would actually parse.
+
+        AC-15's "never returns file bytes" is only a real guard if the poison is
+        something a reader *would* report. So each credential file here holds its
+        secret in the exact shape the corresponding manifest reader extracts a
+        dependency name from — a ``dependencies`` map for the npm reader, a
+        ``[project] dependencies`` array for the Python one, and one bare name per
+        line for the requirements reader. Had the allow-list been widened to a
+        credential name, the poisoned name would have landed in
+        ``manifests[].dependencies`` and this row would say so.
+        """
         write(workspace, ".env", "SECRET_TOKEN=poison\n")
-        write(workspace, "credentials.json", json.dumps({"SECRET_TOKEN": "poison"}))
+        write(
+            workspace,
+            "credentials.json",
+            json.dumps({"dependencies": {"poisoned-npm-secret": "1"}}),
+        )
+        write(
+            workspace,
+            "secrets.toml",
+            '[project]\ndependencies = ["poisoned-toml-secret"]\n',
+        )
+        write(workspace, "secrets.txt", "poisoned-requirements-secret\n")
         write(workspace, "id_rsa", "poison")
         write(workspace, "app.py")
 
@@ -383,17 +403,48 @@ class TestAllowList:
 
         monkeypatch.setattr("builtins.open", spying_open)
         payload = facts(workspace)
+        serialised = json.dumps(payload)
         assert opened == []
-        assert "poison" not in json.dumps(payload)
-        assert "SECRET_TOKEN" not in json.dumps(payload)
+        # Every poisoned name, in all three shapes, is absent — as is the word
+        # they all carry, which is what makes the row fail if a reader ever runs.
+        for name in (
+            "poisoned-npm-secret",
+            "poisoned-toml-secret",
+            "poisoned-requirements-secret",
+            "poison",
+            "SECRET_TOKEN",
+        ):
+            assert name not in serialised, name
         assert payload["manifests"] == []
-        # The credential file still counts toward its extension — the tree shows
-        # that name, and a count is not a read. What cannot happen is a path to
-        # it or anything from inside it.
-        assert extensions(payload) == {".json": 1, ".py": 1}
-        assert "credentials.json" not in json.dumps(payload)
-        assert ".env" not in json.dumps(payload)
-        assert "id_rsa" not in json.dumps(payload)
+        # The credential files still count toward their extensions — the tree
+        # shows those names, and a count is not a read. What cannot happen is a
+        # path to one of them or anything from inside one.
+        assert extensions(payload) == {
+            ".json": 1,
+            ".py": 1,
+            ".toml": 1,
+            ".txt": 1,
+        }
+        for name in ("credentials.json", "secrets.toml", "secrets.txt", ".env", "id_rsa"):
+            assert name not in serialised, name
+
+    def test_the_same_poison_under_an_allow_listed_name_is_reported(
+        self, workspace: Path
+    ):
+        """The row above has teeth: the poison is a shape a reader *does* report.
+
+        Without this contrast, "the credential file's name never appears" could
+        pass simply because nothing parses that JSON shape. Here the identical
+        content sits under a name on the allow-list, and the poisoned dependency
+        name comes back — so the only thing keeping it out of the credential row
+        is the name, which is exactly the rule AC-15 guards.
+        """
+        poisoned = json.dumps({"dependencies": {"poisoned-npm-secret": "1"}})
+        write(workspace, "package.json", poisoned)
+        payload = facts(workspace)
+        assert manifest(payload, "package.json")["dependencies"] == [
+            "poisoned-npm-secret"
+        ]
 
     def test_only_an_allow_listed_manifest_is_opened(self, workspace: Path, monkeypatch):
         write(workspace, "package.json", json.dumps({"dependencies": {"vue": "3"}}))

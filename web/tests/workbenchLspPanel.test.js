@@ -10,12 +10,28 @@ import { useChat } from '../src/composables/useChat'
 //
 // The panel's rows are conversation-scoped switches, and the Editor's code pane
 // obeys the same ones (§4.3). What this file pins down is the panel's surface:
-// one switch per server and the restart button, nothing else — no second
-// control, no renamed title, no changed row title, no touched gate.
+// one switch per server and the head's **two** icon buttons — the wizard's entry
+// point and the restart — and nothing else. The count used to be one button; the
+// `Set me up!` entry point is a deliberate widening of this contract (cwizard-08),
+// not a loosening: both buttons are named here, and the restart's own title is
+// still pinned word for word.
 
 const chat = useChat().state
 const batch = useBatch().state
 const agentModes = useAgentModes().state
+
+// The agent the panel is showing, with a model: the wizard's entry point is live
+// then, and its own name is what the button below is pinned by. Without a model it
+// is inert and its accessible name is the refusal — which is the right answer, and
+// not what this file is about.
+const ROW_WITH_MODEL = {
+  id: 'chat',
+  label: 'Chat',
+  mcpEnable: true,
+  lspEnable: true,
+  modelId: 7,
+  modelName: 'a model',
+}
 
 function seedServers() {
   chat.lsp.loaded = true
@@ -35,14 +51,28 @@ function resetState() {
 describe('the LSP panel', () => {
   beforeEach(resetState)
 
-  // The switches are the whole control surface: one per server, plus the hub
-  // restart, and nothing else.
-  it('adds no control beyond the switches and the restart', () => {
+  // The switches and the head's two buttons are the whole control surface: one
+  // switch per server, the wizard's entry point, and the hub restart — and
+  // nothing else. The buttons are pinned **by name** rather than by a bare count,
+  // so a third one cannot slip in unnoticed while the feature's own two stay put.
+  it('adds no control beyond the switches and the head\'s two buttons', () => {
     seedServers()
+    agentModes.modes = [ROW_WITH_MODEL]
+    agentModes.current = ROW_WITH_MODEL.id
+    agentModes.loaded = true
     const wrapper = mount(WorkBenchLspPanel)
 
     expect(wrapper.findAll('input[role="switch"]')).toHaveLength(1)
-    expect(wrapper.findAll('button')).toHaveLength(1) // the hub restart, unchanged
+    const buttons = wrapper.findAll('button')
+    expect(buttons).toHaveLength(2)
+    // The wizard's entry point comes first, then the restart — the order the head
+    // reads left to right.
+    expect(buttons.map((button) => button.attributes('aria-label'))).toEqual([
+      'Set me up!',
+      'Restart LSP hub',
+    ])
+    expect(wrapper.find('.chat-hub-setup').attributes('title')).toBe('Set me up!')
+    expect(wrapper.find('.chat-hub-restart').exists()).toBe(true)
     wrapper.unmount()
   })
 

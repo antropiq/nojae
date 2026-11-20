@@ -187,6 +187,59 @@ class TestLoadExternals:
         assert "NO_SUCH_CONNECTOR_KEY" in errors[0]
         assert "not set in the environment" in errors[0]
 
+    def test_a_sentinel_slot_is_loaded_verbatim_with_no_note(
+        self, tmp_path, monkeypatch
+    ):
+        """AC-22's behavioural half: the hub was **not** taught the sentinel.
+
+        §8: "The panel is not taught to recognise the sentinel: once pasted, an
+        unfilled slot surfaces exactly as a wrong value does today, in the
+        connector's own error." So a declaration carrying the wizard's
+        ``__put_your_api_key_here__`` is an entry like any other — loaded, enabled,
+        and its value passed through untouched. It is not a ``${NAME}`` reference,
+        so the loader's one expansion step leaves it alone and it earns **no**
+        note: no refusal, no warning, no "not ready". The failure comes later and
+        from upstream, which is the design, not an oversight.
+
+        The contrast row is the reference form beside it, which *is* expanded —
+        proof that the sentinel's silence is "nothing special happens" rather than
+        "the loader skipped the field".
+        """
+        monkeypatch.delenv("CONTEXT7_API_KEY", raising=False)
+        sentinel = "__put_your_api_key_here__"
+        path = _write_externals(
+            tmp_path / "mcp-settings.json",
+            {
+                "context7": {
+                    "type": "remote",
+                    "enable": True,
+                    "url": "https://mcp.context7.com/mcp",
+                    "headers": {"CONTEXT7_API_KEY": sentinel},
+                },
+                "reference": {
+                    "type": "remote",
+                    "enable": True,
+                    "url": "https://example.test/mcp",
+                    "headers": {"CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"},
+                },
+            },
+        )
+        connectors, errors = load_externals(path)
+
+        by_id = {connector["id"]: connector for connector in connectors}
+        assert by_id["context7"]["headers"] == {"CONTEXT7_API_KEY": sentinel}
+        assert by_id["context7"]["enable"] is True
+        # The sentinel earned **no** note of its own: the only note in this load
+        # belongs to the reference entry, whose unset name the loader reports by
+        # name. That contrast is the proof — the loader saw both fields, expanded
+        # one and left the other exactly as written.
+        assert len(errors) == 1, errors
+        assert "reference" in errors[0], errors
+        assert not any(sentinel in note for note in errors), errors
+        assert by_id["reference"]["headers"] == {
+            "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+        }
+
     def test_secrets_survive_the_write_back_untouched(self, tmp_path, monkeypatch):
         """Toggling ``enable`` must not persist an expanded value into the file."""
         monkeypatch.setenv("CTX_KEY", "ctx7sk-real")

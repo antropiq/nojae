@@ -3,6 +3,7 @@ import { defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import AppBar from './components/AppBar.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import BatchModeDialog from './components/BatchModeDialog.vue'
+import ConnectorWizardDialog from './components/ConnectorWizardDialog.vue'
 import WorkBenchView from './components/WorkBenchView.vue'
 import { useAppShell } from './composables/useAppShell'
 import { loadWorkspace } from './composables/useWorkspaceSession'
@@ -76,6 +77,10 @@ onMounted(async () => {
   <!-- Mounted here (not inside WorkBenchView) so the lot form survives a tab
        switch, exactly like the settings dialog. -->
   <BatchModeDialog />
+
+  <!-- The connector wizard, mounted once for both tool panels: it survives a tab
+       switch and neither panel owns it (its state is the composable's). -->
+  <ConnectorWizardDialog />
 
   <WorkBenchView v-show="state.activeTab === 'chat'" />
 

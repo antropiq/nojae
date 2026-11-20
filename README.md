@@ -420,6 +420,19 @@ deny-list, and `console` execs one command with no shell: no pipes, no
 redirections, no command chains. `chrome-devtools` and `context7` are third-party
 and entirely optional.
 
+The MCP panel's **Set me up!** button is the guided way in: it offers the
+committed catalogue (`mcp_connectors/catalog-mcp.json`), prepares the chosen
+entry for this machine and this folder, and hands over a JSON **member** to
+paste into this file. The member is put through the app's own loader and the
+page prints its verdict in the loader's own words, so a member the loader would
+refuse is refused there, naming the field to change, before any restart. Nothing
+in the wizard writes this file for you: the paste is yours, and the panel's
+**restart** is what applies it, since the hub reads the declaration at
+start-up. One rule at the paste: a slot spelling `__put_your_api_key_here__`
+must be replaced with your key before the entry authenticates, and a snippet
+never carries a key the app has seen — the `${…}` form above is the
+alternative when the key belongs outside the file.
+
 ### The LSP setup file — `.nojae/lsp-settings.json`
 
 When a folder is first admitted, the app leaves
@@ -433,6 +446,17 @@ server adds `lsp_<id>_<action>` tools — diagnostics, hover, definition,
 references, symbols, completion, formatting — to the WorkBench tab.
 `${NAME}` expansion works here exactly as it does for MCP.
 
+The LSP panel's **Set me up!** button is the guided way in, and it starts from
+this folder: it proposes the servers the project's own files ask for, prepares
+the chosen one for this machine, and hands over a JSON **member** — checked by
+the app's own loader before it is offered, and reported as `looks installed` or
+`not installed` by resolving its command, never by running it. What has to be
+installed stays the user's line to run. When `lsp-settings.json` does not exist
+yet the page prints the path to create and the member still goes inside an
+object at its top level: the wizard writes nothing, so the seeded file stays a
+template and the paste stays yours. The panel's **restart** is what applies it,
+since the hub reads the declaration at start-up.
+
 One gate decides whether a server runs in this workspace: its `enable` flag in
 `lsp-settings.json`. That file is the single source of truth, exactly as
 `mcp-settings.json` is for the connectors — so a declaration you copy in with
@@ -440,7 +464,7 @@ One gate decides whether a server runs in this workspace: its `enable` flag in
 another machine runs what its own file says with nothing else to tick. The
 Settings dialog's LSP section is an editor over that flag: a ticked row means
 "this server runs here", the save writes the flag back to the file, and a
-hand-edit of the file takes effect on the next hub restart (the section's
+hand-edit of the file takes effect on the next hub restart (the LSP panel's
 restart button, or an app restart).
 
 There used to be a second switch agreeing with that flag, so a prepared
@@ -748,7 +772,9 @@ The app bar carries the session meters: the elapsed clock, the generation speed
 and the context-window occupancy. They describe the **conversation**, not one
 reply, so they keep their figures when an answer lands and the next question
 continues the same totals. Only **Restart conversation** in the composer puts
-them back to zero. The clock counts the time the conversation worked: it
+them back to zero — and the connector wizard's reasoning belongs to **no
+conversation**, so its model calls add to none of these figures and none of
+their numbers is shown. The clock counts the time the conversation worked: it
 **excludes** the seconds a turn spent waiting on the model endpoint — a wait is
 neither inference nor thinking, so a 40-minute provider outage is not a
 40-minute session — while the turn's own span **keeps** them. The speed figure

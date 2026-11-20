@@ -477,6 +477,44 @@ class TestTheScanAndBothPostsAnswerAboutTheFoldersTheyName:
         # The already-served language is named as served, which is the gap rule.
         assert facts["extensions"][0]["servers"] == ["python"]
 
+    def test_the_gap_and_the_served_language_reach_the_model_apart(
+        self, client: TestClient, seam: Seam, tmp_path: Path
+    ):
+        """AC-4/5's provable half: the model is *given* the distinction it ranks on.
+
+        The ranking itself is the model's judgement, and no test can make a model
+        rank — what can be asserted, and is asserted here, is that the payload the
+        propose step receives states the two facts the spec's ordering rule reads:
+        a language the folder holds and nothing serves (``servers: []``, the gap
+        that leads), and a language something already covers (which must not lead).
+        If the route's join dropped the extensions, both would look like gaps and
+        the rule would be unimplementable — so this is the row that keeps AC-4/5
+        reachable at all.
+        """
+        root = a_project(tmp_path / "mixed-project", "a.py", "b.py", "site.css")
+        write_json(
+            root / ".nojae" / "lsp-settings.json",
+            {"python": {"command": ["python", "-m", "pylsp"],
+                        "workspaceRoot": str(root),
+                        "extensions": [".py"]}},
+        )
+        seam.answer = {"servers": [a_proposal()]}
+
+        response = client.post(
+            "/api/wizard/propose", params=locate(root), json={"agentMode": AGENT}
+        )
+        assert response.status_code == 200, response.text
+
+        by_extension = {
+            item["extension"]: item for item in seam.facts()["extensions"]
+        }
+        # The gap: CSS here, nothing declared for it — the case AC-4 names.
+        assert by_extension[".css"] == {"extension": ".css", "count": 1, "servers": []}
+        # The served language: named as served, so it cannot lead.
+        assert by_extension[".py"]["servers"] == ["python"]
+        # And the count ordering the gap rule reads off: Python leads the list.
+        assert [item["extension"] for item in seam.facts()["extensions"]][0] == ".py"
+
 
 # -- installation scope: a vanished folder cannot break these reads ------------
 

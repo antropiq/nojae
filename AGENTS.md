@@ -53,7 +53,8 @@ through an injected `emit(event: dict)` callable.
 - `core/mcphub/` and `core/lsphub/` — the MCP and language-server hubs, one per
   workspace and held in a pool. They mirror each other (discovery, manager, seed) —
   keep that symmetry when touching either one. Both read their declarations from
-  that workspace's reserved folder and are hot-toggled from the UI.
+  that workspace's reserved folder and are hot-toggled from the UI. Their discovery
+  is also offered as a **guided preparation**: it writes nothing and starts nothing.
 - `core/editorfs/` — the Editor's file surface. Paths are relative to the
   request's workspace, reads are bounded, no write destroys bytes, and every call
   answers from the workspace policy's verdict. What the tree lists, what search

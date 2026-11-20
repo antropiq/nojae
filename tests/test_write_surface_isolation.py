@@ -1022,6 +1022,165 @@ class TestTheServerAndModelRoutesStayPinnedToTheirPaths:
             assert by_path == self.CONNECTION_VERBS
 
 
+#: ---------------------------------------------------------------------------
+#: cwizard-11 (AC-22): the sentinel stays the wizard's word and the catalogue's.
+#:
+#: §8 spends a whole trap on this: ``__put_your_api_key_here__`` is **not** a
+#: reference, so an unreplaced slot is sent upstream as the key and fails at
+#: authentication, far from its cause. The design's answer is one canonical
+#: spelling and one honest sentence on page 3 — and the deliberate *absence* of
+#: anything else: "Nothing downstream re-checks it. The panel is not taught to
+#: recognise the sentinel: once pasted, an unfilled slot surfaces exactly as a
+#: wrong value does today, in the connector's own error."
+#:
+#: An absence is the easiest thing in the world to add by accident, so it is
+#: asserted: the constant may appear in ``wizard.prompts`` (which owns it), in
+#: ``wizard.snippet`` (which quotes it in its sentences) and in the committed
+#: catalogue (which carries it in a value slot) — and in no hub, no panel and no
+#: tool list. A hub that learned to spot it would be a second validator, which is
+#: the one thing this feature's §4 forbids twice.
+#: ---------------------------------------------------------------------------
+
+#: The one canonical spelling, restated as a literal here so the guard does not
+#: read the value it is checking out of the module under test — the same rule
+#: ``tests/test_mcp_catalogue.py`` and ``tests/test_wizard_snippet.py`` hold to.
+SECRET_SENTINEL = "__put_your_api_key_here__"
+
+#: The surfaces AC-22 says must stay untaught: the two hubs whole, the two panels
+#: that show their connectors, and the tool-list surfaces that render a hub's
+#: tools. The wizard's own three files are *not* in this list — they own it.
+UNTAUGHT_SURFACES = (
+    Path("src/core/mcphub"),
+    Path("src/core/lsphub"),
+    Path("web/src/components/WorkBenchMcpPanel.vue"),
+    Path("web/src/components/WorkBenchLspPanel.vue"),
+    Path("web/src/components/WorkBenchToolPanel.vue"),
+    Path("web/src/components/WorkBenchToolsDock.vue"),
+    Path("web/src/lib/chat-hubs.js"),
+)
+
+#: The only files in the app that hold the sentinel **as text**, and why each one
+#: holds it. A fourth name here is a new downstream reader of the sentinel and has
+#: to be argued about in this file, not added quietly. ``wizard.snippet`` is
+#: deliberately absent: it quotes the spelling through ``prompts.SECRET_SENTINEL``
+#: rather than restating it (``test_the_families_are_the_prompts_own_two`` in
+#: ``tests/test_wizard_snippet.py`` pins that), so it holds no literal to find.
+SENTINEL_HOMES = {
+    # it owns the one canonical spelling (§8)
+    "src/core/wizard/prompts.py",
+    # the one catalogue entry that needs a key carries it in the value slot (§9)
+    "mcp_connectors/catalog-mcp.json",
+}
+
+
+def sentinel_bearers(roots: List[Path]) -> List[str]:
+    """Every file under ``roots`` that spells the sentinel, repo-relative.
+
+    One implementation, shared by the guard below and by its self-check — the same
+    reason ``offenders_for`` is shared. Text files only, and the byte-compiled
+    mirrors of a module are skipped: the question is what the app's *sources*
+    teach, and a ``.pyc`` is that same source seen twice.
+    """
+    found: List[str] = []
+    for root in roots:
+        candidates = [root] if root.is_file() else sorted(root.rglob("*"))
+        for path in candidates:
+            if not path.is_file() or path.suffix not in (".py", ".js", ".vue", ".json"):
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if SECRET_SENTINEL in text:
+                found.append(
+                    str(path.relative_to(REPO_ROOT))
+                    if path.is_relative_to(REPO_ROOT)
+                    else str(path)
+                )
+    return found
+
+
+class TestTheSentinelStopsWithTheWizard:
+    """AC-22: no panel, tool list or hub gained a sentinel check or an auth pre-check.
+
+    The static half is the scan; the behavioural half lives with the loader that
+    proves it (``tests/test_mcp.py``: a declaration carrying the sentinel is
+    **loaded**, and the sentinel travels through verbatim — surfacing as a wrong
+    value does today, in the connector's own error, and nowhere earlier).
+    """
+
+    def test_no_hub_panel_or_tool_list_names_the_sentinel(self):
+        offenders = sentinel_bearers(
+            [REPO_ROOT / rel for rel in UNTAUGHT_SURFACES]
+        )
+        assert offenders == [], (
+            "a hub, panel or tool list was taught to recognise the sentinel, which "
+            f"would be the downstream check §8 forbids: {offenders}"
+        )
+
+    def test_the_sentinel_appears_nowhere_else_in_the_app(self):
+        """The homes are exactly the three, so a fourth is a new reader.
+
+        Walked over the whole app rather than a list, because the point is that
+        *nothing else* learned the word — a check added to a composable, a route
+        or the editor would hide from a list of the obvious suspects.
+        """
+        scanned = [
+            REPO_ROOT / "src",
+            REPO_ROOT / "web" / "src",
+            REPO_ROOT / "mcp_connectors",
+            REPO_ROOT / "lsp_connectors",
+        ]
+        found = set(sentinel_bearers(scanned))
+        assert found == SENTINEL_HOMES, (
+            f"the sentinel is held by {sorted(found)}, expected {sorted(SENTINEL_HOMES)}"
+        )
+
+    def test_the_two_hubs_hold_no_auth_pre_check_of_any_shape(self):
+        """The wider half of AC-22: not just the word, the *idea*.
+
+        A hub that refuses an entry for a missing key, or marks it not-ready, is
+        the same forbidden check under a different name — and it would be a hub
+        that changed how a declaration is read, which §15 puts out of reach for
+        this feature entirely.
+        """
+        markers = (
+            "will not authenticate", "needs a key", "api key missing",
+            "missing api key", "not ready", "placeholder key", "needs_key",
+            "key_required", "auth_precheck", "precheck",
+        )
+        offenders: List[str] = []
+        for folder in ("mcphub", "lsphub"):
+            for path in (REPO_ROOT / "src" / "core" / folder).rglob("*.py"):
+                text = path.read_text(encoding="utf-8").lower()
+                offenders.extend(
+                    f"{path.relative_to(REPO_ROOT)}: {marker}"
+                    for marker in markers
+                    if marker in text
+                )
+        assert offenders == [], (
+            f"a hub grew a readiness or auth check for a pasted entry: {offenders}"
+        )
+
+    def test_the_sentinel_scan_catches_a_poisoned_hub_file(self, tmp_path):
+        """Fed to the same walker the guard uses, so the check above is a guard.
+
+        A hub module that learned the word is exactly the leak the scan exists
+        for, and a clean file beside it answers nothing — which is what makes the
+        empty answer above a verdict rather than a walk that flags everything.
+        """
+        fake = tmp_path / "manager.py"
+        fake.write_text(
+            f'NOT_READY = "{SECRET_SENTINEL}"  # a hub taught to spot the slot\n',
+            encoding="utf-8",
+        )
+        clean = tmp_path / "seed.py"
+        clean.write_text("ENABLE = \"enable\"\n", encoding="utf-8")
+        assert sentinel_bearers([tmp_path]) == [str(fake)]
+
+
 class TestTheSearchReaderStaysARead:
     """The same verb guard as ``/agent-modes``, for the surface it does not cover.
 
@@ -1395,3 +1554,450 @@ class TestTheGuardsActuallyFail:
                   and entry["verb"] == "get"]
         assert [entry["handler"].args.args for entry in reader] == [[]]
         assert registered[1]["handler"].args.args != []
+
+
+#: ---------------------------------------------------------------------------
+#: cwizard-11 (AC-14): the connector wizard's own surface.
+#:
+#: The wizard *prepares* a declaration entry, so the promise it keeps is the
+#: loudest one in the app: it writes no declaration, starts no process and
+#: installs no package. "Asserted, not intended" means a scan here, and the scan
+#: has to be call-shaped for the same reason the marker scan is verb-and-path
+#: shaped — the wizard's own docstrings name every one of these forbidden things
+#: in order to forbid it (``snippet.py``'s says it imports no ``subprocess``), so
+#: a substring scan would read honest prose as an offender. The Python half
+#: therefore reads the AST's names; the client half reads identifier-followed-by-
+#: paren spellings.
+#:
+#: The wizard's routes join the **expected-absent** list below and nothing else:
+#: ``WRITE_MARKERS`` is what the app can write, and a wizard route is a read or a
+#: conversationless post, so adding one to the marker list would make the guard
+#: stop refusing it.
+#: ---------------------------------------------------------------------------
+
+# The wizard's client files: the rules, the dialog and the two buttons. One file
+# under ``web/src`` names the wizard's two posts (the composable), and that is the
+# file the install hand-over must not be able to arm or send a turn from.
+WIZARD_CLIENT_FILES = (
+    Path("web/src/composables/useConnectorWizard.js"),
+    Path("web/src/components/ConnectorWizardDialog.vue"),
+    Path("web/src/components/WorkBenchMcpPanel.vue"),
+    Path("web/src/components/WorkBenchLspPanel.vue"),
+)
+
+# The wizard's two posts, in the spelling the client uses.
+WIZARD_POST_ROUTES = ("/api/wizard/propose", "/api/wizard/prepare")
+
+# The whole surface ``/wizard`` may ever answer: three reads and two
+# conversationless posts. A fourth route, or a write verb on one of these, is a
+# change to what the wizard may do and has to be made here, on purpose.
+WIZARD_VERBS = {
+    "/wizard/catalogue": ["get"],
+    "/wizard/connection": ["get"],
+    "/wizard/scan": ["get"],
+    "/wizard/propose": ["post"],
+    "/wizard/prepare": ["post"],
+}
+
+# Every writer of a declaration, of the Editor's file surface, or of the settings
+# store, plus the seeding path — spelled as the *identifier a call would use*, so
+# prose naming one stays invisible to the scan.
+WIZARD_FORBIDDEN_WRITERS = (
+    # the hubs' two declaration writers, and the seeding path that creates one
+    "set_externals_enabled", "set_lsp_enabled",
+    "ensure_mcp_settings_file", "ensure_lsp_settings_template",
+    # the Editor's write core (AGENTS.md: every write surface is the browser's)
+    "write_file", "create_path", "rename_path", "move_paths_batch", "trash_path",
+    "backup_for_write",
+    # the settings store's writes
+    "add_server", "update_server", "delete_server",
+    "add_model", "update_model", "delete_model",
+    "add_agent", "update_agent", "delete_agent",
+    "add_prompt_helper", "save_prompt_helper", "delete_prompt_helper",
+    # writing bytes at all
+    "write_text", "write_bytes", "mkdir", "unlink", "shutil",
+)
+
+# The spawn machinery. ``resolve_command`` / ``child_environment`` /
+# ``searched_paths`` are deliberately **absent**: resolving a program's path is
+# not starting it (§7), and that one act is the feature's whole readiness check.
+WIZARD_SPAWN_SPELLINGS = (
+    "subprocess", "Popen", "spawn", "fork", "execv", "execve", "posix_spawn",
+    "create_subprocess", "system", "kill", "terminate",
+)
+
+# The composer's verbs that would make the install hand-over more than a draft
+# (§7, AC-20): sending, arming the strip, or taking focus to the composer.
+# ``setDraft`` is the one surface the hand-over may touch, and the wizard's own
+# ``reset`` (its memory wipe, not the composer's) is not a composer verb — so
+# neither is in this list.
+COMPOSER_ARMING_CALLS = (
+    "send", "sendBatchTurn", "stage", "removeStaged", "pullBackStaged",
+    "appendDraft", "registerDraftInput", "editLast", "stop", "pause",
+)
+
+
+def wizard_python_files() -> List[Path]:
+    """The wizard's Python surface: its package, and the scan it is grounded in.
+
+    One implementation, shared by the guard below and by its self-check — the same
+    reason ``offenders_for`` is shared. ``projectfacts`` is included because AC-15
+    is the same promise from the other side: the scan is the wizard's eyes, and it
+    may not become a writer either.
+    """
+    files = sorted((REPO_ROOT / "src" / "core" / "wizard").glob("*.py"))
+    files.append(REPO_ROOT / "src" / "core" / "editorfs" / "projectfacts.py")
+    return files
+
+
+def python_spellings(source: str) -> set:
+    """Every identifier a module *could* call: names, attributes, import roots.
+
+    Docstrings and comments are not part of this set, which is the point: the
+    wizard's modules name their own forbidden machinery in order to forbid it, and
+    a guard that flinched at that would have to be loosened — the one thing this
+    file refuses to do.
+    """
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                found.add((alias.asname or alias.name).split(".")[0])
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    found.add(node.module.split(".")[-1])
+    return found
+
+
+def wizard_route_block(source_text: str) -> str:
+    """The wizard's routes and their helpers, as source text.
+
+    Read out of the AST — the handlers registered under ``/wizard`` plus the
+    private helpers named for it — so the block is the *code*, and neither a
+    docstring elsewhere in ``routes.py`` nor a route added elsewhere can widen or
+    narrow what is scanned.
+    """
+    tree = ast.parse(source_text)
+    wanted = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        named = node.name.startswith("_wizard_") or node.name.startswith("_catalogue_")
+        registered = any(
+            isinstance(d, ast.Call) and d.args
+            and isinstance(d.args[0], ast.Constant)
+            and isinstance(d.args[0].value, str)
+            and d.args[0].value.startswith("/wizard")
+            for d in node.decorator_list
+        )
+        if named or registered:
+            wanted.add(node.name)
+    chunks = [
+        ast.get_source_segment(source_text, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in wanted
+    ]
+    assert chunks, "no wizard route found in routes.py — the guard has nothing to scan"
+    return "\n".join(chunks)
+
+
+def wizard_write_offenders(python_files: List[Path], route_block: str) -> List[str]:
+    """Every forbidden writer or spawn spelling the wizard's code could call.
+
+    One implementation, shared by the guard and by both poisoned self-checks
+    below, so what is proven is that *this* walk sees the leak.
+    """
+    found: List[str] = []
+    forbidden = set(WIZARD_FORBIDDEN_WRITERS) | set(WIZARD_SPAWN_SPELLINGS)
+    for path in python_files:
+        try:
+            spellings = python_spellings(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        label = (
+            str(path.relative_to(REPO_ROOT))
+            if path.is_relative_to(REPO_ROOT)
+            else str(path)
+        )
+        found.extend(f"{label}: {name}" for name in sorted(spellings & forbidden))
+    for name in sorted(python_spellings(route_block) & forbidden):
+        found.append(f"src/api/routes.py (wizard block): {name}")
+    return found
+
+
+def strip_js_comments(text: str) -> str:
+    """The file's code with its comments gone — the JS/Vue side of ``python_spellings``.
+
+    Same reason the Python half reads the AST instead of the bytes: this feature's
+    own comments *recite* the verbs it must not call ("no send, no stage, no
+    appendDraft"), so a scan over the raw text reads honest prose as an offender —
+    and a guard that cries wolf is a guard somebody loosens. Only a comment that
+    starts a line is dropped, which is how every comment in these files is written;
+    a trailing comment after code is left in, so the strip can err only toward
+    refusing, never toward missing a call.
+    """
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return "\n".join(
+        "" if line.lstrip().startswith("//") else line
+        for line in text.splitlines()
+    )
+
+
+def arming_offenders(files: List[Path]) -> List[str]:
+    """Every composer arming verb spelled as a *call* in a wizard client file.
+
+    The hand-over fills and only fills (§7), so the client that names the wizard's
+    posts must hold no send, no stage and no composer-focus call. The scan is
+    call-shaped (``name`` then ``(``) over comment-stripped text, so what it sees
+    is a call and nothing else.
+    """
+    # One alternation, and the **matched** verb is what gets reported: searching
+    # the whole alternation once per verb would report all ten for any one call,
+    # which is a guard that names the wrong thing.
+    call = re.compile(
+        r"\b(" + "|".join(sorted(COMPOSER_ARMING_CALLS, key=len, reverse=True)) + r")\s*\("
+    )
+    found: List[str] = []
+    for path in files:
+        text = strip_js_comments(path.read_text(encoding="utf-8"))
+        label = (
+            str(path.relative_to(REPO_ROOT))
+            if path.is_relative_to(REPO_ROOT)
+            else str(path)
+        )
+        for verb in sorted({match.group(1) for match in call.finditer(text)}):
+            found.append(f"{label}: {verb}(")
+    return found
+
+
+def wizard_verbs(routes_source: str) -> Dict[str, List[str]]:
+    """The ``/wizard`` surface as ``{path: [verb]}``, read out of the decorators."""
+    by_path: Dict[str, List[str]] = {}
+    for entry in route_registrations(routes_source, "/wizard"):
+        by_path.setdefault(entry["path"], []).append(entry["verb"])
+    return by_path
+
+
+class TestTheWizardWritesNothingStartsNothingInstallsNothing:
+    """AC-14: the wizard's promise, asserted rather than intended.
+
+    Every one of its surfaces — the two routes' block, its core package, the scan
+    it is grounded in, and its client — is asked the same questions: does it reach
+    a **declaration writer**, a **`/api/fs` write**, a **settings-store write**,
+    the **seeding path**, or a **subprocess spawn**? And the client is asked the
+    fifth: does the install hand-over stop at the draft?
+
+    Two of these are already covered elsewhere and are re-asked here on purpose,
+    because the point is that *this* file — the app's standing write-surface
+    guard — owns the wizard too. What the existing scans cannot see is a call
+    spelled without a route string (``ensure_mcp_settings_file(root)``), and that
+    is the leak this class exists for.
+    """
+
+    def test_the_wizard_core_and_routes_name_no_writer_and_no_spawn(self):
+        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
+            encoding="utf-8"
+        )
+        offenders = wizard_write_offenders(
+            wizard_python_files(), wizard_route_block(routes_source)
+        )
+        assert offenders == [], f"the wizard reaches a write or a spawn: {offenders}"
+
+    def test_resolving_a_program_is_the_only_child_facing_thing_it_does(self):
+        """The one allowed edge, pinned by name so it cannot grow.
+
+        ``resolve_command`` and the environment it resolves against are the
+        readiness check (§6 check 2), and they are the *only* child-facing names the
+        wizard may hold. A ``start``/``spawn``/``kill`` arriving beside them is the
+        feature starting a connector it was told not to start, and it trips this
+        line rather than a review.
+        """
+        allowed = {"resolve_command", "child_environment", "searched_paths"}
+        child_facing = allowed | {"start_connector", "start_server", "spawn_connector"}
+        held = set()
+        for path in wizard_python_files():
+            held |= python_spellings(path.read_text(encoding="utf-8")) & child_facing
+        assert held <= allowed, held - allowed
+
+    def test_the_wizard_surface_is_three_reads_and_two_posts(self):
+        """The expected-absent list: no wizard path is a write route.
+
+        The verb set is pinned whole, and each path is then asked against
+        ``WRITE_MARKERS`` — the answer must be *no match*, which is what makes "a
+        read is invisible to the write scan" a fact rather than an assumption.
+        """
+        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
+            encoding="utf-8"
+        )
+        by_path = wizard_verbs(routes_source)
+        assert by_path == WIZARD_VERBS, (
+            f"the /wizard surface is {by_path}, expected {WIZARD_VERBS}"
+        )
+        for path, verbs in by_path.items():
+            for verb in verbs:
+                spelling = f"{verb.upper()} /api{path}"
+                for marker in WRITE_MARKERS:
+                    assert not spelling.startswith(marker), (path, marker)
+
+    def test_the_wizard_routes_are_not_added_to_the_write_marker_list(self):
+        """The guard's own shape is the promise: the wizard stays out of it.
+
+        ``WRITE_MARKERS`` is what the app can *write*. A wizard route belongs to
+        the expected-absent list, never to this one — adding one would silently
+        license a write the feature does not have.
+        """
+        for path in WIZARD_VERBS:
+            for marker in WRITE_MARKERS:
+                assert path not in marker, (path, marker)
+        assert not any("wizard" in marker.lower() for marker in WRITE_MARKERS), (
+            "a wizard route became a write marker: the guard would stop refusing it"
+        )
+
+    def test_the_wizard_client_reaches_no_write_route(self):
+        """The browser half: the wizard's files name no ``/api/fs`` write."""
+        offenders = offenders_for(
+            WRITE_MARKERS,
+            [REPO_ROOT / f for f in WIZARD_CLIENT_FILES],
+            allowed=set(),
+        )
+        assert offenders == [], (
+            f"a wizard client file names a write route: {offenders}"
+        )
+
+    def test_the_install_hand_over_fills_the_composer_and_never_arms_it(self):
+        """AC-20, statically: no send, stage or composer-focus call exists there.
+
+        The dynamic half is the jsdom suite and the e2e spec; this is the shape
+        guard, so a later edit cannot add ``send()`` beside ``setDraft()`` and still
+        pass a test that only reads the draft back.
+        """
+        files = [REPO_ROOT / f for f in WIZARD_CLIENT_FILES]
+        naming = [
+            str(path.relative_to(REPO_ROOT))
+            for path in files
+            if any(
+                route in path.read_text(encoding="utf-8")
+                for route in WIZARD_POST_ROUTES
+            )
+        ]
+        assert naming == ["web/src/composables/useConnectorWizard.js"], (
+            "the wizard's posts are named by its one rule module and by nothing "
+            f"else in web/src: {naming}"
+        )
+        offenders = arming_offenders(files)
+        assert offenders == [], f"the wizard's client arms or sends a turn: {offenders}"
+
+    def test_the_wizard_posts_are_named_nowhere_else_in_the_app(self):
+        """No other client file can post a wizard step, armed or otherwise.
+
+        One caller is what makes the previous row's verdict about *the* hand-over
+        rather than about one file among several.
+        """
+        found = [
+            str(path.relative_to(REPO_ROOT))
+            for path in (REPO_ROOT / "web" / "src").rglob("*")
+            if path.is_file()
+            and path.suffix in (".js", ".vue")
+            and any(
+                route in path.read_text(encoding="utf-8")
+                for route in WIZARD_POST_ROUTES
+            )
+        ]
+        assert found == ["web/src/composables/useConnectorWizard.js"], found
+
+
+class TestTheWizardGuardActuallyFails:
+    """The new guards fed a poisoned input, in this file's own style.
+
+    A guard that cannot fail is decoration, and these are the guards the lot's
+    "asserted, not intended" promise rests on — so each is shown catching the leak
+    it exists for, over a scratch tree rather than by editing a real file.
+    """
+
+    def test_the_writer_scan_catches_a_poisoned_wizard_module(self, tmp_path):
+        fake = tmp_path / "snippet.py"
+        fake.write_text(
+            "from src.core.mcphub.seed import ensure_mcp_settings_file\n\n"
+            "def save_it(root):  # a wizard that wrote the declaration itself\n"
+            "    return ensure_mcp_settings_file(root)\n",
+            encoding="utf-8",
+        )
+        assert wizard_write_offenders([fake], "") == [
+            f"{fake}: ensure_mcp_settings_file"
+        ]
+
+    def test_the_writer_scan_catches_a_poisoned_spawn_in_the_routes_block(self):
+        poisoned = (
+            "def post_wizard_prepare(body, request):\n"
+            "    import subprocess\n"
+            "    return subprocess.run(body.candidate['command'])\n"
+        )
+        assert wizard_write_offenders([], poisoned) == [
+            "src/api/routes.py (wizard block): subprocess"
+        ]
+
+    def test_the_writer_scan_ignores_prose_that_names_the_forbidden_thing(self):
+        """The AST half is what makes honest docstrings invisible to the guard.
+
+        ``snippet.py`` says in prose that it imports no ``subprocess``; a module
+        whose *only* mention of it is a docstring must still answer clean, or the
+        guard would be loosened the first time somebody wrote that sentence.
+        """
+        prose = (
+            '"""This module never imports subprocess and never calls Popen."""\n\n'
+            "def resolve(command):\n"
+            "    return command.strip()\n"
+        )
+        assert python_spellings(prose) == {"command", "strip"}
+        assert wizard_write_offenders([], prose) == []
+
+    def test_the_arming_scan_catches_a_hand_over_that_sends(self, tmp_path):
+        fake = tmp_path / "useConnectorWizard.js"
+        fake.write_text(
+            "const chat = useChat()\n"
+            "export function handOver(line) {\n"
+            "  chat.setDraft(line)\n"
+            "  return chat.send()\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        assert arming_offenders([fake]) == [f"{fake}: send("]
+        # And the clean shape — fill, and nothing else — answers nothing, which is
+        # what makes the row above a verdict rather than a walk that flags all. The
+        # comment recites the forbidden verbs; the scan reads calls, so it cannot
+        # trip the guard.
+        clean = tmp_path / "clean.js"
+        clean.write_text(
+            "export function handOver(chat, line) {\n"
+            "  // no send, no stage, no appendDraft here — prose names them, the\n"
+            "  // scan reads calls, so this line cannot trip the guard.\n"
+            "  return chat.setDraft(line)\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        assert arming_offenders([clean]) == []
+
+    def test_the_verb_guard_catches_a_wizard_route_that_writes(self):
+        poisoned = (
+            "@router.get(\"/wizard/scan\")\n"
+            "def get_wizard_scan(request):\n"
+            "    return {}\n\n"
+            "@router.post(\"/wizard/scan\")\n"
+            "def post_wizard_scan(body):\n"
+            "    return {}\n\n"
+            "@router.post(\"/wizard/apply\")\n"
+            "def post_wizard_apply(body):\n"
+            "    return {}\n"
+        )
+        by_path = wizard_verbs(poisoned)
+        assert by_path == {
+            "/wizard/scan": ["get", "post"],
+            "/wizard/apply": ["post"],
+        }
+        with pytest.raises(AssertionError):
+            assert by_path == WIZARD_VERBS

@@ -2396,8 +2396,12 @@ input.appbar-location-input {
   white-space: nowrap;
 }
 
-/* Smaller than the chat action buttons: it sits inside a narrow panel. */
-.chat-hub-restart {
+/* Smaller than the chat action buttons: it sits inside a narrow panel. The hub
+   head's two icon buttons are the *same* box — the wizard's entry point
+   (`.chat-hub-setup`) sits left of the restart — so a second head control cannot
+   change the row's height or the panel's width. */
+.chat-hub-restart,
+.chat-hub-setup {
   flex: 0 0 auto;
   width: 1.5rem;
   height: 1.5rem;
@@ -4606,4 +4610,205 @@ input.appbar-location-input {
     display: flex;
     max-height: 45vh;
   }
+}
+
+/* -- connector wizard -----------------------------------------------------------
+
+   The "Set me up!" dialog (ConnectorWizardDialog.vue): one card, three pages, the
+   same idiom as the other app-level dialogs. Everything here is new and
+   `.wizard-*`-namespaced: the card borrows `.settings-title`, `.caption` and
+   `.settings-actions` exactly as they are, so a rule another component is
+   counted on is never touched. The width is the batch dialog's — a list and a
+   JSON block read better on a narrow card than on the settings editor's. */
+.wizard-dialog > article {
+  width: 680px;
+  max-width: 94vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+  background-color: var(--bi-surface);
+  box-shadow: var(--bi-shadow-md);
+}
+
+/* The header line names the agent, the server and the model: it wraps rather
+   than truncating, because a clipped model name names the wrong model. */
+.wizard-header {
+  margin: 0.25rem 0 0;
+  overflow-wrap: break-word;
+}
+
+/* The page area is the card's only scrolling region, so the header line and the
+   footer's actions stay put while the list or the member moves. */
+.wizard-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin-bottom: var(--bi-space-1);
+}
+
+/* Page 1's list: one scrollable column of candidates, exactly one chosen. */
+.wizard-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bi-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A candidate row is a button, because choosing one *is* the action: the whole
+   row is the target and the chosen mark is the border, so no radio glyph is
+   needed to say which one it is. */
+.wizard-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+  font: inherit;
+  /* Pico forces `color: white` and `--pico-color: white` onto every button, so
+     the row's own colours come from `--bi-icon` (which Pico never touches) —
+     otherwise the name would be white on the light card. The same escape the
+     `.icon-btn` rule above takes, for the same trap. */
+  color: var(--bi-icon);
+  background-color: var(--bi-surface);
+  border: 1px solid var(--bi-border);
+  border-radius: var(--bi-radius-lg);
+}
+
+.wizard-candidate:hover {
+  background-color: var(--bi-surface-2);
+  border-color: var(--pico-muted-color);
+}
+
+.wizard-candidate[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--pico-primary) 55%, var(--bi-border));
+  background-color: color-mix(in srgb, var(--pico-primary) 8%, var(--bi-surface));
+}
+
+.wizard-candidate-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.wizard-candidate-line {
+  overflow-wrap: break-word;
+}
+
+/* Page 2's complete member and page 3's verbatim block: the same box, because
+   the second is the first rendered for pasting. Both scroll inside themselves
+   and neither wraps a token mid-value. */
+.wizard-member,
+.wizard-snippet {
+  margin: 0 0 var(--bi-space-1);
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre;
+  font-size: 0.75rem;
+}
+
+/* Page 2's install band: the readiness verdict, the line that has to be run and
+   the hand-over that only ever fills the composer. It wraps, because a package
+   name is long and the button must stay beside the line it hands over. */
+.wizard-install {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--bi-space-1);
+  margin: 0 0 var(--bi-space-1);
+}
+
+.wizard-readiness {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.wizard-install-line {
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+/* The lines a page lists — the platform commands, the loader's notes, the
+   decisions the member's shape had to take. One line each, never a paragraph. */
+.wizard-lines {
+  margin: 0 0 var(--bi-space-1);
+  padding-left: var(--bi-space-3);
+}
+
+.wizard-lines > li {
+  overflow-wrap: break-word;
+}
+
+/* Page 3's declaration path: the absolute path is a long token with no spaces,
+   so it breaks rather than being clipped by the card. */
+.wizard-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0 0 var(--bi-space-1);
+}
+
+.wizard-path code {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.wizard-warning,
+.wizard-missing,
+.wizard-restart,
+.wizard-verdict {
+  margin: 0 0 var(--bi-space-1);
+  overflow-wrap: break-word;
+}
+
+/* The two warnings are words the user must not skim past: they carry the page's
+   only "this will not authenticate" and "this id is already taken" news. */
+.wizard-warning {
+  color: var(--bi-warning);
+}
+
+/* Copy is the page's primary action, so it is the card's only filled button;
+   the footer's Close and Try again stay secondary, as they are everywhere. */
+.wizard-primary {
+  display: flex;
+  justify-content: flex-start;
+  margin: 0 0 var(--bi-space-1);
+}
+
+.wizard-copy {
+  width: auto;
+  margin: 0;
+  padding-inline: 1.25rem;
+}
+
+/* The footer band: the one message takes the room, the two or three verbs keep
+   their own width, and the message never pushes them off the card. */
+.wizard-actions {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.wizard-message {
+  flex: 1 1 18rem;
+  min-width: 0;
+  margin: 0;
+  font-size: 0.78rem;
+  overflow-wrap: break-word;
+}
+
+.wizard-message[role='alert'] {
+  color: var(--bi-danger);
+}
+
+/* The in-flight status line: the top of the page area, above whatever the page
+   already holds, so a step that is still working says so where its answer will
+   arrive. */
+.wizard-waiting {
+  margin: 0 0 var(--bi-space-1);
 }

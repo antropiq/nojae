@@ -3,10 +3,16 @@ import { computed } from 'vue'
 import { useChat } from '../composables/useChat'
 import { useBatch } from '../composables/useBatch'
 import { currentMode, modeBlocksHub } from '../composables/useAgentModes'
+import {
+  FAMILY_MCP,
+  SET_ME_UP_LABEL,
+  useConnectorWizard,
+} from '../composables/useConnectorWizard'
 import { mcpHasEntries } from '../lib/chat-hubs'
 
 const { state, setChatMcp, restartMcp } = useChat()
 const { state: batch } = useBatch()
+const wizard = useConnectorWizard()
 
 // Status dot next to each switch: green when the connector serves its
 // tools, red on a startup/configuration error, gray otherwise (stopped,
@@ -68,12 +74,58 @@ const restartTitle = computed(() => {
   if (state.mcp.restarting) return 'Restarting MCP connectors…'
   return 'Restart the MCP hub: reconnect every connector from .nojae/mcp-settings.json'
 })
+
+// The wizard's entry point. Its enablement is the composable's one gate verdict —
+// `{disabled, label}`, where the label is `Set me up!` when live and the app's
+// existing no-model sentence when not — so this panel adds no rule of its own.
+//
+// Deliberately **not** `locked` / `gatedByMode` / `canRestart`: those are the
+// restart's rules. Preparing an entry touches no hub and no conversation, so it
+// stays live while a reply streams, while a batch runs, while the toggles are
+// locked and while the active mode switches this hub off (§10).
+const setMeUp = computed(() => wizard.setMeUpSlot(FAMILY_MCP))
+
+// Opening the wizard on **this** panel's family and nothing else: no toggle, no
+// restart, no send. The dialog is one component for both families; which of them
+// it shows is the button that opened it, never a question inside it.
+function openWizard() {
+  wizard.open(FAMILY_MCP)
+}
+
+// The empty panel's one sentence: the line it already carried — which declaration
+// file, and that the entry is switched on in Settings — plus the click this
+// feature adds. Composed here rather than in the template, so the template renders
+// a value and decides nothing, and built around the composable's own
+// `SET_ME_UP_LABEL`, so the sentence and the button beside it cannot drift.
+const emptyLine = computed(
+  () =>
+    'No MCP connector is available for this conversation — declare one in ' +
+    '.nojae/mcp-settings.json and switch it on in Settings, or press ' +
+    `${SET_ME_UP_LABEL} and it prepares that entry for you to paste in.`,
+)
 </script>
 
 <template>
   <aside class="chat-mcp-panel" aria-label="MCP connectors for this conversation">
     <div class="chat-hub-head">
       <p class="caption chat-mcp-title">MCP tools</p>
+      <!-- The wizard's entry point, left of the restart and in the same 1.5rem
+           box: one line in the head, so the panel's width, height and head
+           layout are untouched. It opens this panel's family and nothing else. -->
+      <button
+        class="icon-btn chat-hub-setup"
+        type="button"
+        :disabled="setMeUp.disabled"
+        :aria-label="setMeUp.label"
+        :title="setMeUp.label"
+        @click="openWizard"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 3.5 11.4 7.6 15.5 9 11.4 10.4 10 14.5 8.6 10.4 4.5 9 8.6 7.6z" />
+          <path d="M17.5 13 18.3 15.2 20.5 16 18.3 16.8 17.5 19 16.7 16.8 14.5 16 16.7 15.2z" />
+        </svg>
+      </button>
       <button
         class="icon-btn chat-hub-restart"
         :class="{ 'chat-hub-restart--busy': state.mcp.restarting }"
@@ -95,10 +147,9 @@ const restartTitle = computed(() => {
     <p v-if="state.mcp.error" class="caption alert-error chat-hub-error" role="alert">
       {{ state.mcp.error }}
     </p>
-    <p v-if="!hasEntries" class="caption chat-hub-empty">
-      No MCP connector is available for this conversation — declare one in
-      <code>.nojae/mcp-settings.json</code> and switch it on in Settings.
-    </p>
+    <!-- The empty line inviting the click: the composable's sentence, which still
+         names the declaration file and now says what the button above does. -->
+    <p v-if="!hasEntries" class="caption chat-hub-empty">{{ emptyLine }}</p>
     <label
       v-for="connector in state.mcp.connectors"
       :key="connector.id"

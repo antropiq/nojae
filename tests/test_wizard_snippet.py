@@ -162,6 +162,63 @@ class TestTheMemberIsBuiltFromTheMemberGroup:
                 if isinstance(nested, dict):
                     assert not forbidden & set(nested), entry_id
 
+    def test_every_snippet_is_rendered_from_its_member_group_alone(self, declarations):
+        """AC-21, entry by entry, on the **text the user copies**.
+
+        ``build_member`` is checked above; this is the same rule one step further
+        out, where it actually matters: the snippet string page 3 prints and the
+        copy button puts on the clipboard. Each of the nine is put through
+        :func:`snippet.assess` and its ``snippet`` text is parsed back, so the
+        claim is about the rendered JSON and not about a dict that never reached
+        the user.
+
+        The comparison is leaf-for-leaf rather than substring-for-substring on
+        purpose: a signal like ``api`` is a substring of the ``CONTEXT7_API_KEY``
+        header the member legitimately carries, and a guard that flags that is a
+        guard somebody turns off.
+        """
+        path = write_declaration(declarations["mcp"], {})
+        for entry_id, entry in catalogue_entries().items():
+            answer = snippet.assess(
+                "mcp",
+                entry_id,
+                snippet.build_member(entry),
+                declaration_path=path,
+                install={"any": "the-guidance-install-line"},
+            )
+            decoded = json.loads("{" + answer["snippet"] + "}")
+            # One key, and it is the entry's id: a member, never a whole file.
+            assert list(decoded) == [entry_id], entry_id
+            assert decoded[entry_id] == entry["member"], entry_id
+
+            # The text holds the member's own keys and leaf values and nothing
+            # else. Compared as *values*, never as substrings of the serialised
+            # text: a signal like ``api`` is a substring of the
+            # ``CONTEXT7_API_KEY`` header the member legitimately carries, and a
+            # guard that flags a correct snippet is a guard somebody turns off.
+            leaves = member_leaves(decoded[entry_id])
+            assert set(leaves) <= set(member_leaves(entry["member"])), entry_id
+            guidance = {
+                "install": [
+                    item["install"]
+                    for item in entry["requirements"]["requires"].values()
+                ],
+                "inputs": entry["requirements"]["inputs"],
+                "signals": entry["relevance"]["signals"],
+                "docs": entry["identity"]["docs"],
+                "description": entry["identity"]["description"],
+                "name": entry["identity"]["name"],
+            }
+            for group, value in guidance.items():
+                for text in member_leaves(value):
+                    assert text not in leaves, f"{entry_id}: {group} leaked {text!r}"
+            # And the install line the caller handed over stays *beside* the
+            # snippet, which is what makes it guidance rather than JSON. It is a
+            # value this test invented, so it appears nowhere in any member and
+            # its absence from the text is a fact rather than a coincidence.
+            assert "the-guidance-install-line" not in answer["snippet"], entry_id
+            assert answer["install"] == {"any": "the-guidance-install-line"}, entry_id
+
     def test_a_key_bearing_entry_carries_exactly_the_sentinel(self):
         entry = catalogue_entries()["context7"]
         built = snippet.build_member(entry)
