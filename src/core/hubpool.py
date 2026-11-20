@@ -157,9 +157,17 @@ class HubSet:
         re-raised: a language server that would not join must not be what keeps a
         workspace's connector children alive. Neither manager's own ``stop_all``
         is expected to raise, so this is the guard, not the normal path.
+
+        A half that is **absent** is skipped rather than failed on. An absent hub
+        is the documented degradation case the hub routes answer with 503, and a
+        teardown that tripped over it would put a traceback in the one log line
+        that reports a workspace whose tools did *not* stop cleanly — the same
+        condition :meth:`state` already tolerates.
         """
         failures: List[BaseException] = []
         for manager in (self.lsp, self.mcp):
+            if manager is None:
+                continue
             try:
                 await manager.stop_all()
             except BaseException as exc:  # noqa: BLE001 — the other one still goes

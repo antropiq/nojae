@@ -31,6 +31,7 @@ The promises:
 
 import asyncio
 import ast
+import logging
 import json
 import os
 import time
@@ -1074,6 +1075,27 @@ class TestStatusAndShutdown:
         with pytest.raises(RuntimeError):
             run(hub_set.stop_all())
         assert hub_set.mcp.stops == 1
+
+    def test_an_absent_hub_half_is_skipped_by_the_teardown(
+        self, pool: HubPool, roots: List[Path], caplog: pytest.LogCaptureFixture
+    ):
+        """A workspace with a hub half absent still tears the other one down.
+
+        An absent half is the documented degradation case (the hub routes answer
+        it with 503), so the teardown must not trip over it. The warning it would
+        log is the app's only signal for a workspace whose tools did **not** stop
+        cleanly, and a benign traceback there is what makes a real one unreadable.
+        """
+        hub_set = run(pool.acquire(str(roots[0]))).hub_set
+        assert hub_set is not None
+        hub_set.mcp = None
+
+        with caplog.at_level(logging.WARNING, logger="nojae.hubpool"):
+            run(pool.stop_all())
+
+        assert pool.roots() == []
+        assert hub_set.lsp.stops == 1
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
     def test_a_reaper_pass_survives_a_workspace_that_will_not_stop(
         self, pool: HubPool, roots: List[Path], monkeypatch: pytest.MonkeyPatch
