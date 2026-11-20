@@ -3285,6 +3285,16 @@ input.appbar-location-input {
   min-height: 0;
 }
 
+/* Folded, the terminal's track is sized by its own head strip instead of
+   `--bi-editor-terminal`, so the code pane's `1fr` row takes the room. A track
+   of `auto` is what makes that work without measuring anything: the row is the
+   head's height, which is the same statement `.editor-terminal--collapsed`
+   makes about the pane itself. This is the whole geometry of the fold — the
+   splitter's stored size is left untouched, so unfolding comes back to it. */
+.editor-shell--terminal-collapsed {
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+}
+
 /* Standing bar between the tree and the code pane: 10 px wide, no vertical
    margin (its row is exactly its height). */
 .editor-resizer-v {
@@ -4548,11 +4558,35 @@ input.appbar-location-input {
   background-color: var(--bi-danger);
 }
 
+/* Pico puts a 1rem bottom margin on every `[type=button]`. In this one-line
+   strip that margin is not spacing but height: it made the head 14px taller than
+   its own contents and left the three buttons riding high instead of centred on
+   the text beside them. The strip's padding is its only spacing. */
+.editor-terminal-head .icon-btn {
+  margin: 0;
+}
+
 .editor-terminal-new,
 .editor-terminal-kill {
   width: 28px;
   height: 28px;
   flex: none;
+}
+
+/* The fold sits right of the two session controls — the last of the header's
+   right-aligned buttons. Its icon is the Chat tools dock's: a chevron pointing
+   down while there is a body below it, up once folded. */
+.editor-terminal-toggle {
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+
+/* Folded: the head strip is the whole pane, so the body's hairline goes with
+   it and the pane's own border closes the box — one edge against the status
+   bar, not two. */
+.editor-terminal--collapsed .editor-terminal-head {
+  border-bottom: 0;
 }
 
 /* Body fills the strip and is the sizing context for xterm. The host must take
@@ -4785,6 +4819,12 @@ input.appbar-location-input {
   .editor-resizer-h { grid-column: 1; grid-row: 3; }
   .editor-terminal-slot { grid-column: 1; grid-row: 4; }
   .editor-status-bar { grid-column: 1; grid-row: 5; }
+
+  /* The fold's track, at this breakpoint's own row list — the terminal's row
+     stops being `--bi-editor-terminal` and becomes the head strip's height. */
+  .editor-shell--terminal-collapsed {
+    grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  }
 
   /* No sidebar to size in a single column: the bar has no track to sit in. */
   .editor-resizer-v {

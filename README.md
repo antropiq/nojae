@@ -810,7 +810,10 @@ This tab's folder as a file tree and a Monaco pane: create, rename, move and
 delete, save with a diff against the last commit, git status badges on the rows,
 a search that answers for the same set of files the tree lists, and **one
 terminal per connection**, on the platform's pseudo-terminal — `$SHELL` on
-POSIX, Git Bash on Windows.
+POSIX, Git Bash on Windows. The terminal's header carries the session's pid,
+path and state beside two buttons that renew and kill the shell, and a chevron
+that folds the pane away so the code pane takes the room — click it again and
+the terminal comes back at the height you left it.
 
 Nothing here is destroyed. Every save keeps the bytes it replaced in a backup
 folder, and a delete moves the file into a dated batch under the reserved

@@ -39,6 +39,16 @@ const terminal = useTerminal()
 const state = terminal.state
 const appShell = useAppShell()
 
+// The fold: the strip's head stays, because it carries the control that brings
+// the pane back; the body goes and EditorView shrinks the terminal's row to the
+// head's height, so the code pane above takes the room. Like the Chat tools
+// dock, the fold belongs to the layout owner — only it can answer to the pane's
+// height — hence the `collapsed` prop / `update:collapsed` pair rather than a
+// flag kept here.
+const props = defineProps({ collapsed: Boolean })
+const emit = defineEmits(['update:collapsed'])
+const expanded = computed(() => !props.collapsed)
+
 // The header meta, only while a session is live: pid + cwd from the `open`
 // frame, so a second tab or a lost session is diagnosable.
 const meta = computed(() =>
@@ -111,7 +121,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="editor-terminal" aria-label="Workspace terminal">
+  <section
+    class="editor-terminal"
+    :class="{ 'editor-terminal--collapsed': !expanded }"
+    aria-label="Workspace terminal"
+  >
     <header class="editor-terminal-head">
       <span class="editor-terminal-title">
         Terminal<span class="editor-terminal-meta">{{ meta }}</span>
@@ -148,9 +162,40 @@ onBeforeUnmount(() => {
           <path d="m6 6 12 12" />
         </svg>
       </button>
+      <!-- The fold, right of the two session controls: it takes the body (and,
+           through the layout owner, the pane's whole row) out of the flow, so
+           the code pane above gets the room. It lives in the head because the
+           head is what stays — a control that vanished with the thing it
+           restores would be unreachable. -->
+      <button
+        class="icon-btn editor-terminal-toggle"
+        type="button"
+        :aria-expanded="expanded"
+        :aria-controls="expanded ? 'editor-terminal-body' : undefined"
+        :aria-label="expanded ? 'Hide the terminal' : 'Show the terminal'"
+        :title="
+          expanded
+            ? 'Hide the terminal — the code pane takes the room'
+            : 'Show the terminal'
+        "
+        @click="emit('update:collapsed', expanded)"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path v-if="expanded" d="m6 9 6 6 6-6" />
+          <path v-else d="m18 15-6-6-6 6" />
+        </svg>
+      </button>
     </header>
 
-    <div class="editor-terminal-body">
+    <!-- `v-show`, not `v-if`: the host has to stay in the DOM so the xterm
+         instance and the ResizeObserver that fits it survive the fold, and the
+         observer fires again on unfold, which is what re-lays-out the grid. -->
+    <div
+      v-show="expanded"
+      id="editor-terminal-body"
+      class="editor-terminal-body"
+    >
       <div ref="host" class="editor-term-host"></div>
       <p v-if="banner" class="caption editor-term-banner">{{ banner }}</p>
     </div>

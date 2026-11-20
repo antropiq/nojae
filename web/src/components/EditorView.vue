@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import WorkspaceNavigator from './WorkspaceNavigator.vue'
 import EditorArea from './EditorArea.vue'
 import EditorNoticeStack from './EditorNoticeStack.vue'
@@ -63,14 +63,41 @@ const {
 // Narrow screens: the tree becomes a drawer, because the single-column stack
 // would otherwise push the code pane below the fold.
 const navOpen = ref(true)
+
+// The terminal's fold, the Chat tools dock's twin: a flag, not a size, so a
+// dragged terminal height survives it untouched and unfolding comes back at
+// exactly the height it had. It persists (a furnishing preference), and the
+// write-through keeps it durable however it is flipped.
+const TERMINAL_COLLAPSED_KEY = 'nojae:editorTerminalCollapsed'
+
+function loadTerminalCollapsed() {
+  try {
+    return window.localStorage.getItem(TERMINAL_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+const collapsed = ref(loadTerminalCollapsed())
+const terminalCollapsed = computed({
+  get: () => collapsed.value,
+  set: (value) => {
+    collapsed.value = value
+    try {
+      window.localStorage.setItem(TERMINAL_COLLAPSED_KEY, value ? '1' : '0')
+    } catch {
+      // Storage disabled: the fold still works for the session.
+    }
+  },
+})
 </script>
 
 <template>
   <div
     ref="shell"
     class="editor-shell"
-    :class="{ 'nav-collapsed': !navOpen }"
-    :style="[sidebarStyle, terminalStyle]"
+    :class="{ 'nav-collapsed': !navOpen, 'editor-shell--terminal-collapsed': terminalCollapsed }"
+    :style="[sidebarStyle, terminalCollapsed ? null : terminalStyle]"
   >
     <div ref="nav" class="editor-nav-col">
       <button
@@ -105,7 +132,10 @@ const navOpen = ref(true)
 
     <EditorArea class="editor-area-slot" />
 
+    <!-- The bar goes with the body: folding takes both out of the flow, so the
+         terminal's row is sized by the head strip alone. -->
     <div
+      v-if="!terminalCollapsed"
       class="pane-resizer editor-resizer-h"
       :class="{ dragging: terminalDragging }"
       role="separator"
@@ -120,7 +150,11 @@ const navOpen = ref(true)
       @dblclick="terminalReset"
     ></div>
 
-    <EditorTerminal ref="terminal" class="editor-terminal-slot" />
+    <EditorTerminal
+      ref="terminal"
+      v-model:collapsed="terminalCollapsed"
+      class="editor-terminal-slot"
+    />
 
     <!-- The status bar: the last child of the shell, so it belongs to the
          Editor *screen* (tree, pane and terminal alike) and sits below all of
