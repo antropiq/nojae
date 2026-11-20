@@ -128,17 +128,45 @@ function createFixtureWorkspace() {
 // Every file under the reserved folder: name, bytes and mtime. The witness for
 // AC-14's browser half and AC-19's other half — a route that wrote, seeded,
 // backed up or created anything in here changes it.
+//
+// The stat is taken with `{ bigint: true }` because `mtimeNs` is a bigint-only
+// member: on a plain `Stats` it is `undefined`, so the `.toString()` below is a
+// TypeError the moment this runs against a folder that holds a file — which is
+// what it does when the walk's own admission seeds the folder between its two
+// snapshots (`seedThenClearReserved` is what stops that).
 function reservedSnapshot() {
   if (!fs.existsSync(RESERVED)) return { missing: true, files: [] }
   const files = []
   for (const entry of fs.readdirSync(RESERVED, { recursive: true })) {
     const name = String(entry)
     const target = path.join(RESERVED, name)
-    const stat = fs.statSync(target)
+    const stat = fs.statSync(target, { bigint: true })
     if (!stat.isFile()) continue
     files.push({ name, mtime: stat.mtimeNs.toString(), bytes: fs.readFileSync(target).toString('base64') })
   }
   return { missing: false, files: files.sort((a, b) => a.name.localeCompare(b.name)) }
+}
+
+// Admitting a folder is what seeds its reserved files — `03-workspace-switch`'s
+// `admit` names the same fact. The pool seeds a path on its **first** admission
+// and never again while its entry is live, and an entry outlives this spec's
+// folder (each test removes and re-creates the folder; the pool keeps the path),
+// so whether `mcp-settings.json` stands in `.nojae` is a fact about pool history
+// rather than about anything the scenario in front of it does. Running the suite
+// one test at a time is enough to flip that history and with it the premise.
+//
+// The two specs that state an **unseeded** folder as their premise — page 3's
+// "the file is not there, so the page says to create it" (AC-19's other half) and
+// AC-14/19's walk, which wants nothing in the folder to begin with — ask the
+// panel's question here **first**, so the seed has certainly happened, and then
+// remove what it left with node's `fs`, which is this spec's own authority over
+// the fixture folder (header: "this spec writes it"). With the pool's entry live
+// afterwards, no read in the run seeds it again, so the state made here is the
+// state every assertion below reads, in any order.
+async function seedThenClearReserved(request) {
+  const res = await request.get('/api/mcp', { params: { workspace: WORKSPACE } })
+  expect(res.ok(), `could not admit the fixture workspace: ${await res.text()}`).toBe(true)
+  fs.rmSync(RESERVED, { recursive: true, force: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -475,9 +503,12 @@ test.describe('one dialog, two families, three pages', () => {
   })
 
   // AC-8, AC-10, AC-12, AC-19: choose → prepare → apply, with the posts routed.
-  test('the whole walk, page by page', async ({ page, context }) => {
+  test('the whole walk, page by page', async ({ page, context, request }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'])
     const posts = await routeWizardSteps(page, { propose: proposeOk, prepare: PREPARED })
+    // Page 3 asserts the declaration file is absent, so the folder is put into
+    // that state here rather than inherited from which test ran before it.
+    await seedThenClearReserved(request)
     await openWorkBench(page)
     await pointTabAt(page)
 
@@ -661,16 +692,20 @@ test.describe('one dialog, two families, three pages', () => {
   test('a whole walk leaves the reserved folder exactly as it found it', async ({
     page,
     context,
+    request,
   }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'])
     await routeWizardSteps(page, { propose: proposeOk, prepare: PREPARED })
+    // Start from nothing in here, whatever the pool had admitted earlier.
+    await seedThenClearReserved(request)
     await openWorkBench(page)
     await pointTabAt(page)
 
     // The wizard's routes never admit a hub set (§10: discovery acquires none),
-    // so this folder may have no reserved folder at all — which is the strongest
-    // form of the row: a walk that ends with a declaration file appearing where
-    // there was no folder is exactly the write the feature promises never to do.
+    // and the pool will not seed this path again while its entry is live, so this
+    // folder has no reserved folder at all — the strongest form of the row: a walk
+    // that ends with a declaration file appearing where there was no folder is
+    // exactly the write the feature promises never to do.
     const before = reservedSnapshot()
 
     for (const panel of [MCP_PANEL, LSP_PANEL]) {
