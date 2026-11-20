@@ -1094,8 +1094,11 @@ def sentinel_bearers(roots: List[Path]) -> List[str]:
             except (OSError, UnicodeDecodeError):
                 continue
             if SECRET_SENTINEL in text:
+                # ``as_posix``, because SENTINEL_HOMES spells its names with
+                # forward slashes; the separator a walk reports in is the
+                # separator its comparisons are written in.
                 found.append(
-                    str(path.relative_to(REPO_ROOT))
+                    path.relative_to(REPO_ROOT).as_posix()
                     if path.is_relative_to(REPO_ROOT)
                     else str(path)
                 )
@@ -1878,7 +1881,7 @@ class TestTheWizardWritesNothingStartsNothingInstallsNothing:
         """
         files = [REPO_ROOT / f for f in WIZARD_CLIENT_FILES]
         naming = [
-            str(path.relative_to(REPO_ROOT))
+            path.relative_to(REPO_ROOT).as_posix()
             for path in files
             if any(
                 route in path.read_text(encoding="utf-8")
@@ -1899,7 +1902,7 @@ class TestTheWizardWritesNothingStartsNothingInstallsNothing:
         rather than about one file among several.
         """
         found = [
-            str(path.relative_to(REPO_ROOT))
+            path.relative_to(REPO_ROOT).as_posix()
             for path in (REPO_ROOT / "web" / "src").rglob("*")
             if path.is_file()
             and path.suffix in (".js", ".vue")
