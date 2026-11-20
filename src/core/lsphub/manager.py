@@ -898,8 +898,10 @@ class LspManager:
                 )
 
         try:
-            uri = await actions.sync_document(session, resolved, text)
-            result = await self._editor_request(session, action, uri, position)
+            sync = await actions.sync_document(session, resolved, text)
+            result = await self._editor_request(
+                session, action, sync.uri, position, sync
+            )
         except asyncio.TimeoutError:
             return _editor_envelope(
                 action,
@@ -918,6 +920,7 @@ class LspManager:
         action: str,
         uri: str,
         position: Optional[Dict[str, Any]],
+        sync: Optional[actions.DocumentSync] = None,
     ) -> Any:
         """One editor action against an already synced document.
 
@@ -925,11 +928,41 @@ class LspManager:
         **working location** as the root the paths are made relative to — never
         the server's ``workspaceRoot``, because the browser's buffers are keyed
         by workspace-relative paths.
+
+        ``diagnostics`` is the one action that sends nothing to the server: the
+        document was just synced, so the notification handler will publish for
+        it in its own time, and this reads whatever the per-session inbox holds
+        **without waiting** (spec §3.1). Waiting — and sending a 3.17 pull
+        request, when the server advertises one — belongs to the model's tool,
+        which has a deadline and a reader expecting an answer. A cold file
+        therefore answers "not analysed yet", and a later call answers it; that
+        is the intended behaviour, not a gap to smooth over. The cap is the same
+        per-server one the model's tool applies.
+
+        ``sync`` is that just-finished sync. It is what keeps a *lagging*
+        payload from being read as a verdict: the inbox is filled a loop turn
+        later, so after an edit it still holds the analysis of the previous
+        text — and answering it would paint squiggles under code that no
+        longer has them (the disagreement this action exists to prevent). The
+        floor is the version that text was *sent* at, not the document's
+        current one: an unchanged re-ask leaves it where the held analysis
+        already stands, so re-asking never hides a good verdict.
         """
         from lsprotocol import types as lsp
 
         root = workspace_root()
         document = lsp.TextDocumentIdentifier(uri=uri)
+        if action == "diagnostics":
+            return editor.diagnostics_answer(
+                session.inbox.peek(uri),
+                session.info.get("maxDiagnostics") or constants.DEFAULT_MAX_DIAGNOSTICS,
+                # The version the text now on the server was sent at: a
+                # payload older than that describes text this sync replaced,
+                # so it is *unknown* rather than a verdict. For unchanged text
+                # it is the older version, so the held analysis still counts —
+                # the version bump alone must never hide an answer (D4).
+                oldest_version=sync.text_version if sync is not None else None,
+            )
         if action == "definition":
             result = await asyncio.wait_for(
                 session.client.text_document_definition_async(

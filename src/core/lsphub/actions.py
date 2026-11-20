@@ -16,17 +16,40 @@ synced as a full-text change and never written back.
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NamedTuple, Optional
 
 from . import constants, rendering
 from .constants import DEFAULT_MAX_DIAGNOSTICS, DIAGNOSTICS_WAIT_SECONDS, REQUEST_TIMEOUT
 from .session import ServerSession
 
 
+class DocumentSync(NamedTuple):
+    """What one :func:`sync_document` did.
+
+    ``uri`` and ``version`` are the document as the server now holds it.
+    ``text_version`` is the version the text the server holds was *sent* at,
+    which is ``version`` itself when this sync changed the text and an older
+    number when it did not.
+
+    That second number is what ``editor.diagnostics_answer`` needs: an analysis
+    published for a version below it describes text nobody is looking at any
+    more, so it is not a verdict — while an unchanged re-ask keeps accepting
+    the payload already in the inbox, because that one describes exactly what
+    is open.
+    """
+
+    uri: str
+    version: int
+    #: The version the text now on the server was sent at. Equal to
+    #: ``version`` when this sync changed the text (a first open included);
+    #: lower when the text was already what the server held.
+    text_version: int
+
+
 async def sync_document(
     session: ServerSession, path: Path, text: Optional[str] = None
-) -> str:
-    """didOpen/didChange the document, return its URI.
+) -> DocumentSync:
+    """didOpen/didChange the document, answer what was sent.
 
     ``text`` is the caller's own content — the Editor's buffer — and ``None``
     means "read the file". An empty string is a legitimate buffer (a file the
@@ -52,7 +75,8 @@ async def sync_document(
         path.suffix
     )
     version = store.next_version(uri)
-    if store.version(uri) is None:
+    first_open = store.version(uri) is None
+    if first_open:
         store.add(uri, version, text, language_id)
         session.client.text_document_did_open(
             lsp.DidOpenTextDocumentParams(
@@ -76,7 +100,14 @@ async def sync_document(
                 ],
             )
         )
-    return uri
+    # ``text_version`` is the version the text *now on the server* was sent at:
+    # this one when the sync changed the text, the previous one when it
+    # re-sent what was already there. A caller compares an inbox payload's
+    # version against it to tell "an analysis of this text" from "an analysis
+    # of text this sync replaced".
+    text_version = store.text_version(uri)
+    assert text_version is not None  # just written above
+    return DocumentSync(uri=uri, version=version, text_version=text_version)
 
 
 def position(arguments: Dict[str, Any]) -> Any:
@@ -148,7 +179,7 @@ async def run_action(
     from lsprotocol import types as lsp
 
     root = Path(session.info["workspaceRoot"]).resolve()
-    uri = await sync_document(session, path)
+    uri = (await sync_document(session, path)).uri
     document = lsp.TextDocumentIdentifier(uri=uri)
 
     if action == "diagnostics":

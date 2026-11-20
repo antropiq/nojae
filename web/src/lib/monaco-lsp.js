@@ -23,12 +23,16 @@
 //     the scheme is what the providers are registered against (spec §6).
 //
 // The browser never speaks LSP (spec §4.1): the shapes below are the app's own
-// vocabulary, and no LSP method name or JSON-RPC frame appears in this file.
+// vocabulary, and no LSP method name or JSON-RPC frame appears in this file —
+// the wire it maps is `POST /api/lsp/query`'s, and the hub is what speaks LSP.
 //
-// The diagnostics mapping — a wire diagnostic
-// `{line, character, endLine, endCharacter, severity, message, source, code}`
-// to a Monaco marker — belongs to the diagnostics increment (spec §4.7, §4.11)
-// and is deliberately absent here.
+// The diagnostics mapping lives here too: a wire item
+// `{range: {start, end}, severity, message, code?, source?}` to a Monaco
+// marker, plus the severity rule and the counts the Editor's status bar shows
+// (spec §4.7, §4.11, D7). It is here because this module owns the `+1`, and a
+// marker needs it at both ends of a range; the rule that markers are replaced
+// whole, so a fixed defect's underline disappears, is a property of
+// `markersForDiagnostics` never merging with a previous list.
 
 // The scheme every model in the Editor's code pane is created with, and the one
 // the three providers are registered against — so they answer for this pane's
@@ -132,4 +136,130 @@ export function wireHoverToMonaco(hover) {
 export function revealFor(location) {
   const mapped = wireLocationToMonaco(location)
   return mapped ? { line: mapped.lineNumber, column: mapped.column } : null
+}
+
+// The four marker severities, by the names the wire uses, with Monaco's own
+// numeric values. They are written out rather than imported from
+// `monaco-editor` because this module stays free of the editor — the pin
+// against the bundled enum lives in `tests/monacoLspUri.test.js`, so a version
+// bump that moved one fails there.
+export const MARKER_SEVERITY = Object.freeze({
+  error: 8,
+  warning: 4,
+  info: 2,
+  hint: 1,
+})
+
+// A wire severity -> Monaco's marker severity. The wire spells it by name: the
+// server's number was resolved to a name once, on the backend, where an omitted
+// severity reads as an error (`lsphub/rendering.py`) — this repeats that answer
+// rather than inventing a second one, and an unknown name lands on the same
+// place. One rule, both sides of the wire.
+export function markerSeverityFor(severity) {
+  return MARKER_SEVERITY[severity] ?? MARKER_SEVERITY.error
+}
+
+// D7: errors and warnings are underlined, hints and information are counted
+// only. Stated here once, because two consumers ask it — the markers, which are
+// drawn from this predicate, and the bar's counts, which are not (spec §5 D7).
+export function isUnderlined(item) {
+  const severity = markerSeverityFor(item?.severity)
+  return severity === MARKER_SEVERITY.error || severity === MARKER_SEVERITY.warning
+}
+
+// The counts the bar shows for a buffer's items: `errors`, `warnings`, and the
+// `total`. The total counts **every** item the server reported — hints and
+// information included — so an error/warning count alone is never mistaken for
+// how much the server said. Counted from the answer's items, not from the
+// marker set: a hint has a count and no underline, by D7.
+export function diagnosticCounts(items) {
+  const counts = { errors: 0, warnings: 0, total: 0 }
+  for (const item of Array.isArray(items) ? items : []) {
+    const severity = markerSeverityFor(item?.severity)
+    if (severity === MARKER_SEVERITY.error) counts.errors += 1
+    else if (severity === MARKER_SEVERITY.warning) counts.warnings += 1
+    counts.total += 1
+  }
+  return counts
+}
+
+// D5's rule, stated once: **is Monaco's built-in JavaScript/TypeScript engine to
+// be silenced for this buffer?**
+//
+// The answer to "does a declared server answer for this path" is not decided
+// here and must not be: it is the bar's own `status` answer, which the hub gives
+// from its own state (its off and errored vocabulary included). This function
+// only *reads* that answer, so the browser never grows a second path→server rule
+// and nothing is compressed to a boolean that loses the reasons the bar shows.
+//
+// Two arguments, because the bar's answer is **keyed by the path it was asked
+// about**: `asked` is that stored pair (`{ path, answer }` of
+// `useEditorStatus`'s state) and `path` is the buffer on screen. An answer about
+// any other path is not an answer about this one, so it cannot silence this
+// buffer.
+//
+// The result is either `null` — *hand the question back to the defaults*, i.e.
+// today's behaviour, unbent — or the override itself. The override always covers
+// **both** halves, because a file with a declared server should speak with one
+// voice: syntactic validation and semantic validation are silenced together or
+// not at all.
+export function builtinValidationOverride(asked, path) {
+  if (!path || !asked || asked.path !== path) return null
+  const answer = asked.answer
+  if (!answer || answer.status !== 'ok' || !answer.server) return null
+  return { syntactic: false, semantic: false }
+}
+
+// Whether a wire coordinate is one Monaco can be handed: two non-negative
+// integers. Anything else would be converted into a position near line 0, which
+// Monaco clamps into real code — a squiggle on innocent lines.
+function isWirePosition(position) {
+  return (
+    !!position &&
+    typeof position === 'object' &&
+    Number.isInteger(position.line) &&
+    Number.isInteger(position.character) &&
+    position.line >= 0 &&
+    position.character >= 0
+  )
+}
+
+// One wire item -> one Monaco marker, or `null` for a shape this module cannot
+// map. Both ends go through `lspPositionToMonaco`, the one `+1`; the message
+// travels verbatim (the last place the server's words are still words before a
+// tooltip), and `code`/`source` are carried only when the server gave them — an
+// absent field stays absent rather than becoming a `null` rendered as text.
+export function markerForDiagnostic(item) {
+  if (!item || typeof item !== 'object') return null
+  const range = item.range
+  if (!range || !isWirePosition(range.start) || !isWirePosition(range.end)) {
+    return null
+  }
+  const start = lspPositionToMonaco(range.start)
+  const end = lspPositionToMonaco(range.end)
+  const marker = {
+    startLineNumber: start.lineNumber,
+    startColumn: start.column,
+    endLineNumber: end.lineNumber,
+    endColumn: end.column,
+    severity: markerSeverityFor(item.severity),
+    message: typeof item.message === 'string' ? item.message : String(item.message ?? ''),
+  }
+  if (item.code != null) marker.code = item.code
+  if (item.source != null) marker.source = item.source
+  return marker
+}
+
+// A buffer's whole marker set: the items D7 underlines, in the server's order,
+// with the unmappable ones dropped. It never looks at a previous list and keeps
+// no memory, so replacing the set whole — the property that makes a fixed
+// defect's underline disappear (spec §6) — is structural here, not lucky.
+export function markersForDiagnostics(items) {
+  const markers = []
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!isUnderlined(item)) continue
+    const marker = markerForDiagnostic(item)
+    if (marker) markers.push(marker)
+  }
+  return markers
 }

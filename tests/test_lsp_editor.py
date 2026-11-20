@@ -35,6 +35,7 @@ from src.core.lsphub import (
     EDITOR_ACTIONS,
     DocumentStore,
     LspManager,
+    diagnostics_answer,
     hover_answer,
     location_answer,
     references_answer,
@@ -84,8 +85,14 @@ def _location(relative: str, line: int, character: int) -> lsp.Location:
 
 
 class TestEditorActions:
-    def test_holds_exactly_the_four_editor_actions(self):
-        assert set(EDITOR_ACTIONS) == {"status", "definition", "hover", "references"}
+    def test_holds_exactly_the_five_editor_actions(self):
+        assert set(EDITOR_ACTIONS) == {
+            "status",
+            "diagnostics",
+            "definition",
+            "hover",
+            "references",
+        }
 
     def test_every_entry_names_its_method_capability_and_position_need(self):
         for action, spec in EDITOR_ACTIONS.items():
@@ -96,6 +103,19 @@ class TestEditorActions:
         assert EDITOR_ACTIONS["status"]["method"] is None
         assert EDITOR_ACTIONS["status"]["capability"] is None
         assert EDITOR_ACTIONS["status"]["needs_position"] is False
+
+    def test_diagnostics_is_a_query_from_the_inbox_with_no_capability_gate(self):
+        """A push notification is not a capability anything advertises (§3.1).
+
+        So the action is *always offered* — the same rule the model's own
+        diagnostics tool follows — and it names no request method, because it
+        sends none: the inbox the notification handler fills is the answer.
+        """
+        assert EDITOR_ACTIONS["diagnostics"]["method"] is None
+        assert EDITOR_ACTIONS["diagnostics"]["capability"] is None
+        assert EDITOR_ACTIONS["diagnostics"]["needs_position"] is False
+        assert supports_action(None, "diagnostics") is True
+        assert supports_action(lsp.ServerCapabilities(), "diagnostics") is True
 
     def test_the_query_actions_map_to_their_lsp_methods(self):
         assert EDITOR_ACTIONS["definition"]["method"] == "textDocument/definition"
@@ -118,6 +138,23 @@ class TestEditorActions:
         assert not {"document_symbols", "workspace_symbols", "formatting"} & set(
             EDITOR_ACTIONS
         )
+
+    def test_the_two_diagnostics_answers_do_not_share_a_shape(self):
+        """They overlap on the name and on nothing else (spec §3, §3.1).
+
+        The model keeps its rendered, truncated text report; the pane gets
+        structured items. The pane's entry must not have leaked into the
+        model's table either — the model's ``diagnostics`` is the one that was
+        already there, with its own schema and description.
+        """
+        from src.core.lsphub import TOOL_SPECS
+
+        assert "diagnostics" in EDITOR_ACTIONS and "diagnostics" in TOOL_SPECS
+        # The model's tool is a rendered text answer, so its capability entry
+        # says "push notification, always offered" — and it keeps its schema.
+        assert TOOL_SPECS["diagnostics"]["schema"]["required"] == ["path"]
+        assert "schema" not in EDITOR_ACTIONS["diagnostics"]
+        assert "description" not in EDITOR_ACTIONS["diagnostics"]
 
 
 class TestSupportsAction:
@@ -243,6 +280,150 @@ class TestHoverAnswer:
         assert hover_answer(SimpleNamespace(contents=None)) is None
 
 
+class TestDiagnosticsAnswer:
+    """The pane's structured answer, built from one inbox entry.
+
+    The three states of spec §4 are the whole point: *nothing analysed yet* is
+    an ``analysed: False`` result (a normal ``ok`` answer, never an error), an
+    empty item list on ``analysed: True`` is *clean*, and items are the problems.
+    """
+
+    def test_no_payload_is_not_analysed_rather_than_clean(self):
+        answer = diagnostics_answer(None, 40)
+        assert answer["analysed"] is False
+        assert answer["items"] == []
+        assert answer["suppressed"] == 0
+        # No version when there is no payload: there is nothing it belongs to.
+        assert "version" not in answer
+
+    def test_an_empty_payload_is_analysed_and_clean(self):
+        answer = diagnostics_answer((7, []), 40)
+        assert answer == {
+            "analysed": True,
+            "version": 7,
+            "items": [],
+            "suppressed": 0,
+        }
+
+    def test_items_carry_a_zero_based_range_severity_message_code_and_source(self):
+        diagnostic = lsp.Diagnostic(
+            range=_range(2, 4, 2, 9),
+            severity=lsp.DiagnosticSeverity.Warning,
+            message="unused variable",
+            code="F841",
+            source="pyright",
+        )
+        answer = diagnostics_answer((3, [diagnostic]), 40)
+
+        assert answer["analysed"] is True
+        assert answer["version"] == 3
+        assert answer["items"] == [
+            {
+                "range": {
+                    "start": {"line": 2, "character": 4},
+                    "end": {"line": 2, "character": 9},
+                },
+                "severity": "warning",
+                "message": "unused variable",
+                "code": "F841",
+                "source": "pyright",
+            }
+        ]
+        assert answer["suppressed"] == 0
+
+    def test_code_and_source_are_absent_when_the_server_gave_none(self):
+        diagnostic = lsp.Diagnostic(
+            range=_range(0, 0, 0, 1),
+            severity=lsp.DiagnosticSeverity.Error,
+            message="boom",
+        )
+        [item] = diagnostics_answer((1, [diagnostic]), 40)["items"]
+        assert "code" not in item
+        assert "source" not in item
+
+    def test_an_omitted_severity_reads_as_an_error(self):
+        """The rule is the rendering module's, reused rather than restated."""
+        diagnostic = lsp.Diagnostic(range=_range(0, 0, 0, 1), message="boom")
+        assert diagnostics_answer((1, [diagnostic]), 40)["items"][0]["severity"] == "error"
+
+    def test_no_item_carries_a_path(self):
+        """A payload is per document, and the caller asked about one file."""
+        diagnostic = lsp.Diagnostic(
+            range=_range(0, 0, 0, 1),
+            severity=lsp.DiagnosticSeverity.Error,
+            message="boom",
+        )
+        assert "path" not in diagnostics_answer((1, [diagnostic]), 40)["items"][0]
+
+    def test_the_cap_bounds_the_list_and_the_suppressed_count_is_honest(self):
+        diagnostics = [
+            lsp.Diagnostic(
+                range=_range(line, 0, line, 1),
+                severity=lsp.DiagnosticSeverity.Error,
+                message=f"problem {line}",
+            )
+            for line in range(5)
+        ]
+        answer = diagnostics_answer((2, diagnostics), 3)
+        assert [item["message"] for item in answer["items"]] == [
+            "problem 0",
+            "problem 1",
+            "problem 2",
+        ]
+        assert answer["suppressed"] == 2
+
+    def test_a_cap_above_the_count_suppresses_nothing(self):
+        diagnostic = lsp.Diagnostic(
+            range=_range(0, 0, 0, 1),
+            severity=lsp.DiagnosticSeverity.Error,
+            message="boom",
+        )
+        assert diagnostics_answer((1, [diagnostic]), 40)["suppressed"] == 0
+
+    def test_a_payload_older_than_the_sync_is_not_analysed_rather_than_stale(self):
+        """The lagging inbox, in one call: no verdict, and no version either.
+
+        After an edit the inbox still holds the previous analysis, and the
+        answer must be *unknown* rather than that analysis — the squiggle it
+        would paint belongs to text nobody is looking at. The result is shaped
+        exactly like a cold file's, so a client needs no fourth state.
+        """
+        diagnostic = lsp.Diagnostic(
+            range=_range(0, 0, 0, 1),
+            severity=lsp.DiagnosticSeverity.Error,
+            message="boom",
+        )
+        answer = diagnostics_answer((4, [diagnostic]), 40, oldest_version=5)
+        assert answer == {"analysed": False, "items": [], "suppressed": 0}
+
+    def test_a_payload_at_or_after_the_sync_is_the_verdict(self):
+        """A re-ask about the same text keeps the held analysis.
+
+        ``oldest_version`` is only ever the version a *changed* sync sent, so a
+        payload from that version onwards describes what is on screen.
+        """
+        diagnostic = lsp.Diagnostic(
+            range=_range(0, 0, 0, 1),
+            severity=lsp.DiagnosticSeverity.Error,
+            message="boom",
+        )
+        assert diagnostics_answer((5, [diagnostic]), 40, oldest_version=5)["analysed"] is True
+        assert diagnostics_answer((6, [diagnostic]), 40, oldest_version=5)["analysed"] is True
+
+    def test_an_unversioned_payload_is_accepted_rather_than_guessed_stale(self):
+        """A server that publishes no version gives nothing to compare."""
+        diagnostic = lsp.Diagnostic(range=_range(0, 0, 0, 1), message="boom")
+        answer = diagnostics_answer((None, [diagnostic]), 40, oldest_version=5)
+        assert answer["analysed"] is True
+        assert answer["items"][0]["message"] == "boom"
+
+    def test_no_oldest_version_keeps_the_held_payload(self):
+        """The default is "this sync changed nothing", so it hides nothing."""
+        diagnostic = lsp.Diagnostic(range=_range(0, 0, 0, 1), message="boom")
+        assert diagnostics_answer((1, [diagnostic]), 40)["analysed"] is True
+        assert diagnostics_answer((1, [diagnostic]), 40, oldest_version=None)["analysed"] is True
+
+
 class _RecordingClient:
     """A pygls client stand-in that records the sync notifications it is sent."""
 
@@ -283,8 +464,11 @@ class TestSyncDocumentText:
         document = tmp_path / "a.py"
         document.write_text("from disk\n", encoding="utf-8")
         session = _session()
-        uri = await sync_document(session, document)
-        assert uri == uris.from_fs_path(str(document))
+        sync = await sync_document(session, document)
+        assert sync.uri == uris.from_fs_path(str(document))
+        assert sync.version == 1
+        # A first open sends new text, so the two versions coincide.
+        assert sync.text_version == 1
         assert _synced_text(session) == "from disk\n"
         assert len(session.client.opened) == 1
         assert session.client.changed == []
@@ -325,6 +509,41 @@ class TestSyncDocumentText:
         assert len(session.client.opened) == 1
         assert len(session.client.changed) == 1
         assert _synced_text(session) == "second\n"
+
+    @pytest.mark.anyio
+    async def test_an_identical_text_reports_the_version_that_text_was_sent_at(
+        self, tmp_path
+    ):
+        """A re-ask about the text the server already holds moves nothing.
+
+        The document version still bumps — the shared sync does that on every
+        call, and D4's named trap depends on it — but ``text_version`` stays
+        where the text was sent, which is what the diagnostics answer compares
+        an inbox payload against.
+        """
+        document = tmp_path / "a.py"
+        document.write_text("same\n", encoding="utf-8")
+        session = _session()
+        first = await sync_document(session, document, text="same\n")
+        second = await sync_document(session, document, text="same\n")
+
+        assert first.text_version == first.version
+        assert second.version == first.version + 1
+        # Unchanged text: the floor does not move with the bump.
+        assert second.text_version == first.version
+        assert _synced_text(session) == "same\n"
+
+    @pytest.mark.anyio
+    async def test_a_changed_text_moves_the_text_version_with_the_sync(self, tmp_path):
+        """New bytes are a new floor: no older payload describes them."""
+        document = tmp_path / "a.py"
+        document.write_text("first\n", encoding="utf-8")
+        session = _session()
+        await sync_document(session, document, text="first\n")
+        second = await sync_document(session, document, text="second\n")
+
+        assert second.version == 2
+        assert second.text_version == 2
 
     @pytest.mark.anyio
     async def test_text_over_the_cap_is_refused_and_nothing_is_synced(self, tmp_path):
@@ -726,6 +945,334 @@ class TestEditorBufferIsTheSourceOfTruth:
         assert _diagnostic_lines(published) == [1]
 
 
+class TestEditorDiagnosticsAnswer:
+    """The pane's own structured problems, answered from the inbox without waiting.
+
+    Not the model's rendered text report (§3): the pane reads structured items,
+    and the answer distinguishes *not analysed yet* from *analysed and clean*
+    from *analysed, N problems* (spec §4).
+    """
+
+    @pytest.mark.anyio
+    async def test_a_cold_file_answers_not_analysed_rather_than_clean(
+        self, hub, workspace
+    ):
+        """The middle row of spec §4 table, and the proof that nothing waited.
+
+        The fake publishes as soon as the document is opened, so a *waiting*
+        implementation would have DIAGNOSTICS_WAIT_SECONDS to receive that
+        publish and would answer the problems. It answers ``analysed: False``
+        because the inbox is read at once — the publish is only readable on a
+        later pass of the hub's loop — which is exactly why an empty item list
+        on a cold file must not be presented as a verdict.
+        """
+        await _start(hub, _fake_server_entry(workspace.parent))
+        (workspace / "a.py").write_text("x = 1\nBUG here\n", encoding="utf-8")
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert answer["status"] == "ok"
+        assert answer["server"] == "fake"
+        assert answer["reason"] is None
+        assert answer["action"] == "diagnostics"
+        assert answer["result"]["analysed"] is False
+        assert answer["result"]["items"] == []
+        assert "version" not in answer["result"]
+
+    @pytest.mark.anyio
+    async def test_a_later_call_answers_the_problems_the_server_published(
+        self, hub, workspace
+    ):
+        """The push the hub already holds is the answer, in the pane's own shape.
+
+        The fake publishes one diagnostic per line containing ``BUG``; that is
+        the fixture's handle on a real publish, so nothing here mocks the inbox.
+        """
+        await _start(hub, _fake_server_entry(workspace.parent))
+        document = workspace / "a.py"
+        document.write_text("clean\nBUG here\n", encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        # The first call is what opens (and thus gets analysed) the document.
+        cold = hub.query_editor_sync("diagnostics", "a.py")
+        assert cold["result"]["analysed"] is False
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert answer["status"] == "ok", answer["reason"]
+        result = answer["result"]
+        assert result["analysed"] is True
+        assert result["items"] == [
+            {
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 3},
+                },
+                "severity": "error",
+                "message": "found a BUG here",
+                "code": "fake001",
+                "source": "fakeserver",
+            }
+        ]
+        assert result["suppressed"] == 0
+
+    @pytest.mark.anyio
+    async def test_the_answer_carries_the_version_it_belongs_to(self, hub, workspace):
+        """D4: the client compares successive answers, so the version must be usable.
+
+        The payload belongs to the version that was published, which is
+        *strictly older* than the document's current version once the shared
+        sync has bumped it. The guard is therefore "an older answer is stale",
+        never "the payload's version equals the current one" — D4's named trap.
+        """
+        await _start(hub, _fake_server_entry(workspace.parent))
+        document = workspace / "a.py"
+        document.write_text("BUG here\n", encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["analysed"] is False
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+        published_version = hub._sessions["fake"].inbox.peek(uri)[0]
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert answer["result"]["version"] == published_version
+        # The sync that preceded this call moved the document on, so the two
+        # numbers are *not* equal — and the answer is still a good one.
+        live_version = hub._sessions["fake"].documents.version(uri)
+        assert live_version > answer["result"]["version"]
+
+    @pytest.mark.anyio
+    async def test_an_edit_does_not_answer_the_previous_texts_problems(
+        self, hub, workspace
+    ):
+        """The lag that made the bar disagree with the code, driven for real.
+
+        The inbox is filled a loop turn after the sync, so right after an edit
+        it still holds the analysis of the *previous* text. Answering it would
+        report problems the buffer no longer has; the answer is therefore
+        *not analysed yet*, and the payload for the new version — which the
+        fake publishes — is the verdict once it lands.
+        """
+        await _start(hub, _fake_server_entry(workspace.parent))
+        document = workspace / "a.py"
+        document.write_text("BUG here\n", encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        # Open and let the fake's publish for the buggy text land.
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["analysed"] is False
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["items"]
+
+        # The fix, as the buffer the pane would send: the inbox still holds the
+        # buggy text's analysis, so this must not be presented as a verdict.
+        fixed = "clean now\n"
+        leaked = hub.query_editor_sync("diagnostics", "a.py", text=fixed)
+        assert leaked["result"]["analysed"] is False
+        assert leaked["result"]["items"] == []
+
+        # Once the new version's publish lands, the same text is analysed and
+        # clean — the fix is a verdict, not a silence.
+        deadline = time.monotonic() + 5.0
+        answer = None
+        while time.monotonic() < deadline:
+            answer = hub.query_editor_sync("diagnostics", "a.py", text=fixed)
+            if answer["result"]["analysed"]:
+                break
+            await asyncio.sleep(0.02)
+        assert answer is not None
+        assert answer["result"]["analysed"] is True
+        assert answer["result"]["items"] == []
+
+    @pytest.mark.anyio
+    async def test_a_re_ask_about_the_same_text_keeps_the_held_verdict(
+        self, hub, workspace
+    ):
+        """Only a *changed* text hides a held payload — the version bump is not it.
+
+        Every sync bumps the document version, so a rule comparing against the
+        current version would hide every answer (D4's trap). Unchanged text
+        leaves the held analysis describing exactly what is open.
+        """
+        await _start(hub, _fake_server_entry(workspace.parent))
+        document = workspace / "a.py"
+        document.write_text("BUG here\n", encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["analysed"] is False
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["analysed"] is True
+
+        again = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert again["result"]["analysed"] is True
+        assert [item["message"] for item in again["result"]["items"]] == [
+            "found a BUG here"
+        ]
+
+    @pytest.mark.anyio
+    async def test_a_clean_buffer_is_analysed_and_empty(self, hub, workspace):
+        await _start(hub, _fake_server_entry(workspace.parent))
+        document = workspace / "a.py"
+        document.write_text("x = 1\n", encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["analysed"] is False
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert answer["status"] == "ok", answer["reason"]
+        assert answer["result"]["analysed"] is True
+        assert answer["result"]["items"] == []
+
+    @pytest.mark.anyio
+    async def test_the_buffer_is_what_gets_analysed(self, hub, workspace):
+        """Unsaved edits are analysed as written (§6): the disk copy is clean."""
+        await _start(hub, _fake_server_entry(workspace.parent))
+        document = workspace / "a.py"
+        document.write_text("clean\n", encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        hub.query_editor_sync(
+            "diagnostics", "a.py", text="clean\nclean\nBUG in the buffer\n"
+        )
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+        answer = hub.query_editor_sync(
+            "diagnostics", "a.py", text="clean\nclean\nBUG in the buffer\n"
+        )
+
+        assert answer["status"] == "ok", answer["reason"]
+        assert [item["range"]["start"]["line"] for item in answer["result"]["items"]] == [2]
+        # Nothing here writes: the file still holds what it held.
+        assert document.read_text(encoding="utf-8") == "clean\n"
+
+    @pytest.mark.anyio
+    async def test_the_per_server_cap_bounds_the_list_and_counts_the_rest(
+        self, hub, workspace
+    ):
+        """The same cap the model's tool applies — not a browser-specific number."""
+        entry = _fake_server_entry(workspace.parent)
+        assert entry["maxDiagnostics"] == 10
+        await _start(hub, entry)
+        document = workspace / "a.py"
+        document.write_text("BUG\n" * 12, encoding="utf-8")
+        uri = uris.from_fs_path(str(document)) or ""
+
+        assert hub.query_editor_sync("diagnostics", "a.py")["result"]["analysed"] is False
+        assert await _published_diagnostics(hub, "fake", uri) is not None
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert len(answer["result"]["items"]) == 10
+        assert answer["result"]["suppressed"] == 2
+
+    @pytest.mark.anyio
+    async def test_no_pull_request_is_sent_even_when_the_server_advertises_pull(
+        self, hub, workspace
+    ):
+        """§3.1: the deadline belongs to the model's tool, not to the pane.
+
+        The fake knows no ``textDocument/diagnostic`` method — it answers an
+        error for one — so a pull sent on the pane's behalf would surface as a
+        failed query instead of "not analysed yet". The session is marked as
+        pull-capable to prove the flag changes nothing here.
+        """
+        await _start(hub, _fake_server_entry(workspace.parent))
+        hub._sessions["fake"].pull_diagnostics = True
+        (workspace / "a.py").write_text("BUG here\n", encoding="utf-8")
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert answer["status"] == "ok", answer["reason"]
+        assert answer["result"]["analysed"] is False
+
+
+class TestEditorDiagnosticsQuietAnswers:
+    """Every "nothing to answer" shape, in the envelope's existing vocabulary."""
+
+    @pytest.mark.anyio
+    async def test_a_file_no_server_claims_is_a_quiet_no_server(self, hub, workspace):
+        await _start(hub, _fake_server_entry(workspace.parent))
+        (workspace / "notes.txt").write_text("hi\n", encoding="utf-8")
+
+        answer = hub.query_editor_sync("diagnostics", "notes.txt")
+
+        assert answer["status"] == "no_server"
+        assert answer["server"] is None
+        assert answer["result"] is None
+        assert answer["reason"] == "no active language server handles .txt"
+
+    @pytest.mark.anyio
+    async def test_a_switched_off_server_is_a_quiet_no_server(self, hub, workspace):
+        await _start(hub, _fake_server_entry(workspace.parent))
+        (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+        answer = hub.query_editor_sync(
+            "diagnostics", "a.py", allowed_ids=["some-other-server"]
+        )
+
+        assert answer["status"] == "no_server"
+        assert answer["server"] is None
+        assert answer["result"] is None
+
+    @pytest.mark.anyio
+    async def test_an_errored_server_names_its_own_error(self, hub, workspace):
+        entry = _fake_server_entry(workspace.parent)
+        entry["command"] = ["/nonexistent/langserver"]
+        await _start(hub, entry)
+        (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+
+        assert answer["status"] == "no_server"
+        assert answer["server"] is None
+        assert answer["result"] is None
+        assert answer["reason"].startswith("fake is error: ")
+
+    @pytest.mark.anyio
+    async def test_a_server_still_starting_answers_starting_without_waiting(
+        self, hub, workspace
+    ):
+        entry = _fake_server_entry(
+            workspace.parent, "fake", "--slow-init", "2.0", lazy=True
+        )
+        _declare(hub, entry)
+        (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+        started = time.monotonic()
+        answer = hub.query_editor_sync("diagnostics", "a.py")
+        elapsed = time.monotonic() - started
+
+        assert answer["status"] == "starting"
+        assert answer["server"] == "fake"
+        assert answer["result"] is None
+        assert elapsed < 1.0, f"the query waited {elapsed:.2f}s for the handshake"
+
+        for _ in range(200):
+            if hub.server_status("fake") in ("running", "error"):
+                break
+            await asyncio.sleep(0.05)
+        assert hub.server_status("fake") == "running", hub._servers["fake"]["error"]
+
+    @pytest.mark.anyio
+    async def test_a_hidden_path_answers_the_trees_own_absence(self, hub, workspace):
+        await _start(hub, _fake_server_entry(workspace.parent))
+        (workspace / "secret.py").write_text("BUG\n", encoding="utf-8")
+        _write_policy(workspace, [{"path": "secret.py", "mode": "hidden"}])
+
+        with pytest.raises(WorkspacePathError) as tree_verdict:
+            resolve_in_workspace("secret.py")
+
+        answer = hub.query_editor_sync("diagnostics", "secret.py")
+
+        assert answer["status"] == "no_server"
+        assert answer["result"] is None
+        assert answer["reason"] == tree_verdict.value.detail
+        assert "hidden" not in answer["reason"]
+
+
 class TestEditorColdServer:
     @pytest.mark.anyio
     async def test_a_stopped_lazy_server_answers_starting_without_blocking(
@@ -969,6 +1516,45 @@ class TestEditorQueryRoute:
 
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
+
+    def test_the_route_answers_the_structured_diagnostics_envelope(
+        self, editor_client, tmp_path
+    ):
+        """The structured items reach the browser — not the model's text report."""
+        client, _app, _manager = editor_client
+        (tmp_path / "workspace" / "a.py").write_text("BUG here\n", encoding="utf-8")
+
+        cold = client.post(
+            "/api/lsp/query", json={"action": "diagnostics", "path": "a.py"}
+        )
+        assert cold.status_code == 200
+        assert cold.json()["status"] == "ok"
+        assert cold.json()["result"] == {
+            "analysed": False,
+            "items": [],
+            "suppressed": 0,
+        }
+        # Not the model's rendered text — a dict of items, never a prompt report.
+        assert not isinstance(cold.json()["result"], str)
+
+        answer = client.post(
+            "/api/lsp/query", json={"action": "diagnostics", "path": "a.py"}
+        ).json()
+
+        assert answer["status"] == "ok", answer["reason"]
+        assert answer["result"]["analysed"] is True
+        assert answer["result"]["items"] == [
+            {
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 3},
+                },
+                "severity": "error",
+                "message": "found a BUG here",
+                "code": "fake001",
+                "source": "fakeserver",
+            }
+        ]
 
     def test_the_route_answers_quietly_when_the_hub_is_absent(
         self, editor_client, tmp_path

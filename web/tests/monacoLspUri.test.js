@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import * as monaco from 'monaco-editor'
 
-import { editorUriFor, pathForEditorUri } from '../src/lib/monaco-lsp'
+import { MARKER_SEVERITY, editorUriFor, pathForEditorUri } from '../src/lib/monaco-lsp'
 
 // ---------------------------------------------------------------------------
 // The URI derivation against Monaco's *real* `Uri`, not a stand-in.
@@ -49,5 +49,18 @@ describe('the Monaco API the surface uses', () => {
     expect(typeof monaco.languages.registerReferenceProvider).toBe('function')
     expect(typeof monaco.Range).toBe('function')
     expect(typeof monaco.editor.createModel).toBe('function')
+  })
+
+  // `lib/monaco-lsp.js` spells the four marker severities out rather than
+  // importing the enum, so that it stays free of the editor. This is the pin
+  // that keeps those literals honest: a version bump that renumbered one would
+  // otherwise fail only in the browser, as a squiggle in the wrong colour.
+  it('agrees with the bundled MarkerSeverity enum', () => {
+    expect(MARKER_SEVERITY).toEqual({
+      error: monaco.MarkerSeverity.Error,
+      warning: monaco.MarkerSeverity.Warning,
+      info: monaco.MarkerSeverity.Info,
+      hint: monaco.MarkerSeverity.Hint,
+    })
   })
 })

@@ -101,7 +101,15 @@ class DocumentStore:
         return (entry["version"] + 1) if entry else 1
 
     def add(self, uri: str, version: int, text: str, language_id: str) -> None:
-        self._docs[uri] = {"version": version, "text": text, "languageId": language_id}
+        self._docs[uri] = {
+            "version": version,
+            "text": text,
+            "languageId": language_id,
+            # The version this text was sent at. It starts equal to the
+            # document's version and only falls behind when a later sync sends
+            # the *same* text again, which is the whole point of keeping it.
+            "textVersion": version,
+        }
         self.touch(uri)
 
     def update(self, uri: str, version: int, text: str) -> None:
@@ -109,9 +117,23 @@ class DocumentStore:
         if entry is None:
             self.add(uri, version, text, "")
             return
+        if entry["text"] != text:
+            # New text: this version is the one an analysis must be from to
+            # describe what is open (``text_version``).
+            entry["textVersion"] = version
         entry["version"] = version
         entry["text"] = text
         self.touch(uri)
+
+    def text_version(self, uri: str) -> Optional[int]:
+        """The version the text the server holds was sent at (``None`` if none).
+
+        Never ahead of :meth:`version`, and equal to it unless a sync re-sent
+        the same text — which is what makes a lagging ``publishDiagnostics``
+        payload describable as *older than the text on screen*.
+        """
+        entry = self._docs.get(uri)
+        return entry["textVersion"] if entry else None
 
     def text(self, uri: str) -> Optional[str]:
         entry = self._docs.get(uri)

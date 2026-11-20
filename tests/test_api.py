@@ -972,6 +972,17 @@ class TestAgentCreate:
         assert response.status_code == 422
         assert "label" in response.json()["detail"]
 
+    def test_an_omitted_label_is_the_same_422_not_a_crash(self, client):
+        """A create states its label; the route's own guard says so in words.
+
+        The body model defaults ``label`` to ``None``, and a create must refuse
+        that as a 422 naming the field — which is what makes the label the route
+        then hands the store a stated one.
+        """
+        response = client.post("/api/agents/add", json={"id": "nothing"})
+        assert response.status_code == 422
+        assert "label" in response.json()["detail"]
+
     def test_a_persona_over_the_byte_cap_is_422_naming_the_field(
         self, client, monkeypatch: pytest.MonkeyPatch
     ):

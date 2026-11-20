@@ -3,13 +3,15 @@ import { ref } from 'vue'
 import WorkspaceNavigator from './WorkspaceNavigator.vue'
 import EditorArea from './EditorArea.vue'
 import EditorNoticeStack from './EditorNoticeStack.vue'
+import EditorStatusBar from './EditorStatusBar.vue'
 import EditorTerminal from './EditorTerminal.vue'
 import { useSplitter } from '../composables/useSplitter.js'
 
-// The Editor tab's shell: navigator on the left at full height, the code pane
-// in the centre, the terminal strip along the bottom — a grid whose tracks are
-// sized by the two splitters below. Each region owns its own state in a
-// composable, so this component only lays them out and moves the borders.
+// The Editor tab's shell: navigator on the left (down to the status bar), the
+// code pane in the centre, the terminal strip under it and the status bar
+// along the very bottom, full width — a grid whose tracks are sized by the two
+// splitters below. Each region owns its own state in a composable, so this
+// component only lays them out and moves the borders.
 //
 // The navigator keeps its own state in useWorkspaceTree, so the whole view
 // staying mounted (App.vue's v-show) is what preserves open files and, later,
@@ -119,6 +121,12 @@ const navOpen = ref(true)
     ></div>
 
     <EditorTerminal ref="terminal" class="editor-terminal-slot" />
+
+    <!-- The status bar: the last child of the shell, so it belongs to the
+         Editor *screen* (tree, pane and terminal alike) and sits below all of
+         them — the same placement argument the notice stack below makes. It is
+         chrome, not a fourth pane: not resizable, and nothing goes under it. -->
+    <EditorStatusBar />
 
     <!-- The write-feedback stack. Mounted here rather than in EditorArea so it
          belongs to the Editor *screen* (tree, pane and terminal alike) instead

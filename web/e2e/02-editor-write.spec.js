@@ -1045,3 +1045,167 @@ test('the find widget buttons show Monaco own icons', async ({ page }) => {
       'the codicon face is loaded')
     .toBe(true)
 })
+
+// A tab switch is the pane's own model swap, and Monaco's scroll offset and
+// caret live on the *editor's* view model — which `setModel` replaces. So the
+// position a user was reading used to be lost the moment they looked at another
+// tab and came back, landing them at line 1 with no caret in sight.
+//
+// Only a browser can drive this: the facts under test are Monaco's own (its
+// virtualised scroller, its line-number gutter, its caret element), and neither
+// the swap nor the scroll has a DOM shape jsdom could reproduce. The mechanism
+// the app uses is Monaco's `saveViewState`/`restoreViewState`, and the unit
+// suite pins the *decisions* around it (`monacoEditorLsp.test.js`); what this
+// spec adds is that the position really survives in a real editor, twice, in
+// both directions.
+//
+// The two files are long enough that a deep line is off screen at the top: at
+// this pane's ~20px line height, a viewport shows around 25 lines, so line 400
+// is unambiguously "not the top".
+const LONG_A = `long-a.txt`
+const LONG_B = `long-b.txt`
+const LONG_LINES = 600
+const DEEP_LINE = 400
+
+// The line a file's body is built from, and the whole text: every line carries
+// its own number, so a screenshot or a gutter read says which line is on screen
+// without guessing.
+function numberedLines(count) {
+  return Array.from({ length: count }, (_, index) => `line ${index + 1} of the buffer`).join('\n')
+}
+
+// Where the pane is looking, read off Monaco's own DOM: the smallest line number
+// in the gutter is the first line the viewport shows, which is exactly the
+// question "did the page rewind to the top?" is about.
+//
+// The *caret* is read off the status bar rather than measured in Monaco's DOM:
+// it is the app's own report of `editor.getPosition()`, so it is an exact line
+// number, and it is the fact the user's ask is worded in ("the cursor is at the
+// position it was last used for this tab"). A box offset would only say "some
+// caret is visible".
+function readViewport(page) {
+  return page.evaluate(() => {
+    const numbers = [...document.querySelectorAll('.monaco-host .line-numbers')]
+      .map((el) => Number(el.textContent.trim()))
+      .filter((value) => Number.isFinite(value))
+    const bar = document.querySelector('.editor-status-bar')
+    const caret = /Ln (\d+), Col \d+/.exec(bar?.textContent ?? '')
+    return {
+      firstVisibleLine: numbers.length ? Math.min(...numbers) : null,
+      caretLine: caret ? Number(caret[1]) : null,
+    }
+  })
+}
+
+// Put the caret on a line through Monaco's own "go to line" gesture — a real
+// key sequence rather than a call into `editor.setPosition`, so what is tested
+// is what a user does.
+async function goToLine(page, line) {
+  await page.locator('.monaco-host .view-lines').first().click()
+  await page.keyboard.press('Control+g')
+  await page.keyboard.type(String(line))
+  await page.keyboard.press('Enter')
+  // The reveal is animated (`smoothScrolling`), so wait on the caret the app
+  // itself reports rather than on a fixed pause.
+  await expect
+    .poll(async () => (await readViewport(page)).caretLine)
+    .toBe(line)
+}
+
+test('a tab switch keeps each buffer at the position it was read at', async ({
+  page,
+  request,
+}) => {
+  await seedFile(request, LONG_A, numberedLines(LONG_LINES))
+  await seedFile(request, LONG_B, numberedLines(LONG_LINES))
+
+  await openEditor(page)
+  await openFolders(page)
+  // Two buffers, both opened from the tree while it is unfolded at the root.
+  await page.locator(`.tree-row[data-path="${LONG_A}"]`).first().click()
+  await expect(page.locator('.editor-tab.active')).toHaveAttribute('title', LONG_A)
+  await page.locator(`.tree-row[data-path="${LONG_B}"]`).first().click()
+  await expect(page.locator('.editor-tab.active')).toHaveAttribute('title', LONG_B)
+  await expect(page.locator('.editor-tab')).toHaveCount(2)
+
+  // Tab A, deep in the file. The active tab is B, so this is one switch first.
+  await page.locator('.editor-tab', { hasText: LONG_A }).locator('.editor-tab-name').click()
+  await expect(page.locator('.editor-tab.active')).toHaveAttribute('title', LONG_A)
+  await goToLine(page, DEEP_LINE)
+  const aDeep = await readViewport(page)
+  expect(aDeep.firstVisibleLine).toBeLessThan(DEEP_LINE)
+  expect(aDeep.caretLine).toBe(DEEP_LINE)
+
+  // Tab B: it starts at its own top — the state is per buffer, not a pane-wide
+  // scroll offset carried over from the file that was on screen.
+  await page.locator('.editor-tab', { hasText: LONG_B }).locator('.editor-tab-name').click()
+  await expect(page.locator('.editor-tab.active')).toHaveAttribute('title', LONG_B)
+  await expect
+    .poll(async () => (await readViewport(page)).firstVisibleLine)
+    .toBe(1)
+  expect((await readViewport(page)).caretLine, 'B starts with its caret at line 1').toBe(1)
+
+  // …and B's own deep position is remembered in turn.
+  await goToLine(page, DEEP_LINE)
+  const bDeep = await readViewport(page)
+
+  // Back to A: the last visited position, with the caret in it.
+  await page.locator('.editor-tab', { hasText: LONG_A }).locator('.editor-tab-name').click()
+  await expect(page.locator('.editor-tab.active')).toHaveAttribute('title', LONG_A)
+  await expect
+    .poll(async () => (await readViewport(page)).caretLine)
+    .toBe(aDeep.caretLine)
+  // The caret is on screen, not merely known: its line is inside the range the
+  // gutter shows, which is what "the last position is the one that is shown"
+  // means to a reader looking at the pane.
+  const aBack = await readViewport(page)
+  expect(aBack.firstVisibleLine).toBeLessThanOrEqual(aBack.caretLine)
+  expect(aBack.caretLine).toBeLessThan(aBack.firstVisibleLine + 40)
+
+  // And B kept its own, so this is two remembered positions rather than one.
+  await page.locator('.editor-tab', { hasText: LONG_B }).locator('.editor-tab-name').click()
+  await expect(page.locator('.editor-tab.active')).toHaveAttribute('title', LONG_B)
+  await expect
+    .poll(async () => (await readViewport(page)).caretLine)
+    .toBe(bDeep.caretLine)
+})
+
+// The strip's vertical shape, measured rather than asserted on a stylesheet:
+// the *centring* is what the browser's flexbox and line-box arithmetic decide,
+// and the culprit Pico's own `[type=button] { margin-bottom }` is only visible
+// once the two boxes are compared. The unit suite pins the rules that produce
+// this (`editorTabStripShape.test.js`); this checks the result a user sees.
+test('the tab chip centres its name and its ×', async ({ page, request }) => {
+  await seedFile(request, `centred.txt`, 'a line\n')
+
+  await openEditor(page)
+  await openFolders(page)
+  await page.locator('.tree-row[data-path="centred.txt"]').first().click()
+  const chip = page.locator('.editor-tab').first()
+  await expect(chip.locator('.editor-tab-label')).toHaveText('centred.txt')
+
+  const { chipBox, nameBox, closeBox } = await page.evaluate(() => {
+    const rect = (selector) => {
+      const box = document.querySelector(selector).getBoundingClientRect()
+      return { top: box.top, bottom: box.bottom, height: box.height }
+    }
+    return {
+      chipBox: rect('.editor-tab'),
+      nameBox: rect('.editor-tab-name'),
+      closeBox: rect('.editor-tab-close'),
+    }
+  })
+
+  // The two buttons fill the cell rather than sitting at its top — the state
+  // Pico's unexplained 1rem bottom margin used to break. A tolerance of one
+  // pixel absorbs sub-pixel rounding without letting a third of a rem through.
+  expect(Math.abs(nameBox.top - chipBox.top)).toBeLessThanOrEqual(1)
+  expect(Math.abs(closeBox.top - chipBox.top)).toBeLessThanOrEqual(1)
+  expect(Math.abs(nameBox.bottom - chipBox.bottom)).toBeLessThanOrEqual(1)
+  expect(Math.abs(closeBox.bottom - chipBox.bottom)).toBeLessThanOrEqual(1)
+
+  // And the strip is a little shorter than the 2.1rem it used to be — a bound,
+  // not an exact height, so a later nudge is still free.
+  const chipHeight = chipBox.height
+  expect(chipHeight).toBeLessThan(2.1 * 16)
+})

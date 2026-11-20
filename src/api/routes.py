@@ -279,7 +279,7 @@ class SamplerFieldsMixin(BaseModel):
         return level
 
 
-def _model_columns(body: BaseModel) -> Dict[str, Any]:
+def _model_columns(body: SamplerFieldsMixin) -> Dict[str, Any]:
     """The body's sampler columns, as the store write's keyword arguments.
 
     One mapping for the create and the update, because the two write the same
@@ -428,10 +428,10 @@ class LspIn(BaseModel):
 class LspQueryIn(BaseModel):
     """One Editor-pane question to the language-server hub.
 
-    ``action`` is the app's own vocabulary — ``status``, ``definition``,
-    ``hover`` or ``references`` — never an LSP method name: the hub is the only
-    thing that speaks the protocol. It is a plain string rather than a
-    ``Literal`` on purpose, because the editor's action table lives in
+    ``action`` is the app's own vocabulary — ``status``, ``diagnostics``,
+    ``definition``, ``hover`` or ``references`` — never an LSP method name: the
+    hub is the only thing that speaks the protocol. It is a plain string rather
+    than a ``Literal`` on purpose, because the editor's action table lives in
     ``core/lsphub/editor.py`` and a copy of it here would be a second authority
     that drifts; an action the table does not know is answered quietly by the
     hub, not refused with a 422.
@@ -1345,8 +1345,8 @@ async def _workspace_scope(
     # **not** an option — it turns the parameter into a pydantic field and the
     # router refuses to build ("Invalid args for response field"), which is what
     # the terminal's WebSocket route would fail on at import.
-    request: Request = None,
-    websocket: WebSocket = None,
+    request: Request = None,  # type: ignore[assignment]
+    websocket: WebSocket = None,  # type: ignore[assignment]
     workspace: Optional[str] = Query(
         default=None, alias=WORKSPACE_QUERY, include_in_schema=False
     ),
@@ -2120,7 +2120,7 @@ def build_router() -> APIRouter:
             )
         hub_set, _built = await _acquire_hub_set_async(request)
         manager = hub_set.mcp if hub_set is not None else None
-        if manager is None or not hasattr(manager, "restart"):
+        if hub_set is None or manager is None or not hasattr(manager, "restart"):
             raise HTTPException(status_code=503, detail="MCP hub is not available")
         await hub_set.restart_mcp()
         # The payload re-scans the file, so it re-derives the same validation
@@ -2264,7 +2264,7 @@ def build_router() -> APIRouter:
             )
         hub_set, _built = await _acquire_hub_set_async(request)
         manager = hub_set.lsp if hub_set is not None else None
-        if manager is None or not hasattr(manager, "restart"):
+        if hub_set is None or manager is None or not hasattr(manager, "restart"):
             raise HTTPException(status_code=503, detail="LSP hub is not available")
         await hub_set.restart_lsp()
         # The payload re-scans the file, so it re-derives the same validation
@@ -2277,13 +2277,19 @@ def build_router() -> APIRouter:
         """Answer one Editor-pane question about a buffer, as structured JSON.
 
         The Editor's code pane asks the hub one question at a time in the app's
-        own vocabulary — ``status``, ``definition``, ``hover``, ``references`` —
-        and gets back the envelope ``core/lsphub/editor.py`` defines: the
-        answering server's id, a one-line reason when there is none, and the
-        action's structured answer. No JSON-RPC crosses this boundary and no LSP
-        method name appears in the browser; the hub stays the only thing that
-        talks to a language server. The answer carries positions and hover text,
-        never file bytes — this is not a second file reader.
+        own vocabulary — ``status``, ``diagnostics``, ``definition``, ``hover``,
+        ``references`` — and gets back the envelope ``core/lsphub/editor.py``
+        defines: the answering server's id, a one-line reason when there is
+        none, and the action's structured answer. No JSON-RPC crosses this
+        boundary and no LSP method name appears in the browser; the hub stays
+        the only thing that talks to a language server. The answer carries
+        positions, hover text and diagnostic items, never file bytes — this is
+        not a second file reader.
+
+        ``diagnostics`` is answered from what the hub already holds, without
+        waiting: a cold file answers "not analysed yet" rather than blocking.
+        Waiting belongs to the model's tool, which has a deadline and a reader
+        expecting an answer (spec §3.1).
 
         A ``POST`` because the buffer's text travels with it when the buffer is
         dirty, and that can be large: a ``GET`` would put a megabyte in a query
@@ -3530,6 +3536,10 @@ def build_router() -> APIRouter:
         mid-turn cannot change what that turn says.
         """
         _require_usable_agent_fields(body, creating=True)
+        # A create refuses an absent label in words just above, so one is stated
+        # by here: this is that invariant made readable, not a second refusal.
+        label = body.label
+        assert label is not None
         try:
             agents = _agent_payload()["agents"]
             if any(agent["id"] == body.id for agent in agents):
@@ -3540,10 +3550,10 @@ def build_router() -> APIRouter:
                         "the id is derived from the label, so pick another label."
                     ),
                 )
-            _require_free_agent_label(body.label, agents)
+            _require_free_agent_label(label, agents)
             written = appdb.add_agent(
                 body.id,
-                body.label,
+                label,
                 max_tool_iteration=(
                     body.maxToolIteration
                     if body.maxToolIteration is not None

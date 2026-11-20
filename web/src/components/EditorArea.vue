@@ -12,6 +12,7 @@ import { useWorkspaceSearch } from '../composables/useWorkspaceSearch'
 import { useAppShell } from '../composables/useAppShell'
 import { useChat } from '../composables/useChat'
 import { useEditorMode } from '../composables/useEditorMode'
+import { useEditorDiagnostics } from '../composables/useEditorDiagnostics'
 import { useQuickOpen, registerPaneFocus } from '../composables/useQuickOpen'
 import { scrollStripWithWheel } from '../lib/tab-strip-wheel'
 import { applyEditorChord } from '../lib/editor-keys'
@@ -38,6 +39,10 @@ const { paneReadonly } = useEditorMode()
 // question after a pick — the composable must not import the pane, so the
 // one-way `registerPaneFocus` registry carries the answer back.
 const quickOpen = useQuickOpen()
+// The buffer's problems: the state, the four triggers and the bar's one control
+// all live in this composable (spec D3, D1). This pane arms them while it is on
+// screen and is the **one** place that hands a marker set to the surface.
+const diagnostics = useEditorDiagnostics()
 
 // Focus back into the code pane after a pick. The surface's own `focus()` puts
 // the caret in Monaco's textarea; when no code surface is mounted (a diff, a
@@ -332,17 +337,47 @@ watch(
   { immediate: true },
 )
 
+// The marker surface's one caller (ediag-05/07). An accepted answer reaches it
+// here — and *only* here — and a re-application after a buffer swap reaches it
+// through the same watcher, because the path is part of what is watched: a model
+// swap drops its marks with the model (spec §2, consequence 3), so the set has
+// to be handed over again when the buffer comes back, not remembered once by
+// the surface. Whole replacement is the surface's own semantics, so what travels
+// is exactly the composable's current set — including an empty one, which is how
+// a fixed defect's underline, or a buffer that turned out clean, is cleared.
+function applyMarkers() {
+  // Only a *file* buffer has a code surface to mark: a diff tab, a preview tab
+  // and an empty pane have none. The surface's own empty-path rule would make
+  // that a no-op anyway; skipping it here keeps the call sites few.
+  if (tab.value?.kind !== 'file') return
+  editorSurface.value?.setMarkers?.(diagnostics.state.markers)
+}
+
+watch(
+  [() => tab.value?.path ?? null, () => diagnostics.state.markers],
+  applyMarkers,
+  // After the render, so the surface exists for the buffer a switch reveals.
+  { flush: 'post' },
+)
+
+// The four triggers are armed while this pane is on screen and disarmed with it.
+// Where they live matters: the composable owns the timer, the watchers and the
+// request (AGENTS.md), and this pane only says when they are wanted — the same
+// split the freshness tick above keeps. Nothing here is a trigger of its own:
+// there is no interval, no poll and no DOM listener in this block.
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   // `passive: false` so the handler above can call preventDefault (a passive
   // listener cannot) — the tablist element exists from the first render, so
   // this attaches once.
   tabs.value?.addEventListener('wheel', onTabsWheel, { passive: false })
+  diagnostics.startRefresh()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   tabs.value?.removeEventListener('wheel', onTabsWheel)
   files.stopFreshnessProbe()
+  diagnostics.stopRefresh()
 })
 </script>
 

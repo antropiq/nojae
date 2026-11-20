@@ -332,6 +332,17 @@ export function useEditorFiles() {
         // Ctrl+S must not fire a second save of the same buffer.
         saving: false,
         reloadedAt: 0, // bumped by reloadFile so the pane swaps the document
+        // Bumped by every *confirmed* save of this buffer, whichever affordance
+        // asked for it — the Save button, save-all, a conflict resolution,
+        // save-and-close. It is the record's own completion signal, and it is
+        // what the pane's diagnostics refresh watches (a save that landed is a
+        // new baseline the analysis should describe). A refused save never
+        // touches it: a save that failed is not a completed save.
+        savedAt: 0,
+        // The count of real edits, rising in `updateText` only. The diagnostics
+        // refresh debounces on it, so a burst of keystrokes is one settled
+        // moment — never a request per keystroke (spec D3).
+        editedAt: 0,
       }
       state.open.push(record)
       state.active = record.key
@@ -812,6 +823,11 @@ export function useEditorFiles() {
     record.text = text
     record.size = text.length
     record.dirty = text !== record.baseline
+    // The counter the pane's diagnostics refresh debounces on: a monotonically
+    // rising number of *real edits* of this buffer, not a second copy of its
+    // text and not a second dirty flag. It rises only here, and only when the
+    // text really changed — the early return above is what makes that true.
+    record.editedAt = (record.editedAt ?? 0) + 1
   }
 
   // Send one buffer to the server's guarded save route. The wire rule is the
@@ -886,6 +902,12 @@ export function useEditorFiles() {
       notices.dismissForPath(record.path)
       record.baseline = record.text
       record.dirty = false
+      // The completion signal the pane's diagnostics refresh watches: a save
+      // that landed is a new baseline on disk, so the analysis should describe
+      // the saved text. Bumped here, in the one place a save is confirmed, so
+      // save-all, a conflict resolution and save-and-close are all covered
+      // without a handler hung on each button.
+      record.savedAt = (record.savedAt ?? 0) + 1
       record.size = body?.size ?? record.size
       record.mtime = body?.mtime ?? record.mtime
       // A save that landed means the path is there and it agrees with the

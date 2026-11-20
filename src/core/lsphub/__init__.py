@@ -41,7 +41,14 @@ extra is not installed.
 
 from typing import TYPE_CHECKING, Any
 
-from .actions import fetch_diagnostics, position, run_action, sync_document, workspace_symbols
+from .actions import (
+    DocumentSync,
+    fetch_diagnostics,
+    position,
+    run_action,
+    sync_document,
+    workspace_symbols,
+)
 from . import constants
 
 _MISSING = object()
@@ -71,6 +78,7 @@ from .discovery import (
 )
 from .editor import (
     EDITOR_ACTIONS,
+    diagnostics_answer,
     hover_answer,
     location_answer,
     references_answer,
@@ -154,6 +162,7 @@ __all__ = [
     "DIAGNOSTICS_WAIT_SECONDS",
     "DiagnosticsInbox",
     "DocumentStore",
+    "DocumentSync",
     "EDITOR_ACTIONS",
     "INIT_TIMEOUT",
     "LSP_CONNECTORS_DIR",
@@ -182,6 +191,7 @@ __all__ = [
     "all_servers",
     "apply_whole_line_edits",
     "client_capabilities",
+    "diagnostics_answer",
     "ensure_lsp_settings_template",
     "fetch_diagnostics",
     "find_project_config",

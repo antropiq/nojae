@@ -824,10 +824,27 @@ The code pane is served by the same language servers the WorkBench tools use:
 docstring, and find its references — answered about the buffer on screen, unsaved
 edits included. They are the servers you declared and switched on for the
 conversation, so a server switched off in the WorkBench **Tools** panel is a dead
-`Ctrl`+click here too, and the pane's status line names the one serving the file
-you are looking at. A file no server claims is quiet: the gesture simply does
-nothing, and the status line says why. Setting the servers up is *The LSP setup
-file* above.
+`Ctrl`+click here too. Setting the servers up is *The LSP setup file* above.
+
+The status bar along the bottom of the screen names the server serving the file
+on screen and answers the question an editor without it would answer with a lie
+— *is this file OK?* A real defect is underlined in red, marked on the overview
+ruler so an off-screen one still shows at the right edge, and named by hovering
+it; fixing it takes the underline away, hints and information are counted
+without a mark, and the underlines stay put while a reply streams over a
+read-only pane. A file no server claims gets none and the bar says why, reading
+**analysing…** until an analysis exists and **no problems** only once a server
+has actually judged the file. One control in the strip re-checks by hand.
+
+Its right edge answers a different question — *what is this buffer?* — the way a
+code editor does: the caret's line and column, the indentation the buffer
+actually uses (`Spaces: 2`, `Tab: 4`), its line ending (`LF` / `CRLF`) and the
+file's kind by its grammar's own name (`JSON`, `Python`). The indentation is the
+one Monaco guessed from the text rather than a default, and these fields are
+absent — not stale — while a diff tab, a preview or an empty pane is on screen.
+
+Each tab remembers **where you were reading it**: switch away and come back and
+the pane is scrolled to the same line, with the caret where you left it.
 
 The Editor's writes are the browser's own surface — never reachable from a
 connector, a tool or a chat path — and they are refused while a reply streams.
