@@ -223,6 +223,17 @@ async function connectionNames(page, agent) {
   return res.json()
 }
 
+// The clipboard as the app filled it. Windows keeps clipboard text in
+// CF_UNICODETEXT, whose line endings the OS owns: Chromium hands back `\r\n`
+// where the page wrote `\n`, on every surface and with nothing in the app
+// deciding it. The feature's claim (AC-10) is that the copy is **the snippet**,
+// so the comparison is made on the text the app controls and the host's own
+// separators are normalised out of the read once, here.
+async function clipboardText(page) {
+  const text = await page.evaluate(() => navigator.clipboard.readText())
+  return text.replace(/\r\n/g, '\n')
+}
+
 async function openWizard(page, panel) {
   const button = page.locator(`${panel} ${SETUP}`)
   await expect(button).toBeEnabled()
@@ -509,9 +520,7 @@ test.describe('one dialog, two families, three pages', () => {
     // AC-10: one click copies, and the copy says so.
     await page.locator(`${DIALOG} .wizard-copy`).click()
     await expect(page.locator(`${DIALOG} .wizard-copy`)).toHaveText('Copied')
-    await expect
-      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-      .toBe(PREPARED.snippet)
+    await expect.poll(() => clipboardText(page)).toBe(PREPARED.snippet)
 
     // Page 3 issued no request: everything it printed came with the prepare.
     expect(posts.filter((post) => post.pathname.endsWith('/prepare'))).toHaveLength(1)
