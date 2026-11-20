@@ -218,11 +218,19 @@ def lsp_member(root: str = PATH_REFERENCE, **extra: Any) -> Dict[str, Any]:
 
 
 def plant_shim(folder: Path, name: str = "fake-langserver") -> Path:
-    """An executable shim called ``name`` in ``folder`` — never run by a test."""
+    """Both spellings of one command in ``folder`` — never run by a test.
+
+    The extensionless file is the POSIX program (its executable bit is what the
+    lookup honours there); the ``.cmd`` beside it is what Windows can resolve,
+    since ``shutil.which`` matches only ``PATHEXT`` forms. A folder with just the
+    script is the *not-installed* case on Windows, so the tests that mean
+    "installed" plant the pair — Volta's shape, and the one the hub spawns.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     shim = folder / name
     shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    os.chmod(shim, 0o755)
+    os.chmod(shim, 0o755)  # the POSIX half; a no-op on NTFS
+    (folder / f"{name}.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
     return shim
 
 
