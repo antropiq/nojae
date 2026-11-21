@@ -602,6 +602,11 @@ class TestPosixHalf:
             "the teardown killed the wrapper but not its group"
         )
 
+    @skip_unless(
+        proc_fs_probe,
+        "the job leads a group of its own, so only the /proc session scan can "
+        "name it: killpg reaches the shell's group and nothing else",
+    )
     def test_the_session_scope_reaches_a_job_of_its_own(
         self, spawned: List[subprocess.Popen], monkeypatch: pytest.MonkeyPatch
     ):
@@ -612,6 +617,11 @@ class TestPosixHalf:
         the shell and nothing else. The session probe is what finds the
         backgrounded job — the promise the terminal's teardown depends on, and
         the reason it calls this entry point rather than the group one.
+
+        Gated on procfs and not on POSIX: the session half *is* POSIX, but the
+        scan that finds a member outside the leader's group is a separate fact
+        (``/proc``), and macOS is POSIX without it. Same guard as the read of
+        that scan from the inside, below.
         """
         monkeypatch.setattr(proctree, "GROUP_POLL_INTERVAL_SECONDS", 0.01)
         shell = _spawn(spawned, _NEW_GROUP_CHILD_SRC, new_session=True,

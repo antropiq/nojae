@@ -465,7 +465,11 @@ def process_is_gone(pid: Optional[int]) -> bool:
             return True
         except PermissionError:
             return False
-        return True
+        # Signal 0 answered: the process is there. This is the branch a platform
+        # without procfs lives on -- macOS has no ``/proc``, so every liveness
+        # probe on it lands here, and a "gone" answer made a live child look dead
+        # to every teardown that consults it.
+        return False
     return state == "Z"
 
 
