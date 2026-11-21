@@ -952,3 +952,24 @@ unknown model, a malformed request, anything the endpoint is certain about — a
 any stream that broke *after* text had arrived. Both stay final because waiting
 on a diagnosis turns a one-second error line into a silent stall, and replaying a
 cut stream would duplicate the text on screen or discard it without saying so.
+
+## 4. License
+
+nojae is licensed under the **Apache License, Version 2.0** — see
+[`LICENSE`](LICENSE). In short: you may use, modify and redistribute it, in
+source or binary form, commercially included, provided you keep the copyright
+and licence notices and state what you changed. It grants a patent licence too,
+which terminates if you sue someone over patents on this work.
+
+Contributions are accepted on the same terms: anything submitted here is
+licensed under Apache 2.0 as well, by section 5 of the licence — there is no
+separate CLA to sign.
+
+**One exception.** The self-hosted fonts under
+[`web/src/fonts/`](web/src/fonts/) are font software from JetBrains Mono and
+Nerd Fonts, and they stay under the **SIL Open Font License 1.1** — the Apache
+licence above does not cover them. Their licence text and copyright notices are
+in [`web/src/fonts/OFL.txt`](web/src/fonts/OFL.txt), and the full attribution is
+in [`NOTICE`](NOTICE). If you redistribute this project with those `.woff2`
+files, carry `OFL.txt` along with them: that is OFL condition 2, and it is the
+one requirement that is easy to break by accident.

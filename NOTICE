@@ -1,0 +1,48 @@
+nojae
+Copyright 2026 Victor Garnier <vgar44@laposte.net>
+
+This product includes software developed as part of the nojae project,
+licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+--------------------------------------------------------------------------
+Third-party material in this repository, and the licence it carries
+--------------------------------------------------------------------------
+
+The licence above does NOT cover the following files, which are redistributed
+here under their own terms.
+
+web/src/fonts/*.woff2
+    Self-hosted, code-point-subsetted WOFF2 faces of JetBrains Mono patched
+    with Nerd Fonts icon glyphs. The font software is licensed under the SIL
+    Open Font License, Version 1.1, not under the Apache License 2.0.
+
+        Copyright 2020 The JetBrains Mono Project Authors
+        (https://github.com/JetBrains/JetBrainsMono)
+
+        Copyright (c) 2014, Ryan L McIntyre (https://ryanlmcintyre.com)
+
+    The full OFL 1.1 text, required by that licence to accompany every copy of
+    the fonts, is included at web/src/fonts/OFL.txt.
+
+    The subsets were produced locally with `fonttools subset` (see the header
+    of web/src/fonts/nerd-fonts.css and tools/nerd_icons.py). Subsetting strips
+    the fonts' own copyright and licence name records, so the notices above are
+    the attribution for the files as shipped here.
+
+    The faces are named "JetBrains Mono Nerd", "JetBrains Mono Nerd Icons" and
+    "JetBrains Mono Nerd Icons UI" in CSS. "JetBrains" is a trademark of
+    JetBrains s.r.o.; OFL condition 3 additionally forbids a modified version
+    of the font software from using a Reserved Font Name. These subsets are
+    redistributed unmodified in outline and code point, under the names the
+    upstream Nerd Fonts project gives them, and no claim of endorsement by
+    JetBrains s.r.o. or by the Nerd Fonts authors is made or implied.
+
+--------------------------------------------------------------------------
+Not redistributed here
+--------------------------------------------------------------------------
+
+Everything else this project uses — FastAPI, Uvicorn, Pydantic, httpx,
+python-dotenv, the MCP SDK, pygls, Vue, Vite, Pico.css, Monaco, xterm.js, and
+the rest — is pulled in as a dependency at install time from its own publisher
+and is not copied into this repository. Each remains under its own licence,
+which its package carries.

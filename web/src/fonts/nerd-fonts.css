@@ -1,5 +1,11 @@
 /* Self-hosted PUA icon subsets of JetBrains Mono (Nerd Fonts).
 
+LICENCE: these .woff2 files are font software under the SIL Open Font License
+1.1, NOT under the Apache License 2.0 that covers the rest of this repository.
+The OFL text and the copyright notices are in OFL.txt beside them, and the
+attribution is repeated in the repository root NOTICE. Redistributing a copy of
+these fonts without that licence file breaks OFL condition 2.
+
 Three faces, one per surface that shows Nerd Font glyphs:
   * "JetBrains Mono Nerd"      -- the terminal pane (EditorTerminal.vue): the
     blocks a shell prompt emits, whatever the prompt is.
