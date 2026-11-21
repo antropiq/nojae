@@ -36,6 +36,8 @@ from starlette.websockets import WebSocketDisconnect
 from tests.conftest import (
     WorkspaceClient,
     driver_probe,
+    proc_fs_probe,
+    skip_unless,
     scoped,
     workspace_params,
 )
@@ -798,14 +800,31 @@ class TestSession:
     # A failed translation falls back to ``$!``, which the liveness pre-check
     # below then reports loudly rather than letting the test go vacuous.
     CHILD_MARKER = "NOJAE-CHILD-"
+    # The space before the `;` after `$!` is what makes this work on macOS, and
+    # it costs nothing anywhere else. The pane's shell is an *interactive* one,
+    # so bash answers a history-expansion question about every line typed into
+    # it, and `$!;` is a designator it cannot resolve: the line is refused
+    # outright (`sh: !: event not found`) before the shell ever runs it, so the
+    # marker never arrives and this test blocks reading for it. Bash skips the
+    # expansion when `!` is followed by whitespace, which `$! ;` is. Linux is
+    # unaffected because its /bin/sh is dash, which has no history expansion;
+    # the Windows runner is unaffected as observed, whatever its shell's setting
+    # -- the space is legal in every POSIX shell, so it is free insurance.
     CHILD_COMMAND = (
-        "sleep 40 >/dev/null 2>&1 & c=$!; "
+        "sleep 40 >/dev/null 2>&1 & c=$! ; "
         "case $(uname) in "
         'MINGW*|MSYS*|CYGWIN*) o=$(ps -aW | awk -v p=$c "\\$1==p {print \\$4}");; '
         "*) o=$c;; "
         f"esac; echo {CHILD_MARKER}${{o:-$c}}\r"
     )
 
+    @skip_unless(
+        proc_fs_probe,
+        "kills a backgrounded job that leads a process group of its own, which "
+        "only the /proc scan that names a session's members can reach (see "
+        "proctree.session_members); a job-controlling shell is torn down with "
+        "the session, not with its own group",
+    )
     def test_disconnect_tears_down_the_whole_session_tree(self, client, fast_grace):
         # The tree-kill assertion, same shape as the hub teardown tests: start a
         # *backgrounded* job, drop the socket, and require the child to die too.
