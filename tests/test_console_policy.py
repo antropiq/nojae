@@ -377,9 +377,14 @@ def test_ordinary_reads_are_not_collateral_damage():
     "test can only show them through a real program writing a stray byte"
 )
 def test_a_stray_byte_no_longer_loses_stdout_and_the_exit_code():
-    # `\xff` is not valid UTF-8; the strict decoder used to raise, and the bare
-    # except swallowed everything, exit code included.
-    out = c.execute_command(r"printf 'ok\xffstill-here\n'")
+    # `\377` (octal) is the byte `\xff`, which is not valid UTF-8; the strict
+    # decoder used to raise, and the bare except swallowed everything, exit code
+    # included. Octal and not `\xff` because the escape is the *program's* job:
+    # POSIX printf mandates `\ddd`, while `\xNN` is a GNU extension the BSD
+    # printf answers by dropping the backslash and printing the literal `xff` --
+    # so on macOS no undecodable byte ever reached the decoder and the note this
+    # case asserts was never earned.
+    out = c.execute_command(r"printf 'ok\377still-here\n'")
     assert "ok" in out
     assert "still-here" in out
     assert "undecodable byte" in out
