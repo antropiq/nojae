@@ -39,6 +39,7 @@ const state = reactive({
 // Report every fact for a buffer, plus the path they belong to. One call for the
 // three moments that change them together: the surface mounting, a buffer swap,
 // and a model's own options/language/line-ending moving under it.
+/** @param {{ path?: string, cursor?: string, indentation?: string, eol?: string, language?: string }} facts */
 export function reportFile({ path, cursor, indentation, eol, language }) {
   state.path = path ?? null
   state.cursor = cursor ?? null

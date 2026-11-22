@@ -130,6 +130,7 @@ export function useEditorLsp() {
   // an answer that a newer request (or a working-location switch) has overtaken
   // is dropped rather than stored, and `null` is returned for it — it belongs to
   // a question nobody is asking any more.
+  /** @param {{ action?: string, path?: string, line?: number, character?: number, text?: string }} [request] */
   async function query({ action, path, line, character, text } = {}) {
     const askedAt = ++answerToken
     const body = bodyFor({ action, path, line, character, text })

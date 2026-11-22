@@ -55,6 +55,10 @@ function parentOf(path) {
 // sentence when it may not. `parent` is the batch's shared parent, which the
 // prefill puts straight into the field — so the no-op case answers itself
 // instead of costing a guaranteed 409 (every target would be its own source).
+/**
+ * @param {string|null} [value]
+ * @param {{ parent?: string }} [context]
+ */
 export function validateMoveDestination(value, { parent } = {}) {
   const text = (value ?? '').trim()
   if (!text) return 'A destination folder is needed'
