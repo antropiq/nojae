@@ -667,6 +667,30 @@ class TestLoadLspServers:
             assert "not set in the environment" not in note
             assert "not started" not in note
 
+    def test_the_example_typescript_entry_names_no_tsserver_path(self):
+        """The template must not hand out an ``initializationOptions.tsserver.path``.
+
+        ``typescript-language-server`` resolves its tsserver by looking in the
+        ``workspaceRoot``'s own ``node_modules/typescript`` first, and only then
+        at a path the declaration names — so that field is a fallback the
+        workspace search beats, and an unusable one is logged and ignored rather
+        than reported. A path written in a template is a machine path the user is
+        meant to edit; when the field is also unnecessary, the honest template
+        omits it and says why. (This is the shape that broke a real setup: a
+        global ``typescript`` is now the native compiler, whose ``lib`` holds no
+        ``tsserver.js``, so pointing the fallback at it fails the one thing that
+        was already working.)
+        """
+        example = (
+            lsp_constants.LSP_CONNECTORS_DIR / "lsp_servers.example.json"
+        )
+        entry = json.loads(example.read_text(encoding="utf-8"))["typescript"]
+
+        assert "tsserver" not in (entry.get("initializationOptions") or {})
+        # What *is* load-bearing for finding a tsserver: the root that holds the
+        # workspace's own TypeScript, kept a placeholder rather than a real path.
+        assert "workspaceRoot" in entry
+
     def test_the_examples_values_stay_the_posix_form_on_any_runner(self, monkeypatch):
         """The template cannot carry one ``PATH`` for both systems, and its note
         says so (lspfinal-05) — this is that sentence made executable.

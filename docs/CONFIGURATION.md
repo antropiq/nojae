@@ -241,8 +241,17 @@ Install the servers themselves with npm, the same line on either system (the
 `lsp` extra only brings the Python client side):
 
 ```bash
-npm install -g pyright typescript typescript-language-server @vue/language-server
+npm install -g pyright typescript-language-server @vue/language-server
 ```
+
+**Do not install `typescript` globally for this.** `typescript-language-server`
+needs a `tsserver.js`, and TypeScript 7 — the native compiler — no longer ships
+one: its `lib/` holds only `tsc.js` and `version.cjs`. The `tsserver` the server
+uses comes from the workspace: it looks in the `workspaceRoot`'s own
+`node_modules/typescript` and prefers that, which is why `typescript` stays a
+devDependency of `web/` and why the `typescript` entry's `workspaceRoot` has to
+name the folder that holds it. A global `typescript` buys nothing here and
+occupies the name the fallback then resolves to.
 
 **On Linux** — the form of the committed example, where `${VOLTA_BIN:-/usr/local/bin}`
 covers both a Volta-managed install and a plain global one:
@@ -267,7 +276,6 @@ covers both a Volta-managed install and a plain global one:
     "command": ["typescript-language-server", "--stdio"],
     "workspaceRoot": "${NOJAE_PATH_LOCATION}/web",
     "lazy": true,
-    "initializationOptions": { "tsserver": { "path": "/usr/local/lib/node_modules/typescript" } },
     "tools": ["diagnostics", "hover", "definition", "references", "document_symbols",
               "completion", "signature_help", "formatting"],
     "idleShutdownSeconds": 300
@@ -286,6 +294,18 @@ covers both a Volta-managed install and a plain global one:
   }
 }
 ```
+
+The `typescript` entry carries **no `initializationOptions`**, and that is the
+shape to copy. The server resolves its tsserver in this order: the
+`workspaceRoot`'s own `node_modules/typescript` first, then a path named by
+`initializationOptions.tsserver.path`, then a bundled TypeScript. So the field is
+only ever a fallback — and pointing it at a global install is the way to break a
+working setup, because the workspace search wins anyway and an invalid path is
+logged and ignored rather than reported as a failure. With `workspaceRoot` set to
+the folder that holds `typescript` (`web/` here), the right tsserver is already
+found and there is nothing to point at. Set the field only to make the server use
+a TypeScript *other* than the workspace's, and then it must name one that actually
+ships `tsserver.js`.
 
 **On Windows** the same three entries take a different shape, and the two
 differences are exactly why a Linux declaration copied verbatim fails there:

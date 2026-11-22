@@ -21,10 +21,8 @@
     "command": ["typescript-language-server", "--stdio"],
     "workspaceRoot": "/absolute/path/to/your/web",
     "lazy": true,
-    "initializationOptions": {
-      "tsserver": { "path": "/absolute/path/to/typescript" }
-    },
     "tools": ["diagnostics", "hover", "definition", "references", "document_symbols", "completion", "signature_help", "formatting"],
+    "_note": "No 'initializationOptions' here, and adding one is usually a mistake. The server resolves its tsserver in this order: the workspaceRoot's own node_modules/typescript, then initializationOptions.tsserver.path, then a bundled TypeScript — so the field is only a fallback, the workspace search wins over it, and an invalid path is logged and ignored rather than reported. Point it at a global install and you break a setup that was working: TypeScript 7 (the native compiler) ships no tsserver.js, so the folder holds only tsc.js and version.cjs. Keep the language server installed globally and the typescript package a devDependency of the folder the workspaceRoot names; set the field only to force a TypeScript other than the workspace's, and only one that actually ships tsserver.js.",
     "idleShutdownSeconds": 300
   },
   "vue": {
