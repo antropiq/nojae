@@ -228,12 +228,13 @@ def workspace_policy_reason(
     Four things this deliberately does **not** do, each for a stated reason:
 
     * **level A is not consulted.** The app's own rules (``**/.env**``,
-      ``logs/**``) exist because the *pane* fights the settings dialog over a
-      generated file (``config._render_env()`` rebuilds it on every save). That
-      is a property of the pane, not of an agent's edit, and applying it here
-      would put the connector's root outside the app and then invent rules about
-      a project it has no relationship with. A reader who expects the connector
-      to skip what the pane enforces is right: it does, and the reserved folder
+      ``logs/**``) exist because the *pane* would otherwise fight the tooling
+      that owns those files — the app hides its own run configuration and its own
+      backups, which is a decision about a human editor in that pane. That is a
+      property of the pane, not of an agent's edit, and applying it here would
+      put the connector's root outside the app and then invent rules about a
+      project it has no relationship with. A reader who expects the connector to
+      skip what the pane enforces is right: it does, and the reserved folder
       below is the only thing it enforces unconditionally.
     * **a path outside the root answers None.** The workspace's rules are written
       relative to the workspace; outside it the existing connector deny-list

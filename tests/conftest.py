@@ -465,18 +465,18 @@ def _no_trash_of_its_own(_hermetic: pytest.MonkeyPatch,
 
 @pytest.fixture(autouse=True)
 def _no_legacy_tool_cap(_hermetic: pytest.MonkeyPatch) -> None:
-    """Keep a stale ``.env`` entry from deciding a test's answer.
+    """Keep a stale legacy environment entry from deciding a test's answer.
 
-    ``create_app()`` loads the developer's own ``.env`` once, so a key this file
-    *used* to own would leak into every test and depend on the machine it runs
-    on. ``MAX_TOOL_ITERATION`` became a per-agent column (D9) and ``LSP_ENABLED``
-    the declaration's ``enable`` flag (D13), so a stale entry in a developer's
-    ``.env`` is read by nothing; clearing them is what keeps that true even if a
-    template ever rendered one again. The value a test actually runs on comes
-    from the temporary database :func:`_every_test_gets_its_own_store` pins.
-    ``MCP_ENABLED`` is gone from the config entirely (connectors activate only
-    through their ``enable`` flag in ``mcp-settings.json``); clearing it keeps a
-    stale entry in a developer's ``.env`` from confusing the suite.
+    These three names are what ``.env`` used to hold before each moved to its
+    own home: ``MAX_TOOL_ITERATION`` became a per-agent column (D9),
+    ``LSP_ENABLED`` the declaration's ``enable`` flag (D13), and connectors
+    activate only through their ``enable`` flag in ``mcp-settings.json``
+    (``MCP_ENABLED``). The app reads none of them, and there is no ``.env`` file
+    any more — the app-level keys are boot flags — so the only way one could
+    reach a test is through the ambient environment of whatever started the
+    suite. Clearing them keeps that impossible. The value a test actually runs
+    on comes from the temporary database
+    :func:`_every_test_gets_its_own_store` pins.
     """
     _hermetic.delenv("MAX_TOOL_ITERATION", raising=False)
     _hermetic.delenv("LSP_ENABLED", raising=False)
@@ -487,7 +487,7 @@ def _no_legacy_tool_cap(_hermetic: pytest.MonkeyPatch) -> None:
 #
 # ``<install root>/nojae.db`` is where the model connection, the agent personas
 # and the prompt helpers live (spec §4.1), so the suite owns a database the same
-# way it owns a ``.env`` and a working location: one autouse fixture gives every
+# way it owns a working location and a set of boot flags: one autouse fixture gives every
 # test a temporary one, one helper serves the test that owns its own root, and
 # the guard below makes the install's own file **unopenable** rather than merely
 # unlikely to be reached. ``tests/test_store_hermeticity.py`` is that invariant
@@ -752,20 +752,22 @@ def _every_test_gets_its_own_home(_hermetic: pytest.MonkeyPatch,
 def _no_debug_switch_leak(_hermetic: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep the LLM debug switch off, and process state clean, for every test.
 
-    Two leaks would make that switch machine-dependent otherwise:
-    ``create_app()`` loads the developer's own ``.env`` (which may carry
-    ``LLM_DEBUG``, or the legacy key it falls back to), and ``save_settings``
-    writes the key straight into ``os.environ``, which ``monkeypatch`` never
-    undoes. The switch itself also mutates what no fixture can undo on its own —
-    the level and handler of the ``nojae.llm`` logger, and the payload
-    hook of ``core/llmkit/client``, which an app boot re-points at ``config``.
+    Two leaks would make that switch machine-dependent otherwise: the ambient
+    command line a test process happens to carry (a run of the console script
+    under test, or an embedding that parsed its own argv), and the switch's own
+    effect on process state no fixture can undo on its own — the level and
+    handler of the ``nojae.llm`` logger, and the payload hook of
+    ``core/llmkit/client``, which an app boot re-points at ``config``.
 
-    So both keys are cleared up front, and the logger and the hook are handed
-    back as they were found — except the handler the switch itself attaches,
-    which is the switch's own state to rebuild and must not come back bound to a
-    stream that has since gone (and never without the ``propagate`` off that
-    belongs to it). Without this, a test asserting the client's hook defaults to
-    off would pass or fail on the order the settings tests ran in.
+    So the flags are pinned to their defaults up front (the whole
+    :class:`~src.config.BootFlags` value, never one field of it — the same
+    "replace the whole thing" rule :func:`src.config.set_boot_flags` holds), and
+    the logger and the hook are handed back as they were found — except the
+    handler the switch itself attaches, which is the switch's own state to
+    rebuild and must not come back bound to a stream that has since gone (and
+    never without the ``propagate`` off that belongs to it). Without this, a test
+    asserting the client's hook defaults to off would pass or fail on the order
+    the settings tests ran in.
     """
     from src import config as config_module
     from src.core.llmkit import client as llmkit_client
@@ -778,10 +780,11 @@ def _no_debug_switch_leak(_hermetic: pytest.MonkeyPatch) -> Iterator[None]:
         logger.propagate,
         llmkit_client.debug_enabled,
     )
-    _hermetic.delenv(config_module.LLM_DEBUG_KEY, raising=False)
-    _hermetic.delenv(config_module.LEGACY_LLM_DEBUG_KEY, raising=False)
+    saved_flags = config_module.boot_flags()
+    config_module.set_boot_flags(config_module.BootFlags())
     yield
     level, handlers, propagate, hook = saved
+    config_module.set_boot_flags(saved_flags)
     kept = [
         handler
         for handler in handlers
@@ -822,7 +825,7 @@ def make_the_install(
     Level A — the app's rules about itself — is live only while the workspace
     *is* the install directory, so a test that wants a live level A has to move
     both sides of :func:`src.core.editorfs.builtin_policy.is_self_workspace`
-    onto a folder it can write into. That is the only way to plant ``.env``,
+    onto a folder it can write into. That is the only way to plant ``.env.test``,
     ``nojae.db`` or ``logs/`` as real files without touching this checkout.
 
     Since clws-01 the two sides are read from two places, and a test that moves

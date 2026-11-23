@@ -18,7 +18,7 @@ import re
 import shlex
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from src.config import provided_env_values
+from src.config import PROVIDED_ENV_NAMES, provided_env_values
 
 # ``${NAME}``, plus the shell's ``${NAME:-fallback}`` escape hatch. Only a
 # braced reference is special, so a bare ``$`` stays literal and npm version
@@ -29,18 +29,25 @@ ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 def expand_env(value: str) -> Tuple[str, List[str]]:
     """Substitute ``${NAME}`` / ``${NAME:-fallback}`` references in a string.
 
-    Two value sources, in order: the app's own computed values
-    (``config.provided_env_values`` — today ``${PROJECT_ROOT}``) answer first,
-    because the app knows its install root better than the environment and a
-    stray ``PROJECT_ROOT`` exported by a shell or CI must not redirect a
-    connector away from this checkout. Everything else reads
-    :data:`os.environ`, which already carries the ``.env`` loaded at startup
-    (``config.load_dotenv_once``) and refreshed on every settings save — so
-    ``${HOME}``, a managed key like ``${NOJAE_PYTHON_ROOT}`` and a
-    project key like ``${CONTEXT7_API_KEY}`` are equally available. Returns
-    the expanded text plus the names that resolved to nothing: an unresolved
-    reference is left written as-is rather than blanked out, so a typo stays
-    visible in the entry's validation note instead of quietly becoming an
+    Two value sources, and which one a name uses is decided by the **name**, not
+    by precedence: the three the app owns (``config.PROVIDED_ENV_NAMES`` —
+    ``${PROJECT_ROOT}``, the workspace ``${NOJAE_PATH_LOCATION}`` and the
+    interpreter ``${NOJAE_PYTHON_ROOT}``) are answered by
+    ``config.provided_env_values`` and by nothing else, and every other name
+    reads :data:`os.environ`, which carries what the OS and the invoking shell
+    genuinely own — so ``${HOME}`` and a project key like
+    ``${CONTEXT7_API_KEY}`` are equally available.
+
+    The owned names are not "app value, else environment": for them the
+    environment is never consulted, **even when the app has no answer at this
+    moment** (the location outside any workspace's scope, an embedding whose
+    ``sys.executable`` is empty). A fallback to the environment there would make
+    the invariant depend on the machine — the same ``${NOJAE_PYTHON_ROOT}``
+    resolving to this interpreter on one host and to a stale export on another —
+    which is the failure the name stopped being a ``.env`` key to prevent.
+    Returns the expanded text plus the names that resolved to nothing: an
+    unresolved reference is left written as-is rather than blanked out, so a typo
+    stays visible in the entry's validation note instead of quietly becoming an
     empty path or an empty API key.
     """
     missing: List[str] = []
@@ -48,7 +55,10 @@ def expand_env(value: str) -> Tuple[str, List[str]]:
 
     def replace(match: "re.Match[str]") -> str:
         name, fallback = match.group(1), match.group(2)
-        found = app_values.get(name) or os.environ.get(name)
+        if name in PROVIDED_ENV_NAMES:
+            found = app_values.get(name)
+        else:
+            found = os.environ.get(name)
         if found is not None:
             return found
         if fallback is not None:

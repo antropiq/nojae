@@ -66,9 +66,8 @@ from src.config import PROJECT_ROOT, env_flag
 
 # -- the constants (module attributes, patchable) -------------------------------
 
-#: The database file's name, beside ``.env`` at the install root. A module
-#: attribute so a test can move the lookup — the repo's ``mcphub.constants``
-#: convention.
+#: The database file's name, at the install root. A module attribute so a test can
+#: move the lookup — the repo's ``mcphub.constants`` convention.
 DB_FILENAME = "nojae.db"
 
 #: The env var that puts this process in **test mode** (D14): with it truthy the
@@ -269,10 +268,11 @@ def database_path() -> Path:
     """Where the store lives: ``<install root>/nojae.db`` (it may not exist yet).
 
     Built from :data:`PROJECT_ROOT` the way every other install-scoped path in
-    this app is built (``config.ENV_PATH``, ``editorfs.constants.BACKUP_DIR``):
-    one ``Path`` join, so it is correct on Linux and Windows with no platform
-    branch, no separator spelled, no drive assumption and no ``~`` expansion
-    anywhere near it (§4.9).
+    this app is built (``editorfs.constants.BACKUP_DIR`` and the log folder are
+    the others): one ``Path`` join, so it is correct on Linux and Windows with no
+    platform branch, no separator spelled, no drive assumption and no ``~``
+    expansion anywhere near it (§4.9). It is the install's only configuration
+    file — the ``.env`` beside it is gone, its keys are boot flags now.
 
     A **function**, not a constant, so a test can move the whole store by
     patching :data:`PROJECT_ROOT` — which is what keeps the suite off the

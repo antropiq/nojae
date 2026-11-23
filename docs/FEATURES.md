@@ -231,14 +231,15 @@ OpenAI-compatible endpoint — llama.cpp, vLLM, or a hosted one — so adding a 
 is configuration, never code. Every reply is one stream that closes with exactly
 one terminal event, so a paused answer still ends as a kept partial turn.
 Configuration changes are live the moment the Settings dialog saves them; a
-hand-edit of a hub declaration file is picked up by its **Refresh**, and only a
-hand-edit of `.env` waits for a server restart.
+hand-edit of a hub declaration file is picked up by its **Refresh**, and only the
+install's own technical settings — the **boot flags** the app was started with —
+wait for a server restart.
 
 When that endpoint answers a request with a failure that says *ask again later* —
 a provider-side `5xx`, a rate limit, a refusal to connect, a stalled read — the
 turn does not end there: nojae waits out the pause and sends the **identical**
 request again, until the endpoint answers usefully or the budget of
-`NETWORK_FAIL_MAX_RETRY` is spent. That is where the whole guard sits and why it
+`--network-max-retry` is spent. That is where the whole guard sits and why it
 is invisible to the browser: the link that broke is between **this server and the
 endpoint**, never the one between the page and the server — the page's own
 connectivity is innocent and is never watched. The resume is exact rather than

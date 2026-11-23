@@ -1352,16 +1352,11 @@ def editor_client(monkeypatch, tmp_path):
     a real ``LspManager`` running the fake server, so the route's answer is a
     real answer rather than a stub's.
     """
-    from src import config as config_module
     from src.api import routes
     from src.api.server import create_app
     from src.core import mcphub
     from src.core.lsphub import constants as lsp_constants
     from tests.conftest import neutralise_store
-
-    for key in config_module.SETTING_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
 
     root = tmp_path / "workspace"
     root.mkdir(exist_ok=True)

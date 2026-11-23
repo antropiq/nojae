@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, devices } from '@playwright/test'
@@ -7,10 +7,17 @@ import { defineConfig, devices } from '@playwright/test'
 // real FastAPI app (built SPA + /api + SSE), never the Vite dev server, so
 // what is exercised is what `nojae` actually serves.
 //
-// Not 8000: that is where the developer's own `nojae` usually sits, and
-// sharing it would make the suite reuse whatever server and whatever build
-// happened to be on disk — passing specs proving nothing. A dedicated port
-// also means e2e and a manually-run app can coexist.
+// Not the app's own default port: that is where a developer's `nojae` usually
+// sits, and sharing it would make the suite reuse whatever server and whatever
+// build happened to be on disk — passing specs proving nothing. A dedicated
+// port also means e2e and a manually-run app can coexist.
+//
+// `E2E_PORT` chooses it (default 8123), and it is a Playwright-side name rather
+// than the app's `--port` boot flag on purpose: this harness spawns the server
+// with `uvicorn`'s own parser (below), so the app under test runs on its
+// unflagged defaults exactly as a human's plain `nojae` boot would, and the port
+// it binds is handed to it on its command line. A spec that wants a flag starts
+// its own server.
 const PORT = Number(process.env.E2E_PORT ?? 8123)
 const BASE_URL = `http://127.0.0.1:${PORT}`
 
@@ -35,30 +42,6 @@ const EXECUTABLE_PATH =
   process.env.PLAYWRIGHT_EXECUTABLE_PATH ??
   (process.platform === 'win32' ? undefined : '/usr/bin/chromium')
 
-// The env file holding the **app-level** keys for the server under test — the
-// debug switch and the connector interpreter, i.e. what `.env` holds
-// (`.env.test` is gitignored, copied from `.env.test.example`). It is *not* the
-// endpoint's home: the model connection lives in nojae's settings store, and the
-// suite materialises its own connection into a temporary one (below), so a spec
-// can never talk to the developer's store.
-// Resolved from this file's own location, not from `cwd`, so the run works from
-// `web/` or root.
-const ENV_FILE =
-  process.env.E2E_ENV_FILE ??
-  join(dirname(fileURLToPath(import.meta.url)), '..', '.env.test')
-
-// Loud on purpose. Were this file missing and the flag dropped quietly, specs
-// would pass against the real run endpoint — the one failure mode worth
-// failing hard on, since everything such a run asserts came from a
-// configuration no other machine can repeat.
-if (!existsSync(ENV_FILE)) {
-  throw new Error(
-    `E2E env file not found: ${ENV_FILE}\n` +
-      'It holds the app-level keys a e2e run uses. Point E2E_ENV_FILE at a ' +
-      'file with the same key set as .env.example.',
-  )
-}
-
 // The suite's own model connection: `.nojae/nojae-test-settings.json` at the
 // **installation** folder. That is the folder the server boots on and the one a
 // new tab lands on, so the fixture is found exactly where it is committed
@@ -66,10 +49,10 @@ if (!existsSync(ENV_FILE)) {
 // It is **a store fixture, not a UI payload**, so its member names are the
 // *column* names — one `server` object holding one `model` object, with no ids
 // (the harness assigns both). It is the only connection a spec may use. The app
-// never creates or writes it (it is hand-authored, like `.env.test`), and with
-// the switch below on there is no fallback in either direction: a missing
-// fixture must stop the suite here rather than look like an app bug — or, worse,
-// silently reach the developer's own store and key.
+// never creates or writes it, and with the switch below on there is no fallback
+// in either direction: a missing fixture must stop the suite here rather than
+// look like an app bug — or, worse, silently reach the developer's own store
+// and key.
 //
 // The specs name their own folders per request; the config names none. There is
 // therefore no second environment lookup here: a scenario's workspace is the
@@ -91,45 +74,24 @@ if (!existsSync(TEST_SETTINGS_FILE)) {
   )
 }
 
-// Parse `.env.test` into the environment of the server under test, so that
-// file — not dotenv's precedence rules — decides what a spec talks to.
+// What the server under test is booted with, and nothing else.
 //
-// Reading it here rather than handing uvicorn `--env-file` is deliberate:
-// dotenv never overrides a variable that already exists, and the app itself
-// exports every SETTING_KEYS value into os.environ when a settings save
-// happens. A suite launched from inside a running app's process tree (the
-// agent case, and any wrapper that inherits that environment) therefore
-// carries the developer's live SERVER_URL, which would silently beat a file
-// uvicorn loads later. `webServer.env` is applied last when Playwright spawns
-// the server, so these values win no matter what the parent already exported.
+// This used to be `readEnvFile('.env.test')` — the app-level keys, which lived
+// in a file the suite parsed so those keys, and nothing ambient, decided what a
+// spec talked to. There are no app-level keys any more: the debug switch, the
+// endpoint-wait pair and the port are **boot flags** on the command line, and
+// the connector interpreter is the running interpreter. So the only
+// configuration a suite may still pin through the environment is what is
+// genuinely environment-scoped — the three switches below — and they are written
+// here rather than in a file, because there is no per-machine value left to
+// carry. The precedence the parser existed to enforce is untouched: `webServer.env`
+// is applied last when Playwright spawns the server, so these beat anything a
+// parent process (a running app's own process tree, an agent's shell) exported.
 //
-// Supported syntax is the subset the file itself uses — `KEY=value`, `#`
-// comments, and one level of double quoting. A commented-out key is exported
-// as empty, which is what clears an ambient value instead of leaving it set.
-function readEnvFile(path) {
-  const values = {}
-  for (const raw of readFileSync(path, 'utf8').split('\n')) {
-    const line = raw.trim()
-    if (!line) continue
-    const commented = line.startsWith('#')
-    const body = commented ? line.slice(1).trim() : line
-    const eq = body.indexOf('=')
-    if (eq === -1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(body.slice(0, eq))) continue
-    const key = body.slice(0, eq)
-    if (commented) {
-      values[key] = ''
-      continue
-    }
-    let value = body.slice(eq + 1).trim()
-    if (value.startsWith('"') && value.endsWith('"') && value.length > 1) {
-      value = value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-    }
-    values[key] = value
-  }
-  return values
-}
-
-const TEST_ENV = readEnvFile(ENV_FILE)
+// The debug switch and the wait's pair for a suite run are therefore the app's
+// own defaults — off, 3 × 10 s — which is also what they were whenever `.env.test`
+// left them commented out, i.e. what they are on every machine that ever ran
+// this suite.
 
 export default defineConfig({
   testDir: './e2e',
@@ -177,11 +139,13 @@ export default defineConfig({
     // src/api/server.py) — `globalSetup` does that instead of trusting the
     // developer to remember.
     //
-    // No `--env-file`: the endpoint arrives through `env` below, which
-    // overrides anything the invoking shell (or a parent app process) exported.
-    // An override is still possible without editing either file —
-    // `E2E_ENV_FILE=other.test npm run test:e2e` points the whole suite at a
-    // different file, and neither one may hold a secret.
+    // `uvicorn`'s own command, not the `nojae` console script, and that is the
+    // point: this parser carries no boot flag, so the app under test runs on
+    // the same defaults an unflagged `nojae` boot answers (debug off, the wait
+    // on its pair of defaults) — the suite never needed a flag, and a spec that
+    // wants one starts its own server. The endpoint itself arrives through
+    // `env` below, which overrides anything the invoking shell (or a parent app
+    // process) exported.
     command: `python -m uvicorn src.api.server:app --host 127.0.0.1 --port ${PORT}`,
     cwd: '..',
     url: `${BASE_URL}/api/health`,
@@ -198,7 +162,6 @@ export default defineConfig({
     // on the wording of an answer. A stubbed OpenAI-compatible stream is the
     // next step if any spec needs an exactly-known token count.
     env: {
-      ...TEST_ENV,
       NOJAE_DISABLE_MCP: '1',
       NOJAE_DISABLE_LSP: '1',
       // The switch that puts the server under test in test mode: it never opens

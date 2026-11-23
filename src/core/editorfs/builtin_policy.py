@@ -5,11 +5,16 @@ the half of :func:`editorfs.policy_modes.mode_for` that no workspace file can
 configure. They are conditional on purpose:
 
 *the rule that stops a pane editing ``.env`` is not "``.env`` is dangerous", it
-is "this app rebuilds that file from ``SETTING_KEYS`` on every settings save"
-(``config._render_env()``). That second sentence is false for every other
-project, so the rule must be false for them too — point the working location at
-another checkout and its ``.env`` is an ordinary file, visible in the tree and
-editable.*
+is "this installation owns the ``.env`` names at its own root: it gitignores
+them, and the one that used to hold its configuration is gone — those keys are
+boot flags now". That second sentence is false for every other project, so the
+rule must be false for them too — point the working location at another checkout
+and its ``.env`` is an ordinary file, visible in the tree and editable.
+
+The rule is **kept** although the app reads and writes no such file any more: a
+name this install gitignores and declares its own is still not something a pane
+should edit half the time, and the same pattern covers the hand-kept or
+half-migrated files of an install that predates the boot flags.*
 
 That is what :func:`is_self_workspace` decides, and it is the only condition in
 this file. If a rule here ever needs to apply to a foreign workspace, it is the
@@ -62,8 +67,8 @@ def is_self_workspace() -> bool:
 
 # ``(pattern, mode, reason)`` in evaluation order. Each reason is echoed verbatim
 # by :func:`editorfs.policy_modes.refusal_message`, because "nojae hides
-# this because the settings dialog regenerates it" is a different conversation
-# from "your policy hides it" — and the first is a rule the reader cannot edit.
+# this because this install owns the name" is a different conversation from
+# "your policy hides it" — and the first is a rule the reader cannot edit.
 BUILTIN_RULES: Tuple[Tuple[str, str, str], ...] = (
     # The ``**/`` is the point: what this rule replaces is a *name* check — the
     # connector floor's ``DENY_FILE_PREFIXES = (".env",)``, which reaches
@@ -71,20 +76,23 @@ BUILTIN_RULES: Tuple[Tuple[str, str, str], ...] = (
     # reach the same set or the swap would open ``.env`` files it never meant to.
     # A bare ``.env**`` would cover only the root one, because pol-02's ``**``
     # never crosses a component *backwards*. It is ``hidden`` rather than ``ro``
-    # for the same reason as the floor's name check: the settings dialog is that
-    # file's only editor, and the pane must not become the second one.
+    # for the same reason as the floor's name check: the name is this install's
+    # own (gitignored, and the file it used to configure itself with before the
+    # boot flags), so a pane has nothing to do with one at its own root — and a
+    # leftover of an older install, holding whatever it holds, is the last thing
+    # to be opened by an agent or a careless save.
     (
         "**/.env**",
         shared.HIDDEN,
-        "nojae regenerates it from the settings template on every save",
+        "nojae's own configuration file name — this install owns it",
     ),
     # The store (``src/core/appdb.py``) and its WAL sidecars — ``nojae.db``,
-    # ``nojae.db-wal``, ``nojae.db-shm`` — sit beside ``.env`` at the install
-    # root, which is inside the tree whenever the workspace *is* this checkout
-    # (D10). The file holds the model credentials and the app is its only
-    # reader and writer, so a pane that could open it would be a second one
-    # over the same bytes: ``hidden``, like ``.env``, not ``ro``. The ``**/``
-    # is ``.env**``'s reason again (a bare root-anchored pattern would not
+    # ``nojae.db-wal``, ``nojae.db-shm`` — sit at the install root, which is
+    # inside the tree whenever the workspace *is* this checkout (D10). The file
+    # holds the model credentials and the app is its only reader and writer, so a
+    # pane that could open it would be a second one over the same bytes:
+    # ``hidden``, like the ``.env`` rule above, not ``ro``. The ``**/`` is that
+    # rule's reason again (a bare root-anchored pattern would not
     # reach the name at depth), and the trailing ``*`` is what reaches the
     # sidecars, which hold committed bytes and so are part of the store rather
     # than decoration beside it. A folder that is not this installation has no

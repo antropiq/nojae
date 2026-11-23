@@ -15,10 +15,10 @@ The promises this change exists to keep:
 * **the seed is the template verbatim** — the ``${NAME}`` references are
   resolved on every read (``expand_env``), never substituted at seed time,
   which is what keeps one file correct across switches and machines;
-* **``${PROJECT_ROOT}`` answers from the app's own computation** — a stray
-  ``PROJECT_ROOT`` in the environment cannot redirect connectors;
-  ``${NOJAE_PYTHON_ROOT}`` answers from ``.env`` like any managed key,
-  and an unset one is a note, not a blank;
+* **``${PROJECT_ROOT}`` and ``${NOJAE_PYTHON_ROOT}`` answer from the app's own
+  computation** — a stray name in the environment can redirect nothing;
+  ``${NOJAE_PYTHON_ROOT}`` is the interpreter this process runs on, and an
+  answer the process cannot give is a note, not a blank;
 * **the switch seeds before it restarts** — a fresh root comes up holding
   ``console`` and ``fedit``, not zero connectors;
 * **a failure is a note** and **a reader never writes** — same as the policy
@@ -33,7 +33,9 @@ from typing import Any, Dict, Iterator, List
 import pytest
 from fastapi.testclient import TestClient
 
+from src import config as config_module
 from src.api.server import create_app
+from src.config import python_root
 from src.core.mcphub import constants, seed
 from src.core.mcphub.discovery import load_externals, set_externals_enabled
 from src.core.mcphub.validation import expand_env
@@ -67,7 +69,9 @@ class TestTheSeedLands:
         self, workspace: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """The point of seeding: a fresh workspace's hub is console + fedit."""
-        monkeypatch.setenv("NOJAE_PYTHON_ROOT", "/opt/py/python")
+        # The interpreter is the app's own answer, so it is pinned by moving the
+        # answer and not by exporting the name (which decides nothing).
+        monkeypatch.setattr(config_module, "python_root", lambda: "/opt/py/python")
         seed.ensure_mcp_settings_file(str(workspace))
         connectors, errors = load_externals()
         assert errors == []
@@ -146,13 +150,30 @@ class TestTheInterpolation:
         assert missing == []
         assert expanded == f"{PROJECT_ROOT}/mcp_connectors/fedit_mcp.py"
 
-    def test_python_root_answers_from_the_environment(self, monkeypatch):
+    def test_python_root_answers_the_running_interpreter(self, monkeypatch):
+        """The name resolves to **this** process, whatever the environment says.
+
+        The app-level ``.env`` key is gone, so the only answer is the
+        computation — and it wins over an ambient export of the same name on
+        purpose: a connector must run on the interpreter that loaded the SDK, not
+        on one a shell happens to export.
+        """
         monkeypatch.setenv("NOJAE_PYTHON_ROOT", "/opt/py/python")
         expanded, missing = expand_env("${NOJAE_PYTHON_ROOT}")
-        assert (expanded, missing) == ("/opt/py/python", [])
+        assert missing == []
+        assert expanded == python_root()
+        assert expanded != "/opt/py/python"
 
-    def test_an_unset_python_root_is_a_note_not_a_blank(self, monkeypatch):
-        monkeypatch.delenv("NOJAE_PYTHON_ROOT", raising=False)
+    def test_an_interpreter_the_process_does_not_know_is_a_note_not_a_blank(self, monkeypatch):
+        """The one shape with no value: leave the name written, say so.
+
+        Only an embedding with no ``sys.executable`` gets here. An empty
+        *interpreter* would be the blanking-out this rule exists to prevent (a
+        connector spawn of ``[""]``), so the reference stays visible and the
+        entry's note names the placeholder.
+        """
+        monkeypatch.setenv("NOJAE_PYTHON_ROOT", "/opt/py/python")
+        monkeypatch.setattr(config_module, "python_root", lambda: "")
         expanded, missing = expand_env("${NOJAE_PYTHON_ROOT}")
         assert expanded == "${NOJAE_PYTHON_ROOT}"
         assert missing == ["NOJAE_PYTHON_ROOT"]
@@ -220,12 +241,8 @@ class _RecordingHub:
 @pytest.fixture
 def seed_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A live app on a scratch root, declaration paths unpinned, no legacy lift."""
-    from src import config as config_module
     from src.core import lsphub
 
-    for key in config_module.SETTING_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
     # Unpin the declaration lookup: these tests assert the resolver follows the
     # *working location*, which a pin would defeat.
     monkeypatch.setattr(constants, "MCP_SETTINGS_PATH", None)
@@ -320,6 +337,11 @@ class TestTheEntryPoints:
         assert len(hub.restarts) == 1
         handed = list(hub.restarts[0][0])
         assert [connector["id"] for connector in handed] == ["console", "fedit"]
-        # Every entry carries an unresolved ${NOJAE_PYTHON_ROOT} note — honest,
-        # and proof the expansion ran on the seeded bytes.
-        assert "NOJAE_PYTHON_ROOT" in (response.json()["externalsError"] or "")
+        # Proof the expansion ran on the seeded bytes: every entry's interpreter
+        # is **this** process's, which is the one thing the seeded file could not
+        # have known when it was written. (It used to be the opposite proof — an
+        # unresolved ``${NOJAE_PYTHON_ROOT}`` note, because nothing in the
+        # environment answered that name here.)
+        assert response.json()["externalsError"] is None
+        for connector in handed:
+            assert connector["command"][0] == python_root()

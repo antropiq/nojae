@@ -490,6 +490,29 @@ class TestProvidedEnvValues:
         assert missing == ["NOJAE_NOT_A_NAME_AT_ALL"]
         assert expanded == "${NOJAE_NOT_A_NAME_AT_ALL}/x"
 
+    def test_a_stray_export_never_answers_the_workspaces_own_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The app owns its three names outright: no environment fallback.
+
+        The rule that matters when there is **no** answer: outside a scope, an
+        ambient ``NOJAE_PATH_LOCATION`` (which clws-10 stopped exporting, but a
+        developer's shell or an old launcher may still carry) must not stand in
+        for the served folder — that would silently root one workspace's
+        connectors at another. The reference stays unresolved and the note names
+        it, which is the honest state: this call is about no folder at all.
+        """
+        import contextvars
+
+        from src.core.mcphub.validation import expand_env
+
+        monkeypatch.setenv(config_module.PATH_PLACEHOLDER, "/another/checkout")
+        expanded, missing = contextvars.Context().run(
+            expand_env, "${NOJAE_PATH_LOCATION}/x"
+        )
+        assert missing == [config_module.PATH_PLACEHOLDER]
+        assert expanded == "${NOJAE_PATH_LOCATION}/x"
+
 
 # -- the API's one reader -------------------------------------------------------
 

@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
-from dotenv import dotenv_values
 from fastapi.testclient import TestClient
 
 from src.api import routes
@@ -2119,16 +2118,12 @@ class TestLocalReachRefusal:
         spawning the child anyway — the silently-permissive shape A-D4 exists to
         remove — fails here.
         """
-        from src import config as config_module
         from src.core import mcphub
 
         from tests.conftest import neutralise_store
 
         marker = tmp_path / "spawned.flag"
         monkeypatch.delenv("NOJAE_DISABLE_LSP", raising=False)
-        for key in config_module.SETTING_KEYS:
-            monkeypatch.delenv(key, raising=False)
-        monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
         # The declaration file written below is the only gate, so the pyright
         # entry's ``enable: true`` is what puts it on the lifespan's start list
         # (D13) — the workspace's model-connection file is not consulted for it.
@@ -2518,13 +2513,8 @@ class FakeLspManager:
 
 @pytest.fixture
 def lsp_client(monkeypatch, tmp_path):
-    from src import config as config_module
-
     from tests.conftest import neutralise_store
 
-    for key in config_module.SETTING_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
     # This class owns its own workspace root, so the model-connection file is
     # pinned here too, with the tool-loop cap at 25 (the template's 300 would
     # make the cap assertions below accidental). It pins no language server at
@@ -2641,8 +2631,6 @@ class TestLspEndpoints:
         readers answer from, so a save that left it unchanged while writing
         somewhere else would look green and do nothing.
         """
-        from src import config as config_module
-
         from src.core import appdb
 
         client, _ = lsp_client
@@ -2657,10 +2645,11 @@ class TestLspEndpoints:
         assert appdb.load_servers() == before
         agent, _findings = appdb.resolve_agent("code")
         assert agent["maxToolIteration"] == 25
-        # The POST wrote nothing to .env's now-dead keys.
-        env_values = dotenv_values(config_module.ENV_PATH)
-        assert env_values.get("LSP_ENABLED") is None
-        assert env_values.get("MAX_TOOL_ITERATION") is None
+        # (The check that used to live here — that the POST left ``.env``'s
+        # ``LSP_ENABLED`` / ``MAX_TOOL_ITERATION`` alone — is gone rather than
+        # re-pointed: those two are **boot flags** now, which no request can
+        # reach, and asserting on the install's own folder would make the case
+        # depend on whether this machine still has a stale file.)
         # The declaration file is where the decision landed, for every declared
         # server, and the rest of the entry survived the rewrite.
         data = json.loads(lsp_constants.LSP_SETTINGS_PATH.read_text(encoding="utf-8"))

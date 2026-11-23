@@ -1,7 +1,12 @@
 # Workspace policy / stores (hidden folder, read-write-policy.json governs it)
 .nojae/
 
-# Secrets (each text secret file has a committed .example template)
+# Secrets. The hub declaration files and the e2e connection fixture have a
+# committed .example template; the store below has none.
+# ``.env``/``.env.test`` stay ignored although the app no longer reads either
+# (its own configuration is boot flags now): an install that predates the change
+# may still hold its old file, with whatever it held in it, and a gitignore that
+# dropped the name would expose that to ``git add .``.
 .env
 .env.test
 # nojaé's own settings store: binary and single-writer, so it is never

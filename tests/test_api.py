@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -86,38 +87,39 @@ class TestConfigEndpoint:
     def test_the_retry_budget_block_answers_the_effective_pair(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ):
-        """Spec §6's read-out: the pair the endpoint-wait guard runs on now."""
-        from src.config import NETWORK_FAIL_MAX_RETRY_KEY, NETWORK_FAIL_WAIT_FOR_KEY
+        """Spec §6's read-out: the pair the endpoint-wait guard runs on now.
 
-        monkeypatch.delenv(NETWORK_FAIL_MAX_RETRY_KEY, raising=False)
-        monkeypatch.delenv(NETWORK_FAIL_WAIT_FOR_KEY, raising=False)
+        The route answers the flags **this run** was booted with, so a case moves
+        them through the same whole-value replacement the console script uses —
+        the route has no way to set them itself, which is the point.
+        """
+        from src import config as config_module
 
         block = client.get("/api/config").json()["retryBudget"]
-        # Both defaults, and no note: nothing was written, so nothing is wrong.
-        assert block == {"maxRetry": 3, "waitSeconds": 10, "notes": []}
+        # Both defaults, and nothing else: a run that passed neither flag still
+        # has a budget, and there is no written value to be confused about.
+        assert block == {"maxRetry": 3, "waitSeconds": 10}
 
-        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "0")
-        monkeypatch.setenv(NETWORK_FAIL_WAIT_FOR_KEY, "25")
+        config_module.set_boot_flags(
+            config_module.BootFlags(network_max_retry=0, network_wait_for=25)
+        )
         block = client.get("/api/config").json()["retryBudget"]
         # Zero is a value someone chose, not a missing one.
-        assert block == {"maxRetry": 0, "waitSeconds": 25, "notes": []}
+        assert block == {"maxRetry": 0, "waitSeconds": 25}
 
-    def test_the_retry_budget_block_names_an_unusable_value(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    def test_the_retry_budget_block_carries_no_fallback_note(
+        self, client: TestClient
     ):
-        from src.config import NETWORK_FAIL_MAX_RETRY_KEY, NETWORK_FAIL_WAIT_FOR_KEY
+        """The block's shape is the pair and **nothing else**.
 
-        monkeypatch.setenv(NETWORK_FAIL_MAX_RETRY_KEY, "ten")
-        monkeypatch.delenv(NETWORK_FAIL_WAIT_FOR_KEY, raising=False)
-
+        It used to answer a ``notes`` list, one sentence per ``.env`` key whose
+        written value was unusable and the default answered for. An unusable
+        ``--network-max-retry`` stops the boot in the parser instead, so a
+        running app can be in no such state — and a field that is always empty
+        advertises a read-out that cannot report anything.
+        """
         block = client.get("/api/config").json()["retryBudget"]
-        # The default answered, and the note says which key fell back and why,
-        # so a typo in .env is not a stall nobody can read off the screen.
-        assert block["maxRetry"] == 3
-        assert block["waitSeconds"] == 10
-        assert len(block["notes"]) == 1
-        assert NETWORK_FAIL_MAX_RETRY_KEY in block["notes"][0]
-        assert "ten" in block["notes"][0]
+        assert set(block) == {"maxRetry", "waitSeconds"}
 
     def test_supports_vision_rides_with_the_model_it_describes(
         self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -276,81 +278,112 @@ class TestTheSettingsSurfaceIsTheStore:
         assert added_model["serverUrl"] == "http://target:8080/v1"
 
 
-class TestEnvTrioParity:
-    """AGENTS.md's trio rule, as a test: ``SETTING_KEYS``, ``_render_env()``
-    and ``.env.example`` move together — ws-04 shrank all three the same way,
-    and none of them may name a group-1 key any more.
+class TestTheBootFlagsMoveTogether:
+    """The install-level configuration surface, as one parity check.
+
+    It replaced the ``.env`` trio rule (``SETTING_KEYS``, the renderer and
+    ``.env.example`` had to agree). The same kind of drift is still possible
+    among the three places a boot flag now lives — the
+    :class:`src.config.BootFlags` members, the parser's options, and what
+    ``/api/health`` names — and a flag added to one and not the others is the
+    same bug the old class existed to catch: a value with no way in, or a read-out
+    of a thing nobody can set.
     """
 
-    # The names the model connection used to live under in ``.env`` — dead
-    # bytes now (spec D2), rendered by nothing.
-    GROUP_ONE_ENV_NAMES = (
-        "SERVER_URL",
-        "SERVER_URL_API_KEY",
-        "ENDPOINT",
-        "LLM_SYSPROMPT",
-        "TEMPERATURE",
-        "TOP_P",
-        "TOP_K",
-        "MIN_P",
-        "REPEAT_PENALTY",
-        "PRESENCE_PENALTY",
-        "REASONING",
-        "SUPPORTS_VISION",
-        "LSP_ENABLED",
-        "MAX_TOOL_ITERATION",
-    )
+    def test_every_flag_is_parsed_and_reported(self):
+        """Every member of the value has a name in the health payload.
 
-    @staticmethod
-    def _managed_keys(text: str):
-        """The ``KEY=``/``#KEY=`` names a file or render mentions, line by line."""
-        names = set()
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if line.startswith("#"):
-                line = line[1:]
-            name, sep, _value = line.partition("=")
-            if sep and name.replace("_", "").isalnum() and name == name.upper():
-                names.add(name)
-        return names
+        The two spellings differ on purpose — the flags are Python names, the
+        payload is the browser's — so the check is the **mapping** and the
+        count, not identical strings: a member nobody can read off the screen, or
+        a reported field nobody can set, is the drift this class exists to catch.
+        """
+        from src import config as config_module
 
-    def test_every_managed_key_is_rendered_and_exemplified(self):
-        from src.config import PROJECT_ROOT, SETTING_KEYS, _render_env
+        boot = TestClient(create_app()).get("/api/health").json()["boot"]
+        assert len(boot) == len(config_module.BootFlags._fields)
+        # Every reported key is a flag's own name in camelCase, and no key is an
+        # invented one.
+        for key in boot:
+            snake = re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), key)
+            assert snake in config_module.BootFlags._fields, key
 
-        rendered = _render_env({key: "x" for key in SETTING_KEYS})
-        assert self._managed_keys(rendered) == set(SETTING_KEYS)
-        example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
-        assert set(SETTING_KEYS) <= self._managed_keys(example)
+    def test_the_run_entry_point_hands_the_port_to_the_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``run`` is the console script: the flag must reach the bind.
 
-    def test_no_group_one_key_in_any_of_the_three(self):
-        from src.config import PROJECT_ROOT, SETTING_KEYS, _render_env
+        Everything else here tests a *value*; this tests the one function that
+        turns a command line into a served app. ``uvicorn.run`` is replaced, so
+        nothing binds a port — what is asserted is the call it would have made,
+        which is the whole of ``--port``'s effect.
+        """
+        from src import config as config_module
+        from src.api import server as server_module
 
-        rendered = _render_env({})
-        example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
-        for name in self.GROUP_ONE_ENV_NAMES:
-            assert name not in SETTING_KEYS
-            assert name not in self._managed_keys(rendered)
-            assert name not in self._managed_keys(example)
+        calls: List[Dict[str, Any]] = []
+        monkeypatch.setattr(
+            server_module.uvicorn, "run", lambda app, **kw: calls.append({"app": app, **kw})
+        )
+        server_module.run(["--port", "9137"])
 
-    def test_the_pointer_comment_names_the_moved_store(self):
-        from src.config import PROJECT_ROOT, _render_env
+        assert len(calls) == 1
+        # The address is never the operator's to choose: loopback, always.
+        assert calls[0]["port"] == 9137
+        assert calls[0]["host"] == config_module.DEFAULT_HOST
+        assert config_module.boot_flags().port == 9137
 
-        for text in (
-            _render_env({}),
-            (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8"),
-        ):
-            # The comment points at the settings store, which replaced the flat
-            # file, and it names no file that no longer exists. It does not
-            # spell the database's name either: the store module is the only
-            # place that does (§4.1).
-            assert "nojae's settings store" in text
-            assert "nojae-settings.json" not in text
-            assert "nojae-settings.default.json" not in text
+    def test_an_unusable_flag_stops_before_anything_is_served(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The reason the flags are parsed **first**.
 
-    def test_required_setting_keys_is_empty(self):
-        from src.config import REQUIRED_SETTING_KEYS
+        A typo must end the boot with argparse's sentence, not start an app on a
+        number nobody typed: ``uvicorn.run`` is patched to raise, so a serve after
+        a refused parse is visible as a failure rather than as a quiet default.
+        """
+        from src.api import server as server_module
 
-        assert REQUIRED_SETTING_KEYS == ()
+        def no_serve(*args, **kwargs):
+            raise AssertionError("the app was served despite a refused flag")
+
+        monkeypatch.setattr(server_module.uvicorn, "run", no_serve)
+        for bad in (["--port", "0"], ["--network-max-retry", "ten"]):
+            with pytest.raises(SystemExit):
+                server_module.run(bad)
+
+    def test_the_parser_offers_exactly_the_flags_the_value_holds(
+        self, capsys: pytest.CaptureFixture
+    ):
+        """``--help`` spells every member, and no member is missing from it."""
+        from src import config as config_module
+
+        with pytest.raises(SystemExit):
+            config_module.parse_boot_args(["--help"])
+        text = capsys.readouterr().out
+        for field in config_module.BootFlags._fields:
+            assert "--" + field.replace("_", "-") in text
+
+    def test_the_health_boot_block_is_the_effective_run_state(self):
+        """Not a second source: what it answers is what the consumers read.
+
+        The port, the switch and the pair are reported from the same
+        :func:`src.config.boot_flags` every other consumer calls, so a screen and
+        a refused round cannot disagree about the run they are both part of.
+        """
+        from src import config as config_module
+
+        config_module.set_boot_flags(
+            config_module.BootFlags(llm_debug=True, port=9123, network_max_retry=1)
+        )
+        boot = TestClient(create_app()).get("/api/health").json()["boot"]
+        assert boot == {
+            "llmDebug": True,
+            "networkMaxRetry": 1,
+            "networkWaitFor": config_module.DEFAULT_NETWORK_FAIL_WAIT_FOR,
+            "port": 9123,
+        }
+        assert boot["port"] == config_module.boot_flags().port
 
 
 class TestModelsEndpoint:

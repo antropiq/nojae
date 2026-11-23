@@ -87,8 +87,9 @@ ShellSpec = Tuple[str, ...]
 GIT_INSTALL_CANDIDATES: List[str] = list(gitbash.GIT_INSTALL_CANDIDATES)
 
 # The override's name, same process-environment-only reasoning as the console
-# connector's and ``NOJAE_PATH_LOCATION``'s: a settings save must not erase
-# it, and the managed ``.env`` template's key set is not widened for it.
+# connector's: a run's own configuration is what the boot flags carry, and this
+# is not one of them — it names a folder for one child process, so widening the
+# app's configuration surface for it would be wrong on both sides.
 GIT_ENV_OVERRIDE: str = gitbash.GIT_ENV_OVERRIDE
 
 # Which selection runs. Named and patchable rather than read inline at the call,
@@ -130,9 +131,10 @@ def child_environment(
     unchanged on both platforms.
 
     The process environment is inherited **verbatim** otherwise — the honest
-    trade-off the session has always documented: the child sees
-    ``NOJAE_PATH_LOCATION`` and the ``.env``-derived values because the app
-    itself carries them.
+    trade-off the session has always documented: whatever the process carries,
+    the child carries too. Nothing the app configures itself with is in there any
+    more — its technical settings are boot flags and its workspace placeholder is
+    computed per request — so what leaks is only what the OS and the shell own.
 
     For the Git Bash case, ``PATH`` gets Git's directories **prepended in Windows
     form** (:func:`mcp_connectors.gitbash.git_child_env`): a bash started with

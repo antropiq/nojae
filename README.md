@@ -133,11 +133,12 @@ Full detail: **[What the app does](docs/FEATURES.md)**.
 | | |
 |---|---|
 | **[Setup](docs/SETUP.md)** | Both platforms in full, Volta and pyenv, dev mode, the e2e suite's own model connection. |
-| **[Configuring the app](docs/CONFIGURATION.md)** | The settings store, the MCP and LSP declaration files, the working location, `.env`. |
+| **[Configuring the app](docs/CONFIGURATION.md)** | The settings store, the MCP and LSP declaration files, the working location, the boot flags. |
 | **[What the app does](docs/FEATURES.md)** | Both tabs in detail, skills, the streaming layer and the endpoint wait. |
 
-Configuration is edited from the UI and takes effect hot — except a hand-edit of
-`.env`, which waits for a restart.
+Configuration is edited from the UI and takes effect hot — except the install's
+technical settings (`--llm-debug`, the two network flags, `--port`), which are
+flags on the command line that starts the app and so wait for a restart.
 
 ---
 

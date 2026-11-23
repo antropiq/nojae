@@ -946,16 +946,13 @@ class FakeManager:
 
 @pytest.fixture
 def mcp_client(monkeypatch, tmp_path):
-    from src import config as config_module
-
     from tests.conftest import neutralise_store
 
-    for key in config_module.SETTING_KEYS:
-        monkeypatch.delenv(key, raising=False)
     # The tool-loop cap is a per-agent column now (D9); pin it to 25 here so a
-    # case that reads it back keeps a number it named.
+    # case that reads it back keeps a number it named. Nothing wipes an
+    # environment key any more: the install's own keys are **boot flags**, so no
+    # ambient ``.env`` value of any name can answer for this fixture.
     neutralise_store(monkeypatch, tmp_path, maxToolIteration=25)
-    monkeypatch.setattr(config_module, "ENV_PATH", tmp_path / ".env")
     # Point the hub at a temp declaration file, so the developer's own
     # mcp_connectors/mcp-settings.json stays untouched. No file is written: the
     # tests that need entries write one themselves.
@@ -1092,23 +1089,15 @@ class TestMcpEndpoints:
     ):
         import os
 
-        from dotenv import dotenv_values
-
-        from src import config as config_module
-
         path = self._externals_file(tmp_path)
         client, _ = mcp_client
         response = client.post("/api/mcp", json={"enabled": ["context7"]})
         assert response.status_code == 200
-        # The enable flag is the only activation source: no MCP_ENABLED is
-        # ever written back to .env or the environment.
+        # The enable flag is the only activation source: the route writes the
+        # declaration and exports nothing. (The check that this used to be made
+        # against — ``MCP_ENABLED`` / ``MAX_TOOL_ITERATION`` sitting unwritten in
+        # ``.env`` — has no file to make it against any more.)
         assert "MCP_ENABLED" not in os.environ
-        file_values = dotenv_values(config_module.ENV_PATH)
-        assert "MCP_ENABLED" not in file_values
-        # The tool-loop cap is not this route's to write any more (D9): it is an
-        # agent column, edited on that agent's tab, so no `maxIterations` reaches
-        # a store from here — and the `.env` template never rendered one.
-        assert "MAX_TOOL_ITERATION" not in file_values
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["context7"]["enable"] is True
         assert data["chrome-devtools"]["enable"] is False

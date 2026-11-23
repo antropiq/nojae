@@ -140,6 +140,11 @@ uvicorn src.api.server:app --reload --port 8001   # the API on :8001
 cd web && npm run dev                             # Vite on :5173, proxying /api to :8001
 ```
 
+This is `uvicorn`'s own command line, so it carries **no boot flag**: the app runs
+on the documented defaults (debug off, the endpoint wait on its pair). Pass `--port`
+to `uvicorn` here, not to the app. To try a flag, run the console script instead —
+`nojae --llm-debug --port 8001`.
+
 ### Tests
 
 ```bash
@@ -156,21 +161,24 @@ temporary settings store of its own — the install's `nojae.db` is never opened
 
 The end-to-end suite (`cd web && npm run test:e2e`) has **its own** model
 connection, so a spec can never talk to a server this install is configured with.
-Two files, one switch:
+One file and one switch:
 
 | File | Holds |
 |---|---|
-| `.env.test` (from `.env.test.example`) | The **app-level** keys — `LLM_DEBUG` and `NOJAE_PYTHON_ROOT`: the same set `.env` holds. |
 | `.nojae/nojae-test-settings.json` | The suite's **model connection** — one `server` object holding one `model` object, spelled with the settings store's own column names: `name`, `url`, `api_key`, then the model's `name`, `sys_prompt`, samplers and `supports_vision`. |
 
-`web/playwright.config.js` parses `.env.test` into the environment of the server
-under test and exports `NOJAE_TEST_SETTINGS=1`, which is the one switch that puts
-that server in **test mode**: it never opens the install's `nojae.db`, and works
-instead on a temporary database it creates in a throw-away folder. The test
-settings file's job is to **seed that database** — one server row, one model row,
-and every agent pointed at that model — so the suite resolves a turn's connection
-exactly the way a real turn does, against a configuration nobody else owns.
-Nothing else turns it on — the backend suite pins it off.
+`web/playwright.config.js` exports `NOJAE_TEST_SETTINGS=1`, which is the one switch
+that puts the server under test in **test mode**: it never opens the install's
+`nojae.db`, and works instead on a temporary database it creates in a throw-away
+folder. The test settings file's job is to **seed that database** — one server
+row, one model row, and every agent pointed at that model — so the suite resolves
+a turn's connection exactly the way a real turn does, against a configuration
+nobody else owns. Nothing else turns it on — the backend suite pins it off.
+
+The app-level settings the suite used to read from a `.env.test` are **boot flags**
+now, and the harness starts the app with `uvicorn`'s own command, which carries
+none: the run under test is on the defaults (debug off, the wait on its pair),
+which is what it always was whenever that file left them commented out.
 
 **The test settings file is created by hand and never by the app.** It has no
 committed template and the app never seeds, saves or rewrites it, so a

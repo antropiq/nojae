@@ -4,7 +4,7 @@
 # Configuring the app
 
 What the settings store holds, the two declaration files, the working
-location, and `.env`.
+location, and the flags the app boots with.
 
 Two kinds of thing configure the app. The **model connection, the agents and the
 prompt-helper bullets** are rows of one SQLite database — `nojae.db`, at the
@@ -15,7 +15,7 @@ only settings a folder carries.
 | | Holds | Written by |
 |---|---|---|
 | `nojae.db` (install root) | The servers and the models under them, each server with its key; the agents; the prompt helpers. | the Settings and Agent-modes dialogs — and nothing else |
-| `.env` (from `.env.example`) | The install-scoped technical keys: `LLM_DEBUG` (log every request payload), `NOJAE_PYTHON_ROOT` (the python the stdio connectors run on), and the two numbers of the model-endpoint wait. | by hand; nothing in the dialog edits them |
+| the flags on the command line | The install-scoped technical settings: `--llm-debug` (log every request payload), `--network-max-retry` and `--network-wait-for` (the two numbers of the model-endpoint wait), `--port`. Nothing is written to a file; the interpreter the connectors run on is worked out at boot. | the command that starts `nojae` — and nothing else |
 | `.nojae/mcp-settings.json` (seeded from `mcp_connectors/mcp-settings.default.json`) | The MCP connectors the agent may call. | by hand; the dialog's toggles write each entry's `enable` flag |
 | `.nojae/lsp-settings.json` (written from the seeded `.nojae/lsp-settings.template.json`) | The language servers. | by hand; same |
 
@@ -23,7 +23,8 @@ The database is **binary and single-writer**: never hand-edited, and with no
 committed template, because it has no member you would type into it. It holds the
 model keys, so it is gitignored like the other secret-bearing files, and it is
 hidden from the Editor's tree, from file reads and search, and from both
-connectors — the protection `.env` already has. A store the app cannot open is a
+connectors — the protection the install's own configuration has always had. A
+store the app cannot open is a
 **named state**, never a silent empty one: the app bar says so in the one sentence
 that names the path, and a chat turn refuses with that same sentence.
 
@@ -39,8 +40,9 @@ the template.
 Nothing about the connection, the agents or the bullets travels with the folder:
 point a tab at another project and the same servers, the same agents and the same
 bullets answer there. The store is read afresh at the start of every turn, so a
-dialog save needs no restart at all. `.env` follows the other rule: a hand-edit
-waits for one.
+dialog save needs no restart at all. The **boot flags** follow the other rule:
+what a run was started with is what it stays, so changing one means booting
+again.
 
 ### The model connection — Settings → **Servers**
 
@@ -99,11 +101,13 @@ that counts. Two kinds:
 Any `url`, `command`, `headers` or `env` value may reference an environment
 variable as `${NAME}`, or `${NAME:-fallback}` when the variable is optional. The
 reference is expanded when the file is read, using the environment the connector
-runs with — the app's own, `.env` included — so one declaration works on every
-machine and a secret can stay out of the file. Two names answer from the app
-itself rather than from the environment: `${PROJECT_ROOT}` is this install's
-own folder, always right by construction. Only the braced `${…}` form is
-special, an
+runs with — so one declaration works on every machine and a secret can stay out
+of the file. **Three names answer from the app itself instead, and the
+environment is never consulted for them**: `${PROJECT_ROOT}` is this install's
+folder, `${NOJAE_PATH_LOCATION}` the workspace the request named, and
+`${NOJAE_PYTHON_ROOT}` the interpreter this process runs on — all three always
+right by construction, and all three unredirectable by a stray export of the
+same name. Only the braced `${…}` form is special, an
 expanded value is never re-split into arguments, and an unset name is left
 written as-is and reported as a validation note in **Settings → MCP** rather
 than blanked.
@@ -417,53 +421,56 @@ touching your own editor. And **`hidden` is the per-workspace off switch** — i
 removes that project's skills from every turn, which is why the scan honours it
 rather than listing files the connectors would refuse.
 
-### The install's technical keys — `.env`
+### The install's technical settings — the boot flags
 
-Copy `.env.example` to `.env` when you want to turn the request logging on, to
-name the interpreter your connectors run on, or to change how long a refused
-model round is waited on. This file holds only what is scoped to **this nojae
-install** and edited by hand: the model connection — servers, their models,
-keys, prompts, sampling and the vision flag — is in the settings store, edited
-from the Settings dialog, and the tool-loop cap is a number on each agent (see
-the table at the top of this section). What is left here are the technical keys
-below, and nothing in the dialog edits them:
+There is no `.env` file. What used to be its four keys are now either a **flag on
+the command line that booted the app** or something the app **works out for
+itself**:
 
 ```bash
-#LLM_DEBUG=1                # logs every request payload to the console
-#NOJAE_PYTHON_ROOT=         # the python the stdio connectors run on
-#NETWORK_FAIL_MAX_RETRY=3   # how many times a refused round is asked again
-#NETWORK_FAIL_WAIT_FOR=10   # seconds between two attempts at that round
+nojae --llm-debug                      # log every request payload to the console
+nojae --network-max-retry 3            # how often a refused round is asked again
+nojae --network-wait-for 10            # seconds between two attempts at it
+nojae --port 8001                      # the port the UI and the API are served on
 ```
 
-All four are **hand-edited managed keys**: a settings save keeps them, but
-nothing in the dialog edits them. `LLM_DEBUG=1` makes the LLM client log the
-payload of every request to the server console — very verbose, and switched back
-off once the failure is read.
+Every flag is optional and every one is **this run's**: none is written to a file,
+so booting again without it clears it, and two checkouts of one install can be
+booted differently without either editing anything the other reads. The model
+connection — servers, their models, keys, prompts, sampling and the vision flag —
+is in the settings store and edited from the Settings dialog; the tool-loop cap is
+a number on each agent. Nothing the boot flags decide is editable from the dialog.
 
-`NETWORK_FAIL_MAX_RETRY` and `NETWORK_FAIL_WAIT_FOR` are the two numbers of the
-endpoint wait described under
+`--llm-debug` makes the LLM client log the payload of every request to the server
+console — very verbose, and switched back off by booting without the flag. The
+*status and upstream body* of a refused call reach the UI's error line whether or
+not it is on; what the flag adds is the request payload.
+
+`NOJAE_PYTHON_ROOT` left the set entirely, because it was never a choice: it named
+which interpreter this app is, and only the running process can answer that. It is
+now `sys.executable`, the interpreter that started `nojae`, and the stdio
+connectors run on it — they import the same packages from the same environment, so
+booting the app from another interpreter moves them with it. A stale hand-written
+path, which nothing used to check, is no longer a thing that can happen. The
+placeholder keeps its name (`${NOJAE_PYTHON_ROOT}`) inside the declaration files,
+where it always resolves; see the note on expansion under
+[The MCP setup file](#the-mcp-setup-file--nojaemcp-settingsjson).
+
+The two network flags are the numbers of the endpoint wait described under
 [One configuration, one streaming layer](FEATURES.md#one-configuration-one-streaming-layer):
 how many times one refused round is asked again, and the seconds between two
 attempts at it. Both defaults are non-zero, so the wait is **on with no
-configuration at all**; `NETWORK_FAIL_MAX_RETRY=0` switches it off and a refused
+configuration at all**; `--network-max-retry 0` switches it off and a refused
 round fails on its first attempt. One round can hold the turn for at most the
 product of the two — `120 × 30s` is two hours — and that hold is not free: a
 reply stays in flight through the wait, so **the Editor refuses every write to
 its folder** until the round lands. A generous budget is therefore a long window
 in which that workspace cannot save, and **Stop** closes it at once. A blank,
-non-numeric or negative value is never silently coerced: the default answers for
-that key alone, and `GET /api/config` answers the effective pair with a note
-naming every key whose written value was unusable — so a typo there is visible
-instead of being a stall with extra steps.
-
-A `.env` save **regenerates the file from a fixed template**: fixed key set and
-order, empty optional keys commented out, hand-written extras lost. Add or rename
-a key and you change the template, the renderer and the committed example
-together.
-
-The e2e suite reads the same app-level keys from `.env.test`, and its model
-connection from the test settings file — see
-[Setting up tests for nojae](SETUP.md#setting-up-tests-for-nojae).
+non-numeric or negative value is never silently coerced into a default either:
+the boot **refuses** and names the option, because the app has not started yet and
+the person who typed it is standing there. `GET /api/config` answers the effective
+pair, and `GET /api/health` the whole set of flags this run was given, so a run can
+be read off the screen.
 
 ### Run
 

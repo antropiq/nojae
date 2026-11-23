@@ -45,8 +45,9 @@ The tabs share one settings store and one streaming layer:
 A UI-free **core** and the **API** in front of it. Core functions report progress
 through an injected `emit(event: dict)` callable.
 
-- `config` — `.env`, the connection an agent resolves from the settings store, and
-  the project-instructions block for chat; `core/workspace.py` answers which folder.
+- `config` — the **boot flags**, the connection an agent resolves from the
+  settings store, and the project-instructions block for chat;
+  `core/workspace.py` answers which folder.
 - `api` — the REST and SSE endpoints under one route prefix.
 - `core` — the streamed chat reply with its shared tool-call loop; the
   batch-mode lot listing; the agent modes; `appdb`, the store's only opener.
@@ -75,8 +76,11 @@ Vite + Vue 3, plain JavaScript, Pico.css.
 - The tree's per-file-type icons are **generated**: edit the source tables and
   regenerate, never hand-edit the artifacts.
 
-Configuration is edited from the UI and takes effect hot — except a hand-edit of
-`.env`, which waits for a restart.
+Configuration is edited from the UI and takes effect hot — except the install's
+technical settings, which are **boot flags** (`--llm-debug`, `--network-max-retry`,
+`--network-wait-for`, `--port`) and therefore wait for a restart. There is no
+`.env` file: the app reads none, writes none, and the interpreter its stdio
+connectors run on is `sys.executable`, computed at call time.
 
 ## How a request flows
 
@@ -113,9 +117,8 @@ ack, keeping its partial turn. The measurement rules hold for every stream:
 
 | File | Role |
 |---|---|
-| `.env` | Install-scoped technical keys. |
 | `nojae.db` | The install's settings store: its model connections, its agents and its prompt helpers. Written only through its own routes, never through a path; never hand-edited, so it has no committed template. |
-| `.env.test`, `.nojae/nojae-test-settings.json` | The e2e suite's own configuration and model connection, read only under the test switch. |
+| `.nojae/nojae-test-settings.json` | The e2e suite's own model connection, read only under the test switch. |
 | Connector and language-server declarations | Which ones exist and how to reach them — files in the workspace's reserved folder. |
 | Reserved workspace folder | This workspace's read/write policy and its hub declarations. |
 | `.agents/skills/*/SKILL.md` | Packaged know-how, catalogued into chat turns on this workspace. The user's files: no app path writes them. |
@@ -123,8 +126,11 @@ ack, keeping its partial turn. The measurement rules hold for every stream:
 Those files may hold secrets, so they are gitignored. These rules tie them
 together:
 
-- **`.env` is regenerated from a fixed template on every save** — a new or
-  renamed key means changing the template and its committed example together.
+- **Install-scoped technical settings are process state, never a file.** They are
+  parsed once from the command line and read at call time, so no route can write
+  one and an unusable value stops the boot instead of reaching a running app.
+  Adding one means a `BootFlags` member, its parser option and its `/api/health`
+  report together — `tests/test_api.py` asserts that parity.
 - **The declaration files are the only source of truth for what runs.** Their
   `enable` flag is the switch; their secrets never leave the server. A value may
   reference an environment variable so one declaration works on every machine;

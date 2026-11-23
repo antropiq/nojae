@@ -2,7 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Sequence
 
 import uvicorn
 from fastapi import FastAPI
@@ -12,9 +12,11 @@ from src.api import routes as api_routes
 from src.api.routes import build_router
 from src.config import (
     apply_llm_debug,
-    ENV_PATH,
-    load_dotenv_once,
+    DEFAULT_HOST,
+    boot_flags,
     PROJECT_ROOT,
+    parse_boot_args,
+    set_boot_flags,
 )
 from src.core.hubpool import HubPool
 from src.core.termhub import TerminalHub
@@ -67,12 +69,20 @@ def _boot_app_store() -> Dict[str, Any]:
 
 def create_app() -> FastAPI:
     """Build the FastAPI app: API routes first, static SPA fallback after."""
-    load_dotenv_once()
-    # The debug switch is read from the environment, so it is applied right
-    # after the .env has been loaded (and again on every settings save).
-    # Keeping it here rather than in the module's import side effects means the
-    # tests build an app without touching the loggers of the whole process
-    # unless they ask for it.
+    # There is no file to read here any more: what this app runs on comes from
+    # the command line that booted it (:func:`src.config.parse_boot_args`,
+    # recorded by :func:`run`) or from the module's defaults when nothing
+    # recorded anything. A process that never went through ``run`` — this
+    # module's import in a test, a ``uvicorn src.api.server:app`` dev server —
+    # therefore builds the same app on the documented defaults, which is why
+    # nothing here looks for a file at all.
+    #
+    # The debug switch is applied here because the switch's whole effect is
+    # process-wide logger state, and an app that is *created* is the moment that
+    # state should match what the run decided. Keeping it out of the module's
+    # import side effects means the tests build an app without touching the
+    # loggers of the whole process unless they ask for it; ``run`` re-applies it
+    # after parsing, which is what covers the console-script path.
     apply_llm_debug()
     # The folder the boot lands on is the **installation**, which is the workspace
     # a new tab starts on (spec D4). It is admitted to the pool like any other:
@@ -187,9 +197,24 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
+        """Reachability probe, and what this process was booted with.
+
+        The ``env`` key this used to answer (``.env`` exists, yes/no) is gone
+        with the file. What replaced it is the honest successor of the same
+        question: an install that was configured by hand used to be readable
+        from its file, and a run configured by flags is readable from its
+        parsed command line — so this names the debug switch, the endpoint
+        wait's pair and the port, which is everything about the run that is not
+        in the settings store.
+        """
         return {
             "status": "ok",
-            "env": ENV_PATH.is_file(),
+            "boot": {
+                "llmDebug": boot_flags().llm_debug,
+                "networkMaxRetry": boot_flags().network_max_retry,
+                "networkWaitFor": boot_flags().network_wait_for,
+                "port": boot_flags().port,
+            },
         }
 
     if WEB_DIST.is_dir():
@@ -198,9 +223,31 @@ def create_app() -> FastAPI:
     return app
 
 
-def run() -> None:
-    """Console-script entry: serve the API and built frontend on :8001."""
-    uvicorn.run("src.api.server:app", host="127.0.0.1", port=8001)
+def run(argv: Optional[Sequence[str]] = None) -> None:
+    """Console-script entry: parse this run's flags, then serve the API and UI.
+
+    The one place the command line becomes process state: :func:`parse_boot_args`
+    answers the flags (and refuses an unusable value *before* anything is
+    served), :func:`set_boot_flags` records them for every consumer to read at
+    call time, and only then is the app handed to the server. So the debug
+    switch that ``create_app()`` applies is the value this run was given, not the
+    module's default — and an unparseable flag exits with argparse's sentence
+    rather than booting an app nobody asked for.
+
+    ``argv`` is a parameter for the same reason the parser's is: ``run`` is then
+    testable about a *given* command line instead of about whatever arguments
+    reached the process. It defaults to the process's own.
+    """
+    set_boot_flags(parse_boot_args(argv))
+    flags = boot_flags()
+    # Re-apply here, not only in ``create_app``: the module-level app that
+    # ``uvicorn.run`` imports below was already created — before this parse — so
+    # this is the call that makes ``--llm-debug`` mean anything on the console
+    # script's own path.
+    apply_llm_debug()
+    uvicorn.run(
+        "src.api.server:app", host=DEFAULT_HOST, port=flags.port
+    )
 
 
 app = create_app()

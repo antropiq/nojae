@@ -27,14 +27,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from src.api.events import sse_format
 from src.config import (
-    NETWORK_FAIL_MAX_RETRY_KEY,
-    NETWORK_FAIL_WAIT_FOR_KEY,
     agent_connection_refusal,
     agent_instructions_block,
     load_endpoints_config,
     max_tool_iteration,
     network_fail_budget,
-    network_fail_readout,
 )
 from src.core.mcphub import (
     load_externals,
@@ -1506,24 +1503,21 @@ def build_router() -> APIRouter:
     def _retry_budget_block() -> Dict[str, Any]:
         """The endpoint-wait budget, as spec §6 says it must be readable.
 
-        ``{"maxRetry": 3, "waitSeconds": 10, "notes": []}`` — the effective pair
-        plus, per key, a sentence when a written value was unusable and the
-        default answered instead. Without that note, a typo in ``.env`` would be
-        a stall nobody can read off the screen; the values themselves are read
-        at call time, so this block is what the install currently runs on.
+        ``{"maxRetry": 3, "waitSeconds": 10}`` — the pair this **run** was
+        booted with (``--network-max-retry`` / ``--network-wait-for``, or the
+        defaults when neither flag was given). Read at call time, so what the
+        screen shows is what the next refused round will spend.
+
+        The block used to carry a ``notes`` list, one sentence per key whose
+        *written* value was unusable and the default answered for. That state
+        cannot exist any more: an unusable value on the command line stops the
+        boot in ``src.config._non_negative_int_arg`` with argparse naming the
+        option, so there is nothing left to report from a running app. A read-out
+        of an unrepresentable state is not a safety net, so it is gone rather than
+        permanently empty.
         """
         max_retry, wait_seconds = network_fail_budget()
-        effective = {
-            NETWORK_FAIL_MAX_RETRY_KEY: max_retry,
-            NETWORK_FAIL_WAIT_FOR_KEY: wait_seconds,
-        }
-        notes = [
-            f"{key} was set to {entry['raw'].strip()!r}, which is not a whole "
-            f"number of 0 or more; {effective[key]} answers instead."
-            for key, entry in network_fail_readout().items()
-            if entry["fellBack"]
-        ]
-        return {"maxRetry": max_retry, "waitSeconds": wait_seconds, "notes": notes}
+        return {"maxRetry": max_retry, "waitSeconds": wait_seconds}
 
     @router.get("/config")
     def get_config() -> Dict[str, Any]:
@@ -1531,7 +1525,7 @@ def build_router() -> APIRouter:
 
         ``{"models": [{id, name, serverId, serverName, serverUrl,
         supportsVision, contextWindow}], "store": {usable, sentence},
-        "retryBudget": {maxRetry, waitSeconds, notes}}``.
+        "retryBudget": {maxRetry, waitSeconds}}``.
 
         A **list**, not one connection, and deliberately so: which model a view
         is looking at is the composer's answer, not this route's, so the vision
@@ -1542,8 +1536,9 @@ def build_router() -> APIRouter:
         says so.
 
         The ``retryBudget`` block is the read-out spec §6 demands: the effective
-        pair the endpoint-wait guard reads at call time, plus a note per key
-        whose written value was unusable.
+        pair the endpoint-wait guard reads at call time — what this run was
+        booted with, which is the only source those two numbers have and so the
+        only thing worth showing.
         """
         try:
             servers = appdb.load_servers()
@@ -3759,9 +3754,10 @@ def build_router() -> APIRouter:
                     # stacked).
                     sysprompt=persona,
                     # The wait's budget **accessor**, not its numbers: the two
-                    # keys are read when a refused round is about to be waited
-                    # on, never at the turn's start (spec §6), and ``core/``
-                    # reads no ``.env`` — so the route hands over the reader.
+                    # numbers are read when a refused round is about to be
+                    # waited on, never at the turn's start (spec §6), and
+                    # ``core/`` reads no run configuration — so the route hands
+                    # over the reader, which answers this process's boot flags.
                     # It is the *module* function, not this route's local
                     # ``config`` (that name is the turn's ``EndpointsConfig``).
                     retry_budget=network_fail_budget,

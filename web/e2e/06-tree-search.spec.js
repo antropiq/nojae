@@ -11,9 +11,9 @@ import { fileURLToPath } from 'node:url'
 // (`<dialog>.showModal()` does not exist in jsdom — the unit suite patches it).
 //
 // Like `02-editor-write.spec.js`, this is one of the cheapest proofs in the
-// repo: **no LLM call is involved**. The config comes from `.env.test`, no
-// connector and no language server is started (`NOJAE_DISABLE_MCP/_LSP`
-// in playwright.config.js), and the whole feature is one blocking GET plus a
+// repo: **no LLM call is involved**. The config comes from playwright.config.js,
+// no connector and no language server is started (`NOJAE_DISABLE_MCP/_LSP`
+// in that file), and the whole feature is one blocking GET plus a
 // table of rows.
 //
 // **The scratch is the tab's workspace** (clws-12). The files are seeded through

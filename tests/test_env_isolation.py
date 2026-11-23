@@ -13,11 +13,16 @@ guard that stops each:
   are looked for. The autouse
   :func:`_every_test_runs_in_a_workspace_scope` enters a throw-away root, so no
   core surface reads this checkout.
-* **the environment** — ``SETTING_KEYS`` is the two technical keys,
-  ``LLM_DEBUG`` and ``NOJAE_PYTHON_ROOT``, and the wipe loops in the app's
-  fixtures must keep protecting exactly those, because those keys *stay* in the
-  environment. Drop one from the tuple and the ambient environment answers it
-  here.
+* **the environment and the command line** — the install's own configuration is
+  no longer in the environment at all: it is this process's **boot flags**
+  (:class:`src.config.BootFlags`), so an ambient ``LLM_DEBUG`` or
+  ``NETWORK_FAIL_MAX_RETRY`` decides nothing and there is no wipe loop to forget
+  a key. What still needs pinning is the opposite direction: the flags a test
+  runs on come from ``conftest._no_debug_switch_leak``, which replaces the whole
+  value with its defaults, so neither the console script under test nor the
+  process that started pytest decides a run's numbers. The environment names a
+  *parent* sets for a child keep working (``NOJAE_DISABLE_MCP`` and friends) —
+  those are switches about the process, not its configuration.
 * **the user's skills root** — ``<home>/.agents/skills``, one of the two folders
   :func:`src.core.skills.scan` walks for the catalogue that goes into the system
   prompt. The autouse :func:`_every_test_gets_its_own_home` pins the module's
@@ -34,6 +39,7 @@ Nothing here reads the values of, or writes to, this checkout's own ``.nojae``.
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -187,40 +193,49 @@ class TestThePerAgentCapIsNeutralToo:
         assert routes._active_server_ids() == []
 
 
-class TestTheEnvWipeLoopsStillCoverWhatStaysInTheEnv:
-    """The two technical keys are still the environment's, so the loops keep them."""
+class TestTheBootFlagsOfATestArePinned:
+    """Nothing the machine carries can set a test's install-level configuration.
 
-    def test_the_managed_keys_answer_nothing_after_the_wipe_loop(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ):
-        """The six fixtures' loop, run here: the managed keys stay neutralised.
+    The install's keys left the environment for the command line, so the hazard
+    changed shape and so did the guard: it is no longer a wipe loop over a tuple
+    of key names (which a future key could be forgotten from), it is one
+    whole-value replacement of the process's :class:`src.config.BootFlags`.
+    """
 
-        The model connection is neutralised by the temporary store; the keys
-        that stayed in ``.env`` are neutralised by wiping ``SETTING_KEYS`` —
-        which is why that tuple must keep naming them.
+    def test_an_ambient_environment_sets_no_install_key(self, monkeypatch):
+        """Every name the old ``.env`` held is inert here.
+
+        Pinned by *setting* them rather than deleting them, because deletion
+        proves only that this machine does not happen to export them: an install
+        that still has an exported ``LLM_DEBUG`` from before the change would
+        otherwise answer it, and the suite would pass on the machine that does
+        not have it and fail on the one that does.
         """
-        for key in config_module.SETTING_KEYS:
-            monkeypatch.delenv(key, raising=False)
-            assert key not in os.environ
-
-        # Rows of this test's own, so the config is built at all: with the env
-        # wiped, nothing ambient reaches it.
-        neutralise_store(monkeypatch, tmp_path)
-        config, error = load_endpoints_config(agent_row())
-        assert error is None
-        assert config is not None
-
-    def test_the_still_env_sourced_keys_are_named_by_the_tuple(self):
-        """The tuple is exactly these; it may not drop them.
-
-        The two technical keys stay in ``.env``, so they stay wiped by the
-        loops this file's first class is about.
-        """
-        for key in (
-            config_module.LLM_DEBUG_KEY,
+        for name in (
+            "LLM_DEBUG",
+            "LITELLM_DEBUG",
+            "NETWORK_FAIL_MAX_RETRY",
+            "NETWORK_FAIL_WAIT_FOR",
             "NOJAE_PYTHON_ROOT",
         ):
-            assert key in config_module.SETTING_KEYS
+            monkeypatch.setenv(name, "1" if name.endswith("DEBUG") else "77")
+
+        assert config_module.llm_debug_enabled() is False
+        assert config_module.network_fail_budget() == (
+            config_module.DEFAULT_NETWORK_FAIL_MAX_RETRY,
+            config_module.DEFAULT_NETWORK_FAIL_WAIT_FOR,
+        )
+        # The interpreter answer never came from the environment either.
+        assert config_module.python_root() == sys.executable
+
+    def test_the_flags_answer_the_pin_and_not_the_host_process(self):
+        """The guard's answer, asserted as the whole value it is.
+
+        A run of ``python -m pytest --llm-debug``-style arguments belongs to
+        pytest; nothing copies ``sys.argv`` into the flags, so the value here is
+        the module's own defaults whatever started the suite.
+        """
+        assert config_module.boot_flags() == config_module.BootFlags()
 
 
 class TestTheTestSettingsSwitchCannotLeakIntoTheSuite:
@@ -521,6 +536,11 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
         ``NOJAE_DISABLE_MCP``/``_LSP`` off means an app lifespan in a test
         spawns real connector processes; the test-settings key back means the
         whole suite reads the e2e fixture instead of the workspace's file.
+
+        The debug switch joins them from the other side: it is no longer an
+        environment key a lifted wipe loop could re-expose, but process state a
+        guard pins by replacing the whole value — which no ``undo()`` can reach
+        either, for the same reason the environment guards cannot.
         """
         monkeypatch.setenv("NOJAE_UNDO_PROBE", "1")
         monkeypatch.undo()
@@ -528,7 +548,8 @@ class TestAGuardSurvivesATestUndoingItsOwnPatches:
         assert os.environ.get("NOJAE_DISABLE_MCP") == "1"
         assert os.environ.get("NOJAE_DISABLE_LSP") == "1"
         assert appdb.TEST_SETTINGS_KEY not in os.environ
-        assert config_module.LLM_DEBUG_KEY not in os.environ
+        assert config_module.boot_flags() == config_module.BootFlags()
+        assert config_module.llm_debug_enabled() is False
 
     def test_the_user_skills_root_guard_still_answers_the_guard_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

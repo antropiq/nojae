@@ -36,6 +36,6 @@ POOL_TIMEOUT = 10.0
 # fallback, and a full HTML error page is not a diagnosis.
 ERROR_BODY_LIMIT = 500
 
-# The logger the debug switch (``LLM_DEBUG``) turns on: this package's request
+# The logger the ``--llm-debug`` boot flag turns on: this package's request
 # payloads and stream outcomes go under this one name.
 DEBUG_LOGGER_NAME = "nojae.llm"

@@ -15,7 +15,8 @@ import { expect, test } from '@playwright/test'
 // No LLM call and no streamed answer: the reasoning panel is
 // rendered unconditionally, so every box below is measurable on a cold, empty
 // WorkBench screen. A spec that waited for an answer would depend on
-// `.env.test` and turn flaky for reasons that have nothing to do with layout.
+// the suite's model connection and turn flaky for reasons that have nothing
+// to do with layout.
 //
 // The controls' accessible names belong to the app and are never typed here:
 // they change with the state (the focus control reads "show" until it is

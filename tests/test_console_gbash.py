@@ -254,13 +254,15 @@ def test_the_candidates_and_the_override_are_the_shared_probes_default(
     monkeypatch.setattr(c, "GIT_INSTALL_CANDIDATES", [str(tmp_path / "no-git-here")])
     monkeypatch.setenv(c.GIT_ENV_OVERRIDE, str(fake_root))
     assert c.discover_git_install() == str(fake_root)
-    # And it stays a process-environment name, never a managed .env key: the
-    # template's key set and the committed example do not carry it.
-    from src.config import SETTING_KEYS
+    # And it stays a process-environment name, never install-level configuration:
+    # no boot flag of this app is about where Git is (and the app has no key set
+    # left for it to be confused with — see ``TestTheInstallHasNoConfigurationFile``
+    # in the config suite, which pins that).
+    from src import config as config_module
 
-    assert c.GIT_ENV_OVERRIDE not in SETTING_KEYS
-    example = Path(probe.__file__).parent.parent / ".env.example"
-    assert c.GIT_ENV_OVERRIDE not in example.read_text(encoding="utf-8")
+    assert c.GIT_ENV_OVERRIDE not in {
+        field.upper() for field in config_module.BootFlags._fields
+    }
 
 
 def test_the_discovery_and_search_answers_come_from_the_shared_probe(

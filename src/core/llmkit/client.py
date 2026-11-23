@@ -42,9 +42,9 @@ def debug_enabled() -> bool:
     """Whether the request payload is logged at DEBUG (the payload half of D8).
 
     A module-level hook, off by default: the debug switch itself lives in
-    ``config`` (``LLM_DEBUG``), which is a layer this core package must not
-    import. The debug owner re-points this callable at its own predicate; the
-    failed-call diagnosis itself does not wait for it -- it is in
+    ``config`` (the ``--llm-debug`` boot flag), which is a layer this core
+    package must not import. The debug owner re-points this callable at its own
+    predicate; the failed-call diagnosis itself does not wait for it -- it is in
     :meth:`LLMRequestError.__str__`, visible with the flag off.
     """
     return False

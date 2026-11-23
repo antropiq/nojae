@@ -27,10 +27,11 @@ const { loadPromptHelpers } = usePromptHelpers()
 
 // Keep config.supportsVision (which gates the attach button) and the
 // conversation-scoped MCP snapshot fresh when the chat tab is opened:
-// settings may have been saved or .env edited meanwhile (App.vue's initial
-// loadConfig covers the first render). A locked (started) conversation
-// keeps its frozen list — loadChatMcp ignores locked state. The prompt helper
-// bullets refresh the same way (they may have been edited meanwhile).
+// settings may have been saved, or a hub declaration edited and refreshed,
+// meanwhile (App.vue's initial loadConfig covers the first render). A locked
+// (started) conversation keeps its frozen list — loadChatMcp ignores locked
+// state. The prompt helper bullets refresh the same way (they may have been
+// edited meanwhile).
 watch(
   () => appShellState.activeTab,
   (tab) => {
