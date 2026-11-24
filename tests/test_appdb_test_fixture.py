@@ -14,8 +14,11 @@ Three properties make that safe, and this file asserts each of them:
 3. **a missing or malformed fixture stops the run** rather than falling through
    to whatever this machine happens to have configured.
 
-The fixture file is written by hand, so every case here writes its own: nothing
-reads this checkout's ``.nojae/nojae-test-settings.json``.
+The fixture file is written by hand, so every case here writes its own **and
+points the lookup at it**: nothing reads the committed
+``web/tests/nojae-test-settings.json``, which belongs to the real e2e suite.
+One case does read that file's *path*, pinning that the two sides of the
+harness agree on where the fixture lives.
 """
 
 import json
@@ -58,30 +61,30 @@ def fixture_document(**overrides: Any) -> Dict[str, Any]:
 
 @pytest.fixture
 def test_mode_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A switched-on process on a workspace of its own, with its own fixture file.
+    """A switched-on process with a fixture file of its own.
 
     The switch is the product's own predicate, so this is what a real e2e run
-    sees: ``database_path`` answers the throw-away root, and the fixture is read
-    from the workspace's reserved folder.
+    sees: ``database_path`` answers the throw-away root. The **fixture lookup**
+    is moved to a folder of this case's too, because the lookup is the
+    installation's own (:func:`src.core.appdb.test_settings_path`) and a unit
+    test may never read the committed file the e2e suite owns.
     """
-    root = tmp_path / "e2e-workspace"
-    folder = root / ".nojae"
-    folder.mkdir(parents=True)
     monkeypatch.setenv(appdb.TEST_SETTINGS_KEY, "1")
     # A fresh store per case: the switch's root is per process, and the boot
     # below is what this case's rows come from.
     monkeypatch.setattr(appdb, "_test_root", tmp_path / "e2e-store")
     (tmp_path / "e2e-store").mkdir()
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    monkeypatch.setattr(appdb, "TEST_SETTINGS_DIR", ("fixture",))
+    monkeypatch.setattr(appdb, "PROJECT_ROOT", tmp_path)
     appdb.close_thread_connection()
-    from tests.conftest import scoped
-
-    with scoped(root):
-        yield root
+    yield fixture_dir
     appdb.close_thread_connection()
 
 
-def write_fixture(root: Path, document: Dict[str, Any]) -> Path:
-    path = root / ".nojae" / appdb.TEST_SETTINGS_FILENAME
+def write_fixture(fixture_dir: Path, document: Dict[str, Any]) -> Path:
+    path = fixture_dir / appdb.TEST_SETTINGS_FILENAME
     path.write_text(json.dumps(document), encoding="utf-8")
     return path
 
@@ -102,6 +105,51 @@ class TestTheSwitchMovesTheStoreOffTheInstall:
 
         assert appdb.test_mode() is False
         assert appdb.database_path() == Path(appdb.PROJECT_ROOT) / appdb.DB_FILENAME
+
+
+class TestTheFixtureLivesBesideTheSpecs:
+    """The one seam between the two harnesses: **where the fixture is**.
+
+    The Playwright config and the store must agree on one path, in two
+    languages, with nothing passing it between them — so this spells the path out
+    in **literals** (the JS side cannot import a constant) and asserts that the
+    file there is readable by the same strict reader. The JS side is
+    ``web/playwright.config.js``.
+    """
+
+    def test_the_lookup_is_the_web_tests_folder_of_the_install(self):
+        # ``appdb.PROJECT_ROOT`` is the store guard's throw-away install for every
+        # test, so the *shape* is what this case can assert; the real file at that
+        # shape is the next case's subject.
+        answered = appdb.test_settings_path()
+
+        assert appdb.TEST_SETTINGS_DIR == ("web", "tests")
+        assert answered == Path(appdb.PROJECT_ROOT).joinpath(
+            "web", "tests", appdb.TEST_SETTINGS_FILENAME
+        )
+
+    def test_the_committed_fixture_is_readable_by_the_strict_reader(self):
+        """The file the specs read is the shape this module accepts.
+
+        Addressed from **here**, not from the module: the store guard has moved
+        the install root, and this case's whole point is the one file that ships
+        with the specs.
+        """
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "web"
+            / "tests"
+            / appdb.TEST_SETTINGS_FILENAME
+        )
+        assert path.is_file(), f"{path} is the fixture the e2e suite boots from"
+
+        server, model = appdb._read_test_fixture(path)
+
+        assert server["url"], "the fixture names no endpoint"
+        # The stub answers whichever name it is asked for, but the row and the
+        # /v1/models listing are only coherent while both spellings agree.
+        assert model["name"] == "fake-model"
+        assert model["reasoning"] == "off"
 
 
 class TestTheFixtureBecomesRows:
@@ -189,7 +237,7 @@ class TestAMissingOrMalformedFixtureStopsTheRun:
         assert "server.model" in state["sentence"]
 
     def test_invalid_json_is_a_named_failure(self, test_mode_root: Path):
-        (test_mode_root / ".nojae" / appdb.TEST_SETTINGS_FILENAME).write_text(
+        (test_mode_root / appdb.TEST_SETTINGS_FILENAME).write_text(
             "{oops", encoding="utf-8"
         )
 

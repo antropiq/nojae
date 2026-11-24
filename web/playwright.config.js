@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, devices } from '@playwright/test'
@@ -21,31 +21,26 @@ import { defineConfig, devices } from '@playwright/test'
 const PORT = Number(process.env.E2E_PORT ?? 8123)
 const BASE_URL = `http://127.0.0.1:${PORT}`
 
-// Which Chromium to drive — a "which binary is this" question, so the OS is the
-// honest thing to ask here; no capability probe answers it.
+// Which Chromium to drive. Unset, that is Playwright's own pinned browser — the
+// one `npx playwright install --with-deps chromium` downloads, whatever the
+// platform (see the "End-to-end tests" section of docs/SETUP.md). Nothing here
+// names a binary: a hard-coded path is a machine's fact, it is wrong on every
+// other machine, and a launch failure about a missing file explains nothing.
 //
-// Linux: reuse the system Chromium the project's own MCP connector already
-// drives, so e2e needs no browser download of its own (the pip `mcp` extra
-// already carries a playwright). Verified against this build; on a machine
-// where the version gap bites, unset PLAYWRIGHT_EXECUTABLE_PATH and run
-// `npx playwright install chromium` to get the browser @playwright/test pins.
-//
-// Windows: that path names nothing, and a launch failure about a missing file
-// is not an explanation of why the suite could not run — so the default there
-// is *unset*, which makes Playwright use the browser its own version pins: the
-// one `npx playwright install chromium` downloads. `e2e/global-setup.js` checks
-// that browser is installed before any spec runs and names the command when it
-// is not. Do not "repair" a Windows run by putting a hard-coded path back in
-// this file — the pinned browser is the supported one there, and an explicit
-// PLAYWRIGHT_EXECUTABLE_PATH stays the escape hatch on every platform.
-const EXECUTABLE_PATH =
-  process.env.PLAYWRIGHT_EXECUTABLE_PATH ??
-  (process.platform === 'win32' ? undefined : '/usr/bin/chromium')
+// PLAYWRIGHT_EXECUTABLE_PATH is the one override, for a run that must drive a
+// browser of its own (a system Chromium, a channel build). It is an escape
+// hatch, not a default.
+const EXECUTABLE_PATH = process.env.PLAYWRIGHT_EXECUTABLE_PATH
 
-// The suite's own model connection: `.nojae/nojae-test-settings.json` at the
-// **installation** folder. That is the folder the server boots on and the one a
-// new tab lands on, so the fixture is found exactly where it is committed
-// (`<repo>/.nojae/`) — no developer's working location decides the lookup.
+// The suite's own model connection: `tests/nojae-test-settings.json`, **next to
+// this file** — with the specs that read it and the stub server it points at.
+// It used to sit in the installation's reserved `.nojae/`, which made an
+// install-scoped fixture live in a per-workspace folder and kept it out of git;
+// here it is a committed test resource, and no developer's working location
+// decides the lookup. `src/core/appdb.py` reads the same path
+// (`TEST_SETTINGS_DIR`), and `tests/test_appdb_test_fixture.py` pins that the
+// two spellings agree.
+//
 // It is **a store fixture, not a UI payload**, so its member names are the
 // *column* names — one `server` object holding one `model` object, with no ids
 // (the harness assigns both). It is the only connection a spec may use. The app
@@ -57,9 +52,9 @@ const EXECUTABLE_PATH =
 // The specs name their own folders per request; the config names none. There is
 // therefore no second environment lookup here: a scenario's workspace is the
 // field on its requests, never this file's business.
-const TEST_SETTINGS_FILE = join(
-  join(dirname(fileURLToPath(import.meta.url)), '..'),
-  '.nojae',
+export const TEST_SETTINGS_FILE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  'tests',
   'nojae-test-settings.json',
 )
 
@@ -68,9 +63,38 @@ if (!existsSync(TEST_SETTINGS_FILE)) {
     `E2E test settings file not found: ${TEST_SETTINGS_FILE}\n` +
       'It is the only model connection a e2e spec may use, and it is authored ' +
       'by hand — the app never creates it. It describes one server with one ' +
-      'model, using the store\'s column names (see docs/app-settings-db-spec.md ' +
-      '§4.6, and the "Setting up tests for nojae" section of the README), and ' +
-      'the server it names must be reachable.',
+      'model, using the store\'s column names (see "Setting up tests for nojae" ' +
+      'in docs/SETUP.md), and the stub model server this config starts answers ' +
+      'the address it names.',
+  )
+}
+
+// The fixture's own two values, read here rather than repeated, because they are
+// the pair that has to match what the server under test resolves: the stub's
+// address, which this config starts, and the model id it is advertised under.
+// The stub serves **any** name it is asked for, so the model id never has to be
+// kept in step by hand — but `/v1/models`, and the occupancy badge that reads
+// it, answer the one `--model` is started with, so this starts that one.
+const testSettings = JSON.parse(readFileSync(TEST_SETTINGS_FILE, 'utf8'))
+const FAKE_SERVER_URL = String(testSettings.server?.url ?? '')
+const FAKE_MODEL = String(testSettings.server?.model?.name ?? '')
+let FAKE_SERVER_HOST = '127.0.0.1'
+let FAKE_SERVER_PORT = NaN
+
+try {
+  const parsed = new URL(FAKE_SERVER_URL)
+  FAKE_SERVER_HOST = parsed.hostname
+  FAKE_SERVER_PORT = Number(parsed.port)
+} catch {
+  // Left as it is: the refusal below names the member, which is the whole answer.
+}
+
+if (!FAKE_MODEL || !Number.isInteger(FAKE_SERVER_PORT) || FAKE_SERVER_PORT <= 0) {
+  throw new Error(
+    `E2E test settings file ${TEST_SETTINGS_FILE} has no usable server.url / ` +
+      'server.model.name. This config starts tools/openai_fake_server.py on the ' +
+      'address the url names (host and port) and advertises it under that model ' +
+      'id, so both have to be there before a spec runs.',
   )
 }
 
@@ -133,46 +157,67 @@ export default defineConfig({
       },
     },
   ],
-  webServer: {
-    // The app under test, served by FastAPI from `web/dist`. Requires
-    // `npm run build` to have produced dist (see the static mount in
-    // src/api/server.py) — `globalSetup` does that instead of trusting the
-    // developer to remember.
-    //
-    // `uvicorn`'s own command, not the `nojae` console script, and that is the
-    // point: this parser carries no boot flag, so the app under test runs on
-    // the same defaults an unflagged `nojae` boot answers (debug off, the wait
-    // on its pair of defaults) — the suite never needed a flag, and a spec that
-    // wants one starts its own server. The endpoint itself arrives through
-    // `env` below, which overrides anything the invoking shell (or a parent app
-    // process) exported.
-    command: `python -m uvicorn src.api.server:app --host 127.0.0.1 --port ${PORT}`,
-    cwd: '..',
-    url: `${BASE_URL}/api/health`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
-    // Hermetic by default, mirroring tests/conftest.py on the Python side:
-    // the endpoints stay live but no connector subprocess and no language
-    // server is spawned for a spec that does not ask for one. A spec that
-    // wants them starts its own server rather than loosening this globally.
-    //
-    // The endpoint is a real server, not a fake: answers then vary with the
-    // model's sampling, so a spec must assert on the *shape* of what streams
-    // (chunk order, state transitions, an event-seq gap after reconnect), never
-    // on the wording of an answer. A stubbed OpenAI-compatible stream is the
-    // next step if any spec needs an exactly-known token count.
-    env: {
-      NOJAE_DISABLE_MCP: '1',
-      NOJAE_DISABLE_LSP: '1',
-      // The switch that puts the server under test in test mode: it never opens
-      // the install's `nojae.db`. It creates a temporary store instead and
-      // materialises `.nojae/nojae-test-settings.json` into it as rows, so no
-      // spec can reach the developer's live server and key. Applied last when
-      // the server is spawned, exactly like the two flags above, which is what
-      // beats an ambient value inherited from a running app's process tree.
-      NOJAE_TEST_SETTINGS: '1',
+  // Two servers, in the order they are started: the **stub model server** the
+  // suite answers, then the app under test. Playwright sets the entries up in
+  // list order and takes them down in reverse, so the model is already serving
+  // when the app boots and the app is gone before the stub stops.
+  webServer: [
+    {
+      // `tools/openai_fake_server.py` — an OpenAI-compatible stub, stdlib-only,
+      // serving the address and the model id the fixture names. Started here
+      // rather than left to the developer: with it, the suite needs no reachable
+      // model, and a streamed reply has an exactly-known shape (word-sized
+      // frames, a finish reason, a usage block), which is what lets a spec
+      // assert on a stream instead of merely surviving one.
+      //
+      // `reuseExistingServer` is off **on purpose**, unlike the app below: the
+      // stub is this harness's own process, so a foreign listener on its port
+      // would answer specs with something the suite does not control. Playwright
+      // names the URL when that happens.
+      name: 'fake-model',
+      command:
+        `python tools/openai_fake_server.py --host ${FAKE_SERVER_HOST} ` +
+        `--port ${FAKE_SERVER_PORT} --model ${FAKE_MODEL}`,
+      cwd: '..',
+      url: `http://${FAKE_SERVER_HOST}:${FAKE_SERVER_PORT}/v1/models`,
+      reuseExistingServer: false,
+      timeout: 60_000,
     },
-  },
+    {
+      // The app under test, served by FastAPI from `web/dist`. Requires
+      // `npm run build` to have produced dist (see the static mount in
+      // src/api/server.py) — `globalSetup` does that instead of trusting the
+      // developer to remember.
+      //
+      // `uvicorn`'s own command, not the `nojae` console script, and that is the
+      // point: this parser carries no boot flag, so the app under test runs on
+      // the same defaults an unflagged `nojae` boot answers (debug off, the wait
+      // on its pair of defaults) — the suite never needed a flag, and a spec that
+      // wants one starts its own server. The endpoint itself arrives through
+      // the fixture above, which the test switch below makes the store's rows.
+      name: 'nojae',
+      command: `python -m uvicorn src.api.server:app --host 127.0.0.1 --port ${PORT}`,
+      cwd: '..',
+      url: `${BASE_URL}/api/health`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+      // Hermetic by default, mirroring tests/conftest.py on the Python side:
+      // the endpoints stay live but no connector subprocess and no language
+      // server is spawned for a spec that does not ask for one. A spec that
+      // wants them starts its own server rather than loosening this globally.
+      env: {
+        NOJAE_DISABLE_MCP: '1',
+        NOJAE_DISABLE_LSP: '1',
+        // The switch that puts the server under test in test mode: it never opens
+        // the install's `nojae.db`. It creates a temporary store instead and
+        // materialises `web/tests/nojae-test-settings.json` into it as rows, so
+        // no spec can reach the developer's live server and key. Applied last when
+        // the server is spawned, exactly like the two flags above, which is what
+        // beats an ambient value inherited from a running app's process tree.
+        NOJAE_TEST_SETTINGS: '1',
+      },
+    },
+  ],
   globalSetup: './e2e/global-setup.js',
   globalTeardown: './e2e/global-teardown.js',
 })

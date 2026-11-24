@@ -424,7 +424,7 @@ def _no_test_settings_mode(_hermetic: pytest.MonkeyPatch) -> None:
 
     ``NOJAE_TEST_SETTINGS`` puts a process in the e2e suite's mode, where the
     store is a temporary database materialised from
-    ``.nojae/nojae-test-settings.json`` instead of this install's ``nojae.db``.
+    ``web/tests/nojae-test-settings.json`` instead of this install's ``nojae.db``.
     That fixture is hand-authored and the app never seeds it, so an exported
     ``1`` in the runner's shell would leave the *whole* suite failing en masse
     for a reason no traceback explains. Clearing it here is what keeps the

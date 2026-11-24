@@ -102,10 +102,15 @@ async function removeSentinelHelper(request) {
 // The suite's own model connection: the flat fixture the server under test
 // materialises into its temporary database at boot, because
 // `playwright.config.js` exports `NOJAE_TEST_SETTINGS` and refuses to start the
-// suite without it. It lives at the **installation** folder's reserved subfolder —
-// the folder the server boots on and a new tab lands on, so no developer's
-// working location decides where it is found.
-const TEST_SETTINGS_FILE = path.join(REPO_ROOT, '.nojae', 'nojae-test-settings.json')
+// suite without it. It lives in **`web/tests`**, beside that config and this
+// spec — the third spelling of the path is `appdb.TEST_SETTINGS_DIR`, and
+// `tests/test_appdb_test_fixture.py` pins that they agree.
+const TEST_SETTINGS_FILE = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'tests',
+  'nojae-test-settings.json',
+)
 function testSettingsDocument() {
   return JSON.parse(fs.readFileSync(TEST_SETTINGS_FILE, 'utf8'))
 }

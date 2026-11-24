@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 // so no spec here sends a completion request anywhere; the three reads are the
 // app's own (a committed file, a store read, a scan of a folder this spec owns).
 // The suite's own model connection is what the app runs on
-// (`.nojae/nojae-test-settings.json`, via the test switch), and the hubs stay
+// (`web/tests/nojae-test-settings.json`, via the test switch), and the hubs stay
 // switched off by the config's `NOJAE_DISABLE_MCP` / `NOJAE_DISABLE_LSP`, so no
 // connector and no language server is started by anything in this file.
 //

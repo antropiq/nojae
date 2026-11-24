@@ -473,11 +473,22 @@ const moveButton = (page) => page.locator('.editor-move-confirm')
 
 // `Ctrl`+click *is* the marking gesture, so it is performed as the user
 // performs it rather than by reaching into the composable.
+//
+// **`ControlOrMeta`, never a bare `Control`.** On the macOS hosts this app runs
+// on, a left click held with Ctrl *is* the right-click gesture: Chromium answers
+// it with `contextmenu` and no `click` at all, so the row is never marked and the
+// tree's context menu opens over it — and then intercepts the pointer for the
+// next `markRow`, which is the timeout this spelling avoids. `ControlOrMeta`
+// resolves to Ctrl on Windows and Linux and to Cmd on macOS, and the tree's own
+// gesture handler accepts both (`select` reads `ctrlKey || metaKey`), so this is
+// the same marking gesture on either platform with no menu in the way. Keyboard
+// chords are the opposite case and stay `Control+…`: a keydown carries Ctrl
+// honestly on macOS, and `editorChord` accepts either modifier.
 async function markRow(page, path) {
   await page
     .locator(`.tree-row[data-path="${path}"]`)
     .first()
-    .click({ modifiers: ['Control'] })
+    .click({ modifiers: ['ControlOrMeta'] })
 }
 
 // "Before any request goes out" needs a counter, not a hope: the only honest

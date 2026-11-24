@@ -98,12 +98,17 @@ for the Editor; the connectors only decide how far the agent may reach.
 ### Test
 
 ```bash
-pytest                # backend
-cd web && npm test    # frontend
+pytest                          # backend
+cd web
+npm test                        # frontend
+npx playwright install --with-deps chromium  # once: the browser e2e drives
+npm run test:e2e                # end-to-end
 ```
 
-The suite is hermetic: no reachable model needed, both hubs switched off, and
-every test runs on a temporary settings store of its own.
+Both suites are hermetic: no reachable model is needed — the end-to-end one is
+answered by a stub model server the harness starts itself — both hubs are
+switched off, and every test runs on a temporary settings store of its own.
+Detail: [Setting up tests for nojae](docs/SETUP.md#setting-up-tests-for-nojae).
 
 ---
 

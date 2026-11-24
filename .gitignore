@@ -1,8 +1,10 @@
 # Workspace policy / stores (hidden folder, read-write-policy.json governs it)
 .nojae/
 
-# Secrets. The hub declaration files and the e2e connection fixture have a
-# committed .example template; the store below has none.
+# Secrets. The hub declaration files have a committed .example template; the
+# store below has none. (The e2e connection fixture is committed outright, not
+# templated: it holds no key, because the stub model server the Playwright config
+# starts needs none.)
 # ``.env``/``.env.test`` stay ignored although the app no longer reads either
 # (its own configuration is boot flags now): an install that predates the change
 # may still hold its old file, with whatever it held in it, and a gitignore that

@@ -763,11 +763,18 @@ def _seed(conn: sqlite3.Connection, created: bool) -> Dict[str, Any]:
 # seam, and a test that wants an agent with no model clears that row's
 # ``model_id`` itself — the only way such a state is reachable here.
 
-#: The e2e suite's own connection file: the reserved folder's
-#: ``nojae-test-settings.json`` at the working location. Hand-authored, never
-#: seeded, never written by the app — and its member names are the **column
-#: names** (§4.6), because it is a store fixture rather than a UI payload.
+#: The e2e suite's own connection file: ``nojae-test-settings.json`` in the
+#: frontend's tests folder (:data:`TEST_SETTINGS_DIR` below the install root).
+#: Hand-authored, never seeded, never written by the app — and its member names
+#: are the **column names** (§4.6), because it is a store fixture rather than a
+#: UI payload.
 TEST_SETTINGS_FILENAME = "nojae-test-settings.json"
+
+#: The folder that file lives in, relative to the installation: the specs' own
+#: folder, beside the Playwright config that boots the server which reads it. Not
+#: the reserved ``.nojae`` folder — that one holds **a workspace's** policy, and
+#: this fixture is the installation's, so no tab's folder decides where it is.
+TEST_SETTINGS_DIR = ("web", "tests")
 
 #: The members the fixture may carry, each with the JSON type it must hold. This
 #: is the same strictness as the tables (§4.5): an unknown key or a wrong type is
@@ -808,35 +815,18 @@ class TestFixtureError(Exception):
 
 
 def test_settings_path() -> Path:
-    """Where the suite's connection fixture lives: ``<location>/.nojae/nojae-test-settings.json``.
+    """Where the suite's connection fixture lives: ``<install>/web/tests/nojae-test-settings.json``.
 
-    Built from the workspace in scope the way the reserved folder's other files
-    are (the seam, :func:`src.core.workspace.current_root`), so a suite that
-    points its own folder at the seam still finds its fixture there. A
-    **function** so a test can point the lookup elsewhere without rewriting the
+    The **installation**, not the workspace: the fixture is what the Playwright
+    harness next to it boots the server with, so no tab's folder — and no
+    developer's working location — decides where it is found. It is a *file*
+    rather than a row because the store must be able to start before it has any
+    rows (D14); everything else the store holds is the installation's (D11).
+
+    A **function** so a test can point the lookup elsewhere without rewriting the
     module.
-
-    This is the store's **one** workspace-scoped lookup, and it is a *file*
-    rather than a row: the e2e connection fixture is a workspace artefact, while
-    everything the store itself holds is the installation's (D11).
-    ``tests/test_appdb_read.py`` pins that no other read in this module reaches
-    the workspace.
     """
-    # Local imports: the seam sits below nothing here but is imported lazily for
-    # the same reason ``config`` was — and the reserved folder's name comes from
-    # ``mcp_connectors/policy_shared``, the one source ``editorfs``, ``mcphub``
-    # and ``lsphub`` all read it from too.
-    from src.core import workspace as workspace_seam
-
-    try:
-        from mcp_connectors import policy_shared as shared
-    except ImportError:  # pragma: no cover - depends on how the app is started
-        return Path(workspace_seam.current_root()) / ".nojae" / TEST_SETTINGS_FILENAME
-    return (
-        Path(workspace_seam.current_root())
-        / shared.POLICY_DIRNAME
-        / TEST_SETTINGS_FILENAME
-    )
+    return PROJECT_ROOT.joinpath(*TEST_SETTINGS_DIR, TEST_SETTINGS_FILENAME)
 
 
 def _describe_value(value: Any) -> str:

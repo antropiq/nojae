@@ -315,14 +315,12 @@ class TestTheReadsAreUncached:
         key — a cache holding a resolved root, and the invalidation that clears
         one — must not appear in this module at all.
 
-        The seam's ``current_root`` is the one exception, and it is not a cache
-        key: the e2e suite's flat connection fixture is a *file* in the
-        workspace's reserved folder (D14), so test mode reads it from wherever
-        the workspace in scope points. Since clws-01 that lookup goes through
-        ``src.core.workspace`` rather than reading the environment itself — the
-        same single-owner rule ``tests/test_workspace_seam.py`` asserts over the
-        whole of ``src/core``. It appears in that lookup and nowhere else, which
-        is asserted here rather than trusted.
+        The seam is not mentioned here **at all**, and that is the assertion: the
+        e2e suite's flat connection fixture used to be the one exception, read
+        from the workspace's reserved folder (D14). It lives with the specs that
+        boot it (``web/tests``), so the store reads the installation and nothing
+        in it reaches a tab's folder — the same single-owner rule
+        ``tests/test_workspace_seam.py`` asserts over the whole of ``src/core``.
         """
         source = Path(appdb.__file__).read_text(encoding="utf-8")
 
@@ -333,14 +331,8 @@ class TestTheReadsAreUncached:
             isinstance(node, ast.Name) and node.id.endswith("_CACHE")
             for node in ast.walk(ast.parse(source))
         )
-        # The seam's reader is the fixture's own lookup, not a cache key: every
-        # mention of it sits inside the function that resolves that file.
-        fixture_half = source.split("def test_settings_path", 1)[1].split(
-            "\ndef ", 1
-        )[0]
-        assert "current_root" in fixture_half
-        assert source.count("current_root") == fixture_half.count("current_root"), (
-            "the store is install-scoped: nothing else in it may read the workspace"
+        assert "current_root" not in source, (
+            "the store is install-scoped: nothing in it may read the workspace"
         )
 
 

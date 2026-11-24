@@ -118,13 +118,13 @@ ack, keeping its partial turn. The measurement rules hold for every stream:
 | File | Role |
 |---|---|
 | `nojae.db` | The install's settings store: its model connections, its agents and its prompt helpers. Written only through its own routes, never through a path; never hand-edited, so it has no committed template. |
-| `.nojae/nojae-test-settings.json` | The e2e suite's own model connection, read only under the test switch. |
 | Connector and language-server declarations | Which ones exist and how to reach them — files in the workspace's reserved folder. |
 | Reserved workspace folder | This workspace's read/write policy and its hub declarations. |
 | `.agents/skills/*/SKILL.md` | Packaged know-how, catalogued into chat turns on this workspace. The user's files: no app path writes them. |
+| `web/tests/nojae-test-settings.json` | The e2e suite's own model connection, read only under the test switch — committed, because it names the stub model server the harness starts rather than a secret. |
 
-Those files may hold secrets, so they are gitignored. These rules tie them
-together:
+Those files may hold secrets, so they are gitignored (the committed test fixture
+is the exception, and holds none). These rules tie them together:
 
 - **Install-scoped technical settings are process state, never a file.** They are
   parsed once from the command line and read at call time, so no route can write
@@ -136,6 +136,9 @@ together:
   reference an environment variable so one declaration works on every machine;
   an unresolved name is kept verbatim with a note, never blanked.
 - **A test run takes its endpoint from the test files, never from a developer's.**
+  For e2e that endpoint is the **stub** `tools/openai_fake_server.py`, started by
+  the Playwright config itself — so no spec needs a reachable model, and a
+  streamed reply has an exactly-known shape.
 - **The folder is the tab's, not the process's.** Each workspace-scoped request
   names one; the server holds it for that request only, so tabs work on several
   folders. Moving a tab's folder invalidates that folder's hubs, policy, cached

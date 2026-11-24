@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 // by the workspace policy on the live route. No LLM call is involved — the
 // feature is one GET plus a pure matcher in the browser — so nothing here needs
 // a reachable endpoint. The suite's model connection
-// (`.nojae/nojae-test-settings.json`, exported by `playwright.config.js` as
+// (`web/tests/nojae-test-settings.json`, exported by `playwright.config.js` as
 // `NOJAE_TEST_SETTINGS`) is what the *server* boots with; no spec in this
 // file reads it, and none may.
 //

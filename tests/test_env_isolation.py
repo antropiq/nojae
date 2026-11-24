@@ -9,10 +9,11 @@ guard that stops each:
   asserts the install's own path can never be opened;
   ``tests/test_store_hermeticity.py`` is that invariant as a test.
 * **the working location** — the seam's request scope, which decides where
-  ``AGENTS.md``, the hubs' declarations and the e2e suite's connection fixture
-  are looked for. The autouse
+  ``AGENTS.md`` and the hubs' declarations are looked for. The autouse
   :func:`_every_test_runs_in_a_workspace_scope` enters a throw-away root, so no
-  core surface reads this checkout.
+  core surface reads this checkout. (The e2e suite's connection fixture used to
+  be looked for here too; it is the installation's now, beside the specs that
+  boot it, so no scope decides it.)
 * **the environment and the command line** — the install's own configuration is
   no longer in the environment at all: it is this process's **boot flags**
   (:class:`src.config.BootFlags`), so an ambient ``LLM_DEBUG`` or
@@ -89,23 +90,23 @@ class TestTheWorkingLocationGuardPointsOffThisCheckout:
         )
         assert current != install
 
-    def test_the_e2e_connection_fixture_is_looked_for_under_the_guard_root(
-        self, tmp_path: Path
-    ):
-        """The fixture is a *file* still, so the location is what keeps it honest.
+    def test_the_e2e_connection_fixture_is_not_a_workspace_surface(self):
+        """The suite's fixture is the **installation's**, so the guard root sees none of it.
 
-        With the switch off it is not read at all; with it on the lookup lands
-        under the guard root, never on this checkout's hand-authored file.
+        It used to be read from the workspace's reserved folder, which put the
+        e2e connection at the mercy of whichever folder a tab had moved to. Now
+        the Playwright harness beside it owns it, and the lookup answers the same
+        path whatever workspace is in scope — a request that switched tabs cannot
+        change what the boot read.
         """
-        guard_root = os.path.normcase(
-            os.path.realpath(str(workspace_guard_root(tmp_path)))
-        )
-        answered = os.path.normcase(
-            os.path.realpath(str(appdb.test_settings_path()))
-        )
+        answered = str(appdb.test_settings_path())
 
-        assert answered.startswith(guard_root)
-        assert appdb.TEST_SETTINGS_FILENAME in answered
+        assert answered == str(
+            Path(appdb.PROJECT_ROOT).joinpath(
+                *appdb.TEST_SETTINGS_DIR, appdb.TEST_SETTINGS_FILENAME
+            )
+        )
+        assert appdb.TEST_SETTINGS_DIR == ("web", "tests")
 
 
 class TestNoTestTurnsOnAConnectionItDidNotWrite:
@@ -243,7 +244,7 @@ class TestTheTestSettingsSwitchCannotLeakIntoTheSuite:
 
     ``NOJAE_TEST_SETTINGS`` puts a process in the e2e suite's mode, where the
     store is a temporary database materialised from
-    ``.nojae/nojae-test-settings.json`` — a hand-authored fixture the app never
+    ``web/tests/nojae-test-settings.json`` — a hand-authored fixture the app never
     seeds. An exported ``1`` in the runner's shell would leave every test here
     failing en masse for a reason no traceback explains, so ``tests/conftest.py``
     clears the key and these cases pin that.
