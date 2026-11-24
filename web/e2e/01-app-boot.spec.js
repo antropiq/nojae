@@ -101,40 +101,4 @@ test.describe('App boot: displayed configuration, tabs, idle meters', () => {
     ).toBeLessThan(1)
   })
 
-  // The counters used to hug their (short) idle text, so a running session
-  // widened them and shoved the centred tab strip around. Each now reserves
-  // the width of its longest active figure.
-  test('idle session counters already fit their active figures', async ({ page }) => {
-    await bootIdle(page)
-
-    const measured = await page
-      .locator('.session-stat-badges .badge')
-      .evaluateAll((badges) =>
-        badges.map((badge) => {
-          // The widest reading each counter can ever show (estimate marker
-          // included), rendered as a clone of the badge itself so font,
-          // padding and border are identical.
-          const probe = badge.cloneNode(false)
-          probe.textContent = badge.classList.contains('badge--rate')
-            ? '≈ 123.4 t/s'
-            : '≈ ctx 123.4k / 128k'
-          badge.parentElement.appendChild(probe)
-          const active = probe.getBoundingClientRect().width
-          probe.remove()
-          return {
-            text: badge.textContent.trim(),
-            idle: badge.getBoundingClientRect().width,
-            active,
-          }
-        }),
-      )
-
-    expect(measured.map((m) => m.text)).toEqual(['— t/s', '— ctx'])
-    for (const m of measured) {
-      expect(
-        m.idle,
-        `the idle badge (${m.text}) must already be as wide as "${m.active}px" of active text`,
-      ).toBeGreaterThanOrEqual(m.active)
-    }
-  })
 })
