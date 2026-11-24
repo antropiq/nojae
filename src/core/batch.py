@@ -236,7 +236,12 @@ def resolve_lot_dir(raw: Optional[str]) -> Tuple[str, Path]:
     frontend's ``split('/')`` and the model's own tools both expect.
     """
     text = (raw or "").strip() or DEFAULT_LOT_DIR
-    if os.path.isabs(text) or text.startswith("~"):
+    # ``os.path.isabs`` is OS-relative and answers ``/etc`` *relative* on Windows,
+    # where it then escaped the workspace through ``join`` and was refused by the
+    # containment lock with the wrong sentence. ``path_norm.is_qualified`` is the
+    # shape answer every lock in the app shares (win-02): a leading separator, a
+    # UNC root or a drive spec never names a folder here, whatever the platform.
+    if path_norm.is_qualified(text) or text.startswith("~"):
         raise BatchListingError(
             422,
             f"Batch folder must be relative to the workspace: {raw} "

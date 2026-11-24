@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -40,5 +40,11 @@ export default async function globalSetup() {
   if (existsSync(join(WEB_ROOT, 'dist')) && process.env.E2E_SKIP_BUILD === '1') {
     return
   }
-  execFileSync('npm', ['run', 'build'], { cwd: WEB_ROOT, stdio: 'inherit' })
+  // One command string, run through the shell: on Windows `npm` is `npm.cmd`,
+  // and since the CVE-2024-27980 fix Node refuses to spawn a `.cmd`/`.bat`
+  // without `shell: true`, so an `execFileSync('npm', [...])` dies with ENOENT
+  // before the build starts. `execSync` always uses a shell — which is why this
+  // is a string and not an argument array (an array plus a shell would also
+  // earn a DEP0190 warning on every run). Nothing here takes user input.
+  execSync('npm run build', { cwd: WEB_ROOT, stdio: 'inherit' })
 }

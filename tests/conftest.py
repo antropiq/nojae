@@ -10,6 +10,7 @@ suite still runs there.
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -344,6 +345,59 @@ def skip_unless(probe: _Probe, reason: str) -> pytest.MarkDecorator:
 # PATH. One probe per tool, cached, so the tests asking about `printf` attempt
 # it once.
 _tool_probes: Dict[str, _Probe] = {}
+
+# The interpreter half cannot be a PATH question: on Windows
+# ``shutil.which("python3")`` answers the Microsoft Store *alias stub* — a file
+# that is on PATH, launches no program, and exits 9009 with a sentence about
+# the Store. So this probe does what the class comment asks and *tries* the
+# candidates, and the seam below hands the test the name that actually ran.
+# One answer for the marker and the command, so a test cannot skip on one
+# verdict and exec another.
+_python_names: Tuple[str, ...] = ("python3", "python")
+_console_python: Optional[str] = None
+_python_refusal = ""
+
+
+def _offer_python() -> bool:
+    """Run each candidate on a one-line program; keep the first name that works."""
+    global _console_python, _python_refusal
+    for name in _python_names:
+        try:
+            done = subprocess.run(
+                [name, "-c", "print(1)"],
+                capture_output=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _python_refusal = f"`{name}` did not start ({exc})"
+            continue
+        if done.returncode == 0 and done.stdout.strip() == b"1":
+            _console_python = name
+            return True
+        _python_refusal = (
+            f"`{name}` ran `-c \"print(1)\"` and exited {done.returncode}"
+        )
+    return False
+
+
+python_probe = _Probe(
+    _offer_python,
+    "`python3` or `python` that runs a program here",
+    lambda: _python_refusal,
+)
+_tool_probes["python3"] = python_probe
+_tool_probes["python"] = python_probe
+
+
+def console_python() -> str:
+    """The interpreter name a console command should spell.
+
+    Only meaningful once the probe has answered yes — which the
+    ``console_tool("python3")`` marker guarantees on the calling test.
+    """
+    if not python_probe or _console_python is None:
+        pytest.fail("no interpreter runs here; the python probe should have skipped")
+    return _console_python
 
 
 def console_tool(tool: str, reason: str) -> pytest.MarkDecorator:

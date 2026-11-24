@@ -20,6 +20,7 @@ from mcp_connectors import policy_shared as shared
 
 from src.core import appdb
 
+from tests.conftest import console_python
 from tests.conftest import console_tool
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -421,7 +422,9 @@ def test_partial_output_survives_a_timeout():
     # progress and then hangs must not come back empty. The hangs happen inside
     # one command (the semicolon is inside quoting, so it is not a chain).
     script = "print('before-sleep'); import time; time.sleep(30)"
-    out = c.execute_command(f'python3 -u -c "{script}"', timeout=2)
+    out = c.execute_command(
+        f'{console_python()} -u -c "{script}"', timeout=2
+    )
     assert "before-sleep" in out
     assert "timed out after 2 seconds" in out
 
@@ -480,7 +483,7 @@ def test_a_long_command_result_is_truncated_at_runtime():
 )
 def test_stdout_and_stderr_are_capped_separately():
     script = "import sys; [print(i) for i in range(5000)]; [print(i, file=sys.stderr) for i in range(500)]"
-    out = c.execute_command(f'python3 -u -c "{script}"')
+    out = c.execute_command(f'{console_python()} -u -c "{script}"')
     assert out.count("line(s) omitted") == 2
 
 
