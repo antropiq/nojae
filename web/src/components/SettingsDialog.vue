@@ -12,10 +12,6 @@ const {
   toggleServerExpanded,
   setDetailTab,
   requestAgentModes,
-  toggleMcp,
-  saveMcp,
-  toggleLsp,
-  saveLsp,
 } = useAppShell()
 
 // **The dialog decides nothing.** Every enablement verdict, every tooltip, the
@@ -25,13 +21,9 @@ const {
 // shows it.
 const {
   addSlot,
-  saveSlot,
   deleteSlot,
   deleteConfirmation,
   fetchSlot,
-  closeConfirmation,
-  mcpSaveSlot,
-  lspSaveSlot,
   rows,
   rowSlotFor,
   tabs,
@@ -40,15 +32,13 @@ const {
   body,
   message,
   addRow,
-  saveRow,
   addFromListing,
   fetchModels,
   askDelete,
   dismissDelete,
   confirmDelete,
-  askClose,
-  dismissClose,
-  discardAndClose,
+  toggleMcp,
+  toggleLsp,
 } = useSettingsServers()
 
 // This dialog edits the **installation's** catalogue — servers, models, the MCP
@@ -174,43 +164,26 @@ watch(
   },
 )
 
-// **Escape and a backdrop click count as `Close` in every respect**, so they take
-// the same guard as the button — otherwise they would be a silent bypass of it.
-// The backdrop therefore never closes the dialog itself: it asks, and only a
-// guard with nothing to ask lets the card go.
+// **Escape and a backdrop click count as `Close` in every respect.** Nothing here
+// has to ask on the way out: a form is written as it stops changing, so the last
+// thing typed has already been posted — and `closeSettings` flushes what is still
+// inside the debounce window, which covers a click made right after a keystroke.
 function onBackdropClick(event) {
-  if (event.target === dialogEl.value) askClose()
+  if (event.target === dialogEl.value) closeSettings()
 }
 
 // The `<dialog>`'s own Escape path is the cancelable `cancel` event, so it is
-// always cancelled here and routed through the same verb the button uses. That is
-// also why no route can reach `onNativeClose` while a close is being confirmed:
-// nothing closes in that state by any route.
+// cancelled here and routed through the same verb the button uses, which is the
+// verb that flushes.
 function onEscape(event) {
   event?.preventDefault?.()
-  askClose()
+  closeSettings()
 }
 
-// The dialog going away, whichever way it went. A close the guard is asking about
-// never gets here — the shell's flag only drops once the answer has been given.
+// The dialog going away by any native route (an in-page form, a script): the
+// shell's flag follows the card, and the flush rides along with it.
 function onNativeClose() {
   if (state.settingsOpen) closeSettings()
-}
-
-// `Close` while the dialog holds unsaved work asks in place, and focus lands on
-// **`Keep editing`** — the safe answer — so a keyboard user is told what a pointer
-// user reads. `Keep editing` hands it back to `Close`, whose button is leaving the
-// DOM with the pair, so a keyboard user is not dropped at the top of the page.
-async function onAskClose() {
-  askClose()
-  await nextTick()
-  dialogEl.value?.querySelector('.settings-keep-editing')?.focus()
-}
-
-async function onDismissClose() {
-  dismissClose()
-  await nextTick()
-  dialogEl.value?.querySelector('.settings-close')?.focus()
 }
 
 function connectorDetail(connector) {
@@ -292,12 +265,14 @@ function serverDetail(server) {
                section strip one row above already reads `Servers`, and repeating
                it there is a second title for the thing it titles. -->
           <section v-show="state.activeSection === 'servers'" class="settings-models">
-            <!-- **Three verb slots, a spacer, two reserved confirmation slots** —
-                 the Agents card's toolbar, in the shared classes. Every slot keeps
-                 its size whether or not it holds a button, so the pair's arrival
-                 moves nothing and the toolbar never changes height. The verbs are
-                 scoped to the page that is visible, which is why no label spells
-                 its scope. -->
+            <!-- **Two verb slots, a spacer, two reserved confirmation slots** —
+                 the Agents card's toolbar, in the shared classes. There is no
+                 `Save`: a form is written as it stops changing, so the only verbs
+                 left are the ones that cannot be guessed at. Every slot keeps its
+                 size whether or not it holds a button, so the pair's arrival moves
+                 nothing and the toolbar never changes height. The verbs are scoped
+                 to the page that is visible, which is why no label spells its
+                 scope. -->
             <div class="agent-modes-toolbar" role="group" aria-label="Server and model actions">
               <span class="agent-modes-slot">
                 <button
@@ -312,24 +287,6 @@ function serverDetail(server) {
                     stroke="currentColor" stroke-width="2" stroke-linecap="round"
                     stroke-linejoin="round" aria-hidden="true">
                     <path d="M12 5v14M5 12h14" />
-                  </svg>
-                </button>
-              </span>
-              <span class="agent-modes-slot">
-                <button
-                  class="icon-btn servers-save"
-                  type="button"
-                  :disabled="saveSlot.disabled"
-                  :aria-label="saveSlot.label"
-                  :title="saveSlot.label"
-                  @click="saveRow"
-                >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" aria-hidden="true">
-                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-                    <path d="M17 21v-8H7v8" />
-                    <path d="M7 3v5h8" />
                   </svg>
                 </button>
               </span>
@@ -630,26 +587,17 @@ function serverDetail(server) {
               </div>
           </section>
 
-          <!-- The MCP and LSP sections: their `Save` left the footer for a
-               toolbar of the Servers tab's shape — heading at one end, the verb at
-               the other — so the footer is **one shape for all three sections**:
-               the band and `Close`. Their top-level lines (package not installed,
-               the read's failure) moved to the band too; what stays beside a row
-               is that row's own badge and its own error, because a band that
-               carries six connector errors is a list, not a message. -->
+          <!-- The MCP and LSP sections: a toolbar carrying their heading, and
+               nothing else — a tick here is the whole decision and is written the
+               moment it is made, so these sections have no verb of their own and
+               the footer is **one shape for all three sections**: the band and
+               `Close`. Their top-level lines (package not installed, the read's
+               failure) are the band's; what stays beside a row is that row's own
+               badge and its own error, because a band that carries six connector
+               errors is a list, not a message. -->
           <section v-show="state.activeSection === 'mcp'" class="settings-hub-section">
             <div class="settings-section-toolbar">
               <h3 class="settings-section-title">MCP connectors</h3>
-              <button
-                class="settings-section-save"
-                type="button"
-                :disabled="mcpSaveSlot.disabled"
-                :aria-label="mcpSaveSlot.label"
-                :title="mcpSaveSlot.label"
-                @click="saveMcp"
-              >
-                {{ mcpSaveSlot.text }}
-              </button>
             </div>
             <div v-for="connector in state.mcpConnectors" :key="connector.id" class="mcp-panel">
               <div class="mcp-panel-header">
@@ -680,16 +628,6 @@ function serverDetail(server) {
           <section v-show="state.activeSection === 'lsp'" class="settings-hub-section">
             <div class="settings-section-toolbar">
               <h3 class="settings-section-title">LSP language servers</h3>
-              <button
-                class="settings-section-save"
-                type="button"
-                :disabled="lspSaveSlot.disabled"
-                :aria-label="lspSaveSlot.label"
-                :title="lspSaveSlot.label"
-                @click="saveLsp"
-              >
-                {{ lspSaveSlot.text }}
-              </button>
             </div>
             <div v-for="server in state.lspServers" :key="server.id" class="mcp-panel">
               <div class="mcp-panel-header">
@@ -725,9 +663,8 @@ function serverDetail(server) {
            fills the row left of `Close`, is always there, and carries the text and
            the role `messageFor` answered with. Nothing else in the dialog says
            anything, so no sentence can push a control out of place. `Close` is the
-           footer's only verb for all three sections — and it is the card's only
-           exit, so it also asks before discarding typed work, which puts its
-           question in this same line. -->
+           footer's only verb for all three sections; it writes nothing, because
+           auto-save has written everything by the time it is clicked. -->
       <footer class="settings-actions">
         <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
         <!-- The one message the user can act on from here: the band renders it as
@@ -741,50 +678,7 @@ function serverDetail(server) {
         >
           Assign one
         </button>
-        <!-- The footer's **reserved** confirmation slot: always there and always
-             the pair's width, so `Close` never moves when the dialog asks a
-             question. Both buttons are **absent from the DOM** until a close is
-             pending, so neither is focusable nor announced while it means nothing.
-             The two glyphs reuse the delete pair's idiom and its colours, so the
-             dialog teaches the pair once. -->
-        <span class="agent-modes-footer-slot">
-          <span class="agent-modes-slot">
-            <button
-              v-if="closeConfirmation.rendered"
-              class="icon-btn agent-modes-cancel settings-keep-editing"
-              type="button"
-              :disabled="closeConfirmation.cancel.disabled"
-              :aria-label="closeConfirmation.cancel.label"
-              :title="closeConfirmation.cancel.label"
-              @click="onDismissClose"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                stroke-linejoin="round" aria-hidden="true">
-                <path d="M18 6 6 18" />
-                <path d="m6 6 12 12" />
-              </svg>
-            </button>
-          </span>
-          <span class="agent-modes-slot">
-            <button
-              v-if="closeConfirmation.rendered"
-              class="icon-btn agent-modes-confirm settings-discard-close"
-              type="button"
-              :disabled="closeConfirmation.confirm.disabled"
-              :aria-label="closeConfirmation.confirm.label"
-              :title="closeConfirmation.confirm.label"
-              @click="discardAndClose"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                stroke-linejoin="round" aria-hidden="true">
-                <path d="M20 6 9 17l-5-5" />
-              </svg>
-            </button>
-          </span>
-        </span>
-        <button class="secondary contrast settings-close" type="button" @click="onAskClose">
+        <button class="secondary contrast settings-close" type="button" @click="closeSettings">
           Close
         </button>
       </footer>

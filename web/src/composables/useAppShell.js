@@ -17,6 +17,17 @@ export function registerBatchGuard(isRunning) {
   batchGuard = typeof isRunning === 'function' ? isRunning : null
 }
 
+// The settings dialog's auto-save flush, registered by that dialog's composable
+// (which imports this module, so this module cannot import it). The shell calls
+// it before a gesture **replaces or drops a form** — `Close`, and any row
+// selection — so a click that lands before the debounce has run still writes
+// what was typed.
+let settingsAutoSaveFlush = null
+
+export function registerSettingsAutoSaveFlush(flush) {
+  settingsAutoSaveFlush = typeof flush === 'function' ? flush : null
+}
+
 // ---------------------------------------------------------------------------
 // The model connection as the store holds it.
 //
@@ -76,15 +87,6 @@ const state = reactive({
   // question is asked, cleared with it — the copy is the store's own
   // (`serverDeleteSentence` / `modelDeleteSentence`), never re-derived here.
   pendingDeleteSentence: null,
-  // **The close guard**: `true` while the footer's pair asks whether leaving
-  // should discard what was typed. It is the dialog's own question, so it is
-  // answered by its two buttons and cleared by either answer — never by a route
-  // that leaves without asking.
-  pendingClose: false,
-  // The one thing a *deferred* leave was asked for: the band's way into the
-  // Agent-modes dialog is a close too, and when the guard stopped it the intent
-  // is remembered so the answer that leaves also opens that card.
-  pendingCloseOpensAgentModes: false,
   // The tree row to focus once the DOM has caught up. Set when a model is added
   // from the listing, which must land on its new row; the component consumes it
   // and clears it.
@@ -93,8 +95,9 @@ const state = reactive({
   // with a draft means a row that does not exist yet (the Add affordance).
   selectedServerId: null,
   selectedModelId: null,
-  // The row being edited, as a copy: a field typed here is not the store's
-  // until Save posts it, and Close has nothing to undo.
+  // The row being edited, as a copy. A keystroke here is written to the store
+  // by the dialog's auto-save, so the copy is only ever a few hundred
+  // milliseconds ahead of what the store holds.
   serverDraft: null,
   modelDraft: null,
   // Which servers the left column has opened, as their ids. A re-read that keeps
@@ -307,16 +310,16 @@ export function modelInView(config) {
   return Array.isArray(models) && models.length ? models[0] : null
 }
 
-//: **Would closing this dialog lose something?** — the close guard's only
-//: question. The baseline is always *the store's answer* (``state.servers``,
-//: adopted wholesale by every read and every write, plus the hub reads' ``active``
-//: flags), never what was typed, which is the whole invariant the guard rests on.
+//: **Does the dialog hold something the store does not?** — the auto-save's only
+//: question, asked of every surface it can write. The baseline is always *the
+//: store's answer* (``state.servers``, adopted wholesale by every read and every
+//: write, plus the hub reads' ``active`` flags), never what was typed, which is
+//: what makes the answer self-clearing: a write re-baselines, so the same bytes
+//: are never posted twice.
 //:
-//: Three surfaces can hold typed work: the server form, the model form, and the
-//: two hub sections' ticks. An **unsaved** row is judged against the empty form
-//: the Add verb creates, so a form opened and never touched has nothing to lose
-//: and a sentence about unsaved changes is never printed over an empty field. A
-//: row the store no longer holds is work that addresses nothing, so it counts.
+//: An **unsaved** row is judged against the empty form the Add verb creates, so a
+//: form opened and never typed in is not a write to make. A row the store no
+//: longer holds *does* count: what is typed addresses nothing else.
 const SERVER_DIRTY_FIELDS = ['name', 'url', 'apiKey']
 const MODEL_DIRTY_FIELDS = [
   'name', 'sysPrompt', 'reasoning', 'supportsVision', ...SAMPLER_FIELDS,
@@ -326,8 +329,8 @@ const MODEL_DIRTY_FIELDS = [
 //: through **the same constructor that fills the form**, so a comparison never
 //: trips on a shape difference the form introduces (an absent `reasoning` is `''`
 //: on both sides). With no row to answer for, the baseline is the empty form the
-//: `+` produced: an Add opened and never typed in has nothing to lose.
-function draftWouldLose(draft, { row, fields, draftOf }) {
+//: `+` produced.
+function draftDiffers(draft, { row, fields, draftOf }) {
   if (!draft) return false
   const baseline = draftOf(row ?? null)
   if (draft.id == null) {
@@ -335,8 +338,7 @@ function draftWouldLose(draft, { row, fields, draftOf }) {
     // have departed from.
     return !sameFields(draft, baseline, fields)
   }
-  // A row the store no longer holds: what is typed addresses nothing, and the
-  // only way to leave it behind is on purpose.
+  // A row the store no longer holds: what is typed addresses nothing.
   if (!row) return true
   return !sameFields(draft, baseline, fields)
 }
@@ -348,7 +350,7 @@ function sameFields(draft, baseline, fields) {
 //: Two field-values, *the same thing the form holds*. A number typed into a
 //: `type="number"` input arrives as a string while the store's row has a number,
 //: and an unset column is `null` on one side and `''` on the other — neither is
-//: work somebody typed, so neither may make the guard ask. Anything else is
+//: something somebody typed, so neither may ask for a write. Anything else is
 //: compared as it stands.
 function sameField(held, stored) {
   if ((held ?? '') === (stored ?? '')) return true
@@ -359,36 +361,39 @@ function sameField(held, stored) {
   return Number.isFinite(a) && Number.isFinite(b) && a === b
 }
 
-export function closeWouldLoseForSettings(appState) {
+//: Which row auto-save writes next, or null when the store already holds both
+//: forms. One row at a time, and the server first: the two forms are never typed
+//: in simultaneously, and a model write addresses its server's row, so saving the
+//: parent before the child is the order a manual save could never violate.
+export function settingsAutoSaveTarget(appState) {
   const servers = Array.isArray(appState?.servers) ? appState.servers : []
   const models = servers.flatMap((server) => server.models ?? [])
   if (
-    draftWouldLose(appState?.serverDraft ?? null, {
+    draftDiffers(appState?.serverDraft ?? null, {
       row: servers.find((server) => server.id === appState?.serverDraft?.id) ?? null,
       fields: SERVER_DIRTY_FIELDS,
       draftOf: serverRowDraft,
     })
   ) {
-    return true
+    return 'server'
   }
   if (
-    draftWouldLose(appState?.modelDraft ?? null, {
+    draftDiffers(appState?.modelDraft ?? null, {
       row: models.find((model) => model.id === appState?.modelDraft?.id) ?? null,
       fields: MODEL_DIRTY_FIELDS,
       draftOf: modelRowDraft,
     })
   ) {
-    return true
+    return 'model'
   }
-  if (hubTogglesDiffer(appState?.mcpEnabled, appState?.mcpConnectors)) return true
-  return hubTogglesDiffer(appState?.lspActivated, appState?.lspServers)
+  return null
 }
 
-//: A hub section's ticks are unsaved work the moment they disagree with the
-//: declaration the read answered — the same shape as a draft against its row,
-//: and needing no baseline of its own because the read's rows carry it. Order is
-//: never a difference: both verbs re-materialise their list in declaration order.
-function hubTogglesDiffer(selected, rows) {
+//: A hub section's ticks differ the moment they disagree with the declaration the
+//: read answered — the same shape as a draft against its row, and needing no
+//: baseline of its own because the read's rows carry it. Order is never a
+//: difference: both verbs re-materialise their list in declaration order.
+export function hubSelectionDiffers(selected, rows) {
   const stored = (Array.isArray(rows) ? rows : [])
     .filter((row) => row?.active)
     .map((row) => row.id)
@@ -509,64 +514,39 @@ export function useAppShell() {
     }
   }
 
-  //: Leaving the dialog. **`Close` is its only exit and it writes nothing**, so
-  //: while the dialog holds typed work it asks first, in place. `closeSettings`
-  //: is the act itself and is reached by an unguarded close, by `Discard and
-  //: close`, and by nothing else: every other route asks.
+  //: Leaving the dialog. **`Close` is its only exit, and it writes nothing of its
+  //: own** — auto-save has written whatever was typed by the time it is clicked —
+  //: but it does not *allow* a keystroke still inside the debounce window to be
+  //: dropped, so the owed write is made here first, while the dialog still counts
+  //: as open to the writer. Nothing is asked: there is no longer any work that
+  //: leaving would lose.
   function closeSettings() {
+    settingsAutoSaveFlush?.()
     state.settingsOpen = false
     state.settingsError = null
     // A delete that was asked but never answered dies with the dialog: the pair
     // is absent from the DOM when it is closed, so a pending question must not
-    // survive to be answered against a state it was not asked in. The same is
-    // true of the close question itself.
+    // survive to be answered against a state it was not asked in.
     state.pendingDelete = null
     state.pendingDeleteSentence = null
-    state.pendingClose = false
-    state.pendingCloseOpensAgentModes = false
     // The **in-memory forms go with the close**, so a re-open reads the store
-    // afresh — the rule that makes this guard's answer mean what it says:
-    // `Discard and close` that left the typing in the singleton would ask the
-    // same question again on the next open, forever.
-    state.selectedServerId = null
-    state.selectedModelId = null
-    state.serverDraft = null
-    state.modelDraft = null
+    // afresh rather than resuming a draft the store has already been told about.
+    resetSettingsForms()
     // The hub ticks are the two forms the same reasoning covers; each section's
     // read re-derives them from the declaration's `active` flags on the next open.
     state.mcpEnabled = []
     state.lspActivated = []
   }
 
-  //: **`Close`** (and Escape, and a backdrop click — the same verb, so they
-  //: cannot be a silent bypass of the guard): leave, unless something would be
-  //: lost, in which case ask. Asking changes nothing else — no selection moves,
-  //: no field is touched, nothing is written — and it abandons a pending delete,
-  //: for which nothing was written either.
-  function askCloseSettings() {
-    state.pendingDelete = null
-    state.pendingDeleteSentence = null
-    if (!closeWouldLoseForSettings(state)) {
-      closeSettings()
-      return false
-    }
-    state.pendingClose = true
-    return true
-  }
-
-  //: **`Keep editing`**: hide the pair and change nothing else, so the dialog is
-  //: exactly where the click on `Close` found it.
-  function dismissCloseSettings() {
-    state.pendingClose = false
-    state.pendingCloseOpensAgentModes = false
-  }
-
-  //: **`Discard and close`**: the same act as an unguarded `Close`, and it drops
-  //: the in-memory forms only — no store row is reset and no route is posted.
-  function discardAndCloseSettings() {
-    const opensAgentModes = state.pendingCloseOpensAgentModes
-    closeSettings()
-    if (opensAgentModes) state.agentModesRequest += 1
+  //: Drop the dialog's copies without touching the store. `closeSettings` does
+  //: this on the way out, and a write that landed while the dialog was already
+  //: closed does it after the fact — its answer re-selected the row it wrote, and
+  //: a closed dialog has no row showing.
+  function resetSettingsForms() {
+    state.selectedServerId = null
+    state.selectedModelId = null
+    state.serverDraft = null
+    state.modelDraft = null
   }
 
   // -- the Models section: the store's servers and models -----------------------
@@ -652,10 +632,17 @@ export function useAppShell() {
         state.serversError = describeError(body, fallback)
         return false
       }
+      // A write that landed while the dialog was **closed** — a flush racing a
+      // close — must not leave a selection and two forms standing for a dialog
+      // that is not on screen: the bytes are in the store, and the next open
+      // reads them from there. A dialog that was reopened by the time this
+      // landed is a new visit and owns its own selection, so it is left alone
+      // (`adoptDraft` matches the draft by identity, which a re-open broke).
       adoptServers(body)
       // The dialog edits what `/api/config` describes (the install's models),
       // so a successful write must move the app bar and the band with it.
       await loadConfig()
+      if (!state.settingsOpen) resetSettingsForms()
       return true
     } catch (exc) {
       state.serversError = describeTransportError(exc)
@@ -667,14 +654,28 @@ export function useAppShell() {
 
   // -- selection and drafts ------------------------------------------------------
 
+  //: A gesture that **replaces a form** writes it first: a click on another row
+  //: half a second after a keystroke must not leave that keystroke in the form
+  //: that is being thrown away. Cheap when nothing is owed, and inert while a
+  //: write is in flight, which is what keeps a write's own re-selection from
+  //: re-entering it.
+  function flushSettingsDraft() {
+    // Gated on the open dialog: a write's own answer re-selects the row it wrote
+    // through this same verb, and a flush there would post again while that write
+    // is still the one in flight.
+    if (!state.settingsOpen) return null
+    return settingsAutoSaveFlush?.() ?? null
+  }
+
   // Selecting a row is what puts its copy in the right-hand column. The copy is
-  // deliberate: typing in a field must not change what the store holds, and
-  // Close has nothing to undo.
+  // deliberate: typing in a field must not change what the store holds, and the
+  // store is told about it in its own time.
   function selectServer(id) {
     // A pending question was asked about the row that was selected then; moving
     // the selection abandons it rather than letting the answer name one row and
     // delete another.
     dismissDeleteRow()
+    flushSettingsDraft()
     state.selectedServerId = id
     state.selectedModelId = null
     state.modelDraft = null
@@ -692,6 +693,7 @@ export function useAppShell() {
   // asks for Settings explicitly.
   function selectModel(id) {
     dismissDeleteRow()
+    flushSettingsDraft()
     const parent =
       state.servers.find((server) =>
         server.models.some((model) => model.id === id)) ?? null
@@ -718,6 +720,11 @@ export function useAppShell() {
     state.modelDraft = modelRowDraft(null)
   }
 
+  //: A write's answer points the dialog at the row it stored, and **addresses the
+  //: draft in place** rather than re-filling it: the form keeps whatever was typed
+  //: while the write was in flight, which a re-fill from the store would silently
+  //: drop. An addressed draft is also what makes the next keystroke an update of
+  //: this row instead of a second add of it.
   async function saveServerDraft() {
     const draft = state.serverDraft
     if (!draft) return
@@ -748,7 +755,7 @@ export function useAppShell() {
         // the save succeeded.
         const endpointChanged = draftKey(draft) !== draftKey(saved)
         dropServerCaches(saved.id, { listing: isNew || endpointChanged })
-        selectServer(saved.id)
+        adoptDraft('server', draft, saved, payload)
       }
     }
   }
@@ -775,8 +782,27 @@ export function useAppShell() {
         (model) =>
           (isNew && model.name.trim() === wanted) || model.id === draft.id,
       )
-      if (saved) selectModel(saved.id)
+      if (saved) adoptDraft('model', draft, saved, payload)
     }
+  }
+
+  //: A draft, re-baselined on the row the store answered with. It takes the row's
+  //: id — which is what turns the next keystroke into an update of *this* row
+  //: rather than a second add of it — and, field by field, the store's own value
+  //: wherever the form still holds what was posted (so a name the store stripped
+  //: shows stripped, and a sampler it normalised reads as its answer). A field
+  //: that has moved on since the POST holds typing that no write carried yet, so
+  //: it is left exactly as typed: a write must never eat a character typed while
+  //: it was in flight.
+  function adoptDraft(kind, draft, saved, payload) {
+    if (state[kind === 'model' ? 'modelDraft' : 'serverDraft'] !== draft) return
+    const fields = kind === 'model' ? MODEL_DIRTY_FIELDS : SERVER_DIRTY_FIELDS
+    for (const field of fields) {
+      if (sameField(draft[field], payload[field])) draft[field] = saved[field] ?? draft[field]
+    }
+    draft.id = saved.id
+    if (kind === 'model') state.selectedModelId = saved.id
+    else state.selectedServerId = saved.id
   }
 
   // The destructive writes. The confirm is the caller's (the dialog asks), and
@@ -944,16 +970,10 @@ export function useAppShell() {
   //
   // It closes this dialog on the way, because a `<dialog>` opened with
   // ``showModal`` is on top of everything: a card opened behind it would be a
-  // click that did nothing at all. So this *is* a close, and it takes the close
-  // guard like every other route out — the sentence it is attached to can appear
-  // while a field holds typing, and a form the store never answered must not
-  // vanish because of a button the band offered. When the guard asks, the intent
-  // is remembered, so the answer that does leave also opens the card.
+  // click that did nothing at all. So this *is* a close, and it leaves through
+  // the same verb, which is the one that writes what was typed.
   function requestAgentModes() {
-    if (askCloseSettings()) {
-      state.pendingCloseOpensAgentModes = true
-      return
-    }
+    closeSettings()
     state.agentModesRequest += 1
   }
 
@@ -1156,9 +1176,6 @@ export function useAppShell() {
     setTab,
     openSettings,
     closeSettings,
-    askCloseSettings,
-    dismissCloseSettings,
-    discardAndCloseSettings,
     loadServers,
     selectServer,
     selectModel,

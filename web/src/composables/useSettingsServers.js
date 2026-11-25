@@ -1,17 +1,18 @@
-import { computed } from 'vue'
+import { computed, onScopeDispose, watch } from 'vue'
 
 import {
   SAMPLER_FIELDS,
-  closeWouldLoseForSettings,
   draftKey,
   fetchedModelIdsFor,
   fetchedModelsErrorFor,
   hasFetchedListing,
+  hubSelectionDiffers,
+  registerSettingsAutoSaveFlush,
   samplerBounds,
+  settingsAutoSaveTarget,
   unassignedLine,
   useAppShell,
 } from './useAppShell'
-import { CLOSE_QUESTION } from './useAgentModes'
 
 //: ---------------------------------------------------------------------------
 //: The Servers section's rules, as plain functions.
@@ -36,8 +37,16 @@ import { CLOSE_QUESTION } from './useAgentModes'
 const NOT_READ_LABEL = 'The servers have not been read.'
 const WRITE_IN_FLIGHT_LABEL = 'A write is in flight — wait for it to finish.'
 const CONFIRMATION_PENDING_LABEL = 'A confirmation is pending — answer it first.'
-const NOTHING_SELECTED_LABEL = 'Select a server or a model to edit it.'
-const SERVER_NOT_SAVED_LABEL = 'Save the server before fetching its models.'
+//: A row with no stored id is a form that auto-save could not write — it is
+//: missing what the store requires — so the reason a verb has no row to act on is
+//: spelled as what is missing, never as a `Save` that no longer exists.
+const SERVER_NOT_SAVED_LABEL = 'This server has no stored row yet — complete its form ' +
+  'and it is stored, and then listed.'
+
+//: How long a keystroke waits before it is written. Long enough that a word is
+//: one write and not five, short enough that the save is over before the hand
+//: leaves the keyboard.
+export const AUTOSAVE_DELAY_MS = 600
 
 //: The detail column's two pages. They are **pages of one form**, not two forms:
 //: both read and write the same `state.modelDraft`, so switching between them
@@ -80,7 +89,6 @@ function slotContext({
   saving = false,
   listing = false,
   confirming = false,
-  closing = false,
   page = null,
   serverSaved = false,
   urlFilled = false,
@@ -91,7 +99,6 @@ function slotContext({
     saving: saving === true,
     listing: listing === true,
     confirming: confirming === true,
-    closing: closing === true,
     page: page === 'model' ? 'model' : page === 'server' ? 'server' : null,
     serverSaved: serverSaved === true,
     urlFilled: urlFilled === true,
@@ -99,36 +106,22 @@ function slotContext({
   }
 }
 
-//: The row the toolbar acts on: the **page that is visible** is the scope, so
-//: `Save` on the model page saves that model and `Save` on the server page saves
-//: that server. The labels never spell the scope — the page and the verb are
-//: always on screen together, which is the only thing that makes the short word
-//: honest.
+//: The row the toolbar acts on: the **page that is visible** is the scope, so a
+//: new model is added under the model that is on screen and a new server beside
+//: them. The labels never spell the scope — the page and the verb are always on
+//: screen together, which is the only thing that makes the short word honest.
 export function addSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
   if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
-  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
   if (ctx.page === 'server' && !ctx.serverSaved) {
-    return slotInert('Already adding a server — save it or select one.')
+    return slotInert('Already adding a server — complete its form or select one.')
   }
   if (ctx.page === 'model' && !ctx.rowSaved) {
-    return slotInert('Already adding a model — save it or select one.')
+    return slotInert('Already adding a model — complete its form or select one.')
   }
   return slotLive('Add')
-}
-
-//: **save** — `Saving…` while a write is in flight, and inert for nothing else.
-//: A form that holds a problem does **not** disable it: the click is refused and
-//: the reason lands in the message band, because taking the button away hides the
-//: answer.
-export function saveSlotFor(context = {}) {
-  const ctx = slotContext(context)
-  if (ctx.saving) return slotInert('Saving…')
-  if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
-  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
-  if (ctx.page === null) return slotInert(NOTHING_SELECTED_LABEL)
-  return slotLive('Save')
 }
 
 //: **delete** — a row that has no backend row cannot be deleted, and that is true
@@ -142,12 +135,12 @@ export function deleteSlotFor(context = {}) {
   if (!ctx.rowSaved) {
     return slotInert(
       ctx.page === 'model'
-        ? 'Save the model before it can be deleted.'
-        : 'Save the server before it can be deleted.',
+        ? 'This model is not stored yet — delete needs a stored row.'
+        : 'This server is not stored yet — delete needs a stored row.',
     )
   }
   if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
-  if (ctx.confirming || ctx.closing) return slotInert(CONFIRMATION_PENDING_LABEL)
+  if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
   return slotLive('Delete')
 }
 
@@ -165,25 +158,6 @@ export function deleteConfirmationFor(context = {}) {
     rendered: true,
     cancel: ctx.saving ? slotInert(WRITE_IN_FLIGHT_LABEL) : slotLive('Cancel delete'),
     confirm: ctx.saving ? slotInert(WRITE_IN_FLIGHT_LABEL) : slotLive('Confirm delete'),
-  }
-}
-
-//: **The footer's close pair**: the same idiom as the delete pair, in the
-//: footer's **reserved** slot, and **absent from the DOM** until a close is being
-//: confirmed — so it is neither focusable nor announced while it means nothing,
-//: and `Close` never moves when it arrives. Its two tooltips are the two answers,
-//: and each glyph's tooltip is its accessible name, so they cannot drift.
-//:
-//: Unlike the delete pair it is **never inert**: keeping editing and discarding
-//: are answers that can always be given, and a write that lands while the question
-//: is up only changes what discarding would drop.
-export function closeConfirmationFor(context = {}) {
-  const ctx = slotContext(context)
-  if (!ctx.closing) return { rendered: false, cancel: null, confirm: null }
-  return {
-    rendered: true,
-    cancel: slotLive('Keep editing'),
-    confirm: slotLive('Discard and close'),
   }
 }
 
@@ -347,7 +321,6 @@ export function messageFor({
   page = null,
   saving = false,
   listing = false,
-  closing = false,
   storeState = null,
   serversError = null,
   settingsError = null,
@@ -383,17 +356,6 @@ export function messageFor({
   }
   if (section === 'lsp' && lspLoading) {
     return { text: 'Loading language servers…', role: 'status', action: null }
-  }
-
-  // **A close the dialog is asking about outranks every older truth**: while the
-  // footer's pair is up, everything the band would otherwise say is about a click
-  // that is no longer the current question. The pair's two glyphs name its two
-  // answers, so this line is the question they answer — nobody has to read a glyph
-  // twice to learn that leaving now would discard typing. A write in flight still
-  // outranks it, because bytes are moving and that is the one truth the user
-  // cannot yet act on.
-  if (closing) {
-    return { text: CLOSE_QUESTION, role: 'status', action: null }
   }
 
   // A delete awaiting its answer: the sentence is the store's own copy, put in
@@ -503,53 +465,6 @@ function lspTopLevelLine({ lspInstalled, lspError, lspServersError }) {
   return lspServersError || null
 }
 
-//: ---------------------------------------------------------------------------
-//: The MCP and LSP sections' one verb each.
-//:
-//: Their `Save` left the footer for a toolbar of the Servers tab's shape, and a
-//: toolbar verb is a verdict like any other: the two sections share the band's
-//: message priority, so their enablement is answered here too rather than written
-//: as a condition beside the button.
-//: ---------------------------------------------------------------------------
-
-export function mcpSaveSlotFor({
-  saving = false,
-  loading = false,
-  installed = true,
-  closing = false,
-} = {}) {
-  if (saving) return slotInertText('Saving…', 'Saving…')
-  if (closing) return slotInertText('Save', CONFIRMATION_PENDING_LABEL)
-  if (loading) return slotInertText('Save', 'The connectors are still being read.')
-  if (installed === false) {
-    return slotInertText('Save', 'The mcp package is not installed.')
-  }
-  if (installed == null) {
-    return slotInertText('Save', 'The connectors have not been read.')
-  }
-  return slotLiveText('Save')
-}
-
-export function lspSaveSlotFor({
-  saving = false,
-  loading = false,
-  installed = true,
-  closing = false,
-} = {}) {
-  if (saving) return slotInertText('Saving…', 'Saving…')
-  if (closing) return slotInertText('Save', CONFIRMATION_PENDING_LABEL)
-  if (loading) {
-    return slotInertText('Save', 'The language servers are still being read.')
-  }
-  if (installed === false) {
-    return slotInertText('Save', 'The pygls package is not installed.')
-  }
-  if (installed == null) {
-    return slotInertText('Save', 'The language servers have not been read.')
-  }
-  return slotLiveText('Save')
-}
-
 //: The one line that is a button. Its sentence is the shell's (`unassignedLine`)
 //: and the band adds only the verb the button carries, so the two places that
 //: report this count cannot drift apart in wording.
@@ -584,7 +499,6 @@ export function useSettingsServers() {
     saving: state.settingsSaving,
     listing: listingInFlight.value,
     confirming: state.pendingDelete !== null,
-    closing: state.pendingClose === true,
     page: page.value,
     serverSaved: state.serverDraft?.id != null,
     urlFilled: !!String(state.serverDraft?.url ?? '').trim(),
@@ -595,37 +509,16 @@ export function useSettingsServers() {
   }))
 
   const addSlot = computed(() => addSlotFor(slotContextFor.value))
-  const saveSlot = computed(() => saveSlotFor(slotContextFor.value))
   const deleteSlot = computed(() => deleteSlotFor(slotContextFor.value))
   const deleteConfirmation = computed(() =>
     deleteConfirmationFor(slotContextFor.value),
   )
   const fetchSlot = computed(() => fetchSlotFor(slotContextFor.value))
 
-  const closeConfirmation = computed(() =>
-    closeConfirmationFor(slotContextFor.value),
-  )
-
   const tabs = computed(() => detailTabsFor(page.value))
   const visibleTabs = computed(() => visibleDetailTabsFor(page.value))
   const activeTab = computed(() => detailPageFor(page.value, state.detailTab))
   const body = computed(() => detailBodyFor(page.value, activeTab.value))
-  const mcpSaveSlot = computed(() =>
-    mcpSaveSlotFor({
-      saving: state.mcpSaving,
-      loading: state.mcpLoading,
-      installed: state.mcpInstalled,
-      closing: state.pendingClose === true,
-    }),
-  )
-  const lspSaveSlot = computed(() =>
-    lspSaveSlotFor({
-      saving: state.lspSaving,
-      loading: state.lspLoading,
-      installed: state.lspInstalled,
-      closing: state.pendingClose === true,
-    }),
-  )
 
   const refusal = computed(() =>
     saveRefusalFor({
@@ -641,7 +534,6 @@ export function useSettingsServers() {
       page: page.value,
       saving: state.settingsSaving,
       listing: listingInFlight.value,
-      closing: state.pendingClose === true,
       storeState: state.storeState,
       serversError: state.serversError,
       settingsError: state.settingsError,
@@ -687,13 +579,169 @@ export function useSettingsServers() {
     else shell.addServerRow()
   }
 
-  //: The toolbar's Save. A form that holds a problem is **not** a disabled
-  //: button: the click is refused here and the reason is already in the band,
-  //: because `refusal` is derived from the draft the field is bound to.
-  function saveRow() {
-    if (saveSlot.value.disabled || refusal.value) return
-    if (page.value === 'model') shell.saveModelDraft()
-    else if (page.value === 'server') shell.saveServerDraft()
+  //: **The auto-save.** A form is written when it stops changing, so the dialog
+  //: needs no `Save`: the draft is the record of what is typed and the store's
+  //: rows are the record of what is written, and a write is owed whenever the two
+  //: disagree (`settingsAutoSaveTarget`).
+  //:
+  //: A form the store would refuse is **not** written: the reason goes to the band
+  //: as it always did, and the next keystroke that completes the form is what gets
+  //: posted. Nothing here decides *which* row a write addresses — the target
+  //: answer does, so the server a model is being added under can never be skipped.
+  function writeTarget(target) {
+    if (target === 'model') return shell.saveModelDraft()
+    return shell.saveServerDraft()
+  }
+
+  let lastPosted = null
+
+  function autoSaveNow() {
+    // Closed, a write already in flight, or a delete awaiting its answer: in all
+    // three the store is not free to be told about this row **right now**, and a
+    // delete that vanished because of a keystroke nobody confirmed is a question
+    // that was answered by the wrong hand. None of it is lost: the watch below
+    // re-schedules once the blocker clears.
+    if (!state.settingsOpen || state.settingsSaving || state.pendingDelete) return null
+    const target = settingsAutoSaveTarget(state)
+    if (!target) return null
+    const draft = target === 'model' ? state.modelDraft : state.serverDraft
+    if (saveRefusalFor({ page: target, draft, caps: state.serversCaps })) return null
+    // One write per shape of the form. A write the store answered without taking
+    // the bytes it was sent (a row it would not create, so the draft is never
+    // re-baselined) must not be posted again on the next tick — that would be a
+    // loop. Any further keystroke changes the shape and is owed a write again.
+    const shape = `${target}|${JSON.stringify(draft)}`
+    if (shape === lastPosted) return null
+    lastPosted = shape
+    return writeTarget(target)
+  }
+
+  let timer = null
+
+  function scheduleAutoSave() {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = null
+      autoSaveNow()
+    }, AUTOSAVE_DELAY_MS)
+  }
+
+  //: **The hub sections' ticks.** A tick is the whole decision (it is the
+  //: declaration's `enable` flag), so it is written as soon as it is made — no
+  //: debounce, because a checkbox has no in-between state to wait for.
+  //:
+  //: Two passes at most: the second picks up a tick made while the first write was
+  //: in flight, which is the only way a fast double-tick cannot end with the file
+  //: saying something else than the screen. A write the store refused leaves the
+  //: ticks as they are and says so in the band; a third attempt could only repeat
+  //: that, so it is not made.
+  function hubOf(kind) {
+    return kind === 'mcp'
+      ? {
+        selected: () => state.mcpEnabled,
+        rows: () => state.mcpConnectors,
+        loading: () => state.mcpLoading,
+        save: shell.saveMcp,
+      }
+      : {
+        selected: () => state.lspActivated,
+        rows: () => state.lspServers,
+        loading: () => state.lspLoading,
+        save: shell.saveLsp,
+      }
+  }
+
+  const hubWriteState = {
+    mcp: { running: false, again: false },
+    lsp: { running: false, again: false },
+  }
+
+  async function writeHub(kind) {
+    const hub = hubOf(kind)
+    // A hub read in flight answers by re-deriving the ticks from the declaration,
+    // so a write of what is on screen now would be a race the read wins.
+    if (!state.settingsOpen || hub.loading()) return null
+    const busy = hubWriteState[kind]
+    // Asked again while a write is in flight: remember the asking and go round
+    // once that write has answered, so a tick made mid-write is stored rather
+    // than lost. Asking is never queued twice — one more pass covers every tick
+    // made since the pass that is running started.
+    if (busy.running) {
+      busy.again = true
+      return null
+    }
+    busy.running = true
+    try {
+      do {
+        busy.again = false
+        if (!hubSelectionDiffers(hub.selected(), hub.rows())) break
+        await hub.save()
+        // Another pass reads the ticks again, and a dialog that closed while the
+        // pass above was in flight has already dropped them: writing an empty set
+        // there would clear the declaration the close said nothing about.
+      } while (busy.again && state.settingsOpen)
+    } finally {
+      busy.running = false
+    }
+    return true
+  }
+
+  //: Leave-nothing-behind: the debounce is dropped and every owed write is made
+  //: now. The shell calls it through the hook below before a gesture replaces or
+  //: drops a form — `Close`, and any row selection — so a click that lands half a
+  //: second after a keystroke still writes the keystroke.
+  function flushAutoSave() {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+    const tasks = []
+    if (hubSelectionDiffers(state.mcpEnabled, state.mcpConnectors)) tasks.push(writeHub('mcp'))
+    if (hubSelectionDiffers(state.lspActivated, state.lspServers)) tasks.push(writeHub('lsp'))
+    const form = autoSaveNow()
+    if (form) tasks.push(form)
+    return tasks.length ? Promise.all(tasks) : null
+  }
+
+  // The two forms, whatever page is drawn: both pages are one draft, and a
+  // keystroke on the page that is hidden is still a keystroke.
+  watch(
+    () => [state.serverDraft, state.modelDraft],
+    scheduleAutoSave,
+    { deep: true },
+  )
+
+  // A write that was owed but **blocked** — a connection write still in flight, or
+  // a delete that had to be answered first — is owed no less once the blocker
+  // clears, so clearing it re-runs the schedule. Without this, a keystroke whose
+  // debounce fell inside an earlier write's window would never be written at all.
+  watch(
+    () => [state.settingsSaving, state.pendingDelete !== null],
+    ([saving, confirming], [wasSaving, wasConfirming]) => {
+      if ((wasSaving && !saving) || (wasConfirming && !confirming)) scheduleAutoSave()
+    },
+  )
+
+  registerSettingsAutoSaveFlush(flushAutoSave)
+  onScopeDispose(() => {
+    // A card torn down rather than closed (a tab swap, a hot reload) is the same
+    // gesture that must not lose a keystroke: the dialog is still flagged open
+    // here, so the owed write is made before the watches that make it go away.
+    flushAutoSave()
+    if (timer) clearTimeout(timer)
+    registerSettingsAutoSaveFlush(null)
+  })
+
+  //: The two hub sections' ticks, under the same verb as their old `Save`: the
+  //: tick is stored, then stored again to the file.
+  function toggleMcp(id, checked) {
+    shell.toggleMcp(id, checked)
+    return writeHub('mcp')
+  }
+
+  function toggleLsp(id, checked) {
+    shell.toggleLsp(id, checked)
+    return writeHub('lsp')
   }
 
   //: The listing's `+`, under the same guard as its verdict.
@@ -728,35 +776,13 @@ export function useSettingsServers() {
     return shell.confirmDeleteRow()
   }
 
-  //: The footer's `Close` and its two answers.
-  //: **Every route out of the dialog goes through `askClose`** — `Close`, Escape
-  //: and a backdrop click are the same verb, so none of them can be a silent
-  //: bypass of the guard. The answers are refused by nothing at all: keeping
-  //: editing and discarding can always be given, and both are the pair's own
-  //: verdicts rather than a condition here.
-  function askClose() {
-    shell.askCloseSettings()
-  }
-
-  function dismissClose() {
-    shell.dismissCloseSettings()
-  }
-
-  function discardAndClose() {
-    shell.discardAndCloseSettings()
-  }
-
   return {
     page,
     slotContextFor,
     addSlot,
-    saveSlot,
     deleteSlot,
     deleteConfirmation,
     fetchSlot,
-    closeConfirmation,
-    mcpSaveSlot,
-    lspSaveSlot,
     rows,
     rowSlotFor,
     tabs,
@@ -766,15 +792,13 @@ export function useSettingsServers() {
     refusal,
     message,
     addRow,
-    saveRow,
     addFromListing,
     fetchModels,
     askDelete,
     dismissDelete,
     confirmDelete,
-    askClose,
-    dismissClose,
-    discardAndClose,
+    toggleMcp,
+    toggleLsp,
   }
 }
 

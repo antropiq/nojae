@@ -1117,13 +1117,6 @@ body {
   margin: 0;
 }
 
-.settings-section-save {
-  flex: 0 0 auto;
-  width: auto;
-  margin: 0 0 0 auto;
-  padding-inline: 1.25rem;
-}
-
 /* The band's one actionable line: the cross-store count's way into the dialog
    that fixes it. It is the band's button, not a message site of its own — the
    line and this button are `messageFor`'s answer and nothing else. */
