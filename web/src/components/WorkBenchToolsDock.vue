@@ -5,37 +5,31 @@ import WorkBenchLspPanel from './WorkBenchLspPanel.vue'
 import { useChat } from '../composables/useChat'
 import { hubsSummary } from '../lib/chat-hubs'
 
-// Bottom of the Chat left column: the conversation-scoped MCP panel beside
-// the LSP panel (the pair the input row used to carry), plus the control that
-// folds them away so the reasoning timeline above gets the whole column.
+// Bottom of the Chat left column: the conversation-scoped MCP panel beside the
+// LSP panel, plus the control that folds them away so the reasoning timeline
+// above gets the whole column.
 //
-// The fold belongs to the view, not to this component: folding changes how
-// much height the column's splitter gives the timeline, so only the layout
-// owner can answer to it. Hence the `collapsed` prop / `update:collapsed`
-// pair rather than a local flag.
+// The fold belongs to the view, not to this component: folding changes how much
+// height the column's splitter gives the timeline, so only the layout owner can
+// answer to it. Hence the prop / emit pair rather than a local flag.
 const props = defineProps({ collapsed: Boolean })
 const emit = defineEmits(['update:collapsed'])
 
 const { state, chatBusy } = useChat()
 
-// The dock always has its body: the two panels are the Chat left column's
-// fixed width, so an unconfigured workspace still gets the same column and the
-// same dock height, and each panel says what is missing instead of leaving a
-// half-empty strip. The fold is therefore always a real control.
+// The dock always has its body: each panel says what is missing, so an
+// unconfigured workspace still gets the same column and the same dock height.
 //
-// The fold is inert while a reply streams. Folding changes the height of the
-// box the reasoning timeline paints into, and that box is measured once per
-// inference and then frozen (WorkBenchToolPanel's pinned window) — so a fold
-// mid-reply would leave the stream flowing in the window computed before it.
-// It is the same rule the Live View's own switch answers to (`chatBusy`, not
-// `phase`, so a batch between two turns locks it too), and the control stays
-// visible rather than disappearing: a button that vanishes and returns reads
-// as a bug, and the reason is worth a tooltip.
+// The fold is inert while a reply streams: it changes the height of the box the
+// reasoning timeline paints into, and that box is measured once per inference
+// and then frozen, so a fold mid-reply would leave the stream flowing in the
+// window computed before it. Locked on `chatBusy` rather than the phase, so a
+// batch between two turns locks it too. The control stays visible while locked —
+// a button that vanished and returned would read as a bug.
 const expanded = computed(() => !props.collapsed)
 
-// Folded, the strip still answers the one question the panels answered: which
-// hubs are switched on for this conversation. Counts rather than names — the
-// folded strip is a single line.
+// Folded, the strip still answers which hubs are switched on for this
+// conversation — counts, because the folded strip is a single line.
 const summary = computed(() => hubsSummary(state))
 </script>
 

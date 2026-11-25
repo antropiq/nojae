@@ -1,15 +1,13 @@
 """The per-server session state one language server owns while it is up.
 
-Split out of the manager because these three are pure state machines with no
-FastAPI and no asyncio loop of their own — they are the parts of the hub that
-can be reasoned about (and tested) on their own.
+Split out of the manager because these are pure state machines with no FastAPI
+and no asyncio loop of their own.
 
-One thing here is not a state machine: a :class:`ServerSession` *holds* the
-process-tree boundary of the child it belongs to (``proctree_jobs.ProcessJob``,
-B-D5). It spawns nothing, signals nothing and waits for nothing — the manager
-does all of that — but the boundary belongs to the child, so the object that
-owns the child for as long as it lives owns the handle too, and releasing it
-is what a replaced child must never leave behind.
+One is not a state machine: a :class:`ServerSession` *holds* the process-tree
+boundary of the child it belongs to (``proctree_jobs.ProcessJob``). It spawns,
+signals and waits for nothing — the manager does all of that — but the
+boundary belongs to the child, so the object that owns the child owns the
+handle too, and a replaced child must never leave it unreleased.
 """
 
 import asyncio
@@ -20,9 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 class DiagnosticsInbox:
     """Latest ``publishDiagnostics`` payload per URI, plus a wait-for-push step.
 
-    LSP diagnostics arrive as a server->client *notification*, so a tool call
-    cannot simply await a response: it opens/changes the document and then
-    waits for the next publish for that URI (or a deadline).
+    Diagnostics arrive as a server->client *notification*, so a tool call
+    cannot await a response: it opens/changes the document and waits for the
+    next publish for that URI, or a deadline.
     """
 
     def __init__(self) -> None:
@@ -57,8 +55,8 @@ class DiagnosticsInbox:
             version is None or entry[0] is None or entry[0] >= version
         ):
             return entry[1]
-        # A fresh event: only a publish that arrives *now* counts, never a
-        # stale one from an earlier document version.
+        # A fresh event: only a publish arriving *now* counts, never a stale
+        # one from an earlier document version.
         event = asyncio.Event()
         self._events[uri] = event
         try:
@@ -72,10 +70,9 @@ class DiagnosticsInbox:
 class DocumentStore:
     """The documents currently ``didOpen``ed on one server, with versions.
 
-    Every tool call naming a file first opens it (or ``didChange``s it with a
-    full-text change when already open), so the server analyses the *current*
-    content rather than a possibly stale on-disk snapshot. The version
-    counter increments monotonically.
+    Every tool call naming a file opens it first (or ``didChange``s it with a
+    full-text change), so the server analyses the *current* content rather than
+    a possibly stale on-disk snapshot.
     """
 
     def __init__(self) -> None:
@@ -105,9 +102,8 @@ class DocumentStore:
             "version": version,
             "text": text,
             "languageId": language_id,
-            # The version this text was sent at. It starts equal to the
-            # document's version and only falls behind when a later sync sends
-            # the *same* text again, which is the whole point of keeping it.
+            # The version this text was sent at: equal to the document's
+            # version until a later sync re-sends the *same* text.
             "textVersion": version,
         }
         self.touch(uri)
@@ -118,7 +114,7 @@ class DocumentStore:
             self.add(uri, version, text, "")
             return
         if entry["text"] != text:
-            # New text: this version is the one an analysis must be from to
+            # New text: this version is what an analysis must be from to
             # describe what is open (``text_version``).
             entry["textVersion"] = version
         entry["version"] = version
@@ -167,9 +163,9 @@ class ServerSession:
         self.client = client
         self.process = process
         self.log_path = log_path
-        #: The job containing this child's whole process tree on the platform
-        #: that has no process groups; inert where the group is the boundary.
-        #: Opened by the manager before the spawn, released with the child.
+        #: The job holding this child's whole process tree on the platform with
+        #: no process groups; inert where the group is the boundary. Opened by
+        #: the manager before the spawn, released with the child.
         self.job: Optional[Any] = job
         self.capabilities: Any = None
         self.documents = DocumentStore()
@@ -178,6 +174,6 @@ class ServerSession:
         self.stderr_task: Optional[asyncio.Task] = None
         self.exit_task: Optional[asyncio.Task] = None
         #: Volar's tsserver relay answers, counted per command, so the status
-        #: panel can show that a Vue session is actually being served rather
-        #: than merely started (the failure mode here is silent, not loud).
+        #: panel can show a Vue session is actually being served rather than
+        #: merely started — the failure mode here is silent, not loud.
         self.ts_relay_counts: Dict[str, int] = {}

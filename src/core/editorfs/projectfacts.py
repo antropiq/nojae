@@ -1,13 +1,12 @@
 """What the wizard's LSP flow is grounded in: derived facts about this folder.
 
 ``project_facts`` is the read-only scan behind the connector wizard's "servers for
-*this* project" proposal (§6 of ``docs/mcp-lsp-connector-wizard.md``). It answers
-small, auditable facts — which extensions the folder holds, which manifests it
-carries, what those manifests declare, which servers are already declared, and
-where the project's "front end" looks to be — and **never file bytes**. That is
-the promise the feature is built on: a proposal may say *"Python here (142 ``.py``
-files, a ``pyproject.toml``), and no Python language server declared"* because the
-scan counted, it never quoted.
+*this* project" proposal. It answers small, auditable facts — which extensions
+the folder holds, which manifests it carries, what those manifests declare, which
+servers are already declared, and where the project's "front end" looks to be —
+and **never file bytes**. That is the promise the feature is built on: a proposal
+may say *"Python here (142 ``.py`` files, a ``pyproject.toml``), and no Python
+language server declared"* because the scan counted, it never quoted.
 
 What it promises (each rule mirrored by a test in
 ``tests/test_editorfs_projectfacts.py``):
@@ -46,9 +45,9 @@ What it promises (each rule mirrored by a test in
 
 The *declared* servers arrive as an **argument**, never read here:
 :mod:`editorfs.policy` is reached from ``lsphub.discovery``, so importing a hub
-from this package would close a cycle. This module answers about facts; filling
-in the hubs' ids is task 05's route, and :func:`project_facts` only says which
-extensions those ids already cover — the gap being the whole point of a proposal.
+from this package would close a cycle. This module answers about facts and only
+says which extensions the declared ids already cover — the gap being the whole
+point of a proposal.
 """
 
 import json
@@ -71,10 +70,9 @@ except ImportError:  # pragma: no cover - depends on the interpreter
     tomllib = None  # type: ignore[assignment]
 
 
-#: The **only** file names this surface may ever open. One constant, so a
-#: reviewer sees the whole reach at a glance: the manifests the spec names, plus
-#: the configs that say which linter or toolchain a project already chose. A
-#: credential file is not here and never becomes one — the rule is that the scan
+#: The **only** file names this surface may ever open: the manifests this scan
+#: cares about, plus the configs that say which linter or toolchain a project
+#: already chose. A credential file is not here and never becomes one — the scan
 #: is not a second file reader, and this list *is* the rule.
 MANIFESTS: Tuple[str, ...] = (
     # The manifests themselves.
@@ -106,9 +104,9 @@ MANIFESTS: Tuple[str, ...] = (
 )
 
 #: The manifests that mark where a project's **front end** lives — the folder an
-#: LSP ``workspaceRoot`` naturally defaults to. ``package.json`` is the one that
-#: matters (a ``web/package.json`` is what makes ``web`` the front end); the two
-#: TypeScript configs answer the same question where a bundler is not involved.
+#: LSP ``workspaceRoot`` naturally defaults to: a ``web/package.json`` is what
+#: makes ``web`` the front end, and the two TypeScript configs answer the same
+#: question where a bundler is not involved.
 FRONT_END_MANIFESTS: Tuple[str, ...] = ("package.json", "tsconfig.json", "jsconfig.json")
 
 _FRONT_END_NAMES = frozenset(FRONT_END_MANIFESTS)
@@ -482,8 +480,7 @@ def project_facts(declared: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             with os.scandir(folder) as scan:
                 entries = list(scan)
         except OSError:
-            # Unreadable directory: end this branch rather than fail the scan —
-            # the answer ``tree._has_children`` and ``quickopen`` give.
+            # Unreadable directory: end this branch rather than fail the scan.
             return
 
         dirs: List[os.DirEntry] = []
@@ -497,9 +494,8 @@ def project_facts(declared: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             if verdict == shared.HIDDEN:
                 continue
             if scan_entry.is_dir(follow_symlinks=False):
-                # A read-only *folder* is not descended, which is
-                # :func:`editorfs.quickopen.list_workspace_files`' own narrowing
-                # of the tree's set rather than a second ignore list: a
+                # A read-only *folder* is not descended — quick-open's own
+                # narrowing of the tree's set rather than a second ignore list: a
                 # dependency or build tree is where a checkout's bytes pile up,
                 # so descending one would spend the whole walk budget on a
                 # vendor's files and describe the vendor instead of this project.

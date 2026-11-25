@@ -5,11 +5,11 @@ The mechanism half of the package; the numbers it reads live in
 iterable of *decoded* lines -- what a streaming response's line iterator
 hands over -- and gets back chunk dicts. No FastAPI, no event bus, no HTTP
 client of any kind, and it records nothing: whether the stream carried a
-finish reason is the stream object's fact to keep, not this parser's (D3).
+finish reason is the stream object's fact to keep, not this parser's.
 
-The rules are the ones the live server exercises (spec §2.2): the space after
-``data:`` is optional, ``: keep-alive`` is a comment rather than an event,
-blank lines are frame separators, and ``data: [DONE]`` ends the stream.
+The space after ``data:`` is optional, ``: keep-alive`` is a comment rather
+than an event, blank lines are frame separators, and ``data: [DONE]`` ends the
+stream.
 """
 
 import json
@@ -21,8 +21,8 @@ from . import constants
 class SSEFrameError(ValueError):
     """A ``data:`` frame whose JSON payload does not parse.
 
-    Named and raised rather than skipped on purpose (D3): a half-read frame
-    means the connection died mid-write, and the lines that follow it describe
+    Named and raised rather than skipped on purpose: a half-read frame means
+    the connection died mid-write, and the lines that follow it describe
     nothing. Skipping it would hide a cut stream behind a frame that never
     carried a finish reason -- the exact lie the truncation check exists to
     catch. Both consuming loops surface ``str(exc)`` in their error line, so
@@ -35,7 +35,6 @@ def _data_payload(raw: str) -> Optional[str]:
 
     A blank line, a comment line (``: keep-alive`` and anything else prefixed
     with ``:``) and any other SSE field (``event:``, ``id:``) carry no payload.
-    The space after the colon is optional, so the payload is stripped.
     """
     line = raw.strip()
     if not line or line.startswith(":"):
@@ -69,9 +68,8 @@ def parse_frame(raw: str) -> Optional[Dict[str, Any]]:
         ) from exc
 
     if not isinstance(parsed, dict):
-        # A JSON scalar or array in a data frame is not a chat-completion
-        # chunk: it carries nothing a caller could use, and it is not a
-        # half-read frame either.
+        # A JSON scalar or array is not a chat-completion chunk -- and not a
+        # half-read frame either, so it is no error.
         return None
     return parsed
 
@@ -81,8 +79,8 @@ def iter_chunks(lines: Iterable[str]) -> Iterator[Dict[str, Any]]:
 
     The sentinel ends iteration and is not yielded, and nothing is recorded for
     it: it is transport framing, so it neither becomes a chunk nor a finish
-    reason (D3) -- recording is the stream object's job. A frame whose JSON
-    does not parse raises through here rather than being skipped.
+    reason -- recording is the stream object's job. A frame whose JSON does not
+    parse raises through here rather than being skipped.
     """
     for raw in lines:
         if _data_payload(raw) == constants.DONE_SENTINEL:

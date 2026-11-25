@@ -1,40 +1,32 @@
-// Thinking arrives as one `reasoning_delta` frame per streamed chunk: a chunk
-// rate set by the network, far above the frame clock. Writing that text into
-// the reactive block per chunk makes every chunk re-cut the panel's rows,
-// re-patch the row list and re-run its autoscroll — which reads `scrollHeight`
-// and so forces a synchronous layout — dozens of times per painted frame.
+// Thinking arrives as one `reasoning_delta` frame per chunk, a rate set by the
+// network and far above the frame clock. Writing that text into the reactive
+// block per chunk re-cuts the panel's rows and re-runs its autoscroll — which
+// reads `scrollHeight` and so forces a synchronous layout — dozens of times per
+// painted frame. This buffer defers only the DRAWING: deltas accumulate in a
+// plain, non-reactive string and the reactive block is touched once per
+// animation frame.
 //
-// This buffer defers only the DRAWING: deltas accumulate in a plain,
-// non-reactive string and the reactive block is touched once per animation
-// frame, so the panel's work lands on the frame boundary instead of on an
-// arrival.
+// Measurement is deliberately NOT deferred: the `reasoningChars` counter and the
+// generation window stay anchored to the chunk that arrived, because a `usage`
+// frame snapshots a baseline built from that counter and deferring it would
+// count the buffered tail a second time.
 //
-// What is deliberately NOT deferred is the measurement: the per-character
-// `reasoningChars` counter and the generation window stay anchored to the chunk
-// that arrived (see the `reasoning_delta` case in useChat). A `usage` frame
-// snapshots an exact baseline built from that counter, so deferring the counter
-// would count the buffered tail a second time when estimating what was
-// generated after that baseline.
-//
-// Chronology rule, now enforced here because the write happens later than the
-// frame that requested it: consecutive thinking extends the current reasoning
-// block, and anything else appended in between (a tool-call badge, written
+// The write also happens later than the frame that requested it, so chronology
+// is enforced here: consecutive thinking extends the current reasoning block,
+// and anything else appended in between (a tool-call badge, written
 // synchronously by its own frame) starts a new one. Reading the block back off
-// `blocks` at flush time is what keeps that order exact — and it is also what
-// makes the write land on the reactive proxy rather than on the raw object
-// pushed earlier, without which the panel would never see the text at all.
+// `blocks` at flush time keeps that order exact, and lands the write on the
+// reactive proxy rather than on the raw object pushed earlier.
 
-// The one write: append to the flowing block, or open a new one when the
-// timeline's tail is not thinking (start of the reply, or a tool round between
-// two thinking runs).
+// The one write: extend the flowing block, or open a new one when the timeline's
+// tail is not thinking.
 export function appendReasoning(blocks, text) {
   const last = blocks[blocks.length - 1]
   if (last && last.kind === 'reasoning') last.text += text
   else blocks.push({ kind: 'reasoning', text })
 }
 
-// `schedule`/`unschedule` default to the browser's frame clock and are
-// injectable so the coalescing itself is testable without one.
+// Injectable frame clock, so the coalescing is testable without a browser one.
 export function createReasoningBuffer({
   schedule = (fn) => requestAnimationFrame(fn),
   unschedule = (id) => cancelAnimationFrame(id),

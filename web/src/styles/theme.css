@@ -17,13 +17,9 @@
   --bi-space-3: 1.25rem;
   --bi-space-4: 2rem;
   --bi-appbar-height: 60px;
-  /* Width of ONE chat tool panel (MCP or LSP). The two sit side by side in
-     the tools dock at the bottom of the Chat left column, and the reasoning
-     timeline above them fills that same width, so the column is
-     --bi-chat-tools-col-width wide. Sized so connector names fit next to
-     their switch (also wide enough that the vertical scrollbar never
-     squeezes a row sideways). Keep the calc's gap in sync with
-     `.chat-tools-dock-body`'s gap. */
+  /* Width of ONE chat tool panel (MCP or LSP): the two sit side by side in
+     the dock under the timeline, so the column is twice this plus the gap —
+     keep that gap in sync with `.chat-tools-dock-body`'s. */
   --bi-chat-panel-width: 15.5rem;
   --bi-chat-tools-col-width: calc(2 * var(--bi-chat-panel-width) + 0.5rem);
 
@@ -199,13 +195,9 @@ body {
 
 /* -- session meters in the app bar ----------------------------------------- */
 
-/* The shared elapsed clock (SessionClock.vue): one readout for the whole app,
-   because the app has one session at a time — so it sits immediately left of
-   the status pill and reads whichever is live. Compact on purpose: the app bar
-   is `--bi-appbar-height` tall, so the digits stay at the pill's own size.
-   `min-width` is fixed to the width of `00:00:00` (tabular digits) so the
-   actions row never shifts sideways as the clock ticks past a minute or an
-   hour. */
+/* The shared elapsed clock (SessionClock.vue), immediately left of the status
+   pill. `min-width` is fixed to the width of `00:00:00` (tabular digits) so the
+   actions row never shifts as the clock ticks past a minute or an hour. */
 .session-clock {
   flex: 0 0 auto;
   margin: 0;
@@ -248,11 +240,8 @@ body {
   justify-content: center;
 }
 
-/* Each counter keeps the width of its longest active figure even while idle
-   (`— t/s` / `— ctx` are much shorter), so starting a session cannot reflow
-   the centred tab strip. The values are em-relative to the badge's own font
-   size and cover the `≈` estimate marker plus a wide figure
-   (`≈ 123.4 t/s`, `≈ ctx 123.4k / 128k`), so an active reading always fits. */
+/* Each counter keeps the width of a wide active figure even while idle, so
+   starting a session cannot reflow the centred tab strip. */
 .session-stat-badges .badge--rate {
   min-width: 6.8em;
 }
@@ -313,12 +302,9 @@ body {
   animation: bi-pulse 1.2s ease-in-out infinite;
 }
 
-/* The endpoint refused a round and the app is waiting to ask again. The pill
-   stays lit — the turn is still in flight — so it keeps the same "a reply is
-   running" violet as the thinking/reasoning phases above: the theme has no
-   separate tone for "waiting on someone else", and inventing one would read as
-   a fourth status rather than as the same reply, paused. The distinction is in
-   the label, never in the colour (spec §5.11). */
+/* The endpoint refused a round and the app is waiting to ask again. The turn
+   is still in flight, so the pill keeps the thinking/reasoning violet: the
+   distinction is in the label, never in the colour. */
 .status-reconnecting {
   color: var(--bi-violet);
   border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
@@ -328,10 +314,8 @@ body {
   animation: bi-pulse 1.2s ease-in-out infinite;
 }
 
-/* A batch lot is running (app-bar pill, B10). Same violet as a chat reply —
-   the pill is reading the same violet family for "the model is working" — but
-   with its own branch so the label can stay literal. The post-lot outcome
-   reuses the tones above (status-cancelled / status-failed / status-finished),
+/* A batch lot is running: the same violet as a chat reply, with its own branch
+   so the label can stay literal. The post-lot outcome reuses the tones above,
    so no new colour is introduced. */
 .status-batch {
   color: var(--bi-violet);
@@ -441,8 +425,8 @@ body {
   margin: 0;
 }
 
-/* One assistant reply: the card the reply's markdown, its copy chip and its
-   truncation marker all hang off. */
+/* One assistant reply: the card its markdown, copy chip and truncation marker
+   hang off. */
 .chat-answer-card {
   position: relative;
   background-color: var(--bi-surface);
@@ -476,9 +460,9 @@ body {
   padding: 0;
 }
 
-/* Tool-line icon: prefixes each post-tool-round continuation line in the
-   chat answer (useChat arms it after a tool_result, lib/markdown.js swaps
-   the sentinel for the inline wrench SVG at render time). */
+/* Tool-line icon: prefixes each post-tool-round continuation line in the chat
+   answer (useChat arms it after a tool_result, lib/markdown.js swaps the
+   sentinel for the inline wrench SVG at render time). */
 .answer .tool-line-icon {
   display: inline-block;
   vertical-align: -0.15em;
@@ -507,11 +491,10 @@ body {
   padding: 0.5rem;
 }
 
-/* Pico colors raw p/div/span elements with the app theme color, which
-   leaks into the HTML labels mermaid renders inside foreignObject (e.g.
-   state-diagram node captions nest the text in a <p>) and makes them
-   near-invisible on the light plate in dark mode. Mermaid's own
-   id-scoped rules keep winning for the elements it styles. */
+/* Pico colors raw p/div/span elements with the app theme color, which leaks
+   into the HTML labels mermaid renders inside foreignObject and makes them
+   near-invisible on the light plate in dark mode. Mermaid's own id-scoped
+   rules keep winning for the elements it styles. */
 .answer .mermaid-block svg :is(p, div, span, li) {
   color: #333333;
 }
@@ -656,12 +639,9 @@ body {
   border-radius: 999px;
 }
 
-/* Batch meter, above the composer row (BatchProgressBar.vue). The <progress>
-   and its caption come from `.progress-row` / `.caption.mono` above; this
-   block only stacks the three lines. It fills `.chat-textarea-col`, which owns
-   the whole composer width now that no side panel stands beside the textarea.
-   The bottom margin keeps the bordered panel off the action-button row below
-   it — the column's own `gap` is only 2px, too tight to read as its edge. */
+/* Batch meter, above the composer row (BatchProgressBar.vue): this block only
+   stacks the three lines. The bottom margin keeps the bordered panel off the
+   action-button row below it — the column's own `gap` is only 2px. */
 .batch-progress {
   flex: 0 0 auto;
   width: 100%;
@@ -736,11 +716,9 @@ body {
 }
 
 /* The card's column stack: the section nav, the body that fills the rest of the
-   fixed card height, and the footer. What the body sits *inside* differs per
-   card: Settings lays its sections out as a horizontal strip above a full-width
-   editor (see the `.settings-dialog` rules below), the agent-modes card keeps
-   its tabs in a column beside the editor. Either way the editor scrolls and the
-   nav stays put. */
+   fixed card height, and the footer. Settings lays its sections out as a strip
+   above a full-width editor, the agent-modes card keeps its tabs in a column
+   beside it; either way the editor scrolls and the nav stays put. */
 .settings-form {
   display: flex;
   flex-direction: column;
@@ -853,18 +831,14 @@ body {
   column-gap: var(--bi-space-2);
 }
 
-/* -- the Servers section (appdb-08, settings-dialog-migration-plan §4) ---------
+/* -- the Servers section -------------------------------------------------------
 
    The connection's master–detail: servers on the left, the selected row's fields
-   on the right. It is the Agents card's geometry — the toolbar and the tree take
-   the left column's two rows, the detail column spans both — so the two dialogs
-   put a toolbar over a list in the same place and share `.agent-modes-body`,
-   `.agent-modes-toolbar` and the fixed `.agent-modes-slot` boxes for it (§6.2).
-   It has no `.agent-modes-heading`: the section strip above the body already
-   reads `Servers`, so a heading here would title the same thing twice. What
-   follows is only what this section has and the Agents card does not: the two
-   columns' proportion, the detail strip, the model page's field grid and the
-   listing table. */
+   on the right, in the Agents card's geometry — the two dialogs share
+   `.agent-modes-body`, `.agent-modes-toolbar` and the fixed `.agent-modes-slot`
+   boxes. It has no `.agent-modes-heading`: the section strip above the body
+   already reads `Servers`. What follows is only what this section has and the
+   Agents card does not. */
 /* ~1/5 : 4/5. The tree's longest line is a server name plus a count, so it gets
    the narrower column; the detail column holds a three-column form. The tree's
    row is the only flexible one, so the toolbar above it never scrolls away. */
@@ -900,8 +874,8 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* The column never scrolls: the listing table inside it owns its scrollbar
-     (§6.4), so a 200-name answer grows nothing here. */
+  /* The column never scrolls: the listing table inside it owns its scrollbar,
+     so a 200-name answer grows nothing here. */
   overflow: hidden;
   /* The column's own right edge is where a scrollbar would have been; the
      fields need the gap the Agents card gives its form for the same reason. */
@@ -986,7 +960,7 @@ body {
   font-weight: 400;
 }
 
-/* -- the detail column's strip and its pages (§4.5) ---------------------------
+/* -- the detail column's strip and its pages ----------------------------------
 
    The strip is **reserved** on the server page with its single `Settings` tab,
    so selecting a model cannot push the first field down by a row. It reuses the
@@ -1010,10 +984,9 @@ body {
   min-height: 0;
 }
 
-/* The model's Settings page is **one** three-column grid (§4.5): the name takes
-   a column, the reasoning level the two that are left, and the six samplers fall
-   into the same three columns two rows down — so every field's left edge on the
-   page is one of three. The vision tick sits at the row's right end. */
+/* The model's Settings page is **one** three-column grid: every field's left
+   edge on the page is one of three. The vision tick sits at the row's right
+   end. */
 .models-page--settings {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1031,7 +1004,7 @@ body {
   align-self: end;
 }
 
-/* The System prompt page: one textarea filling the column (§4.5). The shared
+/* The System prompt page: one textarea filling the column. The shared
    `.settings-editor textarea` rule caps it at `min-height` and allows vertical
    resize; here the row is flexible, so the field is the row. */
 .models-page--prompt {
@@ -1062,14 +1035,11 @@ body {
 .models-server-url { grid-area: 1 / 2; }
 .models-server-key { grid-area: 2 / 1 / 3 / 3; }
 
-/* Pico puts a form element's bottom margin on every input, select and textarea,
-   so on this page it is paid three times over and taken straight out of the
-   listing. The grid's own row-gap already separates the rows, so the fields
-   keep only the line they need — every pixel here comes off the table, because
-   the card's height is fixed and the listing is the only row that flexes.
-   Descendant, not child: the API key's input is wrapped in `.password-field`
-   for its show/hide toggle, so a child selector would leave that row paying the
-   margin and stand 11px taller than its neighbours for no reason. */
+/* Pico's bottom margin on every input, select and textarea is taken out here,
+   because the card's height is fixed and the listing is the only row that
+   flexes. Descendant, not child: the API key's input is wrapped in
+   `.password-field`, so a child selector would leave that row paying the
+   margin and 11px taller than its neighbours. */
 .models-page--server > label :is(input, select, textarea) {
   margin-bottom: 0;
 }
@@ -1085,8 +1055,7 @@ body {
   font-size: 0.85rem;
 }
 
-/* The listing: a real `name` / `Add` table, and **its own** scroll container —
-   the pair the plan calls the one place a naive implementation fails (§6.4).
+/* The listing: a real `name` / `Add` table, and **its own** scroll container.
    `overflow-y: auto` alone is not enough: the grid row above is `minmax(0, 1fr)`
    and this box is `min-height: 0`, or a long answer grows the column instead of
    scrolling here. */
@@ -1132,7 +1101,7 @@ body {
   margin: 0;
 }
 
-/* -- the MCP and LSP sections' toolbars (§4.9) --------------------------------
+/* -- the MCP and LSP sections' toolbars ---------------------------------------
 
    Their `Save` left the footer so the footer is **one shape for all three
    sections**: the band and `Close`. Each section's own toolbar is the same row
@@ -1171,13 +1140,12 @@ body {
   cursor: pointer;
 }
 
-/* The narrow clamp (T12). The card is desktop-only but clamped to `94vw`, so
-   the collapse order is decided rather than left to chance: the **tree** moves
-   above the detail column, because the column holds the row being edited and
-   must keep the width its form needs.
-   The section keeps its bounded height — dropping it here would un-bound the
-   flexible row, and a long listing would then grow the column instead of
-   scrolling inside itself, which is the one failure §6.4 warns about. */
+/* The narrow clamp. The card is desktop-only but clamped to `94vw`, so the
+   collapse order is decided: the **tree** moves above the detail column,
+   because the column holds the row being edited and must keep the width its
+   form needs. The section keeps its bounded height — dropping it would un-bound
+   the flexible row, and a long listing would then grow the column instead of
+   scrolling inside itself. */
 @media (max-width: 640px) {
   .settings-models {
     grid-template-columns: minmax(0, 1fr);
@@ -1323,27 +1291,20 @@ body {
 /* -- agent-modes dialog --------------------------------------------------------
 
    The agents editor (AgentModesDialog.vue) is the Settings card with another
-   subject, so almost nothing is declared here: its `<article>` shares the
-   settings card rule above, and its body, list, editor column and footer carry
-   the `settings-*` classes and are laid out by those rules. What follows is only
-   what this card has and Settings does not — the toolbar of verbs over the list,
-   the confirmation slots beside it, the two hub switches — plus the colour that
-   marks a row whose entry holds a problem. Every affordance the card used to have
-   outside that — the nav's create field and its button, the findings printed under
-   the fields and at the top, the form's own delete block — is gone with the shape
-   it belonged to, and so is every rule that styled it. No size is repeated and the
-   `<dialog>` element is never sized (see the settings card note). */
+   subject, so almost nothing is declared here: its body, list, editor column and
+   footer carry the `settings-*` classes and are laid out by those rules. What
+   follows is only what this card has and Settings does not — the toolbar of
+   verbs over the list, the confirmation slots beside it, the two hub switches.
+   No size is repeated and the `<dialog>` element is never sized. */
 
-/* -- the two columns and the toolbar over the list (§3) ----------------------
+/* -- the two columns and the toolbar over the list ----------------------------
 
    The body is the settings grid, and this card places its four parts in it
    rather than nesting wrappers: the heading, the toolbar and the list take the
    left column's three rows, and the form spans the **bottom two** of them in the
-   right column. That placement is what §3 asks for and what a wrapper cannot say
-   as well — the form's first field starts at the toolbar's row, so the two share
-   an edge neither column's content can move. The list's row is the only flexible
-   one, so the list scrolls in its own bounded area and the toolbar above it never
-   scrolls away with it. */
+   right column, so its first field starts at the toolbar's row. The list's row
+   is the only flexible one, so the list scrolls in its own bounded area and the
+   toolbar above it never scrolls away with it. */
 .agent-modes-body {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
@@ -1378,9 +1339,9 @@ body {
   flex: 0 0 9rem;
 }
 
-/* The small heading over the toolbar (D4.4): it reads `Agents` in every state,
-   which is why it can be a plain always-there line — a heading that changed
-   wording with the card's state would be exactly the reflow D10 forbids. */
+/* The small heading over the toolbar: it reads `Agents` in every state, which is
+   why it can be a plain always-there line — a heading that changed wording with
+   the card's state would reflow the toolbar. */
 .agent-modes-heading {
   grid-area: 1 / 1;
   margin: 0;
@@ -1389,12 +1350,11 @@ body {
   color: var(--pico-muted-color);
 }
 
-/* **Five fixed-width slots**, not a row that grows (D1): the three verbs at the
-   left, the confirmation pair's two at the right end — so they land just left of
-   the form rather than at the card's edge. A slot is a box that keeps its size
-   whether or not it holds a button, which is the whole reason revealing a pair
-   moves nothing (D10): the first three buttons keep their exact position and the
-   toolbar's height never changes. */
+/* **Five fixed-width slots**, not a row that grows: the three verbs at the left,
+   the confirmation pair's two at the right end — so they land just left of the
+   form rather than at the card's edge. A slot keeps its size whether or not it
+   holds a button, which is why revealing a pair moves nothing: the first three
+   buttons keep their exact position and the toolbar's height never changes. */
 .agent-modes-toolbar {
   grid-area: 2 / 1;
   display: flex;
@@ -1419,22 +1379,16 @@ body {
 
 /* The toolbar's glyphs follow the theme tokens, as every house icon does: the
    verbs in the icon colour, the destructive answer in red, the confirming one in
-   green. The two confirmation classes are shared by both pairs — the delete one
-   the toolbar asks with and the close one the footer asks with — so the card
-   teaches the idiom once (D7, D8). */
+   green. The two confirmation classes are shared by both pairs — the toolbar's
+   delete and the footer's close — so the idiom lives in one place. */
 /* A slot's glyph keeps the icon button's box — **width and padding both**, or the
-   button is not the circle the slot reserves room for. Two shared rules reach in
-   here and each out-weighs a bare `.icon-btn` (0,1,0):
-   - Pico's input-group rules match *any* `role="group"`, which the toolbar
-     carries for ARIA, and `[role="group"] button { width: auto }` (0,1,1)
-     collapses the button to its glyph's width while its height stays 36px;
-   - the footer band's `.settings-actions button { padding-inline }` (0,1,1) puts
-     a text button's padding on a glyph, which — `box-sizing: border-box` — clamps
-     the declared width *up* to that padding plus the border.
-   The slot keeps its own 36px either way, so nothing moves; only the roundness of
-   the glyph inside it is at stake. The memory bullets and the tree meet Pico's
-   rule the same way and reset it the same way (see `.memory-bullets
-   .memory-bullet` and `.tree-group`). */
+   button is not the circle the slot reserves room for. Two shared rules out-weigh
+   a bare `.icon-btn` (0,1,0): Pico's input-group rules match *any*
+   `role="group"` — which the toolbar carries for ARIA — and collapse the button
+   to its glyph's width; the footer band's `.settings-actions button` rule
+   clamps the declared width up to its padding-inline. The slot keeps its own
+   36px either way; only the roundness of the glyph is at stake. The memory
+   bullets and the tree reset the same two rules the same way. */
 .agent-modes-slot .icon-btn {
   width: 36px;
   padding: 0;
@@ -1463,19 +1417,17 @@ body {
   overflow-y: auto;
 }
 
-/* -- the footer's reserved band (D11) ----------------------------------------
+/* -- the footer's reserved band ----------------------------------------------
 
    The card's **one message** sits on the left of the same band the buttons
    occupy, so the footer lays out message-then-buttons instead of Settings'
    right-aligned pair. The line is a flex item that stretches to the band's
-   height — which the buttons set — so it is exactly as tall when it holds
-   nothing as when it holds a sentence, and filling or emptying it moves no
-   control (D10, §6.8). The items are bottom-aligned, so a sentence long enough
-   to wrap grows the band *upward* into the body's space rather than lifting the
-   buttons off the edge they keep. Scoped to the two cards that lay their footer
-   out this way — the Agents editor and Settings, which asks the same close
-   question and so reserves the same slot: every other dialog shares
-   `.settings-actions` and keeps its own footer. */
+   height — which the buttons set — so filling or emptying it moves no control.
+   The items are bottom-aligned, so a sentence long enough to wrap grows the band
+   *upward* into the body's space rather than lifting the buttons off the edge
+   they keep. Scoped to the two cards that lay their footer out this way — the
+   Agents editor and Settings — every other dialog shares `.settings-actions` and
+   keeps its own footer. */
 .agent-modes-dialog .settings-actions,
 .settings-dialog .settings-actions {
   align-items: flex-end;
@@ -1493,21 +1445,19 @@ body {
   color: var(--pico-muted-color);
 }
 
-/* The footer's **reserved** confirmation slot (D8, §3): it keeps the pair's
-   width whether or not a pair is in it, so `Close` never moves when the card
-   asks a question — the same reason the toolbar's slots are fixed. Two slots and
-   the gap between them, which is exactly what the close pair occupies when it
-   arrives: the same fixed slot boxes the toolbar uses, so nothing in the band is
-   negotiated with the pair's presence. */
+/* The footer's **reserved** confirmation slot: it keeps the pair's width whether
+   or not a pair is in it, so `Close` never moves when the card asks a question —
+   the same reason the toolbar's slots are fixed. Two slots and the gap between
+   them, exactly what the close pair occupies when it arrives. */
 .agent-modes-footer-slot {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--bi-space-1);
   width: calc(36px + 36px + var(--bi-space-1));
-  /* The height is reserved too, for the same reason: an empty slot and a slot
-     holding the pair are one box, so the band's height — and therefore `Close`'s
-     vertical position — is the pair's arrival's answer in neither state. */
+  /* The height is reserved too: an empty slot and a slot holding the pair are
+     one box, so `Close`'s vertical position never depends on the pair's
+     arrival. */
   height: 36px;
 }
 
@@ -1524,12 +1474,11 @@ body {
 }
 
 /* A row whose entry holds a problem. Scoped through `.settings-nav button` on
-   purpose: the card reuses the settings nav, whose selector weighs (0,1,1) and
-   would otherwise out-rank a bare class here, and the red would never arrive.
-   The row stays clickable — the user must *reach* the entry to fix it, and Save
-   refuses rather than being taken away (D11) — so the mark is colour, not a
-   disabled control. It also wins over the selected row's primary colour: an
-   entry that cannot be saved is the more important thing to say about that row. */
+   purpose: that selector weighs (0,1,1) and would otherwise out-rank a bare
+   class here, and the red would never arrive. The row stays clickable — Save
+   refuses rather than being taken away — so the mark is colour, not a disabled
+   control. It also wins over the selected row's primary colour: an entry that
+   cannot be saved is the more important thing to say about that row. */
 .settings-nav button.agent-modes-tab--broken {
   color: var(--bi-danger);
   border-color: color-mix(in srgb, var(--bi-danger) 45%, transparent);
@@ -1746,15 +1695,10 @@ input.appbar-location-input {
    point: it never has to know --bi-chat-tools-col-width or the breakpoints
    below, it only takes its 28px out of the row.
 
-   The negative inline margins cancel the two gaps a third child would add —
-   the box lands in the gap that already separates the columns, so the visible
-   space either side of a 14px mark stays ~7px and the conversation loses
-   little. Nothing overlaps: the margins pull into gap space only.
-
-   Top-aligned so the controls sit at the top of the column, and `flex: none`
-   on the buttons keeps each 28px target whole at any window height. There
-   is deliberately no separator drawn between them: in 28px of width a rule
-   reads as noise next to the marks, and the gap alone groups them. */
+   The negative inline margins cancel the two gaps a third child would add, so
+   the box lands in gap space only and nothing overlaps. No separator is drawn
+   between them: in 28px of width a rule reads as noise, and the gap groups
+   them. */
 .chat-col-gutter {
   flex: 0 0 auto;
   box-sizing: border-box;
@@ -1770,9 +1714,9 @@ input.appbar-location-input {
 
 /* Pico's own button rules would paint these primary-coloured with a 1rem
    bottom margin, so every one of them is reset here. At rest the mark is
-   muted; hover and keyboard focus bring it to the foreground colour (wf-03
-   makes the dashes go solid at the same step). The target is 28px — the
-   mark is the glyph, not the click area. */
+   muted; hover and keyboard focus bring it to the foreground colour, with the
+   dashes going solid at the same step. The target is 28px — the mark is the
+   glyph, not the click area. */
 .chat-gutter-btn {
   flex: none;
   margin: 0;
@@ -1806,20 +1750,18 @@ input.appbar-location-input {
 
 /* The three marks of the strip (see WorkBenchFocusGutter): each is one glyph of
    the generated "JetBrains Mono Nerd Icons UI" face, so the character — not the
-   box around it — is what a state changes. What "lighting up" changes is the
-   color (the rule above) and the opacity, never the size, so the target cannot
-   slip under the cursor.
+   box around it — is what a state changes, and what "lighting up" changes is the
+   colour and the opacity, never the size, so the target cannot slip under the
+   cursor.
 
-   The colors come from the two theme blocks (`--pico-muted-color` at rest,
-   `--bi-icon` lit), so light and dark both work without a second rule, and the
-   rest opacity is 0.85 because that is where the mark clears 3:1 against the
-   page in *both* themes (measured: 3.4 light / 5.0 dark; at 0.75 the light
-   theme falls to 2.8, and a control nobody sees cannot be clicked). Lit it is
-   16.2 / 13.0 against the button's own hover surface.
+   Colours come from the two theme blocks (`--pico-muted-color` at rest,
+   `--bi-icon` lit). The rest opacity is 0.85 because that is where the mark
+   clears 3:1 against the page in *both* themes; at 0.75 the light theme falls
+   below it, and a control nobody sees cannot be clicked.
 
    That family is `unicode-range`-gated to the private-use code points of the
    component's generated block (tools/nerd_icons.py), so it claims these marks
-   and no text; the fallback is only what draws while the woff2 is in flight. */
+   and no text; the fallback draws only while the woff2 is in flight. */
 .chat-gutter-mark {
   font-family: 'JetBrains Mono Nerd Icons UI', var(--pico-font-family-monospace);
   font-size: 16px;
@@ -1832,9 +1774,8 @@ input.appbar-location-input {
   opacity: 1;
 }
 
-/* Locked while a reply streams (§3.2, and the same reason the other controls of
-   this app answer to): the button is `:disabled`, and the dimming is what the
-   tooltip then says. */
+/* Locked while a reply streams, like the app's other controls: the button is
+   `:disabled`, and the dimming is what its tooltip then says. */
 .chat-gutter-btn:disabled {
   opacity: 0.35;
   cursor: default;
@@ -1844,28 +1785,21 @@ input.appbar-location-input {
 
    The whole geometry of the feature is these rules — `display: none` and a
    `flex` basis, one per state, on the columns. Never `v-if`: the reasoning
-   panel holds its displayed lines in a component-local cache and its column
-   count in a ResizeObserver, so unmounting it would re-cut every reasoning
-   line of the session from MIN_BUDGET and lose the scroll position. Hiding in
-   CSS also keeps the two splitters, useAutoScroll's ref and the panel's cache
-   alive without any help.
+   panel caches its displayed lines and its column count, so unmounting it
+   would re-cut every reasoning line of the session and lose the scroll
+   position. Hiding in CSS keeps the splitters and `useAutoScroll`'s ref alive.
 
    `reasoning` out-specifies `.chat-col--left`'s own `flex` basis by order
-   alone — same class count, later rule — which is what lets it take the row.
+   alone — same class count, later rule — which is what lets it take the row. It
+   also takes the dock and its bar out with the right column: left in the flow
+   the dock would still claim its minimum height, so the timeline would gain
+   width but not height. Nothing here resizes — a state leaves elements out of
+   the flow — so `normal` finds both exactly as they were dragged.
 
-   `reasoning` takes the dock and its bar out with the right column: left in
-   the flow the dock would still claim its minimum height, so the timeline
-   would gain width but not height and would not be the maximised surface the
-   state is for. Nothing here writes or zeroes the dragged dock height
-   (nojae:chatToolsColumn) or the composer split — a state leaves
-   elements out of the flow, it never resizes, so `normal` finds both exactly
-   as they were dragged.
-
-   No @media rule mentions the gutter, and that is a decision, not an
-   oversight: as a flex item it crosses both breakpoints and both column
-   variants without knowing they exist, and it is the only surface no state
-   hides — the chevron that takes a column away is the way back to it, so
-   hiding the gutter on a narrow screen would strand one. */
+   No @media rule mentions the gutter, and that is a decision, not an oversight:
+   as a flex item it crosses both breakpoints without knowing they exist, and it
+   is the only surface no state hides — the chevron that takes a column away is
+   the way back to it. */
 .chat-shell--conversation .chat-col--left {
   display: none;
 }
@@ -1893,11 +1827,9 @@ input.appbar-location-input {
 .chat-input {
   flex: 1 1 0;
   /* The composer splitter's own minimum (useSplitter's CHAT_MIN_RESIZED): the
-     button row plus a usable textarea (the stat badges and the session clock
-     moved to the app bar, so the floor came down with them). Stated here too
-     so the flex floor and the drag clamp agree, and a very short window cannot
-     crush the composer under its own content before anything has been
-     dragged. */
+     button row plus a usable textarea. Stated here too so the flex floor and the
+     drag clamp agree, and a very short window cannot crush the composer under
+     its own content before anything has been dragged. */
   min-height: 96px;
   display: flex;
   align-items: stretch;
@@ -1905,10 +1837,9 @@ input.appbar-location-input {
 }
 
 /* Draggable separator between two panes — the shared look of every splitter in
-   the app (chat output/input, editor sidebar, editor terminal): a 10 px hit
-   area showing a thin pill on hover/focus/drag, pointer-captured and
-   touch-friendly. `--vertical` names the *bar*, as aria-orientation does: a
-   standing bar measures width instead of height, so its pill is tall. */
+   the app: a 10 px hit area showing a thin pill on hover/focus/drag,
+   pointer-captured and touch-friendly. `--vertical` names the *bar*, as
+   aria-orientation does: a standing bar measures width instead of height. */
 .pane-resizer {
   flex: 0 0 auto;
   display: flex;
@@ -1990,11 +1921,9 @@ input.appbar-location-input {
 }
 
 /* The Enter-key toggle, in its "on" state (Enter writes a newline instead of
-   sending). `.icon-btn` draws the button; all that is left is to say which of
-   its two states is the non-default one, and the theme already has one word
-   for that — the violet every other live switch here is lit with. The glyph
-   changes too (see WorkBenchInput.vue), so the state is never carried by the
-   colour alone. */
+   sending). `.icon-btn` draws the button; the violet is the theme's one word
+   for a live switch. The glyph changes too (see WorkBenchInput.vue), so the
+   state is never carried by the colour alone. */
 .chat-enter-mode[aria-pressed='true'] {
   border-color: color-mix(in srgb, var(--bi-violet) 40%, transparent);
   background-color: color-mix(in srgb, var(--bi-violet) 16%, var(--bi-surface));
@@ -2024,16 +1953,13 @@ input.appbar-location-input {
   margin: 0;
 }
 
-/* The endpoint wait's status line (WorkBenchInput.vue, spec §5.6). It is a
-   status line and not an alert, so it wears the theme's existing caption
-   vocabulary — muted colour, small type — plus `.mono`, the same voice the
-   batch meter's counter and every machine-reported figure already use: the
-   sentence in the middle is the endpoint's own, quoted rather than written by
-   the app. No border, no background and no reserved height: with nothing to
-   say the element is not rendered at all, so the composer is exactly what it
-   was. A long provider sentence is cut to one line and the `title` carries the
-   whole of it, which keeps the composer's strip a strip — the diagnosis is
-   never re-worded here (spec §9), only shortened. */
+/* The endpoint wait's status line (WorkBenchInput.vue): a status line, not an
+   alert, so it wears the theme's existing caption vocabulary — muted colour,
+   small type — plus `.mono`: the sentence in the middle is the endpoint's own,
+   quoted rather than written by the app. No border, no background and no
+   reserved height: with nothing to say the element is not rendered at all. A
+   long provider sentence is cut to one line and the `title` carries the whole
+   of it — the diagnosis is never re-worded here, only shortened. */
 .chat-endpoint-wait {
   margin: 0;
   white-space: nowrap;
@@ -2090,12 +2016,12 @@ input.appbar-location-input {
   margin: 0;
 }
 
-/* The agent-mode dropdown (am-07), last item of the composer's left action
-   group. A column rather than a bare <select>, because the findings line
-   belongs under it and must not become a fourth grid cell of the bullet row.
-   Pico's `select { margin-bottom: … }` and `width: 100%` would stretch it
-   across the row and push the bullets, so the width is pinned and the margin
-   zeroed. Height matches the icon buttons it sits beside (36px). */
+/* The agent-mode dropdown, last item of the composer's left action group. A
+   column rather than a bare <select>, because the findings line belongs under
+   it and must not become a fourth grid cell of the bullet row. Pico's
+   `select { margin-bottom: … }` and `width: 100%` would stretch it across the
+   row and push the bullets, so the width is pinned and the margin zeroed.
+   Height matches the icon buttons it sits beside (36px). */
 .chat-mode-col {
   flex: 0 1 auto;
   min-width: 0;
@@ -2104,8 +2030,8 @@ input.appbar-location-input {
   gap: 2px;
 }
 
-/* The select and its pencil, on one line (eds-07). The row exists so the two
-   stay adjacent while the quiet lines keep the column below them; with the list
+/* The select and its pencil, on one line. The row exists so the two stay
+   adjacent while the quiet lines keep the column below them; with the list
    unloaded the select is absent and the row holds the pencil alone, which is
    what keeps the editor reachable when the file is broken. */
 .chat-mode-row {
@@ -2122,7 +2048,7 @@ input.appbar-location-input {
   flex: 0 0 auto;
 }
 
-/* §5.4: the selected agent has no model to run with. A glyph, not a banner: it
+/* The selected agent has no model to run with. A glyph, not a banner: it
    belongs beside the pencil that opens the card where the model is assigned,
    and it uses the warning accent so the disabled Send has a visible reason. */
 .chat-mode-warning {
@@ -2165,23 +2091,18 @@ input.appbar-location-input {
   color: var(--pico-muted-color);
 }
 
-/* The numbered registration bullets above the textarea (MemoryBullets.vue) — as
-   many as the store holds, wrapping rather than overflowing, plus the "+" the row
-   shows only when it holds none.
-   Pico's input-group rules (`[role=group] { margin-bottom: var(--pico-spacing) }`)
-   would otherwise push the row away from the textarea and offset the bullets
-   from the buttons beside them, so the margin and padding are zeroed here;
-   the space below the row comes from `.chat-bullet-row`.
-   A filled bullet's background is set inline (the slot color), which also
-   wins over Pico's button hover background; the number color follows the
-   background luminance.
+/* The numbered registration bullets above the textarea (MemoryBullets.vue),
+   wrapping rather than overflowing.
+   The margin and padding are zeroed because Pico's input-group rules
+   (`[role=group] { margin-bottom }`) would push the row off the textarea; the
+   space below comes from `.chat-bullet-row`. A filled bullet's background is
+   set inline (the slot color), which also wins over Pico's button hover.
    The selectors are scoped under .memory-bullets on purpose: the wrapper's
    role="group" activates Pico's input-group rules ([role="group"] button
-   { width: auto }, [role="group"] > :not(:last-child) { right radii 0 },
-   [role="group"] > * { flex: 1 1 auto }) which otherwise outrank a bare
-   .memory-bullet (0,1,0), squashing the circles into 8px-wide flat slivers.
-   .memory-bullets .memory-bullet ties those rules on specificity (0,2,1)
-   and wins on source order (theme.css loads after Pico). */
+   { width: auto }, [role="group"] > * { flex: 1 1 auto }) which otherwise
+   outrank a bare .memory-bullet (0,1,0), squashing the circles into flat
+   slivers. `.memory-bullets .memory-bullet` ties them (0,2,1) and wins on
+   source order, since theme.css loads after Pico. */
 .memory-bullets {
   display: flex;
   flex-wrap: wrap;
@@ -2271,14 +2192,11 @@ input.appbar-location-input {
 }
 
 /* The dock at the bottom of the Chat left column: its head strip (title plus
-   the fold button, and the enabled-hub summary while folded) over the MCP
-   panel beside the LSP panel. It fills the column's width, so the reasoning
-   timeline above it is the same width by construction. Each panel scrolls
-   vertically when its list outgrows the dock's height, which the column's
-   own splitter bounds — and the dock shrinks down to its head strip when a
-   short window would otherwise push the timeline under its floor.
-   `.chat-lsp-panel` (WorkBenchLspPanel.vue) reuses every rule of this
-   column — rows, dots, labels. */
+   the fold button, and the enabled-hub summary while folded) over the MCP panel
+   beside the LSP panel. Each panel scrolls vertically when its list outgrows
+   the height the column's splitter bounds, and the dock shrinks to its head
+   strip when a short window would push the timeline under its floor.
+   `.chat-lsp-panel` (WorkBenchLspPanel.vue) reuses every rule of this column. */
 .chat-tools-dock {
   /* Height when nothing has been dragged yet: a list's worth of switches,
      clamped so the timeline above stays readable whatever the hub files
@@ -2729,12 +2647,9 @@ input.appbar-location-input {
 /* -- staged messages: the strip above the draft preview ------------------------ */
 
 /* The messages the composer has accepted but no turn has carried yet, in flush
-   order, drawn in the pane where the draft preview is drawn.
-
-   It is bounded by its own scroll box rather than by a count: there is no cap on
-   how many messages the strip may hold, so a long strip must not eat the
-   conversation — it scrolls inside `max-height` and the textarea and the action
-   row keep the sizes they have whatever the strip holds. */
+   order, drawn where the draft preview is drawn. Bounded by its own scroll box
+   rather than by a count: there is no cap on how many it may hold, so it scrolls
+   inside `max-height` and the textarea and the action row keep their sizes. */
 .chat-staged-strip {
   flex: none;
   max-height: 32vh;
@@ -2920,17 +2835,14 @@ input.appbar-location-input {
 }
 
 /* Vertical timeline of what the chat stream on the right never shows: the
-   model's streamed reasoning flows interleaved with the MCP tool-call
-   badges, in emission order. Independent scroll. Deliberately not
-   `.stream-panel`: that class pins a fixed viewport height. The content
-   scrolls inside `.chat-tool-scroll` so the iteration gauge stays
-   bottom-pinned and always visible.
+   model's streamed reasoning interleaved with the MCP tool-call badges, in
+   emission order. Not `.stream-panel`: that class pins a fixed viewport height.
+   The content scrolls inside `.chat-tool-scroll` so the iteration gauge stays
+   bottom-pinned.
 
-   Size: it fills its column's width (`.chat-col--left`), and takes every
-   pixel of that column's height the tools dock and their bar leave free —
-   which is all of it while the dock is folded. `min-height` is the floor
-   flex still honours when a short window lets the dock's own content claim
-   the column (the dock shrinks and scrolls instead). */
+   It takes every pixel of its column's height the tools dock and their bar
+   leave free; `min-height` is the floor flex still honours when a short window
+   lets the dock's own content claim the column. */
 .chat-tool-panel {
   flex: 1 1 0;
   min-width: 0;
@@ -2953,14 +2865,11 @@ input.appbar-location-input {
 }
 
 /* Live View (see WorkBenchToolPanel.vue and lib/reasoning-window): the panel
-   paints only the rows its box can hold, and `useAutoScroll` pins that box's
-   scroll to its bottom every frame, so the timeline is always at its end —
-   there is nothing above the top to scroll back to. A vertical bar would then
-   only be a drag target able to pull the pruned head back into view and leave
-   the reader off the bottom of the flow, so the box clips instead.
-   `hidden` over `scroll`: `scroll` keeps a bar the content cannot exceed,
-   and clipping is the box's own decision, never a hint at a range. The
-   horizontal axis is untouched, so a long row still gets its own bar. */
+   paints only the rows its box can hold and `useAutoScroll` pins the box to its
+   bottom every frame, so there is nothing above the top to scroll back to — a
+   vertical bar would only let the reader drag the pruned head into view and end
+   up off the bottom. `hidden` over `scroll`, because `scroll` keeps a bar the
+   content cannot exceed. The horizontal axis is untouched. */
 .chat-tool-scroll--live {
   overflow-y: hidden;
 }
@@ -2974,10 +2883,9 @@ input.appbar-location-input {
 }
 
 /* The Live View's control is not here: it is the third mark of the gutter
-   between the two chat columns (see WorkBenchFocusGutter.vue and `.chat-gutter-*`
-   above), so no state of the timeline — a pruned history, a folded dock, a
-   focalised screen — can take the switch out of reach, and the panel's only
-   footer is the iteration gauge. */
+   between the two chat columns (see WorkBenchFocusGutter.vue), so no state of
+   the timeline can take the switch out of reach, and the panel's only footer is
+   the iteration gauge. */
 
 /* -- Reusable gradient gauge (GaugeBar.vue) -------------------------------- */
 .gauge {
@@ -3048,14 +2956,12 @@ input.appbar-location-input {
   color: var(--pico-muted-color);
 }
 
-/* Reasoning (thinking) text block of the timeline: plain text — thinking is
-   not markdown, and it stays XSS-safe as a Vue text interpolation. Same
-   small mono muted look as the brand subtitle and the tool badges.
-   Wrapping is NOT left to the browser here: each row arrives already cut to
-   the panel's column budget (see lib/reasoning-lines), which is what keeps a
-   line the reader is looking at from jumping when the row above it grows.
-   `tab-size` must match TAB_WIDTH in that module — it is the tab advance the
-   column budget counts with. */
+/* Reasoning (thinking) text block of the timeline: plain text — thinking is not
+   markdown, and it stays XSS-safe as a Vue text interpolation.
+   Wrapping is NOT left to the browser here: each row arrives already cut to the
+   panel's column budget (see lib/reasoning-lines), which keeps a line from
+   jumping when the row above it grows. `tab-size` must match TAB_WIDTH in that
+   module — it is the tab advance the column budget counts with. */
 .chat-reasoning {
   font-family: var(--pico-font-family-monospace);
   font-size: 0.8rem;
@@ -3226,9 +3132,8 @@ input.appbar-location-input {
 .editor-shell {
   /* Tracks. `auto` is a resizer bar, so a dragged size only ever names a pane;
      both custom properties are set by useSplitter once the user drags, and a
-     double-click / Home brings these untouched defaults back. The last `auto`
-     is the status bar: the panes' `1fr` row absorbs its height on its own, so
-     nothing else here has to be told how tall the bar is. */
+     double-click / Home brings these defaults back. The last `auto` is the
+     status bar: the panes' `1fr` row absorbs its height on its own. */
   --bi-editor-sidebar: minmax(200px, 260px);
   --bi-editor-terminal: 220px;
   display: grid;
@@ -3243,15 +3148,13 @@ input.appbar-location-input {
 
 /* Placement stated explicitly rather than left to auto-placement, so adding a
    pane later cannot reshuffle the grid. The navigator's right border and the
-   terminal's left edge are the same line, which is the brief's "terminal full
-   width minus the bottom of the file explorer".
+   terminal's left edge are the same line.
 
    Both full-height spans stop at line 4 — the row above the status bar — and
    not at `-1`. That is the trap: `-1` resolves against the *explicit* grid, so
-   it moved one row too far the moment the bar's row was added, pushing the
-   tree's content under the bar and running the splitter's drag boundary
-   through it. The bar is not a column of the three-pane layout; it is a
-   full-width strip beneath all of it. */
+   it would move one row too far, pushing the tree's content under the bar and
+   running the splitter's drag boundary through it. The bar is not a column of
+   the three-pane layout; it is a full-width strip beneath all of it. */
 .editor-nav-col {
   grid-column: 1;
   grid-row: 1 / 4;
@@ -3286,11 +3189,9 @@ input.appbar-location-input {
 }
 
 /* Folded, the terminal's track is sized by its own head strip instead of
-   `--bi-editor-terminal`, so the code pane's `1fr` row takes the room. A track
-   of `auto` is what makes that work without measuring anything: the row is the
-   head's height, which is the same statement `.editor-terminal--collapsed`
-   makes about the pane itself. This is the whole geometry of the fold — the
-   splitter's stored size is left untouched, so unfolding comes back to it. */
+   `--bi-editor-terminal`, so the code pane's `1fr` row takes the room. `auto`
+   makes that work without measuring anything. The splitter's stored size is left
+   untouched, so unfolding comes back to it. */
 .editor-shell--terminal-collapsed {
   grid-template-rows: minmax(0, 1fr) auto auto auto;
 }
@@ -3353,14 +3254,10 @@ input.appbar-location-input {
 }
 
 /* The code pane's mode, live ("read-write" while the WorkBench is idle,
-   "read-only" while a reply streams or a diff is the active tab). It lives in
-   this header rather than in the code pane's tab strip because it states a fact
-   about the pane, not about one tab — and the strip is a row that shrinks as
-   buffers pile up, while this corner is always free. The root folder's own name
-   is no longer shown here: the tree's root row already names it and carries the
-   absolute path in its `title`.
-   Below 1024 px the tree becomes a drawer, so a closed drawer hides the badge
-   with its pane — an accepted consequence of the documented desktop-only scope. */
+   "read-only" while a reply streams or a diff is the active tab). It lives here
+   rather than in the tab strip because it states a fact about the pane, not
+   about one tab, and this corner is always free. Below 1024 px the tree becomes
+   a drawer, so a closed drawer hides the badge with its pane. */
 .editor-mode-badge {
   min-width: 0;
   padding: 0.2rem 0.5rem;
@@ -3409,31 +3306,26 @@ input.appbar-location-input {
   border-radius: var(--pico-border-radius);
   cursor: pointer;
   user-select: none;
-  /* Anchor for `.tree-mark-sr`: an absolutely-positioned span with no positioned
-     ancestor resolves against the *document*, so the tree's `overflow-y: auto`
-     cannot clip it and the hidden label of the last marked row extends the page
-     — a second, page-wide vertical scrollbar appears beside the tree's own once
-     enough folders are open. */
+  /* Anchor for `.tree-mark-sr`: without one, the absolutely-positioned span
+     resolves against the *document*, so a hidden label extends the page and a
+     second, page-wide scrollbar appears beside the tree's own. */
   position: relative;
 }
 
 /* Indent by depth. Each row carries its own depth in --tree-depth (the tree is
    a stack of `role="group"` wrappers, so nested padding would compound twice),
-   which keeps the rule one line however deep the checkout goes. The
-   `.tree-row.depth-N` class is emitted too, as a hook for later panes. */
+   which keeps the rule one line however deep the checkout goes. */
 .tree-row {
   padding-left: calc(var(--bi-space-2) + 0.85rem * var(--tree-depth, 0));
 }
 
 /* Pico's input-group rules match *any* [role="group"], and every opened folder
-   is wrapped in one (WorkspaceTreeItem.vue) for ARIA. Left alone they apply to
-   the wrapper — `display: inline-flex`, a `margin-bottom`, and the
-   `> :not(:first-child)` radius squashing — so the entries of a folder lay out
-   side by side instead of stacked under it. The reset mirrors the one above
-   .memory-bullets: `.tree-group` ties [role="group"] on specificity (0,1,0) and
-   wins on source order (theme.css loads after Pico), and the child rule
-   outranks [role="group"] > :not(:first-child) (0,2,0) to give a row back the
-   rounded corners the hover and focus highlight need. */
+   is wrapped in one (WorkspaceTreeItem.vue) for ARIA. Left alone they make the
+   entries of a folder lay out side by side instead of stacked under it. The
+   reset mirrors the one above `.memory-bullets`: `.tree-group` ties
+   [role="group"] on specificity and wins on source order, since theme.css loads
+   after Pico, and the child rule outranks the radius squashing to give a row
+   back the rounded corners the hover and focus highlight need. */
 .tree-group {
   display: block;
   width: auto;
@@ -3472,9 +3364,7 @@ input.appbar-location-input {
 }
 
 /* Marked and the pane's file: the primary tint is the one the eye follows into
-   the pane, so it keeps the background and the mark keeps its stripe (this rule
-   only has to win the background, which source order alone would give to
-   `.tree-row--marked` above). */
+   the pane, so it keeps the background and the mark keeps its stripe. */
 .tree-row--marked.tree-row--selected {
   background-color: color-mix(in srgb, var(--pico-primary) 12%, var(--bi-surface));
 }
@@ -3578,15 +3468,12 @@ input.appbar-location-input {
 
 /* -- the unstaged marker (WorkspaceTreeItem) ---------------------------------
    A dot after the file name, coloured by what git says about it. It is a
-   decoration on the row, not a control: it takes no click, and its meaning is
-   carried by the `title` of the dot plus a visually-hidden label — colour alone
-   is never the only signal. `flex: 0 0 auto` keeps it on screen when a long
-   name is ellipsised.
-
-   The colours are the app's own status tokens, chosen to read like git's:
-   amber for a modification, green for something git does not track yet. A
-   folder's mark ("something inside changed") uses the muted token, because it
-   is a hint about a subtree rather than a claim about this file. */
+   decoration, not a control: its meaning is carried by its `title` plus a
+   visually-hidden label, so colour alone is never the only signal, and
+   `flex: 0 0 auto` keeps it on screen under a long ellipsised name. The colours
+   are the app's status tokens, chosen to read like git's: amber for a
+   modification, green for something untracked, muted for a folder ("something
+   inside changed") — a hint about a subtree, not about this file. */
 .tree-mark {
   flex: 0 0 auto;
   width: 6px;
@@ -3669,8 +3556,8 @@ input.appbar-location-input {
 }
 
 /* Tab reaches these items (they are plain buttons in a `role="menu"`), so the
-   caret has to be visible on one — the hover background alone would leave a
-   keyboard user without any answer to "which item is Enter about to run?". */
+   caret has to be visible on one: the hover background alone would leave a
+   keyboard user with no answer to "which item is Enter about to run?". */
 .tree-context-item:focus-visible {
   outline: 2px solid var(--pico-primary);
   outline-offset: -2px;
@@ -3700,10 +3587,9 @@ input.appbar-location-input {
 /* -- code pane ---------------------------------------------------------------- */
 
 .editor-area {
-  /* Pico gives every bare `section` a bottom block margin. In a grid whose rows
-     are sized to the panes that margin shrinks the item inside its own track, so
-     it reads as a gap *between* the pane and its resizer bar — the one thing
-     this edge-to-edge shell must not have (the tree, an `<aside>`, has none). */
+  /* Pico gives every bare `section` a bottom block margin, which in this grid
+     shrinks the item inside its own track and reads as a gap between the pane
+     and its resizer bar — the one thing this edge-to-edge shell must not have. */
   margin: 0;
   display: flex;
   flex-direction: column;
@@ -3722,15 +3608,13 @@ input.appbar-location-input {
   padding: 0;
   border-bottom: 1px solid var(--bi-border);
   /* The strip is a row of square cells, so its height is the chip's own and
-     nothing else: a little shorter than before, which is what a code pane's
-     tab row should cost above the text it frames. */
+     nothing else. */
   min-height: 1.85rem;
 }
 
 /* The open-file tabs: one chip per buffer, the strip above the Monaco body.
-   They are square cells *of* the header strip: they stretch to its full height,
-   with no gap and no radius between them, so the borders they share read as the
-   dividers between tabs. */
+   They are square cells *of* the header strip: full height, no gap and no
+   radius, so the borders they share read as the dividers between tabs. */
 .editor-tabs {
   display: flex;
   align-items: stretch;
@@ -3770,8 +3654,8 @@ input.appbar-location-input {
 
 /* A chip is a span wrapping two buttons (a button cannot contain one), so it
    carries the path in `title` and the active state: an inset bar along its top
-   edge marks the selected one, and the same bar (lighter) marks the one the
-   keyboard is on. Inset, because the strip clips horizontally. */
+   edge marks the selected one, and a lighter bar the one the keyboard is on.
+   Inset, because the strip clips horizontally. */
 .editor-tab {
   display: inline-flex;
   align-items: center;
@@ -3787,12 +3671,9 @@ input.appbar-location-input {
 }
 
 /* The chip's two buttons are Pico `[type=button]`s, and Pico gives every one of
-   them `margin-bottom: var(--pico-spacing)` (1rem). Inside a 1.85rem cell that
-   pushes the name and the × up by a third of the tab — the misalignment, and it
-   comes from a rule about *forms*, not about this strip. Zeroed here, on the
-   chip's own buttons, so nothing else in the app is affected; the margin is what
-   Pico put there, so the reset has to name these two rather than a broad
-   `button` rule that would undo a deliberate gap somewhere else. */
+   them a 1rem `margin-bottom` — inside a 1.85rem cell that pushes the name and
+   the × up by a third of the tab. Zeroed here, on the chip's own buttons, rather
+   than by a broad `button` rule that would undo a deliberate gap elsewhere. */
 .editor-tab-name,
 .editor-tab-close,
 .editor-tab-stale {
@@ -3852,9 +3733,8 @@ input.appbar-location-input {
 }
 
 /* The unsaved-changes marker: a small filled circle before the file name. It
-   sits first so a long, ellipsised name cannot push it off the visible edge.
-   The colour is the app's danger tone so it reads as "this buffer differs from
-   disk" in both themes; it is `flex: 0 0 auto` so it never shrinks away. */
+   sits first so a long, ellipsised name cannot push it off the visible edge, and
+   `flex: 0 0 auto` keeps it from shrinking away. */
 .editor-tab-dirty {
   flex: 0 0 auto;
   width: 7px;
@@ -3879,9 +3759,9 @@ input.appbar-location-input {
 
 /* The freshness marker: same row and same size as the dirty dot, but a ring
    rather than a fill, because it reports something *outside* the buffer (the
-   disk moved) instead of the buffer's own unsaved state. Warning for "changed
-   on disk", danger for "gone from disk" — and unlike the dot it is clickable,
-   which is how a turned-down conflict is answered later. */
+   disk moved) rather than the buffer's own unsaved state. Warning for "changed
+   on disk", danger for "gone from disk" — and it is clickable, which is how a
+   turned-down conflict is answered later. */
 .editor-tab-stale {
   flex: 0 0 auto;
   align-self: center;
@@ -3935,7 +3815,7 @@ input.appbar-location-input {
 
 /* The close confirm shares the conflict dialog's card shape. Discard is the
    destructive answer and borrows the danger tone; Save and close keeps Pico's
-   primary shape, and Cancel (the default, first) gets the secondary one. */
+   primary shape, and Cancel (the default, first) the secondary one. */
 .editor-close-dialog > article {
   width: 480px;
   max-width: 94vw;
@@ -3980,11 +3860,11 @@ input.appbar-location-input {
   margin-bottom: 0;
 }
 
-/* The search dialog. Same card family as the three confirms, but wide: two of
-   its columns (a file's path and a line of its text) want to breathe, and Pico's
-   own 700px `dialog > article` would ellipsise the paths into uselessness. The
-   card is not the scroller — the results area below is — so the scope line, the
-   form and the footer stay readable while 500 rows move between them. */
+/* The search dialog. Same card family as the three confirms, but wide: a file's
+   path and a line of its text want to breathe, and Pico's own 700px
+   `dialog > article` would ellipsise the paths into uselessness. The card is not
+   the scroller — the results area below is — so the scope line, the form and the
+   footer stay readable while 500 rows move between them. */
 .editor-search-dialog > article {
   width: 820px;
   max-width: 94vw;
@@ -3997,8 +3877,8 @@ input.appbar-location-input {
 }
 
 /* The read-only scope line: the path in mono (it is a path), and the kind as a
-   suffix, so `docs/old (folder)` and `docs/old (file)` read apart. The whole line
-   is a caption already, so nothing else needs a colour of its own. */
+   suffix, so `docs/old (folder)` and `docs/old (file)` read apart. The line is a
+   caption already, so nothing needs a colour of its own. */
 .editor-search-scope-path {
   font-family: var(--pico-font-family-monospace);
 }
@@ -4044,8 +3924,7 @@ input.appbar-location-input {
 /* The server's one sentence, last in the card. Pico styles a dialog `footer` for
    a row of buttons — right-aligned, with a divider and a negative bottom margin
    to sit flush with the card edge. This is a caption, not a button row, so it
-   goes back to the card's own flow: left-aligned, and the divider stays (it is
-   what separates the sentence from the scroll area above it). */
+   goes back to the card's own flow: left-aligned, divider kept. */
 .editor-search-footer {
   text-align: start;
 }
@@ -4096,8 +3975,8 @@ input.appbar-location-input {
 }
 
 /* A row is a click target: the whole button is the row's affordance, so it
-   carries no button chrome of its own — the same flat shape the tree's rows use.
-   The path verbatim, in mono, because it is the string the tab strip will name. */
+   carries no button chrome — the same flat shape the tree's rows use. The path
+   verbatim, in mono, because it is the string the tab strip will name. */
 .editor-search-hit {
   display: inline;
   width: auto;
@@ -4138,10 +4017,10 @@ input.appbar-location-input {
   color: var(--pico-mark-color);
 }
 
-/* The quick-open dialog. Same card family as the search one, but narrow: what
-   it shows is one field and a column of paths, and a wide card would only
-   stretch them into whitespace. The card is not the scroller — the list below
-   is — so the field and the footer stay put while the rows move between them. */
+/* The quick-open dialog. Same card family as the search one, but narrow: it
+   shows one field and a column of paths, and a wide card would only stretch them
+   into whitespace. The card is not the scroller — the list below is — so the
+   field and the footer stay put while the rows move between them. */
 .quickopen-dialog > article {
   width: 560px;
   max-width: 94vw;
@@ -4164,9 +4043,9 @@ input.appbar-location-input {
 }
 
 /* A row is a click target: the whole button is the row's affordance, so it
-   carries no button chrome of its own — the same flat shape the tree's rows and
-   the search hits use. The path verbatim, in mono, because it is the string the
-   tab strip will name. */
+   carries no button chrome — the same flat shape the tree's rows and the search
+   hits use. The path verbatim, in mono: it is the string the tab strip will
+   name. */
 .quickopen-row {
   display: block;
   width: 100%;
@@ -4195,8 +4074,8 @@ input.appbar-location-input {
 }
 
 /* The selected row is highlighted at all times, not only under the pointer —
-   the keyboard is the primary path (§2.2), so the highlight follows ↑/↓ and
-   Enter acts on exactly what is highlighted. */
+   the keyboard is the primary path, so the highlight follows ↑/↓ and Enter acts
+   on exactly what is highlighted. */
 .quickopen-row.is-selected {
   background-color: var(--pico-primary-background);
   color: var(--pico-primary-inverse);
@@ -4211,16 +4090,15 @@ input.appbar-location-input {
 }
 
 /* The server's one sentence, last in the card — left-aligned like the search
-   footer, for the same reason: it is a caption, not a button row. */
+   footer: it is a caption, not a button row. */
 .quickopen-footer {
   text-align: start;
 }
 
 /* The batch move's modal. Same card family as the confirms, and the same width
-   as the delete one: what it shows is a list of paths and one field, and a
-   longer card would only stretch the paths into whitespace. Nothing here is
-   theme-specific — the colours all come from the Pico variables both themes
-   set. */
+   as the delete one: it shows a list of paths and one field, and a longer card
+   would only stretch the paths into whitespace. It declares no colour of its
+   own — all of them come from the Pico variables both themes set. */
 .editor-move-dialog > article {
   width: 520px;
   max-width: 94vw;
@@ -4245,8 +4123,8 @@ input.appbar-location-input {
   margin-bottom: var(--bi-space-1);
 }
 
-/* One `<input>`, labelled by the question it answers (D6: a *folder*, never a
-   full target path). */
+/* One `<input>`, labelled by the question it answers: a *folder*, never a full
+   target path. */
 .editor-move-field {
   margin-bottom: var(--bi-space-1);
 }
@@ -4382,12 +4260,10 @@ input.appbar-location-input {
 
 /* -- write-feedback stack -----------------------------------------------------
    The Editor's notices (useEditorNotices, EditorNoticeStack.vue) teleport to
-   `<body>`, so they sit outside every pane's stacking context and are readable
-   from the tree as well as the code pane. Bottom-centre: it must not cover the
-   tab strip (top), the composer (WorkBench's bottom) or a right-click point in
-   the tree (left). The tone is carried by the border and the icon colour only —
-   never colour alone — and the × gives every line a dismissal the timer will
-   not do on its own. */
+   `<body>`, so they sit outside every pane's stacking context. Bottom-centre: it
+   must not cover the tab strip (top), the composer (WorkBench's bottom) or a
+   right-click point in the tree (left). The tone is carried by the border and
+   the icon colour only, never colour alone. */
 .editor-notice-stack {
   position: fixed;
   z-index: 1100;
@@ -4457,11 +4333,10 @@ input.appbar-location-input {
   color: var(--bi-danger);
 }
 
-/* The Monaco host: the pane gives it the box, Monaco owns everything inside
-   it (its own scrollers, its own line-number gutter), so nothing here may
-   add padding or a border — Monaco measures this element.
-   `monaco-pico.css` (imported by MonacoEditor.vue) is what keeps Pico's
-   element rules off Monaco's own textarea/input/button DOM. */
+/* The Monaco host: the pane gives it the box, Monaco owns everything inside it
+   (its own scrollers, its own gutter), so nothing here may add padding or a
+   border — Monaco measures this element. `monaco-pico.css` (imported by
+   MonacoEditor.vue) keeps Pico's element rules off Monaco's own DOM. */
 .editor-monaco {
   flex: 1 1 auto;
   min-height: 0;
@@ -4472,11 +4347,10 @@ input.appbar-location-input {
 
 /* The rendered-markdown panel (the tree's "Preview"), a sibling of the Monaco
    surfaces in the same pane. It must NOT reuse `.editor-monaco`: that element is
-   `overflow: hidden` because Monaco measures it and owns its own scroller, so a
-   rendered document given that class could not scroll. Sizing only — the markup
-   inside is MarkdownStream's `.answer`, the one stylesheet for rendered markdown
-   (already light/dark through the Pico variables and the hljs token rules), and
-   `.editor-body-col` already supplies the padding every other panel gets. */
+   `overflow: hidden` because Monaco measures it, so a rendered document given
+   that class could not scroll. Sizing only — the markup inside is
+   MarkdownStream's `.answer`, the one stylesheet for rendered markdown, and
+   `.editor-body-col` supplies the padding. */
 .editor-preview {
   flex: 1 1 auto;
   min-height: 0;
@@ -4558,10 +4432,9 @@ input.appbar-location-input {
   background-color: var(--bi-danger);
 }
 
-/* Pico puts a 1rem bottom margin on every `[type=button]`. In this one-line
-   strip that margin is not spacing but height: it made the head 14px taller than
-   its own contents and left the three buttons riding high instead of centred on
-   the text beside them. The strip's padding is its only spacing. */
+/* Pico puts a 1rem bottom margin on every `[type=button]`. In this one-line strip
+   that margin is not spacing but height: it makes the head taller than its own
+   contents and leaves the three buttons riding high. */
 .editor-terminal-head .icon-btn {
   margin: 0;
 }
@@ -4613,16 +4486,12 @@ input.appbar-location-input {
 }
 
 /* xterm's own stylesheet paints `.xterm-viewport` **black** with a native
-   scrollbar always switched on. `fit()` only fits whole rows, so whatever slice
-   of the pane is left under the last row (a few px, and it changes with every
-   splitter drag) showed that black through — a band the width of the pane with
-   a scrollbar handle in it, sitting between the terminal and the status bar.
-
-   Two halves, one verdict: the viewport takes the app surface, so the leftover
-   slice is invisible against the panel it fills, and its native scrollbar is
-   removed — xterm renders its own slider in `.xterm-scrollable-element`, which
-   already carries the themed background, so nothing is lost by hiding this one.
-   `scrollbar-width` is Firefox; the pseudo-element is Chromium/Safari. */
+   scrollbar always switched on, and `fit()` only fits whole rows — so the slice
+   left under the last row showed as a black band between the terminal and the
+   status bar. The viewport takes the app surface so that slice is invisible,
+   and its native scrollbar is removed: xterm renders its own slider in
+   `.xterm-scrollable-element`. `scrollbar-width` is Firefox; the pseudo-element
+   is Chromium/Safari. */
 .editor-term-host .xterm .xterm-viewport {
   background-color: var(--bi-surface);
   scrollbar-width: none;
@@ -4663,14 +4532,14 @@ input.appbar-location-input {
 /* -- status bar ---------------------------------------------------------------
    The Editor's one full-width strip at the very bottom of the screen: chrome,
    not a pane. It shares the terminal's full-bleed finish — no side margins, no
-   rounded corners, flush with the screen's edges and meeting the pane above it
-   on a single hairline border — because it is the same kind of thing: a strip
-   the panes stop at. Nothing is ever placed below it, it is not resizable and
-   it is not a column of the three-pane layout.
+   rounded corners, meeting the pane above it on a single hairline border —
+   because it is the same kind of thing: a strip the panes stop at. Nothing is
+   ever placed below it, it is not resizable and it is not a column of the
+   three-pane layout.
 
-   Declared in its own `.editor-status-bar` namespace so the fields later tasks
-   add to it never have to touch a rule another pane is counted on. The body is
-   one non-wrapping row, its fields separated by space rather than boxes. */
+   Its own `.editor-status-bar` namespace keeps a new field from having to touch
+   a rule another pane is counted on. The body is one non-wrapping row, its
+   fields separated by space rather than boxes. */
 .editor-status-bar {
   grid-column: 1 / -1;
   grid-row: 4;
@@ -4706,8 +4575,7 @@ input.appbar-location-input {
 
 /* A field that must not be ellipsised away: the counts and `analysing…` are short
    by construction, so they keep their width and the *server field* — the one with
-   a long refusal sentence — is what gives. At a narrow window all four fields
-   therefore stay readable instead of the count disappearing first. */
+   a long refusal sentence — is what gives. */
 .editor-status-bar-field--fixed {
   flex: 0 0 auto;
 }
@@ -4723,9 +4591,8 @@ input.appbar-location-input {
   color: var(--bi-warning);
 }
 
-/* What D7 does *not* underline — hints and information — is counted in the
-   muted text colour rather than in a severity colour: a style nag must never
-   read like a defect. */
+/* Hints and information are counted in the muted text colour rather than in a
+   severity colour: a style nag must never read like a defect. */
 .editor-status-bar-count--other {
   color: var(--pico-muted-color);
 }
@@ -4737,9 +4604,9 @@ input.appbar-location-input {
   font-style: italic;
 }
 
-/* The bar's **only** control (D1): the manual re-check. It keeps its width when
-   the row runs out (`flex: 0 0 auto`, and it is last), so a long server sentence
-   is what gets ellipsised — a control pushed off the strip is a control the user
+/* The bar's **only** control: the manual re-check. It keeps its width when the
+   row runs out (`flex: 0 0 auto`, and it is last), so a long server sentence is
+   what gets ellipsised — a control pushed off the strip is a control the user
    cannot press. The app's icon-button idiom, sized to the row it sits in. */
 .editor-status-bar-recheck {
   flex: 0 0 auto;
@@ -4760,7 +4627,7 @@ input.appbar-location-input {
   color: var(--pico-color);
 }
 
-/* Disabled, never hidden (D1): the control recedes and says why in its title,
+/* Disabled, never hidden: the control recedes and says why in its title,
    because "nothing to re-check" is a state of the buffer, not a missing
    affordance. */
 .editor-status-bar-recheck:disabled {
@@ -4776,10 +4643,9 @@ input.appbar-location-input {
 
 /* The buffer's own facts, grouped at the strip's **right** edge: caret,
    indentation, line ending, file kind. `margin-left: auto` is the whole layout —
-   the group takes every pixel the fields on the left do not, so the fields
-   before it stay left-aligned and this one hugs the edge, whatever its own
-   width. Not `justify-content: space-between`, which would also move the
-   re-check button away from the field it acts on. */
+   the group takes every pixel the fields on the left do not, so they stay
+   left-aligned and this one hugs the edge. Not `space-between`, which would also
+   move the re-check button away from the field it acts on. */
 .editor-status-bar-facts {
   flex: 0 0 auto;
   display: flex;
@@ -4797,14 +4663,12 @@ input.appbar-location-input {
 }
 
 /* -- narrow screens: one column, tree as a drawer ------------------------------
-   Desktop-only is the documented scope, so this is a usability floor: nothing
-   is clipped and the tree stays reachable, but there is no phone layout. The
-   shell stays a grid and re-places every pane explicitly (the wide layout
-   places by grid line, not by area name), and the terminal stays draggable —
-   only the sidebar track disappears, so its bar is hidden and its variable
-   goes unused. The status bar is re-placed here too: it is the fifth row of
-   this narrower list, and a row list that did not name it would drop it
-   entirely below this width. */
+   Desktop-only is the documented scope, so this is a usability floor: nothing is
+   clipped and the tree stays reachable, but there is no phone layout. The shell
+   stays a grid and re-places every pane explicitly (the wide layout places by
+   grid line, not by area name), and the terminal stays draggable — only the
+   sidebar track disappears. The status bar is re-placed here too: a row list
+   that did not name it would drop it below this width. */
 @media (max-width: 1024px) {
   .editor-shell {
     --bi-editor-terminal: 180px;
@@ -4852,12 +4716,10 @@ input.appbar-location-input {
 
 /* -- connector wizard -----------------------------------------------------------
 
-   The "Set me up!" dialog (ConnectorWizardDialog.vue): one card, three pages, the
-   same idiom as the other app-level dialogs. Everything here is new and
-   `.wizard-*`-namespaced: the card borrows `.settings-title`, `.caption` and
-   `.settings-actions` exactly as they are, so a rule another component is
-   counted on is never touched. The width is the batch dialog's — a list and a
-   JSON block read better on a narrow card than on the settings editor's. */
+   The "Set me up!" dialog (ConnectorWizardDialog.vue): one card, three pages,
+   `.wizard-*`-namespaced so no rule another component is counted on is touched.
+   The width is the batch dialog's — a list and a JSON block read better on a
+   narrow card than on the settings editor's. */
 .wizard-dialog > article {
   width: 680px;
   max-width: 94vw;

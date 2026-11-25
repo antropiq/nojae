@@ -16,45 +16,40 @@ import { useWorkspaceSession, withWorkspace } from './useWorkspaceSession'
 // ---------------------------------------------------------------------------
 // The connector wizard's rules ("Set me up!").
 //
-// This is the wizard's **one** rule surface, in the idiom `useSettingsServers`
-// and `useAgentModes` settled on: every enablement verdict, every tooltip and
-// the dialog's one message are answered here as a plain function, and
-// `ConnectorWizardDialog.vue` renders the answers. The property that buys is the
-// one the two files before it bought: no rule about what a control may do is
-// written in the template, so a rule cannot drift from the button that shows it
-// — and an inert control always explains itself, because its accessible name
-// when live and its reason when not are one string moving as one.
+// The wizard's **one** rule surface, in the idiom `useSettingsServers` and
+// `useAgentModes` settled on: every enablement verdict, every tooltip and the
+// dialog's one message are answered here as a plain function, and
+// `ConnectorWizardDialog.vue` renders the answers. No rule about what a control
+// may do is written in the template, so a rule cannot drift from the button that
+// shows it — and an inert control always explains itself, because its accessible
+// name when live and its reason when not are one string moving as one.
 //
-// What the feature is, in one paragraph, because every rule below follows from
-// it: two buttons open **one** three-page dialog (choose → prepare → apply). The
-// family comes from the button that opened it and is never a question; only
-// page 1's *source of candidates* differs. Nothing writes a declaration file,
-// nothing starts or restarts a connector or a language server, nothing installs
-// a package and nothing spawns the candidate — so nothing here calls a hub, and
-// nothing here arms or sends a chat turn (§4). The snippet is text handed to the
-// user; the install line is a composer draft and nothing else (§7).
+// Two buttons open **one** three-page dialog (choose → prepare → apply). The
+// family comes from the button that opened it and is never a question; only page
+// 1's *source of candidates* differs. Nothing writes a declaration file, starts
+// or restarts a connector or a language server, installs a package or spawns the
+// candidate — so nothing here calls a hub, and nothing here arms or sends a chat
+// turn. The snippet is text handed to the user; the install line is a composer
+// draft and nothing else.
 //
 // Three consequences worth stating where the code can be read against them:
 //
-//  * **the only gate is the model** (§10). A reply streaming, a running batch, a
-//    locked toggle set, an agent mode that switches this hub off and a hub route
-//    that refused the workspace all leave the button live: discovery writes
-//    nothing and starts nothing, so none of them gates preparation. The gate is
-//    `setMeUpSlotFor`'s one branch, and its inert reason is `useAgentModes`'s
-//    existing no-model sentence for that row, reused verbatim — one reason that
-//    reads differently in two tooltips is two reasons.
-//  * **no numbers, anywhere** (§5). The wizard's model calls belong to no
+//  * **the only gate is the model.** A reply streaming, a running batch, a locked
+//    toggle set, an agent mode that switches this hub off and a hub route that
+//    refused the workspace all leave the button live: discovery writes nothing
+//    and starts nothing. The gate is `setMeUpSlotFor`'s one branch, and its inert
+//    reason is `useAgentModes`'s existing no-model sentence for that row, reused
+//    verbatim — one reason that reads differently in two tooltips is two reasons.
+//  * **no numbers, anywhere.** The wizard's model calls belong to no
 //    conversation: their tokens enter neither the session clock nor the cost
-//    badges, so this module neither reads nor writes either, and no sentence it
-//    builds carries a figure. What every page shows instead is the header line
-//    naming agent, server and model.
-//  * **one attempt, no waiting** (§5). The two posts are deliberately not
-//    retried: `api-fetch`'s own comment is why (a retry on a POST either
-//    duplicates a write or resumes a half-streamed reply), and the spec adds the
-//    other half — a dialog that silently sleeps through a backoff is worse than
-//    a named failure the user can answer by pressing again. The three *reads*
-//    (catalogue, connection, scan) go through the retry helper, because a
-//    transport blip on a GET costs nothing to absorb.
+//    badges, so this module reads and writes neither, and no sentence it builds
+//    carries a figure. Every page shows the header line instead.
+//  * **one attempt, no waiting.** The two posts are deliberately not retried:
+//    `api-fetch`'s own comment is why (a retry on a POST either duplicates a
+//    write or resumes a half-streamed reply), and a dialog that silently sleeps
+//    through a backoff is worse than a named failure the user can answer by
+//    pressing again. The three *reads* (catalogue, connection, scan) go through
+//    the retry helper, because a transport blip on a GET costs nothing to absorb.
 // ---------------------------------------------------------------------------
 
 //: The two families, spelled the way the panels and the routes spell them. The
@@ -64,16 +59,16 @@ export const FAMILY_LSP = 'lsp'
 export const FAMILIES = [FAMILY_MCP, FAMILY_LSP]
 
 //: The pages, in order, as **data** — the dialog walks this list and decides
-//: nothing itself (§11). Page 1's *source of candidates* is the one thing a
-//: family changes, and it is named here beside the pages so the two cannot drift.
+//: nothing itself. Page 1's *source of candidates* is the one thing a family
+//: changes, and it is named here beside the pages so the two cannot drift.
 export const PAGE_CHOOSE = 'choose'
 export const PAGE_PREPARE = 'prepare'
 export const PAGE_APPLY = 'apply'
 export const PAGES = [PAGE_CHOOSE, PAGE_PREPARE, PAGE_APPLY]
 
 //: Page 1's candidate source per family: the committed catalogue for MCP, the
-//: servers the model proposed for this folder for LSP (§9 — there is no LSP
-//: catalogue, by decision).
+//: servers the model proposed for this folder for LSP — there is no LSP
+//: catalogue.
 export const SOURCE_CATALOGUE = 'catalogue'
 export const SOURCE_PROPOSAL = 'proposal'
 
@@ -88,12 +83,12 @@ export function candidateSource(family) {
 export const SET_ME_UP_LABEL = 'Set me up!'
 
 //: The header line's two halves. The names are the connection read's; this
-//: module invents none of them and adds no number (§5).
+//: module invents none of them and adds no number.
 const HEADER_LEAD = 'Wizard is running with'
 
-//: The readiness pair (§7) — the two answers the resolution check gives. Spelled
-//: once here so the dialog compares nothing; the *words* are the snippet
-//: module's, because the app owns them.
+//: The readiness pair — the two answers the resolution check gives. Spelled once
+//: here so the dialog compares nothing; the *words* are the snippet module's,
+//: because the app owns them.
 export const READY = 'looks installed'
 export const NOT_INSTALLED = 'not installed'
 
@@ -103,12 +98,11 @@ export const PLATFORM_WINDOWS = 'windows'
 export const PLATFORM_POSIX = 'posix'
 export const PLATFORM_ANY = 'any'
 
-//: The three failures the wizard names apart (§5), plus the stop (§3) that is a
-//: *fourth* thing and must never read like one of them (AC-7). Each is a plain
-//: sentence this module owns, used only where the server said nothing; wherever
-//: the payload carries a sentence, `failureSentence` hands that one back
-//: verbatim, because this module adds no paraphrase of a sentence the app
-//: already owns.
+//: The three failures the wizard names apart, plus the stop that is a *fourth*
+//: thing and must never read like one of them. Each is a plain sentence this
+//: module owns, used only where the server said nothing; wherever the payload
+//: carries a sentence, `failureSentence` hands that one back verbatim, because
+//: this module adds no paraphrase of a sentence the app already owns.
 export const FAILURE_ENDPOINT = 'endpoint'
 export const FAILURE_UNREADABLE = 'unreadable'
 export const FAILURE_NOTHING = 'nothing'
@@ -121,29 +115,28 @@ export const FAILURE_UNREADABLE_SENTENCE =
   "The model's answer could not be read: it did not carry the shape the wizard " +
   'asked for, so press the button again to retry.'
 
-//: The third failure, and the one hardest to keep apart from the stop: the model
-//: answered and was readable, and what it answered offers no entry this need can
-//: be built from. It is a *failure* — a press may ask again — where the stop is
-//: the end of the road, so the two never share a sentence.
+//: The third failure, hardest to keep apart from the stop: the model answered and
+//: was readable, and what it answered offers no entry this need can be built
+//: from. It is a *failure* — a press may ask again — where the stop is the end of
+//: the road, so the two never share a sentence.
 export const FAILURE_NOTHING_SENTENCE =
   "The model's answer offered no entry that fits this need: nothing was " +
   'prepared, so press the button again to ask it again.'
 
-//: The one sentence the "none of these" road ends on (§3, AC-18): it names the
-//: declaration file the entry would have belonged in and stops there. There is
-//: no entry, no field and no link to the JSON editor — the user edits that file
-//: by hand, exactly as before this feature existed.
+//: The one sentence the "none of these" road ends on: it names the declaration
+//: file the entry would have belonged in and stops there. There is no entry, no
+//: field and no link to the JSON editor — the user edits that file by hand.
 export const STOP_SENTENCE_LEAD =
   'Nothing offered fits this need — the wizard stops here, and the entry has to ' +
   'be written by hand in '
 
-//: The copy action's two answers. The confirmation is only ever reached after
-//: the clipboard helper answered (§7's "the copy says so").
+//: The copy action's two answers. The confirmation is only ever reached after the
+//: clipboard helper answered.
 export const COPIED_LABEL = 'Copied'
 export const COPY_FAILED_LABEL = 'Copy failed'
 
 //: One line per step, while the step is in flight. A status line, never a token
-//: stream: the wizard's calls are non-streaming by construction (§5).
+//: stream: the wizard's calls are non-streaming by construction.
 const WAITING_CHOOSE_MCP = 'Reading the connector catalogue…'
 const WAITING_CHOOSE_LSP = 'Looking at this project to choose a server for it…'
 const WAITING_PREPARE = 'Preparing the entry for this machine and this folder…'
@@ -152,15 +145,10 @@ const WAITING_PREPARE = 'Preparing the entry for this machine and this folder…
 //: State: one wizard at a time
 //: ---------------------------------------------------------------------------
 //
-// The dialog is one component with one state machine, not two (§11), so there is
-// one of everything here: which family the open dialog belongs to, where in the
-// page order it stands, the list page 1 shows, the one candidate chosen, the
-// prepared answer pages 2 and 3 render, the step in flight, the failure
-// sentence, and the connection the header line is built from.
-//
-// Nothing here is a draft. There is no saved snippet, no server-side draft and
-// no free-text field to hold one (§4, §3): a walk that is closed leaves nothing
-// behind, which is why `reset()` exists and why `open()` calls it.
+// One component with one state machine, not two, so there is one of everything
+// here. Nothing is a draft: there is no saved snippet, no server-side draft and no
+// free-text field to hold one, so a closed walk leaves nothing behind — which is
+// why `reset()` exists and why `open()` calls it.
 const state = reactive({
   open: false,
   // `mcp` / `lsp` — from the button, never a question.
@@ -191,7 +179,7 @@ const state = reactive({
   // `null` until a copy has been asked for, then whether it landed.
   copied: null,
   // The connection read's answer: `{agentMode, agent, server, model, canRun,
-  // refusal}`. Three names and one verdict, never a credential (§8).
+  // refusal}`. Three names and one verdict, never a credential.
   connection: null,
   // Its own in-flight flag and its own failure sentence, kept apart from
   // `loading`/`failure` because the connection is a fact about the **install**
@@ -247,16 +235,15 @@ export function snippet() {
 }
 
 //: ---------------------------------------------------------------------------
-//: The gate (§10)
+//: The gate
 //: ---------------------------------------------------------------------------
 //
-// The table in §10 is the whole truth, and it is a table of *live*: a reply
-// streaming, a batch running, the toggles locked by a started conversation, the
-// active agent mode switching this hub off, and a hub route that refused the
-// workspace all leave the button live. Discovery writes nothing and starts
-// nothing, so nothing the toggles are gated by gates preparation — and the
-// fields are accepted here rather than dropped on the floor, so the table is
-// *asserted* rather than merely intended.
+// The gate is a table of *live*: a reply streaming, a batch running, the toggles
+// locked by a started conversation, the active agent mode switching this hub off,
+// and a hub route that refused the workspace all leave the button live.
+// Discovery writes nothing and starts nothing, so nothing the toggles are gated
+// by gates preparation — and the fields are accepted here rather than dropped on
+// the floor, so the rule is *asserted* rather than merely intended.
 
 function gateContext({
   mode = null,
@@ -270,8 +257,8 @@ function gateContext({
   return {
     mode,
     connection,
-    // Read, deliberately, by nothing below. Spelled out anyway: the five rows of
-    // §10 are the reason, and a future edit that made one of them gate the
+    // Read, deliberately, by nothing below. Spelled out anyway: these five rows
+    // leave the button live, and a future edit that made one of them gate the
     // button should have to delete one of these lines and read this comment.
     streaming: streaming === true,
     batchActive: batchActive === true,
@@ -293,14 +280,11 @@ function canRunOf(ctx) {
   return agentCanRun(ctx.mode)
 }
 
-// Why it cannot, in the app's existing words — and there are exactly two of
-// them, because there are exactly two states:
-//
-//  * a row the panel is showing that carries no model: its own sentence, built by
-//    `useAgentModes`'s `agentNoModelSentence`. Never a re-wording here.
-//  * a row that *does* name a model the app cannot reach — an unusable store, a
-//    model row that is gone: the server's refusal from the connection read,
-//    verbatim, because it names the state the row cannot see.
+// Why it cannot, in the app's existing words — exactly two of them, because there
+// are exactly two states: a row carrying no model gets `useAgentModes`'s own
+// `agentNoModelSentence`, never a re-wording here; a row that *does* name a model
+// the app cannot reach gets the server's refusal from the connection read,
+// verbatim, because it names the state the row cannot see.
 function reasonOf(ctx) {
   if (ctx.mode && !agentCanRun(ctx.mode)) return agentNoModelSentence(ctx.mode)
   return textOf(ctx.connection?.refusal) || agentNoModelSentence(ctx.mode)
@@ -311,15 +295,15 @@ function reasonOf(ctx) {
 //: moves as one or not at all.
 export function setMeUpSlotFor(context = {}) {
   const ctx = gateContext(context)
-  // §10: no hub state appears on this line, and that absence is the rule.
+  // No hub state appears on this line, and that absence is the rule.
   if (canRunOf(ctx)) return slotLive(SET_ME_UP_LABEL)
   return slotInert(reasonOf(ctx))
 }
 
 // The modules that own the state the gate reads, resolved **once**: this file is
-// a singular module, so its collaborators are read here once and never re-created
-// per render. Their factories do real work (a re-root registration, a set of
-// computeds), which a computed re-evaluating on every keystroke must not repeat.
+// a singular module, so its collaborators are never re-created per render. Their
+// factories do real work (a re-root registration, a set of computeds), which a
+// computed re-evaluating on every keystroke must not repeat.
 let collaborators = null
 
 function live() {
@@ -339,7 +323,7 @@ function composer() {
   return live().chat
 }
 
-// The gate read off the app's live state, in §10's own five fields plus the
+// The gate read off the app's live state, in the gate's own five fields plus the
 // agent row — so the panel that draws the button passes nothing and decides
 // nothing.
 export function panelGateContext(family) {
@@ -367,9 +351,9 @@ export function setMeUpSlot(family) {
 //: ---------------------------------------------------------------------------
 
 //: The header line: whose reasoning the wizard spends, and on what. Present from
-//: the moment the dialog opens and on every page (§5). Three **names** and no
-//: number — an unresolved half is not guessed, it is left out, because a header
-//: naming a model nobody chose would be worse than a short line.
+//: the moment the dialog opens and on every page. Three **names** and no number —
+//: an unresolved half is not guessed, it is left out, because a header naming a
+//: model nobody chose would be worse than a short line.
 export function headerLine(connection = state.connection) {
   if (!connection) return null
   const agent = textOf(connection.agent)
@@ -381,16 +365,16 @@ export function headerLine(connection = state.connection) {
 }
 
 //: The line a page shows while its step is in flight — a status line, never a
-//: token stream (§5). `null` when nothing is running.
+//: token stream. `null` when nothing is running.
 export function waitingLine() {
   if (!state.loading) return null
   if (state.page === PAGE_PREPARE) return WAITING_PREPARE
   return state.family === FAMILY_LSP ? WAITING_CHOOSE_LSP : WAITING_CHOOSE_MCP
 }
 
-//: The three failures (§5), pairwise distinct, and none of them the empty
-//: answer's sentence (AC-7). `carried` is the endpoint's or the model step's own
-//: sentence: when it is there, its words are the words the page shows.
+//: The three failures, pairwise distinct, and none of them the empty answer's
+//: sentence. `carried` is the endpoint's or the model step's own sentence: when it
+//: is there, its words are the words the page shows.
 export function failureSentence(kind, carried = null) {
   const said = textOf(carried)
   if (said) return said
@@ -399,9 +383,9 @@ export function failureSentence(kind, carried = null) {
   return FAILURE_ENDPOINT_SENTENCE
 }
 
-//: The stop (§3, AC-18): one sentence naming the declaration file, and the end
-//: of the road. Neither list carries a "none of these" entry, and there is no
-//: free-text field and no link to the JSON editor behind this line.
+//: The stop: one sentence naming the declaration file, and the end of the road.
+//: Neither list carries a "none of these" entry, and there is no free-text field
+//: and no link to the JSON editor behind this line.
 export function stopSentence(declarationPath = state.declarationPath) {
   const path = textOf(declarationPath)
   if (!path) return STOP_SENTENCE_LEAD + 'the declaration file for this workspace.'
@@ -421,8 +405,8 @@ export function messageLine() {
   return { text: '', role: 'status' }
 }
 
-//: The readiness line (§7): the resolution's verdict, in the app's own words.
-//: `null` when there is nothing to look up (a remote member carries no command).
+//: The readiness line: the resolution's verdict, in the app's own words. `null`
+//: when there is nothing to look up (a remote member carries no command).
 export function readinessLine(prepared = state.prepared) {
   const value = textOf(prepared?.readiness)
   if (value === READY) return READY
@@ -430,27 +414,27 @@ export function readinessLine(prepared = state.prepared) {
   return null
 }
 
-//: The sentinel warning (§8, AC-8a): the page says the entry will not
-//: authenticate until the slot is replaced. The sentence is the snippet module's;
-//: this module passes it through and adds no second wording.
+//: The sentinel warning: the page says the entry will not authenticate until the
+//: slot is replaced. The sentence is the snippet module's; this module passes it
+//: through and adds no second wording.
 export function sentinelWarning(prepared = state.prepared) {
   return textOf(prepared?.valueWarning) || null
 }
 
-//: Which of the two value forms the member shows (§8) — `sentinel`,
+//: Which of the two value forms the member shows — `sentinel`,
 //: `environment-reference` or `none` — so page 3 can say which one it is.
 export function valueForm(prepared = state.prepared) {
   return textOf(prepared?.valueForm) || null
 }
 
-//: The duplicate-id warning (§6, AC-11): a warning, never a stop — the snippet is
-//: still offered, and nothing changes until the user pastes it.
+//: The duplicate-id warning: a warning, never a stop — the snippet is still
+//: offered, and nothing changes until the user pastes it.
 export function duplicateWarning(prepared = state.prepared) {
   return textOf(prepared?.duplicate) || null
 }
 
-//: The loader's verdict on the member, in the loader's own words (AC-9). A
-//: refusal names the field to change because the hub's loader does.
+//: The loader's verdict on the member, in the loader's own words. A refusal names
+//: the field to change because the hub's loader does.
 export function verdictLine(prepared = state.prepared) {
   return textOf(prepared?.verdict) || null
 }
@@ -470,10 +454,10 @@ export function decisionLines(prepared = state.prepared) {
   return Array.isArray(lines) ? lines.filter((line) => textOf(line)) : []
 }
 
-//: The missing-file sentence (AC-19, §3): the file has to be created, the member
-//: goes inside an object at its top level, and this is the absolute path to
-//: create. The snippet stays a **member** either way — the wizard never emits a
-//: whole file, and creating the file is the user's act like every other write.
+//: The missing-file sentence: the file has to be created, the member goes inside
+//: an object at its top level, and this is the absolute path to create. The
+//: snippet stays a **member** either way — the wizard never emits a whole file,
+//: and creating the file is the user's act like every other write.
 export function missingFileSentence(prepared = state.prepared) {
   if (!prepared || prepared.declarationExists !== false) return null
   const path = textOf(prepared.declarationPath)
@@ -484,10 +468,9 @@ export function missingFileSentence(prepared = state.prepared) {
   )
 }
 
-//: The restart sentence (AC-12): the app reads a declaration only at start-up,
-//: so a restart is what applies the member — pointing at the panel's own restart
-//: button. The wizard has no restart control of its own, and this sentence is
-//: the whole of what it says about one.
+//: The restart sentence: the app reads a declaration only at start-up, so a
+//: restart is what applies the member — pointing at the panel's own restart
+//: button. The wizard has no restart control of its own.
 export function restartSentence() {
   return (
     "nojae reads the declaration file only at start-up: press this panel's " +
@@ -529,7 +512,7 @@ export function continueSlot() {
 }
 
 //: ---------------------------------------------------------------------------
-//: The install line, and the hand-over that fills and only fills (§7)
+//: The install line, and the hand-over that fills and only fills
 //: ---------------------------------------------------------------------------
 
 //: The platform this browser is running on, in the two words an install line
@@ -562,10 +545,10 @@ export function installLines(install) {
   return rows
 }
 
-//: The hand-over: it **fills the composer and nothing else** (§7, AC-20). No
-//: arming, no send, no focused send control, no pre-approval — the only composer
-//: surface touched is the draft, through `useChat`'s own setter so the preview
-//: updates on the usual debounce.
+//: The hand-over: it **fills the composer and nothing else**. No arming, no send,
+//: no focused send control, no pre-approval — the only composer surface touched
+//: is the draft, through `useChat`'s own setter so the preview updates on the
+//: usual debounce.
 export function handOverInstallLine(line, target = null) {
   const text = textOf(line)
   if (!text) return null
@@ -599,9 +582,8 @@ function fail(sentence, read = null) {
   return null
 }
 
-// The page 1 MCP list: the committed catalogue, and **no model run** (§9). It is
-// installation-scoped, so it names no folder — the list is the same on every
-// machine and in every folder.
+// The page 1 MCP list: the committed catalogue, and **no model run**. It is
+// installation-scoped, so it names no folder.
 async function loadCatalogue() {
   state.loading = true
   state.failure = null
@@ -641,12 +623,9 @@ async function loadCatalogue() {
 }
 
 // The connection read: the header line's three names and the gate's verdict,
-// resolved once at the wizard's start. Installation-scoped, like the catalogue,
-// and retried like it too — a transport blip on a GET costs nothing to absorb.
-//
-// Its failure lives in its own slot rather than in `failure`, because the two
-// answer different questions: this is "the wizard cannot say what it would run
-// as", which a later step that works must not clear.
+// resolved once at the wizard's start. Its failure lives in its own slot rather
+// than in `failure`, because this is "the wizard cannot say what it would run as",
+// which a later step that works must not clear.
 async function loadConnection(agentMode = state.agentMode) {
   state.connectionFailure = null
   state.connectionLoading = true
@@ -675,10 +654,9 @@ async function loadConnection(agentMode = state.agentMode) {
   }
 }
 
-// The scan read: the derived facts about this request's folder, and never its
-// bytes (§6). It is a read like the two above, so it retries; it is not on the
-// dialog's open path, because the LSP page's answer is grounded in the same scan
-// **server-side** and the page renders the proposal, not the facts.
+// The derived facts about this request's folder, and never its bytes. It is not on
+// the dialog's open path, because the LSP page's answer is grounded in the same
+// scan **server-side** and the page renders the proposal, not the facts.
 async function loadScan() {
   state.scan.loading = true
   state.scan.failure = null
@@ -703,10 +681,10 @@ async function loadScan() {
 }
 
 // The one post helper the two steps share: **one attempt**, no retry, no sleep.
-// A plain JSON post and not SSE — one answer, no frames, nothing entering the
-// stream layer — and a model step that failed is a `failed` outcome with its
-// sentence at 200, not an HTTP failure. Only a bad request (an unknown agent, a
-// folder that was refused) is a 4xx, and its detail is the app's sentence.
+// A plain JSON post, not SSE, and a model step that failed is a `failed` outcome
+// with its sentence at 200 rather than an HTTP failure. Only a bad request (an
+// unknown agent, a folder that was refused) is a 4xx, and its detail is the app's
+// sentence.
 async function postStep(url, payload) {
   state.loading = true
   state.failure = null
@@ -745,7 +723,7 @@ function adoptProposal(body) {
   }
   state.candidates = []
   if (body?.outcome === 'empty') {
-    // The model answered and nothing fits: a stop, not a failure (§3).
+    // The model answered and nothing fits: a stop, not a failure.
     state.empty = true
     return state.candidates
   }
@@ -764,8 +742,7 @@ async function propose() {
 }
 
 // Page 2 of both families: the complete member for the chosen candidate, plus
-// page 3's verdict — the loader's words, the readiness pair, the install line,
-// the duplicate warning, the value form and the absolute path it belongs in.
+// everything page 3 prints.
 async function prepare() {
   const candidate = state.selected
   if (!candidate) return fail(FAILURE_NOTHING)
@@ -792,8 +769,7 @@ async function prepare() {
     return fail(failureSentence(FAILURE_NOTHING, body?.sentence))
   }
   // One shape whatever happened, so the dialog renders answers only: a prepared
-  // page and a refused one carry the same keys, and `offered` is the page's one
-  // verdict on presenting the snippet as trustworthy.
+  // page and a refused one carry the same keys.
   state.prepared = body
   state.empty = false
   return body
@@ -803,15 +779,15 @@ async function prepare() {
 // The walk
 // ---------------------------------------------------------------------------
 
-//: Opening the dialog: which family, which page, and the two reads the first
-//: page needs. Opening the MCP family runs **no model** — the catalogue is a
-//: committed file — while the LSP family's page 1 *is* the proposal, by design
-//: (§9: there is no LSP catalogue).
+//: Opening the dialog: which family, which page, and the two reads the first page
+//: needs. Opening the MCP family runs **no model** — the catalogue is a committed
+//: file — while the LSP family's page 1 *is* the proposal, because there is no LSP
+//: catalogue.
 export async function open(family, { agentMode = null } = {}) {
   if (!FAMILIES.includes(family)) return false
   // Opening the other panel's button while this dialog is up re-opens on the new
   // family and discards the unfinished walk: there is no server-side draft to
-  // lose, so there is nothing to ask about (§4).
+  // lose, so there is nothing to ask about.
   reset()
   state.open = true
   state.family = family
@@ -850,8 +826,8 @@ export function reset() {
 }
 
 //: Choosing a candidate. Only a row the list offered may become the choice, so a
-//: hand-written candidate has no state to live in (AC-18) — the wizard offers a
-//: curated or a reasoned list and never degrades into the editor it replaces.
+//: hand-written candidate has no state to live in — the wizard offers a curated
+//: or a reasoned list and never degrades into the editor it replaces.
 export function select(candidate) {
   const id = candidate?.id
   if (!id) return null
@@ -896,7 +872,7 @@ export async function retry() {
 
 //: Copying the member. The only action in the feature that changes anything, and
 //: it changes only the clipboard; the confirmation appears only after the app's
-//: own helper answered (§7, AC-10).
+//: own helper answered.
 export async function copySnippet() {
   const text = snippet()
   if (!text) return false

@@ -1,24 +1,20 @@
 <script setup>
-// The two focalisation controls of the chat screen, in a third flex item of
-// `.chat-shell` between the two columns (spec §3). Presentational by design:
-// the state is `useChatLayout`'s (D1), read here as props and changed only by
-// the two setters the parent wires to wf-01's toggles — this component decides
-// nothing about the transition.
+// The chat screen's focalisation controls, in a third flex item of `.chat-shell`
+// between the two columns. Presentational by design: the state is
+// `useChatLayout`'s, read here as props and changed only by the two setters the
+// parent wires — this component decides nothing about the transition.
 //
 // It is never hidden by a state and never by `v-if` either: the gutter is the
 // one surface all three focalisations keep, so it is where the way back always
-// lives. Focus control on top, hide control below — the user's sketch, and the
-// frequent gesture is the upper one.
+// lives. Focus control on top, hide control below — the frequent gesture is the
+// upper one.
 //
 // All three marks are glyphs of one generated face, "JetBrains Mono Nerd Icons
-// UI" — the same generated unit as the tree's file icons: the code points are
+// UI", the same generated unit as the tree's file icons: the code points are
 // named by the `UI_GLYPHS` table in tools/nerd_icons.py, which subsets the woff2
-// and writes the face's `unicode-range`, so a code point that table does not
-// name would render a tofu box and the test suite says so. The face rides this
-// chunk as it does in WorkspaceNavigator.vue: the @font-face is
-// unicode-range-gated to private-use code points, so nothing is fetched until a
-// glyph of this strip asks for it, and nothing here changes how the labels read.
-// No size animation anywhere — the target must not move under the cursor.
+// and writes the face's `unicode-range`. The @font-face is unicode-range-gated to
+// private-use code points, so nothing is fetched until a glyph of this strip asks
+// for it. No size animation anywhere — the target must not move under the cursor.
 
 import { FOCUS_REASONING } from '../composables/useChatLayout'
 import { useChat } from '../composables/useChat'
@@ -33,7 +29,7 @@ import '../fonts/nerd-fonts.css'
 //
 //   fa-expand / fa-compress   the focus control: "this surface can be
 //       maximised" at rest, "give the column back" once it owns the screen
-//       (restore never reuses the maximise motif, D11).
+//       (restore never reuses the maximise motif).
 //   fa-chevron_left / _right  the hide control, pointing at where the column
 //       goes: left folds it out of the row, right brings it back.
 //   fa-eye / fa-eye_slash     the Live View of the reasoning timeline: the
@@ -55,9 +51,8 @@ defineProps({
 
 const emit = defineEmits(['toggle-focus', 'toggle-left-hidden'])
 
-// The Live View's state is useChat's and so is its switch: this component only
-// draws the third control of the strip and reads the busy rule that locks it
-// (the same one every other inert control here answers to).
+// The Live View's state and its switch are useChat's: this component only draws
+// the control and reads the busy rule that locks it.
 const { chatBusy, toggleLiveView, state: chat } = useChat()
 </script>
 
@@ -80,8 +75,7 @@ const { chatBusy, toggleLiveView, state: chat } = useChat()
       @click="emit('toggle-focus')"
     >
       <!-- One glyph per state of the same control, so the mark cannot move: the
-           box is the button's and only the character in it changes. Expand at
-           rest, compress once the reasoning owns the screen (D11). -->
+           box is the button's and only the character in it changes. -->
       <span
         class="chat-gutter-mark"
         aria-hidden="true"
@@ -103,21 +97,18 @@ const { chatBusy, toggleLiveView, state: chat } = useChat()
         aria-hidden="true"
       >{{ leftHidden ? MARK_SHOW : MARK_HIDE }}</span>
     </button>
-    <!-- The Live View of the reasoning timeline (spec §3.1: under the two
-         controls, same column, same 28px target — the third control of the
-         same strip, and no strip of its own, because a pruned history must
-         never take the switch away from the screen). It is inert, like the
-         spec's lock: `useChat.toggleLiveView` answers to the composable's own
-         busy rule and the button is disabled beside it, so a reply cannot
-         change the mode mid-stream and the DOM cannot be pruned under the
-         reader's eyes.
+    <!-- The Live View of the reasoning timeline: the third control of the same
+         strip and no strip of its own, because a pruned history must never take
+         the switch away from the screen. It is inert:
+         `useChat.toggleLiveView` answers to the composable's own busy rule and
+         the button is disabled beside it, so a reply cannot change the mode
+         mid-stream and the DOM cannot be pruned under the reader's eyes.
 
-         The glyph is the state, so it is the one thing that says anything: the
-         slashed — closed — eye while the mode keeps only what the panel can
-         hold (the default), an open eye once the whole history is back on
-         screen. Nothing else is drawn about the mode: no count of what
-         scrolled off, because a number that moves with every painted frame
-         restyles the column's edge. -->
+         The glyph is the state: the slashed — closed — eye while the mode keeps
+         only what the panel can hold (the default), an open eye once the whole
+         history is back on screen. No count of what scrolled off is drawn,
+         because a number that moves with every painted frame restyles the
+         column's edge. -->
     <button
       type="button"
       class="chat-gutter-btn"

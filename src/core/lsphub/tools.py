@@ -1,16 +1,14 @@
 """Tool catalogue: the LSP requests the hub can expose as LLM tools.
 
-Kept apart from the manager so the catalogue (and the wording the model
-reads) can be reviewed on its own, and so ``tools_for_server`` can be unit
-tested without a live server.
+Kept apart from the manager so ``tools_for_server`` is unit-testable without
+a live server.
 """
 
 from typing import Any, Dict, List, Optional
 
 #: ``path``/``line``/``character`` keep the LSP convention (zero-based,
-#: character = UTF-16 code unit) and the descriptions say so, because models
-#: otherwise invent one-based offsets and blame the server. Text *output*
-#: carries 1-based line/column for readability — the asymmetry is stated too.
+#: character = UTF-16 code unit); models otherwise invent one-based offsets and
+#: blame the server. Text *output* is 1-based, and the asymmetry is stated too.
 _PATH_PROPERTY = {
     "type": "string",
     "description": "File path, relative to the server's workspace root.",
@@ -38,9 +36,8 @@ _PATH_ONLY_SCHEMA = {
     "required": ["path"],
 }
 
-#: action -> LSP capability attribute, request method, argument schema, and
-#: the description the model reads. A capability the server does not
-#: advertise never becomes a tool.
+#: action -> LSP capability attribute, request method, argument schema, and the
+#: description the model reads. An unadvertised capability never becomes a tool.
 TOOL_SPECS: Dict[str, Dict[str, Any]] = {
     "diagnostics": {
         "capability": None,  # push notification (or 3.17 pull), always offered
@@ -159,9 +156,9 @@ def tools_for_server(
 ) -> List[Dict[str, Any]]:
     """OpenAI function-calling defs for one server, intersected with its caps.
 
-    ``capabilities`` is the server's ``initialize`` ``ServerCapabilities``,
-    or ``None`` before the handshake (then only the declared ``tools`` list
-    is consulted). Names are ``lsp_<serverId>_<action>``.
+    ``capabilities`` is the server's ``initialize`` ``ServerCapabilities``, or
+    ``None`` before the handshake (then only the declared ``tools`` list is
+    consulted).
     """
     declared = server.get("tools")
     names = (

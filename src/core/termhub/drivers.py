@@ -1,24 +1,19 @@
 """The terminal driver seam: which driver can this app actually run right now?
 
-The session's pseudo-terminal sits behind one small named surface (C-D1).
-:mod:`termhub.pty_posix` is one half of it (landed by csl-03, behaviour-
-identical to the inline PTY it replaced) and :mod:`termhub.pty_conpty` the
-other (csl-06, the Windows pseudo-console, behind the ``windows`` extra). This
-module is the **selection** question in front of both —
-*"is a driver available?"* — and nothing else: no policy, no process, no
-frame, and it decides no platform by name.
+The session's pseudo-terminal sits behind one small named surface:
+:mod:`termhub.pty_posix` is one half of it and :mod:`termhub.pty_conpty` the
+other (the Windows pseudo-console, behind the ``windows`` extra). This module is
+the **selection** question in front of both — *"is a driver available?"* — and
+nothing else: no policy, no process, no frame.
 
-Roadmap §9 rule 2: *"Platform differences are selected by capability probes,
-not by ``sys.platform``, wherever a probe is possible … Where it is not
-possible (job objects, ConPTY), the difference sits behind one named seam,
-and the other platform's tests keep running unchanged."* That is what this
-is: the answer comes from trying what a driver needs — ``pty_posix`` is a
-driver exactly while its POSIX machinery imported, ``pty_conpty`` exactly
-while its module *and* its dependency import — never from ``os.name`` or
-``sys.platform``. On Linux the answer is ``pty_posix``; on a Windows box
-without the console driver installed the answer is "none", and the sentence
-the refusal says is :data:`termhub.constants.NO_DRIVER_MESSAGE` — written
-once, naming what was looked for.
+The answer comes from trying what a driver needs, never from ``os.name`` or
+``sys.platform``: ``pty_posix`` is a driver exactly while its POSIX machinery
+imported, ``pty_conpty`` exactly while its module *and* its dependency import.
+Where a probe is impossible the difference sits behind the one named seam, so the
+other platform's tests keep running unchanged. On a box without the console
+driver the answer is "none", and the refusal says
+:data:`termhub.constants.NO_DRIVER_MESSAGE` — written once, naming what was
+looked for.
 
 One branch is answered here too, because it is a property of the *pair* and not
 of a platform's name: :func:`pair_starts_the_child` — does the selected driver's
@@ -26,10 +21,10 @@ pair spawn the shell on itself (a pseudo-console *is* the child's stdio; there i
 no slave fd to hand a ``Popen``), or hand a slave over and let the session spawn?
 That keeps ``session.spawn()`` one code path that branches on a capability.
 
-:data:`termhub.constants.DRIVER_ABSENT_FORCED` is the seam's patch-point: a
-test forces the driver-absent answer through it, so the refusal is a *tested*
-behaviour on every platform (roadmap §9 rule 3), not a fallback that only
-exists where nobody can check it.
+:data:`termhub.constants.DRIVER_ABSENT_FORCED` is the seam's patch-point: a test
+forces the driver-absent answer through it, so the refusal is a *tested*
+behaviour on every platform, not a fallback that only exists where nobody can
+check it.
 """
 
 import importlib
@@ -45,7 +40,7 @@ WINDOWS_DRIVER_MODULE = "pty_conpty"
 
 
 class TerminalPty(Protocol):
-    """The pair a driver hands the session — csl-03's landed surface.
+    """The pair a driver hands the session.
 
     The driver answers byte ``read``/``write``, ``set_size``/``get_size``,
     the two closes, and *"is the far end gone?"* (its ``read`` raises the
@@ -109,7 +104,7 @@ def _windows_driver() -> Optional[TerminalDriver]:
 
     A module that does not answer the seam's availability question is not a
     driver, so this refuses rather than raising: a refusal is the tested
-    behaviour, a crash is not (roadmap §9 rule 3).
+    behaviour, a crash is not.
     """
     try:
         module = importlib.import_module(f".{WINDOWS_DRIVER_MODULE}", __package__)

@@ -5,21 +5,16 @@ bullets — one row a colour and a prompt the user reaches for often. This modul
 whole read and write side of that table **as the rest of the app speaks it**: the
 constants the routes validate against, and the four calls a route wraps. It
 writes no SQL and opens no file — :mod:`src.core.appdb` owns the store and is the
-only module that speaks SQL (spec §4.1) — and it talks to no route, no model and
-no browser.
+only module that speaks SQL — and it talks to no route, no model and no browser.
 
-There is **no count rule** (§4.5). The file this replaces held exactly nine slots
-and answered anything else as an error, because the app was that file's only
-writer and a wrong count meant corruption. In a table a row is a bullet: adding
-and deleting are the normal operations, the count is simply the count, and the
-"exactly nine" check and its error type are deleted rather than relaxed. What a
-**created** store starts with — nine empty gray rows, so a first boot looks
-exactly as it did — is the seeder's business (§4.3), not this module's.
+There is **no count rule**: a row is a bullet, so adding and deleting are the
+normal operations and the count is simply the count. What a **created** store
+starts with — nine empty gray rows, so a first boot looks exactly as it did — is
+the seeder's business, not this module's.
 
 The rows are install-scoped, like the rest of the store: a bullet is a habit of
 the user rather than of one tree, so a working-location switch changes nothing
-here (D11). The per-workspace file, its seeder, its state reader and the one-time
-lift from the even older app-level file are all gone with it.
+here.
 """
 
 import re
@@ -41,9 +36,9 @@ DEFAULT_COLOR = "#808080"
 CONTENT_MAX_CHARS = 32000
 
 #: What counts as a colour: a 6-digit hex triplet. The request model refuses
-#: anything else with a message naming the field, because "a database column does
-#: not make a bad value less bad" (§4.5): the store never holds a colour CSS
-#: would reject, and no reader has to defend against one.
+#: anything else with a message naming the field, because a database column does
+#: not make a bad value less bad: the store never holds a colour CSS would
+#: reject, and no reader has to defend against one.
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 #: The one failure every call here can raise: the store could not be opened,
@@ -59,13 +54,11 @@ def load_prompt_helpers() -> List[Dict[str, Any]]:
     """Every bullet the store holds, in insertion order.
 
     ``[{id, color, content}]``, at **any** count — including zero, which is the
-    answer for a user who deleted every bullet and stands (§4.5). The ``id`` is
-    what the writes below address a bullet by: once the count is the user's
-    business there is no slot index to use.
+    answer for a user who deleted every bullet. The ``id`` is what the writes
+    below address a bullet by: there is no slot index to use.
 
     Raises :data:`AppStoreError` naming the path when the store cannot be read.
-    An unusable store is a named state, never nine empty bullets — the same rule
-    the file reader held for the file it replaces.
+    An unusable store is a named state, never nine empty bullets.
     """
     return appdb.load_prompt_helpers()
 
@@ -75,8 +68,7 @@ def payload() -> Dict[str, Any]:
 
     ``{"slots": [...], "caps": {"contentMaxChars": int, "defaultColor": str}}``.
     The caps ride with the rows so the dialog enforces the server's numbers
-    rather than a mirrored copy of them — the client has never been allowed to
-    know a count, and it does not learn one here either.
+    rather than a mirrored copy of them.
     """
     return {
         "slots": load_prompt_helpers(),
@@ -101,10 +93,10 @@ def save_prompt_helper(
 ) -> Optional[List[Dict[str, Any]]]:
     """Rewrite one bullet; answers the whole list, or ``None`` for no such row.
 
-    Saving empty ``content`` clears the bullet and keeps its colour, as it did
-    with the file. ``None`` means the id named no row — the browser was holding
-    an older list — which the route answers with the list it now has rather than
-    by pretending a write landed.
+    Saving empty ``content`` clears the bullet and keeps its colour. ``None``
+    means the id named no row — the browser was holding an older list — which the
+    route answers with the list it now has rather than by pretending a write
+    landed.
     """
     return appdb.update_prompt_helper(helper_id, color, content)
 
@@ -112,7 +104,7 @@ def save_prompt_helper(
 def delete_prompt_helper(
     helper_id: int,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Remove one bullet, after D12's copy of the whole store.
+    """Remove one bullet, after a copy of the whole store.
 
     The copy is the store's own rule, kept in :mod:`src.core.appdb` so every
     destructive write of the database shares one helper, one folder and one

@@ -1,10 +1,9 @@
 import katex from 'katex'
 
-// marked-katex-extension only understands $ and $$ delimiters. LLMs frequently
-// emit LaTeX with \[ ... \] (display) and \( ... \) (inline) instead, which
-// plain markdown renders as escaped brackets eating the backslashes. This
-// companion extension teaches marked those delimiters too. Unclosed
-// delimiters (mid-stream) simply never match and stay raw text.
+// marked-katex-extension only understands $ and $$. Models often emit LaTeX
+// with \[ ... \] (display) and \( ... \) (inline) instead, which markdown
+// renders as escaped brackets eating the backslashes; teach marked those too.
+// Unclosed delimiters (mid-stream) never match and stay raw text.
 const blockRule = /^ {0,3}\\\[(((?:[^\n]|\n(?!\s*\n))+?))\\\][ \t]*(?:\n|$)/
 const inlineParenRule = /^\\\(((?:\\.|[^\\])+?)\\\)/
 const inlineBracketRule = /^\\\[(((?:\\.|[^\]])+?))\\\]/

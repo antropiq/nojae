@@ -7,8 +7,7 @@ import { fileIcon } from '../lib/file-icons'
 
 // One row of the workspace tree, recursive: a directory renders its own row
 // plus, when expanded, one item per entry of its cached listing. No tree
-// library — the keyboard model and the ARIA attributes stay ours (the same
-// reasoning as TabNav.vue's hand-written tablist).
+// library — the keyboard model and the ARIA attributes stay ours.
 const props = defineProps({
   entry: { type: Object, required: true },
   // Position within the parent's listing, for aria-posinset/aria-setsize.
@@ -25,12 +24,11 @@ const expanded = computed(() => !!state.expanded[path.value])
 const focused = computed(() => state.focused === path.value)
 const selected = computed(() => state.selected?.path === path.value)
 // A row of the batch. The marks are composable state (the navigator sits in a
-// `v-show` view and the write flow reads them without going through a
-// component), so this row only ever *reads* them.
+// `v-show` view), so this row only ever *reads* them.
 const marked = computed(() => state.marked.includes(path.value))
 // aria-selected reports the batch when there is one — a multi-selectable
 // `role="tree"` has to announce its selected set — and the pane's file
-// otherwise, which is what it means today.
+// otherwise.
 const ariaSelected = computed(() => (state.marked.length ? marked.value : selected.value))
 const node = computed(() => state.nodes[path.value] ?? null)
 const loading = computed(() => !!node.value?.loading)
@@ -48,10 +46,9 @@ const icon = computed(() =>
   fileIcon(props.entry.name, { dir: isDir.value, open: expanded.value }),
 )
 
-// The unstaged marker: a dot after the name, in git's own colours — amber for
-// a modification, green for a file that is not tracked yet. A folder carries
-// one when *anything below* it is unstaged, so a collapsed branch still hints
-// at what it hides; that mark has no kind of its own.
+// The unstaged marker: a dot after the name, in git's own colours. A folder
+// carries one when *anything below* it is unstaged, so a collapsed branch still
+// hints at what it hides; that mark has no kind of its own.
 //
 // The row's `title` already says the path, so the marker's meaning goes in the
 // `title` of its own span (which wins on hover), and a screen reader gets the
@@ -71,8 +68,7 @@ const MARK_LABEL = {
   below: 'contains modified or untracked files',
 }
 const markTitle = computed(() => MARK_LABEL[markKind.value] || '')
-// The class carries the colour by kind, so CSS decides what git's colours are
-// in each theme rather than a literal here.
+// The class carries the colour by kind, so CSS decides the colours per theme.
 const markClass = computed(() => (markKind.value ? `tree-mark--${markKind.value}` : ''))
 
 function humanSize(bytes) {
@@ -90,8 +86,8 @@ function onFocus() {
 <template>
   <!-- The click event travels to `select`, which is where a `Ctrl`/`Cmd` or
        `Shift` gesture becomes a mark: without that pass-through the whole batch
-       gesture is dead (`select(entry)` used to be called with no event at all).
-       A comment cannot sit inside a tag's attribute list, so it sits here. -->
+       gesture is dead. A comment cannot sit inside a tag's attribute list, so it
+       sits here. -->
   <div
     class="tree-row"
     :class="[
@@ -123,8 +119,7 @@ function onFocus() {
     <span class="tree-name">{{ entry.name }}</span>
     <!-- The unstaged marker: a dot whose colour carries the kind. It follows
          the name (the name is what needs qualifying) and never shrinks, so a
-         long ellipsised label cannot hide it — unlike the chip's dirty dot,
-         which sits first for the same reason. -->
+         long ellipsised label cannot hide it. -->
     <span
       v-if="markKind"
       class="tree-mark"
@@ -144,10 +139,10 @@ function onFocus() {
       :index="childIndex"
       :setsize="children.length"
     />
-    <!-- The inline name input, when this folder is the listing it belongs to:
-         for a create that is the folder being named into, and for a rename it is
-         the folder that currently shows the row (a rename that types a path may
-         end up elsewhere, but the *input* stays where the row is). -->
+    <!-- The inline name input, when this folder is the listing it belongs to: for
+         a create that is the folder being named into, and for a rename the folder
+         that currently shows the row — a rename that types a path may end up
+         elsewhere, but the *input* stays where the row is. -->
     <TreeNameInput
       v-if="state.editing?.parent === path"
       :key="`${state.editing.mode}:${path}:${state.editing.path ?? ''}:${state.editing.isDir}`"

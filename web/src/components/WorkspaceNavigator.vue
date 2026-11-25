@@ -28,9 +28,8 @@ import '../fonts/nerd-fonts.css'
 //
 // The header names no workspace: the tree's own root row already carries the
 // folder's name (and its absolute path in its `title`). What sits there instead
-// is the code pane's mode badge — the tab strip to the right is a row that
-// shrinks as buffers pile up, and this status belongs to the pane, not to one
-// tab, so it is shown where there is always room for it.
+// is the code pane's mode badge — the tab strip to the right shrinks as buffers
+// pile up, and this status belongs to the pane, not to one tab.
 const {
   state,
   load,
@@ -60,10 +59,9 @@ onMounted(() => {
   git.load()
 })
 
-// Re-reading git is part of what the refresh button promises: the point of it
-// is that the working location moved on disk (the WorkBench, the terminal, or
-// an editor outside the app), and a file that changed there is exactly what
-// the user wants to see marked.
+// Re-reading git is part of what the refresh button promises: the working
+// location moved on disk, and a file that changed there is exactly what the
+// user wants to see marked.
 async function refreshAll() {
   await refresh()
   git.load({ force: true })
@@ -72,24 +70,22 @@ async function refreshAll() {
 // The same promise for one folder: the `r` chord and a folder row's "Refresh"
 // item. Both halves, because a re-listed row whose git marker is stale is only
 // half refreshed — and the marks are one query for the whole work tree, so one
-// folder's refresh costs exactly what the header button's costs.
+// folder's refresh costs what the header button's costs.
 async function refreshFolder(path) {
   await refreshBranch(path)
   git.load({ force: true })
 }
 
-// The tree names the key (useWorkspaceTree.handleKey); this owns the answer, for
-// the reason the create/delete/rename chords are registered elsewhere too: the
-// keyboard model belongs to the tree, the request belongs to whoever holds the
-// other state it touches — here, the git marks.
+// The tree names the key (useWorkspaceTree.handleKey); this owns the answer:
+// the keyboard model belongs to the tree, the request to whoever holds the other
+// state it touches — here, the git marks.
 registerRefreshChord((path) => refreshFolder(path))
 
 // The rows and their markers are worth something only if they are current, and
-// the moment they go stale is the moment the user was elsewhere: the WorkBench
-// agent, the terminal or an editor outside the app creates and moves files
-// while this tab is hidden. Coming back to the tab therefore performs the
-// refresh button's whole promise — re-list every open folder and re-read the
-// git marks — so a file the agent just wrote is on screen without a click.
+// they go stale while the user was elsewhere: the WorkBench agent, the terminal
+// or an editor outside the app creates and moves files while this tab is
+// hidden. Coming back therefore performs the refresh button's whole promise —
+// re-list every open folder and re-read the git marks.
 // (The view is `v-show`, so this watch is the only entry signal there is: the
 // component is mounted once and never again.)
 //
@@ -107,14 +103,12 @@ watch(
 )
 
 const refreshing = computed(() => !!state.nodes[ROOT]?.loading)
-// The collapse button has nothing to do while only the root is open, so it
-// says so instead of looking clickable.
+// Nothing to do while only the root is open, so the button says so.
 const canCollapse = computed(
   () => Object.keys(state.expanded).some((path) => path !== ROOT),
 )
-// The header's Search button follows the collapse button's shape: disabled when
-// there is nothing to act on. Its subject is the focused row, and `commandTarget()`
-// is a function that answers null when that row stopped existing — calling it from
+// Disabled when there is nothing to act on. Its subject is the focused row, and
+// `commandTarget()` answers null when that row stopped existing — calling it from
 // the template would re-evaluate it on every render, so it is a computed here.
 const canSearch = computed(() => commandTarget() !== null)
 const rootTitle = computed(
@@ -125,23 +119,22 @@ const rootTitle = computed(
 )
 // aria-level of the root row (its children are one deeper each).
 const rootLevel = computed(() => depthOf(ROOT) + 1)
-// The root is a folder like any other, so it carries the same glyph (open, as
-// it always is at the top) — without it the first level of children would not
-// line up under their parent's icon.
+// The root is a folder like any other, so it carries the same glyph — without it
+// the first level of children would not line up under their parent's icon.
 const rootIcon = computed(() => fileIcon('', { dir: true, open: !!state.expanded[ROOT] }))
 // The root row's hint: any unstaged file anywhere in the browsed subtree.
 const rootMarked = computed(() => git.state.entries.length > 0)
 // How many rows are in the batch. A row style in a scrolling tree is invisible
-// the moment the batch is long, so the count is said in words where there is
-// always room for it. It never reads `0 selected`: the line is not rendered
-// without marks.
+// once the batch is long, so the count is said in words where there is always
+// room for it. It never reads `0 selected`: the line is not rendered without
+// marks.
 const markCount = computed(() => state.marked.length)
 
 const tree = ref(null)
 
 // The roving tabindex decides which row is in the tab order; when a key moves
-// the focus, the *DOM* focus follows it, so the visible caret and what a
-// screen reader announces never lag behind the model. Rows carry their path in
+// the focus, the *DOM* focus follows it, so the visible caret and what a screen
+// reader announces never lag behind the model. Rows carry their path in
 // `data-path`, matched by identity here (a path may hold any character, so no
 // selector escaping is attempted).
 //
@@ -149,7 +142,7 @@ const tree = ref(null)
 // sees the keydowns of everything inside it, and the inline name input lives in
 // it: following the model after a key the input owned would throw the caret out
 // of the half-typed name on the first letter — and out of it before `Escape`
-// ever reached it, which is how a cancel appeared to do nothing.
+// reached it, which is how a cancel appeared to do nothing.
 async function onKeydown(event) {
   if (!handleKey(event)) return
   await nextTick()
@@ -158,8 +151,7 @@ async function onKeydown(event) {
 
 // The row the model considers focused, by `data-path` (see the note above about
 // paths needing no selector escaping). Returns false when no rendered row carries
-// it — which is what `revalidateFocus` exists to prevent, but a key can land
-// between a re-list and its revalidation.
+// it — a key can land between a re-list and its revalidation.
 function focusRow(path) {
   for (const candidate of tree.value?.querySelectorAll('.tree-row') ?? []) {
     if (candidate.dataset.path === path) {
@@ -175,8 +167,7 @@ function focusRow(path) {
 // opens collapsed branches and may leave the row outside the scroll viewport.
 // Scrolling it into view is all this does — calling `focus()` here would take
 // the caret away from the chip the user just clicked. `block: nearest` is a
-// no-op when the row is already on screen, so a click inside the tree never
-// shifts it.
+// no-op when the row is already on screen.
 async function scrollFocusedIntoView() {
   await nextTick()
   for (const candidate of tree.value?.querySelectorAll('.tree-row') ?? []) {
@@ -192,12 +183,11 @@ watch(() => state.focused, scrollFocusedIntoView)
 // -- context menu -----------------------------------------------------------
 //
 // One menu for the whole tree, owned here (not by each recursive row): a
-// right-click on any row bubbles its native `contextmenu` to the tree
-// container, which reads the row's `data-path` + `data-dir` off the event
-// target. **Every row kind gets one** — file, folder and the synthetic root —
-// and the items come from one ordered table (`lib/tree-menu`) rather than from
-// `v-if`s in the template, so the menu's contents and their order are data a
-// test can read, and a new item is one row of that table.
+// right-click on any row bubbles its native `contextmenu` to the tree container,
+// which reads the row's `data-path` + `data-dir` off the event target. Every row
+// kind gets one — file, folder and the synthetic root — and the items come from
+// one ordered table (`lib/tree-menu`) rather than from `v-if`s in the template,
+// so the menu's contents and their order are data a test can read.
 //
 // Which items apply is decided by the flags of the row, and an item is *absent*
 // rather than shown-disabled-and-lying:
@@ -207,21 +197,20 @@ watch(() => state.focused, scrollFocusedIntoView)
 //     folder (useEditorCreate); the refusal of a protected name is the server's
 //     and shows up in that row.
 //   * View diff… — only for a file git says it can compare, i.e. one with a
-//     committed side (`comparable`). An untracked or newly added file is marked
-//     in the tree but has nothing to diff *against*. The tab it opens lives in
-//     the same strip as the file tabs (useEditorFiles.openDiff).
+//     committed side. An untracked or newly added file is marked in the tree but
+//     has nothing to diff *against*. The tab it opens lives in the same strip as
+//     the file tabs (useEditorFiles.openDiff).
 //   * Open — a file row, and the same action as clicking it (`select`, which is
 //     what EditorArea watches), so the menu and a left-click are one flow.
 //   * Rename… / Delete — every row but the root. The root's row *is* the working
 //     location: the server refuses renaming or deleting it outright, and there
-//     is no listing above it to type a new name into — offering either would
-//     only invite the refusal. Delete only opens the confirmation
-//     (`useEditorFiles.requestDelete`); the trash move happens there, so this
-//     menu never destroys anything itself.
-//   * Move to… — a file row only, and with nothing behind it but that scope:
-//     a batch is files (R4), and whether the destination is allowed is the
-//     server's answer, not this menu's. The subject is `batchFor(row)` — the
-//     marks when they make a legal same-folder batch, otherwise that one row.
+//     is no listing above it to type a new name into. Delete only opens the
+//     confirmation (`useEditorFiles.requestDelete`); the trash move happens
+//     there, so this menu never destroys anything itself.
+//   * Move to… — a file row only, and with nothing behind it but that scope: a
+//     batch is files, and whether the destination is allowed is the server's
+//     answer, not this menu's. The subject is `batchFor(row)` — the marks when
+//     they make a legal same-folder batch, otherwise that one row.
 //   * Close — only when a tab already holds this file; the same action as the
 //     chip's × (`requestCloseTab` asks Save-and-close / Discard / Cancel for a
 //     dirty buffer, so this item cannot throw work away either).
@@ -243,7 +232,7 @@ const renamer = useEditorRename()
 // on the subject `batchFor` settles for the clicked row.
 const mover = useEditorMove()
 // Search raises the dialog (mounted at the end of this template) on the
-// navigator's own subject. The query, the scope and the results are the
+// navigator's own subject; the query, the scope and the results are the
 // composable's state, so this component only ever calls `openFor`.
 const search = useWorkspaceSearch()
 // `items` is the menu: the table's answer for the row that was clicked. Nothing
@@ -253,13 +242,12 @@ const search = useWorkspaceSearch()
 const menu = reactive({ open: false, x: 0, y: 0, items: [] })
 const menuEl = ref(null)
 
-// The row kind plus the facts about it that make an item honest. `dir` counts
-// the root as a folder (it is one); `mutable` is the root rule; the two "is
-// there something to show?" flags are read from the same state the rows are
-// drawn from, so a menu item cannot promise a tab or a diff that is not there.
-// The list is built once, when the menu opens: a menu is a snapshot of the
-// moment the pointer was put down, and an item appearing or vanishing under the
-// cursor mid-click is how a menu misfires.
+// The row kind plus the facts about it that make an item honest. The "is there
+// something to show?" flags are read from the same state the rows are drawn
+// from, so a menu item cannot promise a tab or a diff that is not there. The
+// list is built once, when the menu opens: a menu is a snapshot of the moment
+// the pointer was put down, and an item appearing or vanishing under the cursor
+// mid-click is how a menu misfires.
 function menuFlags(path, isDir) {
   const isRoot = path === ROOT
   return {
@@ -270,10 +258,9 @@ function menuFlags(path, isDir) {
     diffable: !isDir && !isRoot && git.isDiffable(path),
     hasBuffer: !isDir && !isRoot && !!files.recordFor(path),
     trashRetentionDays: TRASH_RETENTION_DAYS,
-    // How many rows a Move on this row would cover — the batch as `batchFor`
-    // settles it, so it is 1 for an unmarked file and the mark count only when
-    // the marks form a legal same-parent batch including this row. A count of
-    // rows for the hint text, nothing more: it never gates the item.
+    // How many rows a Move on this row would cover — 1 for an unmarked file, the
+    // mark count only when the marks form a legal same-parent batch including
+    // this row. For the hint text, nothing more: it never gates the item.
     moveCount: batchFor(path).paths.length,
   }
 }
@@ -281,8 +268,7 @@ function menuFlags(path, isDir) {
 function openMenu(event) {
   const row = event.target.closest?.('.tree-row')
   if (!row) return
-  // `data-path` is empty for the root row, so presence is tested on the
-  // attribute, not on the value.
+  // `data-path` is empty for the root row, so presence is tested, not value.
   const path = row.dataset.path
   if (path === undefined) return
   const items = treeMenuItems(menuFlags(path, row.dataset.dir === 'true'))
@@ -290,8 +276,7 @@ function openMenu(event) {
   event.preventDefault()
   closeMenu()
   // The row becomes the tree's subject *before* the menu opens, so the mouse and
-  // the keyboard agree about "this row" from the moment of the right-click: the
-  // chords answer about `commandTarget()`, and so does every item below.
+  // the keyboard agree about "this row" from the moment of the right-click.
   state.focused = path
   menu.x = event.clientX
   menu.y = event.clientY
@@ -317,9 +302,9 @@ function closeMenu() {
   menu.items = []
 }
 
-// Each item, keyed by its table id. Every one of them acts on `commandTarget()`
-// — the focused row, which `openMenu` just set to the row that was clicked — so
-// the menu has no private idea of what "this file" means.
+// Each item, keyed by its table id. Every one acts on `commandTarget()` — the
+// focused row, which `openMenu` just set to the clicked row — so the menu has no
+// private idea of what "this file" means.
 const MENU_ACTIONS = {
   // The click's own flow: publish the row as the tree's selection, which is what
   // EditorArea watches to open a buffer. A refused open (binary, over the cap)
@@ -332,23 +317,22 @@ const MENU_ACTIONS = {
   'new-file': (target) => creator.startCreate(target.path, false),
   'new-folder': (target) => creator.startCreate(target.path, true),
   'view-diff': (target) => files.openDiff(target.path),
-  // Preview goes directly to the flow, like `view-diff` and unlike `open`:
+  // Preview goes straight to the flow, like `view-diff` and unlike `open`:
   // publishing a tree selection would make EditorArea's watcher open the Monaco
-  // buffer *beside* the preview tab. So `useWorkspaceTree` needs no new field.
+  // buffer *beside* the preview tab.
   preview: (target) => files.openPreview(target.path),
   // Rename asks for a name; it does not move anything. The inline input opens in
   // the folder that shows the row, prefilled, and the move happens only when
   // that input is submitted — the same one-gesture-never-decides shape as the
-  // delete item, one level milder.
+  // delete item.
   rename: (target) => renamer.startRename(target.path),
   // Move to… hands over the batch `batchFor` settles for *this* row — resolved
-  // here, once, because by the time the item is clicked the marks may have moved,
-  // and `startMove` copies the list in at once. A plain right-click with no marks
-  // is the N=1 case of the same call.
+  // here, once, because by the time the item is clicked the marks may have moved.
+  // A plain right-click with no marks is the N=1 case of the same call.
   'move-batch': (target) => mover.startMove(batchFor(target.path)),
   // Delete asks, it does not delete: `requestDelete` raises the confirmation with
-  // the row, and the tree's re-list happens when the move lands. The row travels
-  // (name + kind) because that is what the user looked at.
+  // the row (name + kind, what the user looked at), and the tree's re-list
+  // happens when the move lands.
   delete: (target) => files.requestDelete(entryFor(target.path) ?? target),
   close: (target) => files.closeFile(target.path),
   refresh: (target) => refreshFolder(target.path),
@@ -363,8 +347,8 @@ function runMenuItem(id) {
 }
 
 async function copyMenuPath(target) {
-  // The root row has no relative path to copy — the only thing a reader can act
-  // on there is the workspace's own absolute path.
+  // The root row has no relative path to copy; the workspace's own absolute path
+  // is the only thing a reader can act on there.
   const value = target.path === ROOT ? state.workspace : target.path
   if (value) {
     try {
@@ -430,8 +414,7 @@ onBeforeUnmount(() => {
           </svg>
         </button>
         <!-- Close every opened branch at once. Distinct from the root row's own
-             chevron: this one leaves the root open and its listing cached, so
-             nothing is re-fetched on the way back down. -->
+             chevron: this one leaves the root open and its listing cached. -->
         <button
           class="icon-btn editor-nav-collapse"
           type="button"
@@ -446,11 +429,10 @@ onBeforeUnmount(() => {
           </svg>
         </button>
         <!-- Search, the same command as the menu item, on the row the tree is
-             about (§2.9). It is here rather than beside the tab strip because the
-             dialog's scope label needs the navigator's own subject, and this
-             button and `<SearchDialog />` below are the same pair for the same
-             reason. Enabled only when a row is focused — with no subject the
-             command declines, so the button says so first. -->
+             about. It is here rather than beside the tab strip because the
+             dialog's scope label needs the navigator's own subject. Enabled only
+             when a row is focused — with no subject the command declines, so the
+             button says so first. -->
         <button
           class="icon-btn editor-nav-search"
           type="button"
@@ -482,8 +464,7 @@ onBeforeUnmount(() => {
     >
       <!-- The root row is a folder like any other, so its click goes through
            `select` — the same toggle a folder row's click makes, plus the
-           housekeeping a plain click owes the batch (the marks go with any plain
-           click, and this is a click like any other). The event travels for the
+           housekeeping a plain click owes the batch. The event travels for the
            same reason WorkspaceTreeItem passes it: a gesture that never reaches
            the composable is a gesture that does not happen. -->
       <div
@@ -529,15 +510,13 @@ onBeforeUnmount(() => {
         />
         <!-- The name input, in the listing it belongs to — for the root, here;
              for a folder, in its own group (WorkspaceTreeItem). Keyed by mode,
-             folder and row so a second New… or Rename… elsewhere re-mounts and
-             re-focuses it. -->
+             folder and row so a New… or Rename… elsewhere re-mounts it. -->
         <TreeNameInput
           v-if="state.editing?.parent === ROOT"
           :key="`${state.editing.mode}:${ROOT}:${state.editing.path ?? ''}:${state.editing.isDir}`"
         />
-        <!-- The tab's own folder, by name: the payload at the root row's
-             `title` is the absolute path, and a bare "the working location" here
-             would leave a reader unable to tell which folder they are in. -->
+        <!-- The empty state names the tab's own folder: a bare "the working
+             location" would leave a reader unable to tell which folder it is. -->
         <p v-if="!state.nodes[ROOT]?.loading && !(state.nodes[ROOT]?.entries?.length) && !state.editing" class="caption editor-nav-empty">
           {{ rootLabel() }} is empty.
         </p>
@@ -549,8 +528,8 @@ onBeforeUnmount(() => {
     </p>
     <!-- The batch, in words: a row style in a scrolling tree is invisible once
          the batch is long, so the count goes where there is always room for it.
-         `v-if` on the count, so it never says `0 selected`; it disappears with
-         the marks. Plain text — this pane renders no HTML it did not build. -->
+         `v-if` on the count, so it never says `0 selected`. Plain text — this
+         pane renders no HTML it did not build. -->
     <p v-if="markCount" class="caption editor-nav-selected" role="status">
       {{ markCount }} selected
     </p>
@@ -561,7 +540,7 @@ onBeforeUnmount(() => {
          cursor (clamped in openMenu). `@contextmenu.prevent` here stops a
          right-click *inside* the menu from re-opening it. The buttons are the
          table's answer for this row, in its order — `v-for`, never a `v-if` per
-         item, so what a row offers is one data question (`lib/tree-menu`). -->
+         item (`lib/tree-menu`). -->
     <Teleport to="body">
       <div
         v-if="menu.open"
@@ -587,9 +566,9 @@ onBeforeUnmount(() => {
     </Teleport>
 
     <!-- The search dialog, mounted beside the header button and the menu item
-         that raise it (§2.9): both hand over the same `commandTarget()`, and a
-         component mounted next to the state it reads is the only way the scope
-         label can name the navigator's own subject without reaching into another
+         that raise it: both hand over the same `commandTarget()`, and a component
+         mounted next to the state it reads is the only way the scope label can
+         name the navigator's own subject without reaching into another
          component. It is never removed from the DOM — the composable keeps its
          answer, and the dialog's own watch reconciles `showModal()` with
          `state.open`. -->

@@ -7,12 +7,12 @@ asked. This module holds those names and the three shapes (``Rule``,
 no I/O.
 
 Why it lives here rather than under ``src``: the two stdio connectors
-(``fedit_mcp``, ``console_mcp``) answer the same question as the Editor tab
-(pol-08) and they run as scripts launched by absolute path, so they cannot
-``import src.core`` — the wheel packages only ``src``. It is the same reason
+(``fedit_mcp``, ``console_mcp``) answer the same question as the Editor tab and
+they run as scripts launched by absolute path, so they cannot ``import
+src.core`` — the wheel packages only ``src``. It is the same reason
 :mod:`mcp_connectors.path_policy` sits outside the package, and the same rule
-applies to the matcher (pol-02, ``policy_glob``) and the parser (pol-04,
-``policy_file``): stdlib-only, never importing from ``src``.
+applies to the matcher (``policy_glob``) and the parser (``policy_file``):
+stdlib-only, never importing from ``src``.
 
 Two levels feed one verdict:
 
@@ -29,13 +29,13 @@ Strictness order is ``hidden`` > ``ro`` > ``rw``, and the levels are a **union**
 the strictest match anywhere wins, so a workspace rule can tighten what the app's
 rules say but can never loosen them.
 
-The merge and the sentence are here too, and that is not a convenience: pol-08
-has the two stdio connectors answer the same question as the Editor pane, and the
-acceptance condition is that both describe one rule *in the same words*. Two
-implementations of ``_winner`` or of the refusal text is how a pane and an agent
-start disagreeing about the same folder — so :func:`verdict_for`,
-:func:`refusal_message` and :func:`reserved_reason` exist once, and each surface
-wraps them in its own error type.
+The merge and the sentence are here too, and that is not a convenience: the two
+stdio connectors answer the same question as the Editor pane, and the condition
+is that both describe one rule *in the same words*. Two implementations of
+``_winner`` or of the refusal text is how a pane and an agent start disagreeing
+about the same folder — so :func:`verdict_for`, :func:`refusal_message` and
+:func:`reserved_reason` exist once, and each surface wraps them in its own error
+type.
 """
 
 from dataclasses import dataclass
@@ -48,9 +48,8 @@ READ_ONLY = "ro"
 READ_WRITE = "rw"
 MODES: frozenset[str] = frozenset({HIDDEN, READ_ONLY, READ_WRITE})
 
-# Strictness only: a match from any level wins over a looser one (D2). This is
-# not a precedence *between* levels — the levels are equals, their answers are
-# not.
+# Strictness only: a match from any level wins over a looser one. This is not a
+# precedence *between* levels — the levels are equals, their answers are not.
 MODE_RANK: dict[str, int] = {READ_WRITE: 0, READ_ONLY: 1, HIDDEN: 2}
 
 # How a mode is spelled to a human, in a sentence about one path.
@@ -67,14 +66,14 @@ LEVEL_WORKSPACE = "workspace"  # <root>/.nojae/read-write-policy.json
 LEVELS: frozenset[str] = frozenset({LEVEL_BUILTIN, LEVEL_WORKSPACE})
 
 # The level is named in every refusal because the two are fixed differently: a
-# workspace rule the user edits by hand, an app rule they cannot touch (pol-07
-# shows it as a note rather than an error for exactly that reason).
+# workspace rule the user edits by hand, an app rule they cannot touch (which is
+# why the UI shows it as a note rather than an error).
 LEVEL_LABELS: dict[str, str] = {
     LEVEL_BUILTIN: "nojae's own rules for this workspace",
     LEVEL_WORKSPACE: "the workspace policy",
 }
 
-# -- the reserved folder, reserved by code (D5) ---------------------------------
+# -- the reserved folder, reserved by code --------------------------------------
 
 # A rule about the folder that holds the rules is a contradiction, so this name
 # is not policy-configurable: it is absent from the tree, ``stat``, the read,
@@ -86,7 +85,7 @@ POLICY_DIRNAME = ".nojae"
 
 POLICY_FILENAME = "read-write-policy.json"
 
-# The ``version`` key a seeded file carries, and the only one pol-04 accepts.
+# The ``version`` key a seeded file carries, and the only one the parser accepts.
 POLICY_VERSION = 1
 
 
@@ -95,8 +94,8 @@ class Rule:
     """One rule as its level holds it, in enough shape to be *shown*.
 
     ``pattern`` is the rule text verbatim and ``index`` its position in that
-    level's list: the pair pol-07 renders in the UI and the pair every refusal
-    quotes, so the sentence a user reads and the line they would edit are the
+    level's list: the pair the UI renders and the pair every refusal quotes, so
+    the sentence a user reads and the line they would edit are the
     same object. ``index`` also breaks ties — rules are evaluated in file order
     and the later one wins, which is what lets a carve-out beat the folder rule
     it carves out of.
@@ -137,7 +136,7 @@ def verdict_for(rules: list["Rule"]) -> "Verdict":
        an exception out of the folder rule above it. Each level therefore
        contributes only its own last match, so a level's internal order cannot
        leak across the boundary.
-    3. **Between levels, the strictest answer wins** (D2).
+    3. **Between levels, the strictest answer wins.**
 
     On equal strictness the **built-in level is the one quoted**, because a
     refusal has to name the rule the reader *cannot* edit rather than their own
@@ -182,8 +181,8 @@ def _strictest(rules: list["Rule"]) -> "Rule":
 def reserved_reason(dirname: str = POLICY_DIRNAME) -> str:
     """Why the reserved folder is hidden, spelled with the name in use.
 
-    One sentence, because the pane, the write gate and (pol-08) the connectors
-    all refuse the same folder and must not paraphrase it three ways.
+    One sentence, because the pane, the write gate and the connectors all refuse
+    the same folder and must not paraphrase it three ways.
     """
     return (
         f"the {dirname} folder holds the workspace policy and "
@@ -237,8 +236,8 @@ def refusal_message(verdict: "Verdict", *, for_write: bool) -> str:
 # ``error`` and ``note`` are split by *who can fix it*, which is the only
 # distinction that changes what the app does with the finding:
 #
-# * an ``error`` means level B contributed nothing, and the app refuses writes
-#   until the file is fixed (pol-00 D4) — the policy meant to protect a folder
+# * an ``error`` means the workspace level contributed nothing, and the app
+#   refuses writes until the file is fixed — the policy meant to protect a folder
 #   demonstrably did not load, so answering as if there were no rules is the one
 #   option that is not acceptable;
 # * a ``note`` is about a rule that loaded fine but cannot take effect (a

@@ -1,14 +1,14 @@
 """The two call shapes, the error types, the verdict on a failure, the URL rules.
 
-The mechanism half of the package that speaks HTTP to a model endpoint
-(spec §4.3): one POST to ``{server_url}/chat/completions``, streaming or
-not. The tuning numbers it reads live in :mod:`llmkit.constants`; the SSE
-frames are decoded by :mod:`llmkit.sse`. Like everything under ``core/`` it
-imports no FastAPI, emits no events and never reads ``.env``: the caller
-passes ``model`` / ``server_url`` / ``api_key`` / ``sampling`` in, exactly as
-it passed them to the call this package replaces.
+The mechanism half of the package that speaks HTTP to a model endpoint: one
+POST to ``{server_url}/chat/completions``, streaming or not. The tuning
+numbers it reads live in :mod:`llmkit.constants`; the SSE frames are decoded
+by :mod:`llmkit.sse`. Like everything under ``core/`` it imports no FastAPI,
+emits no events and never reads ``.env``: the caller passes ``model`` /
+``server_url`` / ``api_key`` / ``sampling`` in, exactly as it passed them to
+the call this package replaces.
 
-Three invariants hold here and nowhere else may they bend (spec §2.1):
+Three invariants hold here and nowhere else may they bend:
 
 * the ``sampling`` dict is merged into the request body **verbatim** --
   ``top_k``, ``min_p`` and ``repeat_penalty`` are llama.cpp sampler names,
@@ -16,13 +16,13 @@ Three invariants hold here and nowhere else may they bend (spec §2.1):
   model's sampling;
 * the model name travels **bare** -- no provider prefix is ever prepended,
   because ``openai/qwen3.8-...`` reaches llama-swap as a 404;
-* the ``messages`` are **sanitized** on the way out
-  (:mod:`llmkit.sanitize`) -- a conversation can never smuggle a
-  delimiter-wrapped control-token run into the prompt, and no caller can
-  skip the pass because both call shapes make it here.
+* the ``messages`` are **sanitized** on the way out (:mod:`llmkit.sanitize`)
+  -- a conversation can never smuggle a delimiter-wrapped control-token run
+  into the prompt, and no caller can skip the pass because both call shapes
+  make it here.
 
-One ``httpx.Client`` per call, owned and closed by the returned stream
-(D11): nothing in here holds a reference across requests.
+One ``httpx.Client`` per call, owned and closed by the returned stream:
+nothing in here holds a reference across requests.
 """
 
 import json
@@ -39,12 +39,12 @@ logger = logging.getLogger(constants.DEBUG_LOGGER_NAME)
 
 
 def debug_enabled() -> bool:
-    """Whether the request payload is logged at DEBUG (the payload half of D8).
+    """Whether the request payload is logged at DEBUG.
 
     A module-level hook, off by default: the debug switch itself lives in
-    ``config`` (the ``--llm-debug`` boot flag), which is a layer this core
-    package must not import. The debug owner re-points this callable at its own
-    predicate; the failed-call diagnosis itself does not wait for it -- it is in
+    ``config`` (the ``--llm-debug`` boot flag), a layer this core package must
+    not import. The debug owner re-points this callable at its own predicate;
+    the failed-call diagnosis itself does not wait for it -- it is in
     :meth:`LLMRequestError.__str__`, visible with the flag off.
     """
     return False
@@ -53,12 +53,11 @@ def debug_enabled() -> bool:
 class LLMRequestError(Exception):
     """A call the server refused with a non-2xx answer.
 
-    Carries the status, the upstream message and the URL. ``str()`` names
-    both the status and the upstream message (D8): both consuming loops do
-    ``except Exception as exc`` and emit ``str(exc)`` straight into the UI's
-    error line, so the message is the surface that matters, and it must be
-    complete with the debug flag off. The debug flag only adds the request
-    payload on top.
+    Carries the status, the upstream message and the URL. ``str()`` names both
+    the status and the upstream message: both consuming loops do ``except
+    Exception as exc`` and emit ``str(exc)`` straight into the UI's error
+    line, so the message must be complete with the debug flag off; that flag
+    only adds the request payload on top.
     """
 
     def __init__(self, status: int, message: str, url: str) -> None:
@@ -70,12 +69,12 @@ class LLMRequestError(Exception):
         )
 
 
-# The statuses that answer *try again* (spec §3): a gateway that could not
-# reach its own upstream, a rate limit, a request the server gave up on in
-# time. The set is a **positive list**: a status outside it is a diagnosis,
-# not a blip, and waiting on one would turn a one-second error line into a
-# silent stall (spec §5.2, D1). A provider inventing a new code tomorrow is
-# therefore final until someone decides otherwise here.
+# The statuses that answer *try again*: a gateway that could not reach its own
+# upstream, a rate limit, a request the server gave up on in time. The set is a
+# **positive list**: a status outside it is a diagnosis, not a blip, and
+# waiting on one would turn a one-second error line into a silent stall. A
+# provider inventing a new code tomorrow is therefore final until someone
+# decides otherwise here.
 TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
@@ -88,18 +87,18 @@ def another_attempt_may_help(exc: BaseException) -> bool:
     *type*. Nothing outside this package may grow an opinion about an HTTP
     status (one LLM layer).
 
-    Two rules, and both are rules rather than a list of reasons:
+    Two rules:
 
     * **A refused call is retryable only for a status in
       :data:`TRANSIENT_STATUSES`.** Every other status is final -- notably
       ``400``, ``401``, ``403``, ``404`` and ``422``, which say the request
       itself is wrong: a revoked key or a renamed model must never be waited
-      on (spec §5.2).
+      on.
     * **Anything not in the retryable set is final.** The set is written out
       positively, so an unrecognised exception -- a ``RuntimeError`` from a
       bug, a ``ValueError``, a cancellation -- answers ``False`` and today's
-      error path runs (spec §5.3, D1: a feature that retries by default would
-      eventually retry a bug).
+      error path runs: a feature that retries by default would eventually
+      retry a bug.
 
     **The transport half is the whole ``httpx.TransportError`` subtree**, and
     the reason is the call shape: :func:`stream_completion` sends the request
@@ -107,20 +106,16 @@ def another_attempt_may_help(exc: BaseException) -> bool:
     wrong **before the response head arrives** raises out of the call itself --
     a refused or unresolvable host (``ConnectError``, ``NetworkError``), a
     deadline that expires in connect / write / pool (``ConnectTimeout``,
-    ``WriteTimeout``, ``PoolTimeout``, all ``TimeoutException``), a stalled
-    read (``ReadTimeout``, which is both a ``TimeoutException`` and a
-    ``ReadError``), and a socket or TLS break (``ProtocolError`` and its
-    children). Every one of those is a ``TransportError`` subclass, so naming
-    the base covers the connect/read failures spec §3 lists without
-    enumerating leaves -- and nothing else the call can raise is one:
-    ``InvalidURL``, a decoding failure and a cancellation are not
-    ``TransportError``, so they stay final.
+    ``WriteTimeout``, ``PoolTimeout``), a stalled read (``ReadTimeout``), and a
+    socket or TLS break (``ProtocolError`` and its children). Naming the base
+    covers all of them without enumerating leaves -- and nothing else the call
+    can raise is one: ``InvalidURL``, a decoding failure and a cancellation are
+    not ``TransportError``, so they stay final.
 
     Covering the subtree cannot reach a **mid-stream** failure: that one is
-    raised while the caller iterates the returned :class:`ChatStream`, not
-    from the call, and spec §5.4/D2 keeps both shapes of a cut stream on
-    today's path. Whoever asks this question asks it about the exception the
-    *call* raised.
+    raised while the caller iterates the returned :class:`ChatStream`, not from
+    the call. Whoever asks this question asks it about the exception the *call*
+    raised.
     """
     if isinstance(exc, LLMRequestError):
         return exc.status in TRANSIENT_STATUSES
@@ -131,8 +126,8 @@ def _v1_base(server_url: str) -> str:
     """The ``/v1`` root of a server URL, appended when it is not there yet.
 
     ``SERVER_URL`` usually already ends in ``/v1`` (it is the historical
-    ``api_base``); a bare host gets it added. One rule for both URL shapes
-    (D9), so the two builders below cannot drift.
+    ``api_base``); a bare host gets it added. One rule for both builders below,
+    so the two cannot drift.
     """
     url = server_url.strip().rstrip("/")
     if url.endswith("/v1"):
@@ -151,11 +146,11 @@ def models_url(server_url: str) -> str:
 
 
 def _timeout() -> httpx.Timeout:
-    """The D10 timeout, read through ``constants`` at call time.
+    """The client timeout, read through ``constants`` at call time.
 
-    A short connect timeout (a dead endpoint fails fast) and no read
-    deadline: a slow model load must stay a slow first token, never surface
-    as a truncated answer.
+    A short connect timeout (a dead endpoint fails fast) and no read deadline:
+    a slow model load must stay a slow first token, never surface as a
+    truncated answer.
     """
     return httpx.Timeout(
         constants.CONNECT_TIMEOUT,
@@ -168,8 +163,8 @@ def _timeout() -> httpx.Timeout:
 def _headers(api_key: str) -> Dict[str, str]:
     """The bearer header, sent even when the key is the placeholder.
 
-    That is what the endpoint sees today and it accepts it (spec §2.1). The
-    key never reaches a log line from here.
+    That is what the endpoint sees and accepts. The key never reaches a log
+    line from here.
     """
     key = (api_key or "").strip() or constants.API_KEY_PLACEHOLDER
     return {"Authorization": f"Bearer {key}"}
@@ -180,9 +175,8 @@ def _error_message(response: httpx.Response) -> str:
 
     An OpenAI-shaped ``{"error": {"message": ...}}`` body contributes its
     message; anything else contributes its raw text truncated to
-    ``ERROR_BODY_LIMIT`` (a full HTML error page is not a diagnosis). Never
-    raises: a body that does not decode is exactly the case the truncation
-    fallback covers.
+    ``ERROR_BODY_LIMIT``. Never raises: a body that does not decode is exactly
+    the case the truncation fallback covers.
     """
     try:
         raw = response.text
@@ -213,7 +207,7 @@ def _request_error(response: httpx.Response, url: str) -> LLMRequestError:
 
 
 def _log_request(url: str, model: str, body: Dict[str, Any]) -> None:
-    """The debug half of D8: the request line and the JSON payload.
+    """The request line and the JSON payload, when debug logging is on.
 
     The payload is the body as it goes out -- headers are not part of it, so
     the ``Authorization`` header and the key can never reach the log from
@@ -228,17 +222,16 @@ def _log_request(url: str, model: str, body: Dict[str, Any]) -> None:
 class ChatStream:
     """One streamed completion: an iterable of chunk dicts plus its end state.
 
-    Iteration hands over the chunk dicts :mod:`llmkit.sse` parses and
-    records as it yields (never before: the loop has not seen a chunk it did
-    not yield). ``saw_finish_reason`` is a chunk-level fact only (D3): a
-    ``[DONE]`` that arrives with no finish-reason chunk leaves it ``False``,
-    so a stream the server cut still looks cut.
+    Iteration hands over the chunk dicts :mod:`llmkit.sse` parses and records
+    as it yields (never before: the loop has not seen a chunk it did not
+    yield). ``saw_finish_reason`` is a chunk-level fact only: a ``[DONE]``
+    that arrives with no finish-reason chunk leaves it ``False``, so a stream
+    the server cut still looks cut.
 
     The socket's own teardown is :meth:`close` -- response and client,
-    idempotent, never raising (the cancel path calls it blind). Iteration
-    that ends, exhausts or raises-through closes the client too, so a stream
-    that dies mid-read never leaks its connection. (This is unrelated to the
-    process-tree teardown ``core/proctree.py`` owns.)
+    idempotent, never raising (the cancel path calls it blind). Iteration that
+    ends, exhausts or raises-through closes the client too, so a stream that
+    dies mid-read never leaks its connection.
     """
 
     def __init__(self, client: httpx.Client, response: httpx.Response) -> None:
@@ -256,7 +249,7 @@ class ChatStream:
 
     @property
     def saw_finish_reason(self) -> bool:
-        """Whether any yielded chunk carried one (D3: chunk-level only)."""
+        """Whether any yielded chunk carried one (chunk-level only)."""
         return self._saw_finish_reason
 
     @property
@@ -314,15 +307,13 @@ def stream_completion(
 ) -> ChatStream:
     """Start one streamed chat completion and return its :class:`ChatStream`.
 
-    The body is the measured wire (spec §2.1): ``stream`` plus
-    ``stream_options.include_usage``, the ``sampling`` dict merged in
-    verbatim (no whitelist, no rename, no drop), and ``tools`` added **only
-    when non-empty** -- no ``tools`` key at all rather than ``tools: []``.
-    The ``messages`` are sanitized first (:mod:`llmkit.sanitize`), so no
+    The body carries ``stream`` plus ``stream_options.include_usage``, the
+    ``sampling`` dict merged in verbatim, and ``tools`` added **only when
+    non-empty** -- no ``tools`` key at all rather than ``tools: []``. The
+    ``messages`` are sanitized first (:mod:`llmkit.sanitize`), so no
     delimiter-wrapped control-token run reaches the prompt from any
-    conversation path. A non-2xx answer raises :class:`LLMRequestError`
-    before any chunk is handed over; the stream object owns the client and
-    closes it.
+    conversation path. A non-2xx answer raises :class:`LLMRequestError` before
+    any chunk is handed over; the stream object owns the client and closes it.
     """
     url = chat_completions_url(server_url)
     body: Dict[str, Any] = {
@@ -371,9 +362,8 @@ def chat_completion(
 
     The other shape of the same seam: no ``stream`` keys in the body, and
     ``max_tokens`` is a direct argument. The ``messages`` are sanitized on the
-    way out exactly as the streaming shape does (:mod:`llmkit.sanitize`). Any
-    non-2xx raises :class:`LLMRequestError` naming the status and the upstream
-    message.
+    way out exactly as the streaming shape does. Any non-2xx raises
+    :class:`LLMRequestError` naming the status and the upstream message.
     """
     url = chat_completions_url(server_url)
     body: Dict[str, Any] = {"messages": sanitize_messages(messages), "model": model}

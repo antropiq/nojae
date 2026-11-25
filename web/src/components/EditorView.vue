@@ -7,24 +7,22 @@ import EditorStatusBar from './EditorStatusBar.vue'
 import EditorTerminal from './EditorTerminal.vue'
 import { useSplitter } from '../composables/useSplitter.js'
 
-// The Editor tab's shell: navigator on the left (down to the status bar), the
-// code pane in the centre, the terminal strip under it and the status bar
-// along the very bottom, full width — a grid whose tracks are sized by the two
-// splitters below. Each region owns its own state in a composable, so this
-// component only lays them out and moves the borders.
+// The Editor tab's shell: navigator on the left, the code pane in the centre,
+// the terminal strip under it and the status bar along the very bottom, full
+// width — a grid whose tracks are sized by the two splitters below. Each region
+// owns its own state in a composable, so this component only lays them out.
 //
 // The navigator keeps its own state in useWorkspaceTree, so the whole view
-// staying mounted (App.vue's v-show) is what preserves open files and, later,
-// the terminal session across a peek at the WorkBench tab. A tab moving to
-// another folder re-roots that tree from the gesture itself (the app bar's
-// workspace field, through useWorkspaceSession), so this view owns no cross-tab
-// wiring — and no other tab's tree is involved.
+// staying mounted (App.vue's v-show) is what preserves open files and the
+// terminal session across a peek at the WorkBench tab. A tab moving to another
+// folder re-roots that tree from the gesture itself, so this view owns no
+// cross-tab wiring.
 const shell = ref(null)
 const nav = ref(null)
 const terminal = ref(null)
 
-// Sidebar: the pane *before* the bar grows to the right. 160 px at least, and
-// never past half the shell, so the code pane always keeps a usable width.
+// Sidebar: the pane *before* the bar grows to the right, never past half the
+// shell, so the code pane always keeps a usable width.
 const {
   dragging: sidebarDragging,
   shellStyle: sidebarStyle,
@@ -42,8 +40,8 @@ const {
   sizeVar: '--bi-editor-sidebar',
 })
 
-// Terminal: the pane *after* the bar grows upwards. 96 px is two lines plus
-// the panel header; the code pane below it keeps 200 px.
+// Terminal: the pane *after* the bar grows upwards; 96 px is two lines plus the
+// panel header, and the code pane above it keeps 200 px.
 const {
   dragging: terminalDragging,
   shellStyle: terminalStyle,
@@ -66,8 +64,7 @@ const navOpen = ref(true)
 
 // The terminal's fold, the Chat tools dock's twin: a flag, not a size, so a
 // dragged terminal height survives it untouched and unfolding comes back at
-// exactly the height it had. It persists (a furnishing preference), and the
-// write-through keeps it durable however it is flipped.
+// exactly that height. The write-through keeps it durable however it is flipped.
 const TERMINAL_COLLAPSED_KEY = 'nojae:editorTerminalCollapsed'
 
 function loadTerminalCollapsed() {
@@ -133,7 +130,7 @@ const terminalCollapsed = computed({
     <EditorArea class="editor-area-slot" />
 
     <!-- The bar goes with the body: folding takes both out of the flow, so the
-         terminal's row is sized by the head strip alone. -->
+         terminal's row is sized by its head strip alone. -->
     <div
       v-if="!terminalCollapsed"
       class="pane-resizer editor-resizer-h"
@@ -156,16 +153,15 @@ const terminalCollapsed = computed({
       class="editor-terminal-slot"
     />
 
-    <!-- The status bar: the last child of the shell, so it belongs to the
-         Editor *screen* (tree, pane and terminal alike) and sits below all of
-         them — the same placement argument the notice stack below makes. It is
-         chrome, not a fourth pane: not resizable, and nothing goes under it. -->
+    <!-- The status bar: the last child of the shell, so it belongs to the Editor
+         *screen* (tree, pane and terminal alike) and sits below all of them. It
+         is chrome, not a fourth pane: not resizable, and nothing goes under it. -->
     <EditorStatusBar />
 
     <!-- The write-feedback stack. Mounted here rather than in EditorArea so it
-         belongs to the Editor *screen* (tree, pane and terminal alike) instead
-         of to one of its panes — it teleports to `<body>` anyway, and staying
-         inside this lazy chunk keeps the Editor's weight where it is now. -->
+         belongs to the Editor *screen* instead of to one of its panes — it
+         teleports to `<body>` anyway, and staying inside this lazy chunk keeps
+         the Editor's weight where it is now. -->
     <EditorNoticeStack />
   </div>
 </template>

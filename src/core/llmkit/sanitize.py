@@ -4,36 +4,32 @@ Every chat-history turn, tool result and batch turn rides back into the
 next prompt as message content, and a chat-template control token is plain
 text at the HTTP surface: whoever gets one into a message can close the
 current turn early or forge a block the server's template will honour.
-This module is the single place that says such a run never leaves the app.
 Both call shapes in :mod:`llmkit.client` pass their ``messages`` through
 :func:`sanitize_messages` before the request body is built, so every path
-that reaches a model is covered at the one HTTP seam --
-no caller can forget it, because no caller can skip it.
+that reaches a model is covered at the one HTTP seam -- no caller can
+forget it, because no caller can skip it.
 
 The neutralisation is removal of every token-shaped run -- a name wrapped
 in the two-pipe delimiters the major chat templates (ChatML and friends)
 use for their control tokens -- repeated to a fixed point: deleting an
 inner run can splice the surrounding text into a complete outer run, so a
-single pass is not enough. What survives is text no server template can
-re-form into a control token, and nothing else is touched: benign content,
-down to a lonely unterminated delimiter, passes through byte for byte.
+single pass is not enough. Nothing else is touched: benign content, down to
+a lonely unterminated delimiter, passes through byte for byte.
 
 Every string a server template renders out of a message is walked, not
 just ``content``: the assistant turns a tool loop feeds back carry a
-``tool_calls`` function ``name`` and ``arguments`` that the template
-interpolates raw, ``reasoning_content`` rides into the prompt wherever a
-thinking continuation sends it, and ``name`` is interpolated by the
-templates that address functions through it. A run smuggled through any
-of those closes the turn or forges a block exactly as one in content
-does; guarding content alone guards only the obvious door.
+``tool_calls`` function ``name`` and ``arguments`` the template interpolates
+raw, and ``reasoning_content`` and ``name`` ride into the prompt too. A run
+smuggled through any of those closes the turn or forges a block exactly as
+one in content does; guarding content alone guards only the obvious door.
 
 Removal, not escaping: an escaped run is still a shape a template's own
 re-sanitiser might undo, and the app has no use for token-shaped text in
-content -- a user message or a tool result carrying one is an
-attack, not an accident. The delimiters here are assembled from single
-characters through ``re.escape``, so this source file never carries a
-complete delimiter pair: the run this module exists to remove must not
-appear in the code that removes it.
+content -- a user message or a tool result carrying one is an attack, not an
+accident. The delimiters here are assembled from single characters through
+``re.escape``, so this source file never carries a complete delimiter pair:
+the run this module exists to remove must not appear in the code that
+removes it.
 """
 
 import re
@@ -45,9 +41,8 @@ _OPEN_RUN = re.escape(f"<{_PIPE}")
 _CLOSE_RUN = re.escape(f"{_PIPE}>")
 
 # A control token as a server's template spells it: a name between the two
-# pipe delimiters, the name itself holding no delimiter character. A run
-# with a delimiter inside its name is not the shape any template tokenises
-# as one control token, so it is not what has to go.
+# pipe delimiters, the name itself holding no delimiter character -- a run
+# with one inside its name is not the shape any template tokenises.
 TOKEN_RUN = re.compile(f"{_OPEN_RUN}[^<>{_PIPE}]*{_CLOSE_RUN}")
 
 
@@ -68,13 +63,12 @@ def neutralize(text: str) -> str:
 def sanitize_content(content: Any) -> Any:
     """Sanitize one message's content, leaving the caller's value untouched.
 
-    A string is sanitized outright; a list of content parts has the
-    ``text`` of each part sanitized while other parts and keys pass
-    through; anything else -- ``None`` for a tool-call-only assistant
-    turn, or a shape this layer does not interpret -- passes through for
-    the server to judge, exactly as the client does with the rest of the
-    body. The caller's object is returned unchanged when nothing
-    matched, so the common path copies nothing.
+    A string is sanitized outright; a list of content parts has the ``text``
+    of each part sanitized while other parts and keys pass through; anything
+    else -- ``None`` for a tool-call-only assistant turn, or a shape this
+    layer does not interpret -- passes through for the server to judge. The
+    caller's object is returned unchanged when nothing matched, so the common
+    path copies nothing.
     """
     if isinstance(content, str):
         return neutralize(content)
@@ -94,19 +88,18 @@ def sanitize_content(content: Any) -> Any:
 
 # The plain-string fields a template interpolates besides ``content``.
 # Missing keys and non-string values are left alone -- this layer removes
-# runs, it does not validate message shapes.
+# runs, it does not validate shapes.
 _INTERPOLATED_FIELDS = ("name", "reasoning_content")
 
 
 def _sanitize_tool_call(call: Any) -> Any:
     """Sanitize a tool-call's function name and argument text.
 
-    The arguments are the text the server feeds back through its template
-    on the next round, so a run in them is a run in the prompt. Removal
-    can make an argument blob that was malformed around the run no longer
-    parse as JSON -- the correct trade: a tool call built around a control
-    token is corrupt either way, and smuggling the token is the worse
-    outcome. Unchanged calls keep their identity.
+    The arguments are the text the server feeds back through its template on
+    the next round, so a run in them is a run in the prompt. Removal can make
+    an argument blob malformed around the run no longer parse as JSON -- the
+    correct trade: such a call is corrupt either way, and smuggling the token
+    is the worse outcome. Unchanged calls keep their identity.
     """
     if not isinstance(call, dict):
         return call
@@ -132,8 +125,8 @@ def _sanitize_tool_call(call: Any) -> Any:
 def _sanitize_message(message: Any) -> Any:
     """Sanitize every template-rendered string of one message.
 
-    Returns the original object when nothing matched, so a caller that
-    compares identity can tell an untouched message from a copied one.
+    Returns the original object when nothing matched, so a caller comparing
+    identity can tell an untouched message from a copied one.
     """
     if not isinstance(message, dict):
         return message
@@ -155,40 +148,37 @@ def _sanitize_message(message: Any) -> Any:
 def sanitize_messages(messages: List[Dict]) -> List[Dict]:
     """A sanitized copy of ``messages``, ready for the request body.
 
-    Every string a server template renders is walked -- ``content``, the
-    ``tool_calls`` function fields, ``reasoning_content``, ``name``. Only
-    a message whose text actually changed is copied; every other entry
+    Only a message whose text actually changed is copied; every other entry
     keeps its identity, and no input dict or list is ever mutated: the
     caller's conversation history is also what the UI renders, and the UI
-    shows what the user actually typed. The outer list is always fresh,
-    so the body can never alias the caller's list.
+    shows what the user actually typed. The outer list is always fresh, so
+    the body can never alias the caller's list.
     """
     return [_sanitize_message(message) for message in messages]
 
 
-# The longest candidate run that could still be a control token: the names
-# a server template tokenizes are short, so a candidate whose span has grown
-# past this bound is declared dead and its text released. Without it, one
-# unterminated run opening in ordinary prose holds back every character
-# after it until the stream ends -- prevention the user experiences as a
-# stalled answer. What it costs is exact: only a run longer than the bound
-# could cross into the browser, and the one-way :func:`neutralize` that
-# guards outgoing prompts still removes a run of any length.
+# The longest candidate run that could still be a control token: the names a
+# server template tokenizes are short, so a candidate grown past this bound is
+# declared dead and its text released. Without it, one unterminated run
+# opening in ordinary prose holds back every character after it until the
+# stream ends -- prevention the user experiences as a stalled answer. Only a
+# run longer than the bound could get through, and the one-way
+# :func:`neutralize` guarding outgoing prompts still removes a run of any
+# length.
 _MAX_TOKEN_LEN = 64
 
 
 def _open_live(text: str, p: int) -> bool:
     """Whether a token-shaped run could still open at ``text[p]``.
 
-    ``text`` is assumed run-free (a fixed-point :func:`neutralize` has
-    run over it); the question is about any completion of it by later
-    text. A name character of ``>``, or a pipe that cannot close, is dead
-    for good -- no future text and no removal can make a run open there.
-    A nested open inside the name keeps the outer alive: if the nested
-    run later completes, removal erases it and the outer name continues
-    through the gap -- that is precisely the splice this module exists
-    for. Treating a undecided end as live is the safe direction: a false
-    live only holds text back, a false dead would emit half a run.
+    ``text`` is assumed run-free (a fixed-point :func:`neutralize` has run
+    over it); the question is about any completion of it by later text. A
+    name character of ``>``, or a pipe that cannot close, is dead for good.
+    A nested open inside the name keeps the outer alive: if the nested run
+    later completes, removal erases it and the outer name continues through
+    the gap -- precisely the splice this module exists for. Treating an
+    undecided end as live is the safe direction: a false live only holds text
+    back, a false dead would emit half a run.
     """
     if text[p + 1:p + 2] == "":
         return True  # a lone opening character: the pipe has not arrived
@@ -215,24 +205,19 @@ def _open_live(text: str, p: int) -> bool:
 class StreamNeutralizer:
     """The streaming twin of :func:`neutralize`, for a chunk at a time.
 
-    A run straddles chunk borders routinely -- a server writing the
-    literal characters hands them over in several pieces -- so a
-    per-chunk ``neutralize`` pass would happily emit the first half of
-    one. The rule: text may be handed over only once no run can ever
-    complete through it. Each ``feed`` re-runs removal over the held
-    tail plus the new text, then releases up to the earliest *live* open
-    (see :func:`_open_live`) and holds the rest. Benign text streams
-    through with zero hold-back -- a ``<`` that cannot open a run is
-    inert the moment its neighbour says so -- and the held remainder is
-    provably run-free: it opens with a run opening whose closer never
-    arrived, and a fixed-point ``neutralize`` guarantees no complete run
-    is anywhere in it. The hold is bounded by ``_MAX_TOKEN_LEN`` -- the
-    newest text a token could still complete through is kept, and anything
-    older is released -- so a stray unterminated opening delays at most
-    that many characters instead of freezing the rest of the reply.
+    A run straddles chunk borders routinely -- a server writing the literal
+    characters hands them over in several pieces -- so a per-chunk
+    ``neutralize`` pass would emit the first half of one. The rule: text may
+    be handed over only once no run can ever complete through it. Each
+    ``feed`` re-runs removal over the held tail plus the new text, then
+    releases up to the earliest *live* open (see :func:`_open_live`) and
+    holds the rest. Benign text streams through with zero hold-back, and the
+    held remainder is provably run-free. The hold is bounded by
+    ``_MAX_TOKEN_LEN``, so a stray unterminated opening delays at most that
+    many characters instead of freezing the rest of the reply.
 
-    Order is never disturbed: only a prefix older than every live open
-    is ever released.
+    Order is never disturbed: only a prefix older than every live open is
+    ever released.
     """
 
     def __init__(self) -> None:
@@ -253,10 +238,9 @@ class StreamNeutralizer:
                 break
             scan = start + 1
         if len(cleaned) - boundary > _MAX_TOKEN_LEN:
-            # The live candidate has outgrown any real control token, so it
-            # was not one: release all but the newest window a run could
-            # still complete through. Order is untouched -- this only ever
-            # moves the boundary forward.
+            # Outgrown any real control token: release all but the newest
+            # window a run could still complete through. Order is untouched --
+            # this only ever moves the boundary forward.
             boundary = len(cleaned) - _MAX_TOKEN_LEN
         self._held = cleaned[boundary:]
         return cleaned[:boundary]

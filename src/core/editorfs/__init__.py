@@ -1,74 +1,32 @@
 """File surface of the Editor tab: a bounded view of the workspace.
 
 Core-only (no FastAPI, no browser concerns), a sibling of ``mcphub/`` and
-``lsphub/`` whose layout it mirrors — one concern per file:
+``lsphub/`` whose layout it mirrors — one concern per file. Two pieces decide
+what every surface answers:
 
-* :mod:`editorfs.constants` the entry caps and the size caps (visibility is not
-  a constant any more: it is a rule in the workspace's policy file)
 * :mod:`editorfs.policy_modes` the one verdict: ``mode_for`` answering what the
-  policy says about a workspace-relative path, from two levels
+  policy says about a workspace-relative path, from two levels —
+  :mod:`editorfs.builtin_policy` (the rules about files *this app* writes, live
+  only while the workspace **is** the install directory, plus the ``.nojae``
+  folder, reserved in every workspace) and :mod:`editorfs.policy_file` (the one
+  reader of ``<workspace>/.nojae/read-write-policy.json``, whose schema lives in
+  ``mcp_connectors/policy_file.py``). :mod:`editorfs.fscase` answers the one disk
+  question the verdict asks — whether this filesystem keeps ``Dist`` and ``dist``
+  apart — so the matcher stays pure text.
 * :mod:`editorfs.policy` the one gate: the three locks, then that verdict —
-  ``resolve_in_workspace`` for a read, ``resolve_write_target`` for a change to
-  a folder's listing, ``resolve_save_target`` for a change to a file's bytes.
-  Every surface below asks it, so none of them can disagree about what a path
-  may be listed as, read as, or changed into.
-* :mod:`editorfs.builtin_policy` level A of that verdict: the rules about files
-  *this app* writes or regenerates, live only while the workspace **is** the
-  install directory (``is_self_workspace``), plus the reserved ``.nojae`` folder,
-  which is reserved in every workspace
-* :mod:`editorfs.policy_file` level B of that verdict: the one reader of
-  ``<workspace>/.nojae/read-write-policy.json`` — it parses, validates and caches
-  the file (the schema itself lives in ``mcp_connectors/policy_file.py``, shared
-  with the connectors) and reports findings as errors or notes
-* :mod:`editorfs.policy_seed` the *other* direction on that same file: it writes
-  a default one when a folder becomes the working location (boot, and the
-  settings switch), never over an existing one, and reports a failure as a note
-* :mod:`editorfs.fscase` the one disk question the verdict asks: whether this
-  workspace's filesystem keeps ``Dist`` and ``dist`` apart. Cached per root and
-  forgotten by the same switch that re-roots the tree; the matcher itself stays
-  pure text and is handed the answer as an explicit ``fold``
-* :mod:`editorfs.tree` one directory level -> entry dicts (``GET /api/fs/tree``)
-* :mod:`editorfs.files` ``read_file`` (``GET /api/fs/file``), ``stat_paths``
-  (the freshness probe) and ``write_file`` (the save route) — the guarded write:
-  the write gate on the leaf, the ``mtime`` guard, a pre-save backup and an
-  atomic replace
-* :mod:`editorfs.mutate` the operations on *paths* rather than contents:
-  ``create_path`` (the create route) makes one empty file or one folder, never
-  over an existing name; ``rename_path`` (the rename route) moves one path to a
-  new one — both ends and both parent chains gated, never over an occupied
-  target; ``move_paths_batch`` (the move-batch route) moves N *files* into one
-  folder that is already there, checking every entry before applying any so a
-  batch moves whole or not at all; and ``trash_path`` (the delete route) moves a
-  file or a whole folder into a dated batch under the **active workspace's** trash
-  (``mutate.trash_dir()`` — ``<workspace>/.nojae/trash``, per call) — never
-  ``unlink``ed, and all-or-nothing on the subtree's verdict. The parent chain
-  and the leaf name both go through the same write gate, which is one policy
-  answer per path and nothing else.
-* :mod:`editorfs.gitstatus` the read-only git queries: ``git_status``
-  (``GET /api/fs/status``, which rows to mark) and ``file_diff``
-  (``GET /api/fs/diff``, the two sides of one file). They answer *about* the
-  working location and never change it — no stage, no commit, no checkout —
-  and every path they report goes through the same policy as the tree.
-* :mod:`editorfs.search` one search of a scope: ``search_workspace``
-  (``GET /api/fs/search``, the rows of one query). It sees exactly what the tree
-  sees — one verdict per child, the same prune as ``tree`` — so no snippet from a
-  hidden file can reach a payload; and it is bounded by its own caps
-  (``MAX_SEARCH_MATCHES`` / ``_FILES`` / ``_BYTES`` / ``_SNIPPET_BYTES``), which
-  stop the scan and are reported in one footer sentence the payload carries,
-  never raised as an error.
-* :mod:`editorfs.quickopen` the quick-open finder's candidate list
-  (``GET /api/fs/files``): one flat list of workspace-relative paths, exactly
-  what the tree lists minus the ``ro`` ones — one verdict per child, the same
-  prune as ``tree``, then ``ro`` excluded — in the tree's order, bounded by
-  ``MAX_QUICKOPEN_FILES`` with an honest count past it. Names only: no file is
-  ever opened.
-* :mod:`editorfs.projectfacts` the connector wizard's read-only scan
-  (``project_facts``): derived facts about the active folder — extension counts,
-  the manifests present and the dependency **names** they declare, the already
-  declared servers handed in as data, and where the project's front end looks to
-  be. The same verdict per path and the same walk cap as ``quickopen``, plus a
-  **fixed manifest allow-list** (``projectfacts.MANIFESTS``): it is not a second
-  file reader, it opens nothing else, and it writes nothing.
+  ``resolve_in_workspace`` for a read, ``resolve_write_target`` for a change to a
+  folder's listing, ``resolve_save_target`` for a change to a file's bytes. Every
+  surface asks it, so none can disagree about what a path may be listed as, read
+  as, or changed into.
+
+:mod:`editorfs.policy_seed` writes a default policy file when a folder becomes the
+working location, never over an existing one. :mod:`editorfs.constants` holds the
+caps (visibility is a rule in the policy file, not a constant). The surfaces:
+:mod:`editorfs.tree` (one directory level), :mod:`editorfs.files` (read, stat and
+the guarded save), :mod:`editorfs.mutate` (operations on *paths*: create, rename,
+batch move, trash — never ``unlink``), :mod:`editorfs.gitstatus` (read-only git
+queries), :mod:`editorfs.search`, :mod:`editorfs.quickopen` and
+:mod:`editorfs.projectfacts`.
 
 Two invariants the whole Editor surface rests on:
 
@@ -121,10 +79,9 @@ from .quickopen import list_workspace_files
 from .search import SearchQueryError, search_workspace
 from .tree import list_dir
 
-# The verdict's vocabulary, from the shared module the connectors use too. Bound
-# here rather than reached through ``constants`` by every caller: they are names
-# of this surface, and the definitions live outside ``src`` so the two stdio
-# connectors answer the same question with the same words.
+# The verdict's vocabulary, from the shared module the connectors use too: they
+# are names of this surface, and the definitions live outside ``src`` so both
+# sides answer the same question with the same words.
 MODES = constants.policy_shared.MODES
 Verdict = constants.policy_shared.Verdict
 

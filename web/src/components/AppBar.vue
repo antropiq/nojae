@@ -21,17 +21,15 @@ const { state: session, setWorkspaceFromField } = useWorkspaceSession()
 const { state: chat } = useChat()
 const { state: batch } = useBatch()
 
-// The connection indicator, narrowed to the **store-level** question (§5.4):
-// is the store usable, and does it hold at least one model? Whether *this* turn
-// can run is deliberately the composer's business — that is where the agent is
-// chosen and where the fix is one click away — so the bar says nothing about the
-// selected agent. One warning in two places would mean two sentences to keep in
-// step, and a user who cannot tell which one they are answering.
+// The connection indicator, narrowed to the **store-level** question: is the
+// store usable, and does it hold at least one model? Whether *this* turn can run
+// is the composer's business — that is where the agent is chosen and where the fix
+// is one click away — so the bar says nothing about the selected agent. One
+// warning in two places would mean two sentences to keep in step.
 //
-// The sentence is the server's: an unusable store answers 422 with one naming
-// its path, and that is shown verbatim. "No model configured" is the bar's own,
-// because there is no server sentence for a store that is perfectly usable and
-// simply empty.
+// The sentence is the server's: an unusable store answers 422 with one naming its
+// path, shown verbatim. "No model configured" is the bar's own, because there is
+// no server sentence for a store that is perfectly usable and simply empty.
 const storeLine = computed(() => {
   const store = state.storeState
   if (store && !store.usable) return store.sentence || null
@@ -41,22 +39,19 @@ const storeLine = computed(() => {
   return null
 })
 
-// One pill for the app: a chat reply in flight reports its own phase
-// (including the reasoning flag).
-//
-// The "in flight" half is the shared predicate's answer, not a list spelled out
-// here (spec §5.12 calls the two copies the feature's most likely bug): the bar
-// and the tab glyph / end-of-session chime must never disagree about whether a
-// reply is still running, or the app goes quiet mid-turn while the composer
-// stays locked. A phase that is not idle reaches this through
-// `phaseInFlight`, so a later phase needs no edit here at all.
+// One pill for the app: a chat reply in flight reports its own phase. The "in
+// flight" half is the shared predicate's answer, not a list spelled out here: the
+// bar and the tab glyph / end-of-session chime must never disagree about whether a
+// reply is still running, or the app goes quiet mid-turn while the composer stays
+// locked. Every phase that is not idle reaches it through `phaseInFlight`, so a
+// later phase needs no edit here.
 const chatBusy = computed(() => phaseInFlight(chat.phase))
 
 // A running batch reads `Batch`, ahead of the chat branch: the lot owns the
-// conversation across the gap between two task turns, where the chat phase is
-// back to 'idle'. Once the lot is over its own outcome keeps the pill for a
-// couple of seconds — long enough to see which of Stop / finish / fail
-// happened — then the chat state takes over again.
+// conversation across the gap between two task turns, where the chat phase is back
+// to 'idle'. Once the lot is over, its own outcome keeps the pill for a couple of
+// seconds — long enough to see which of Stop / finish / fail happened — then the
+// chat state takes over again.
 const BATCH_PILL_HOLD_MS = 2000
 const BATCH_OUTCOME_CLASS = {
   stopped: 'status-cancelled',
@@ -91,28 +86,25 @@ onUnmounted(clearBatchPillTimer)
 
 // -- the working location, edited in place ---------------------------------
 //
-// The field belongs to **this tab alone** (clws-02): ``session.field`` is what
-// the user has typed, ``session.workspace`` what the server applied (its
-// realpath) and what every request of this tab is built from, so Set reads the
-// same difference the field is about — a canonicalised path never leaves it
-// spuriously enabled. A second tab on the same address keeps its own folder:
-// nothing here is shared, and nothing here touches the address bar.
+// The field belongs to **this tab alone**: `session.field` is what the user has
+// typed, `session.workspace` what the server applied (its realpath) and what every
+// request of this tab is built from, so Set reads the same difference the field is
+// about — a canonicalised path never leaves it spuriously enabled. A second tab on
+// the same address keeps its own folder.
 const workspaceChanged = computed(
   () => (session.field || '').trim() !== session.workspace,
 )
 
-// This tab must not have its root moved out from under a running session: a
-// reply streaming **here** owns the tools and the lot of this folder, so the
-// field is locked while `useChat`'s phase (this module instance's) is busy or
-// `useBatch`'s lot is active.
+// This tab must not have its root moved out from under a running session: a reply
+// streaming **here** owns the tools and the lot of this folder, so the field is
+// locked while `useChat`'s phase (this module instance's) is busy or `useBatch`'s
+// lot is active.
 //
-// **There is deliberately no cross-tab channel here.** Each browser tab is its
-// own JS context, so these two composables — and the `sessionStorage` holding
-// the folder and the agent — are per tab. A reply streaming in another tab lives
-// in *that* tab's module instances and cannot reach this state: no `storage`
-// event, no `BroadcastChannel`, no polling (spec D7). A reader looking for the
-// server's old process-wide guard will find no broadcast to follow, and that is
-// the whole mechanism.
+// **There is deliberately no cross-tab channel here.** Each browser tab is its own
+// JS context, so these two composables — and the `sessionStorage` holding the
+// folder and the agent — are per tab; a reply streaming in another tab lives in
+// *that* tab's module instances and cannot reach this state. No `storage` event,
+// no `BroadcastChannel`, no polling.
 const locationLocked = computed(
   () => batch.active || chatBusy.value,
 )
@@ -123,11 +115,10 @@ const locationTitle = computed(() =>
 )
 
 // What the read answered that is worth a line under the field, chosen by the
-// composable's precedence: a refusal (red, alert), the pool's ceiling sentence
-// (red, alert, the server's own words), the policy file that could not be read
-// (warning), or the restarting status. The policy line is a warning and never a
-// refusal — the folder *did* move — and the error outranks it, exactly as the
-// old `error`/`policyNote` pair did.
+// composable's precedence: a refusal (red, alert), the pool's ceiling sentence (red,
+// alert, the server's own words), the policy file that could not be read (warning),
+// or the restarting status. The policy line is a warning and never a refusal — the
+// folder *did* move — and the error outranks it.
 const locationNote = computed(() => locationNoteVerdict())
 
 // Presentation only: the composable decides *which* note wins and whether it is
@@ -152,16 +143,15 @@ async function applyLocation() {
   // lists and the status dots are the new folder's without a second request.
   applyWorkspaceHubs(body.hubs)
   // **Three things are deliberately not reloaded**: the model connection, the
-  // agent list and the prompt helpers. All three live in the install's
-  // settings store, so moving a tab invalidates nothing in them (spec §4.2) —
-  // the servers, models, agents and bullets a user built once are the same in
-  // every folder.
+  // agent list and the prompt helpers. All three live in the install's settings
+  // store, so moving a tab invalidates nothing in them — the servers, models,
+  // agents and bullets a user built once are the same in every folder.
   //
-  // The Editor's tree browses this folder, so the whole workspace-relative view
-  // of the tab moves here: the listings cached under the old root are forgotten
-  // and the tabs that held files of it close with it. Driven from the gesture
-  // rather than from the tab, because the tab may never have been opened — in
-  // which case there is nothing to forget.
+  // The Editor's tree browses this folder, so the whole workspace-relative view of
+  // the tab moves here: the listings cached under the old root are forgotten and
+  // the tabs that held files of it close with it. Driven from the gesture rather
+  // than from the tab, because the tab may never have been opened — in which case
+  // there is nothing to forget.
   try {
     await useWorkspaceTree().reRoot(session.workspace)
   } catch (exc) {
@@ -172,19 +162,18 @@ async function applyLocation() {
 }
 
 // What each phase the pill can be reading says about itself, and which tone it
-// wears. Two rules the phase vocabulary forces (spec §5.11):
+// wears:
 //
-//   * `reconnecting` must not borrow the `thinking` / `reasoning...` wording —
-//     one phase means "the endpoint refused", the other "it is thinking", and
-//     the two must never be confusable on screen. So it gets its own label,
-//     the short one spec §3 keeps for the composer strip's layout; the
+//   * `reconnecting` must not borrow the `thinking` / `reasoning...` wording — one
+//     phase means "the endpoint refused", the other "it is thinking", and the two
+//     must never be confusable on screen. So it gets its own short label; the
 //     endpoint's own sentence belongs to the composer's detail line, not here.
 //   * it stays **lit**: the turn is still in flight, so the tone is the violet
-//     pulse the bar already uses for "a reply is running" — an `idle` pill
-//     during a wait would tell the user the app had given up.
+//     pulse the bar already uses for "a reply is running" — an `idle` pill during a
+//     wait would tell the user the app had given up.
 //
-// The tables cover every in-flight phase, and the fallbacks below keep a phase
-// that arrives later reading as busy rather than blank.
+// The tables cover every in-flight phase, and the fallbacks below keep a phase that
+// arrives later reading as busy rather than blank.
 const PILL_LABEL = {
   waiting: 'thinking',
   reasoning: 'reasoning...',
@@ -213,18 +202,17 @@ const pillClass = computed(() => {
   return 'status-idle'
 })
 
-// The brand's second line while a reply streams: which model the answer is
-// coming from, on which server. It reads the agent the **turn was sent as**
+// The brand's second line while a reply streams: which model the answer is coming
+// from, on which server. It reads the agent the **turn was sent as**
 // (`chat.session.agentMode`, recorded when the request opened) and not the
-// composer's selection, so a dropdown moved mid-reply — or a lot running under
-// its own pin — cannot make the line name a stranger to the stream.
+// composer's selection, so a dropdown moved mid-reply — or a lot running under its
+// own pin — cannot make the line name a stranger to the stream.
 //
 // Gone the moment the reply ends: a model that is not answering anything is not
 // worth a line, and keeping the last one on screen would pass it off as current.
 // The recorded agent is required as much as the busy flag, because `modeById`
-// answers the composer's *current* selection for a missing id: a turn that
-// carries no agent would otherwise be credited with whatever the dropdown
-// happens to hold — a stranger to the stream.
+// answers the composer's *current* selection for a missing id, so a turn carrying
+// no agent would be credited with whatever the dropdown happens to hold.
 const runningLine = computed(() => {
   if (!chatBusy.value || !chat.session.agentMode) return null
   return runningOnLine(modeById(chat.session.agentMode), state.config?.models)
@@ -243,12 +231,11 @@ const runningLine = computed(() => {
       <span class="brand-text">
         <span class="brand-name">Nojaé</span>
         <!-- One line, whichever half of the answer it is: the store is unusable
-             (its own sentence, naming the path), or it holds no model at all.
-             A configured install shows nothing here while it is idle -- the
-             model a turn runs on is the composer's answer, and it is named
-             there. Once a reply streams, the line becomes the running model
-             instead: the store's problem and a live turn cannot coexist, so
-             there is never a second line to make room for. -->
+             (its own sentence, naming the path) or holds no model at all. A
+             configured install shows nothing here while it is idle -- the model a
+             turn runs on is the composer's answer. Once a reply streams the line
+             becomes the running model instead: the store's problem and a live turn
+             cannot coexist. -->
         <span v-if="storeLine" class="brand-sub">{{ storeLine }}</span>
         <span v-else-if="runningLine" class="brand-sub">{{ runningLine }}</span>
       </span>
@@ -256,8 +243,8 @@ const runningLine = computed(() => {
 
     <div class="appbar-center">
       <!-- The two session counters, left of the tab strip: they read whichever
-           session is live (the WorkBench reply or a batch turn) and blank out when
-           nothing is generating. -->
+           session is live (the WorkBench reply or a batch turn) and keep their
+           figures once it ends, until the conversation is restarted. -->
       <SessionStatBadges />
       <TabNav />
       <div class="appbar-location">
@@ -287,7 +274,7 @@ const runningLine = computed(() => {
         <!-- One line, whichever answer wins: a refusal (the server's 422 or the
              pool's ceiling 429), the policy seed that could not land, or the
              restarting status. The bar has no room for a wrapped sentence, so it
-             truncates and `title` carries the whole of it. -->
+             truncates and `title` carries all of it. -->
         <p
           v-if="locationNote"
           class="appbar-location-note"
@@ -301,9 +288,9 @@ const runningLine = computed(() => {
     </div>
 
     <div class="appbar-actions">
-      <!-- One clock for the whole app: the app has one session at a time, so
-           the same readout serves every tab, and it keeps ticking while the
-           Editor tab is open. -->
+      <!-- One clock for the whole app: there is one session at a time, so the same
+           readout serves every tab and keeps ticking while the Editor tab is
+           open. -->
       <SessionClock />
       <span class="status-pill" :class="pillClass" role="status">
         <span class="status-dot" aria-hidden="true"></span>{{ pillLabel }}

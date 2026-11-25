@@ -4,31 +4,18 @@ import { useEditorFiles } from './useEditorFiles'
 import { useEditorNotices } from './useEditorNotices'
 import { useChat } from './useChat'
 
-// ---------------------------------------------------------------------------
 // Editor mode: whether the code pane currently promises an editable surface.
 //
-// It is a composable rather than a computed inside EditorArea because the same
-// answer is *shown* in the file tree's header and *enforced* on the Monaco
-// surface in the code pane — two components, one rule. A pane labelled "Editor"
-// is editable while the WorkBench is idle (an edit stays in the buffer until an
-// explicit save) and read-only while a reply streams, because the model is the
-// only other writer of these files and it must not race a human typing in the
-// same buffer. The server enforces the same rule on every write route, so this
-// composable is the badge's source, not the boundary.
+// A composable because one answer is both shown in the file tree's header and
+// enforced on the code pane — two components, one rule. The server enforces it
+// on every write route too, so this is the badge's source, not the boundary.
+// The pane is read-only while a reply streams or a batch runs: the model is the
+// only other writer of these files and must not race a human in the same buffer.
 //
-// The badge therefore lives in the navigator header, where there is always
-// room for it: the tab strip is a row that shrinks as buffers pile up, so a
-// status that belongs to the pane rather than to one tab has no business
-// competing with the chips for its width. Its `title` has the last word on the
-// two states a pane-wide label cannot otherwise explain: an unsaved buffer
-// behind an editable badge, and a write that was just refused for this path.
-//
-// Batch mode owns the conversation between two task turns with
-// `useBatch.state.active` while `phase` drops back to 'idle' (see useBatch.js),
-// so the rule reads both: a lot that is running makes the pane read-only even
-// in the gap, because the server refuses the write anyway and a badge inviting
-// an edit that will be refused is a worse answer than one that explains itself.
-// ---------------------------------------------------------------------------
+// The badge sits in the navigator header, where there is room for it (the tab
+// strip shrinks as buffers pile up), and its `title` explains the two states a
+// pane-wide label cannot: an unsaved buffer behind an editable badge, and a
+// write that was just refused for this path.
 
 export function useEditorMode() {
   const files = useEditorFiles()
@@ -36,27 +23,23 @@ export function useEditorMode() {
   const notices = useEditorNotices()
   const chat = useChat()
 
-  // Which kind the active tab is: 'file' (an editable buffer) or the kind of a
-  // *view* — a diff, a preview. A view is a reader whatever the chat is doing:
-  // its contents come from the server and there is no buffer to type into, so
-  // the editable promise the badge makes belongs to a file buffer only.
+  // The active tab's kind: 'file' (an editable buffer) or a view's kind. A view
+  // has no buffer to type into, so the badge's editable promise is a file's.
   const activeKind = computed(() => {
     const active = files.state.active
     if (!active) return null
     return files.state.open.find((item) => item.key === active)?.kind ?? null
   })
 
-  // A diff tab is a reader whatever the chat is doing (kept as its own name: the
-  // badge wording for a diff is a separate sentence below).
+  // Its own name because the badge words a diff separately below.
   const isDiffTab = computed(() => activeKind.value === 'diff')
   const isPreviewTab = computed(() => activeKind.value === 'preview')
   const isViewTab = computed(() => activeKind.value !== null && activeKind.value !== 'file')
 
   const editorMode = computed(() => {
     if (isViewTab.value) return 'read_only'
-    // Idle *and* no lot in progress: between two task turns `phase` is 'idle'
-    // but the next turn is already queued, and the model may be mid-edit of the
-    // file under the caret.
+    // Idle *and* no lot running: between two task turns `phase` is 'idle' while
+    // the next turn is already queued and the model may be mid-edit here.
     return chat.state.phase === 'idle' && !batch.state.active
       ? 'read_write'
       : 'read_only'
@@ -87,23 +70,17 @@ export function useEditorMode() {
       )
     }
 
-    // The badge is where a *pane-wide* state gets explained, so the freshness
-    // answer about the buffer on screen rides here too: the chip's marker says
-    // which tab, this says what it means for the pane.
+    // The badge is where a pane-wide state is explained, so the buffer's
+    // freshness rides here too: the chip says which tab, this what it means.
     const active = files.state.open.find((item) => item.key === files.state.active)
     if (active?.kind === 'file') {
-      // The language server is the one reader that does not care about the
-      // mode: it answers Ctrl+click, hover and find-references whether the pane
-      // is editable or locked, so the "why did that do nothing?" answer says so
-      // here rather than in a second badge.
+      // The language server answers whether the pane is editable or locked, and
+      // this is the only badge to say so in.
       parts.push(
         'Ctrl+click, hover and find-references still work — the language server answers in both modes.',
       )
-      // A dirty buffer needs its unsaved state spelled out here: this is the
-      // one pane-wide indicator of it that survives a tab switch, the dot on
-      // the chip being easy to lose in a full strip. The wording follows the
-      // mode, because a locked pane holding unwritten work is exactly the case
-      // where saying "Ctrl+S" would be a lie.
+      // The one pane-wide indicator of unsaved work that survives a tab switch,
+      // and the wording follows the mode: "Ctrl+S" on a locked pane would lie.
       if (active.dirty) {
         parts.push(
           isEditable.value

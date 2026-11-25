@@ -1,9 +1,8 @@
 import { nextTick, ref, watch } from 'vue'
 
 /**
- * Autoscroll a scrollable element while content grows, unless the user
- * scrolled away from the bottom. `source` is a watch getter that changes
- * whenever the content updates.
+ * Autoscroll an element while content grows, unless the user scrolled away from
+ * the bottom; `source` is a watch getter that changes on each update.
  */
 export function useAutoScroll(elRef, source) {
   const stickToBottom = ref(true)

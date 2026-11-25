@@ -9,12 +9,11 @@ subprocess per activated server, performs the LSP handshake (``initialize``
 turns the server's advertised capabilities into OpenAI-format tool
 definitions so the Chat tab's tool loop can call them.
 
-Like the ``mcphub`` package (which this package deliberately mirrors), all LSP I/O
-runs on a private asyncio thread so synchronous callers (chat worker
+Like the ``mcphub`` package (which this package deliberately mirrors), all LSP
+I/O runs on a private asyncio thread so synchronous callers (chat worker
 threads) can bridge onto it with :meth:`LspManager.call_tool_sync`. The
-language servers themselves are only ever spoken to over stdio JSON-RPC by
-this hub: the LLM calls ``lsp_<id>_<action>`` with plain JSON arguments,
-never a command line.
+language servers themselves are only ever spoken to over stdio JSON-RPC: the
+LLM calls ``lsp_<id>_<action>`` with plain JSON arguments, never a command line.
 
 Layout — the module members live one concern per file:
 
@@ -57,11 +56,10 @@ _MISSING = object()
 def __getattr__(name: str) -> Any:  # PEP 562
     """Resolve a constant from :mod:`lsphub.constants` at lookup time.
 
-    Deliberately not a plain ``from .constants import …``: the declaration
-    file and the deny-list are module attributes precisely so they can be
-    redirected (the tests do), and the code reads them through this module.
-    A copy bound here would go stale under a patch and make the redirect
-    silently stop working.
+    Deliberately not a plain ``from .constants import …``: the declaration file
+    and the deny-list are module attributes precisely so they can be redirected
+    (the tests do), and a copy bound here would go stale under a patch and make
+    the redirect silently stop working.
     """
     value = getattr(constants, name, _MISSING)
     if value is not _MISSING:
@@ -124,10 +122,8 @@ from .tools import (
 )
 
 # Make the constants re-exported through ``__getattr__`` visible to type
-# checkers (they appear in ``__all__`` and are readable as ``lsphub.X``).
-# These imports are never executed at runtime, so the names are still
-# resolved dynamically by ``__getattr__`` and stay patchable on
-# ``lsphub.constants``.
+# checkers. These imports never run, so the names are still resolved
+# dynamically by ``__getattr__`` and stay patchable on ``lsphub.constants``.
 if TYPE_CHECKING:
     from .constants import (
         DEFAULT_IDLE_SHUTDOWN_SECONDS,

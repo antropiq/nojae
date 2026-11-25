@@ -5,15 +5,14 @@ One schema, one set of validation messages, one verdict, **two kinds of caller**
 
 * the Editor tab, through ``src/core/editorfs/policy_file.py`` (which wraps this
   with the app's error type and the level-A shadow notes);
-* the two stdio connectors — pol-08 — through :func:`workspace_policy_reason`
-  below, which reads the same file and answers the same question so an agent and
-  a human cannot be told different things about one folder.
+* the stdio connectors, through :func:`workspace_policy_reason` below, which
+  reads the same file and answers the same question so an agent and a human
+  cannot be told different things about one folder.
 
-Duplicating the parser for pol-08 would have left two schema definitions able to
-drift, which is the "second list" failure this lot removes elsewhere. It is the
-same argument that put :mod:`mcp_connectors.path_policy` here, and the module
-obeys the same packaging rule: stdlib only, never importing from ``src`` (the
-wheel ships ``src`` alone and a connector runs as a bare script path).
+A second parser would leave two schema definitions able to drift. It is the same
+argument that put :mod:`mcp_connectors.path_policy` here, and the module obeys
+the same packaging rule: stdlib only, never importing from ``src`` (the wheel
+ships ``src`` alone and a connector runs as a bare script path).
 
 Two loaders, then, deliberately **not** one:
 
@@ -21,9 +20,8 @@ Two loaders, then, deliberately **not** one:
   the text: what the app's cached loader calls;
 * :func:`load_workspace_policy` / :func:`workspace_policy_reason` — the
   connector-side pair, which know a *root* and keep a per-process cache keyed on
-  ``(root, mtime_ns, size)`` (pol-04 §4's key, for its §4 reasons). A connector
-  cannot share the app's cache: it is a separate process, and it may be pointed
-  at a workspace the app never started.
+  ``(root, mtime_ns, size)``. A connector cannot share the app's cache: it is a
+  separate process, and it may be pointed at a workspace the app never started.
 
 What stays on the app side, because a connector has nowhere to put it:
 
@@ -43,8 +41,8 @@ file is read as written and a later line may carve an exception out of an earlie
 one. The consequence for a parser is that it must never "helpfully" reorder,
 deduplicate or quietly drop a rule. A rule it cannot make sense of is *reported*,
 and a file with any error in it contributes no rules at all — the caller turns
-that into a refusal rather than a shrug (pol-00 D4), because a policy that was
-supposed to protect a folder demonstrably did not load.
+that into a refusal rather than a shrug, because a policy that was supposed to
+protect a folder demonstrably did not load.
 """
 
 import difflib
@@ -93,7 +91,7 @@ def load_policy_text(
     """Parse one policy file's ``text`` into ``(rules, findings)``.
 
     ``location`` is the path quoted in every message. This module never builds
-    it — it does not know where the file lives, and pol-08's connectors have a
+    it — it does not know where the file lives, and the connectors have a
     different one from the app's.
 
     ``workspace_root`` is the absolute root the rules are written relative to,
@@ -109,8 +107,7 @@ def load_policy_text(
     checked a different name than the caller looked the file up under would let a
     rule address the folder that holds the rules.
 
-    The two kinds of finding are pol-00's split, and the contract that goes with
-    them:
+    The two kinds of finding, and the contract that goes with them:
 
     * any ``KIND_ERROR`` → ``rules`` comes back **empty**. A half-validated file
       is not a policy, and pretending it is one lets writes through a folder the
@@ -175,10 +172,10 @@ def load_policy_file(
 
     The two ways a read fails are findings, not exceptions, and they are not the
     same finding: an **absent** file is nothing at all — the normal state of a
-    project that never got one, since seeding is pol-05's job and a workspace may
-    refuse it — while an **unreadable** one (permissions, a directory where the
-    file should be) is an error naming the path and the OS error, because that
-    the user can fix.
+    project that never got one, since seeding is another module's job and a
+    workspace may refuse it — while an **unreadable** one (permissions, a
+    directory where the file should be) is an error naming the path and the OS
+    error, because that is one the user can fix.
     """
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -201,7 +198,7 @@ def load_policy_file(
     )
 
 
-# -- the one question a connector asks (pol-08) ---------------------------------
+# -- the one question a connector asks ------------------------------------------
 
 
 def workspace_policy_path(root: str, policy_dirname: Optional[str] = None) -> str:
@@ -229,22 +226,18 @@ def workspace_policy_reason(
 
     * **level A is not consulted.** The app's own rules (``**/.env**``,
       ``logs/**``) exist because the *pane* would otherwise fight the tooling
-      that owns those files — the app hides its own run configuration and its own
-      backups, which is a decision about a human editor in that pane. That is a
-      property of the pane, not of an agent's edit, and applying it here would
-      put the connector's root outside the app and then invent rules about a
-      project it has no relationship with. A reader who expects the connector to
-      skip what the pane enforces is right: it does, and the reserved folder
-      below is the only thing it enforces unconditionally.
+      that owns those files, which is a property of the pane and not of an
+      agent's edit. A reader who expects the connector to skip what the pane
+      enforces is right: the reserved folder below is the only level-A fact it
+      enforces.
     * **a path outside the root answers None.** The workspace's rules are written
       relative to the workspace; outside it the existing connector deny-list
       already spoke (and it speaks by *name*, which is what keeps ``id_rsa`` out
       of a context window wherever it lives). The two floors have different
       domains and neither is loosened by the other.
-    * **no writing.** A connector never seeds the file (pol-05 seeds it from the
-      app, at the two moments a folder becomes active) -- a reader that leaves a
-      folder behind in someone's project is the mistake that rule exists to
-      prevent.
+    * **no writing.** A connector never seeds the file (the app seeds it, at the
+      two moments a folder becomes active) -- a reader that leaves a folder
+      behind in someone's project is the mistake that rule exists to prevent.
     * **no IPC.** It reads the same file the pane reads, per-process cached.
 
     The verdict is the same merge the pane uses (:func:`policy_shared.verdict_for`
@@ -253,16 +246,15 @@ def workspace_policy_reason(
     (:func:`policy_shared.refusal_message`), naming the level, the mode and the
     pattern verbatim so the model can *ask differently* instead of giving up.
 
-    Failure is asymmetric exactly as it is in the app (pol-00 D4): a file that
-    does not parse contributes no rules, so **reads stay open** (the user has to
-    be able to look at what is wrong) and **writes are refused** naming the
-    cause -- the policy that was supposed to protect a folder demonstrably did
-    not load, and letting an agent rewrite inside it is the one answer that is
-    not acceptable.
+    Failure is asymmetric exactly as it is in the app: a file that does not parse
+    contributes no rules, so **reads stay open** (the user has to be able to look
+    at what is wrong) and **writes are refused** naming the cause -- the policy
+    that was supposed to protect a folder demonstrably did not load, and letting
+    an agent rewrite inside it is the one answer that is not acceptable.
 
     The reserved folder is refused **before the file is even opened**, for both
-    directions: an agent editing the rules that constrain it is the same
-    accident ``DENY_COMPONENTS`` includes ``mcp_connectors`` to prevent
+    directions: an agent editing the rules that constrain it is the same accident
+    ``DENY_COMPONENTS`` includes ``mcp_connectors`` to prevent
     (``path_policy.py``), and that must survive a corrupt file -- which is why
     the check is on the component list, not on a rule.
     """
@@ -304,8 +296,8 @@ def workspace_policy_reason(
 
 # -- the per-process cache ------------------------------------------------------
 #
-# Same three keys pol-04's app-side cache uses -- ``(root, mtime_ns, size)`` --
-# and for the same three reasons: the file can change while this process lives
+# Same three keys the app-side cache uses -- ``(root, mtime_ns, size)`` -- and
+# for the same three reasons: the file can change while this process lives
 # (the user edits it by hand between tool calls), two roots routinely hold
 # same-sized config files, and a same-size edit (a pattern renamed to an
 # equal-length one) is entirely possible, so a stamp cannot identify a file
@@ -395,8 +387,8 @@ def _rule_error(location: str, index: int, problem: str) -> shared.PolicyFinding
     """A finding about one rule, naming both the file and the rule's index.
 
     Self-contained on purpose: a message that only said ``policies[2]`` would
-    depend on every caller remembering to prepend the path, and pol-08's
-    connectors quote findings straight into a tool result.
+    depend on every caller remembering to prepend the path, and the connectors
+    quote findings straight into a tool result.
     """
     return shared.PolicyFinding(
         kind=shared.KIND_ERROR, index=index, message=f"{location}: {problem}"
@@ -427,11 +419,11 @@ def _version_findings(version: Any, location: str) -> List[shared.PolicyFinding]
 def _readme_findings(readme: Any, location: str) -> List[shared.PolicyFinding]:
     """``readme`` is documentation, accepted and ignored by the matcher.
 
-    JSON has no comments and the seeded file is a user's first look at the syntax
-    (pol-05), so the syntax has to be able to explain itself from inside the file.
-    Only its *shape* is checked here — a ``readme`` that cannot be shown as text
-    is a sign the file was hand-mangled, which is worth one line, but the key
-    itself never reaches a rule.
+    JSON has no comments and the seeded file is a user's first look at the syntax,
+    so the syntax has to be able to explain itself from inside the file. Only its
+    *shape* is checked here — a ``readme`` that cannot be shown as text is a sign
+    the file was hand-mangled, which is worth one line, but the key itself never
+    reaches a rule.
     """
     if isinstance(readme, (str, type(None))):
         return []
@@ -595,14 +587,14 @@ def _unreachable_message(
     and the two answers are different kinds:
 
     * ``web/node_module`` next to a real ``web/node_modules`` — a typo: **error**,
-      naming the sibling. This is pol-04's row, and the case a user acts on.
+      naming the sibling, the case a user acts on.
     * ``.hg`` in a checkout with no Mercurial folder — a rule about a folder that
-      is simply not here, and an ordinary one: pol-05's seeded file names ``.hg``,
+      is simply not here, and an ordinary one: the seeded file names ``.hg``,
       ``.svn`` and the cache directories in *every* workspace, so calling absence
-      an error would fail writes everywhere the app goes and break pol-05's own
-      "the seed round-trips through the loader" test. **No finding** — a rule that
-      matches nothing today may match something tomorrow, and a policy file is
-      allowed to be written for a folder that appears later.
+      an error would fail writes everywhere the app goes and break the seed's own
+      round-trip through this loader. **No finding** — a rule that matches nothing
+      today may match something tomorrow, and a policy file is allowed to be
+      written for a folder that appears later.
 
     An ``OSError`` in the lookup (an unreadable directory half-way up) also answers
     ``None``: a filesystem condition the author did not type is not a reason to
@@ -623,9 +615,9 @@ def _unreachable_message(
         return None
 
     # ``/``-joined: a suggestion is a **policy path**, and the policy file's
-    # form is ``/``-joined on every platform (roadmap §9 rule 1). ``os.path.join``
-    # would hand a Windows user a ``web\src`` they cannot paste into their own
-    # file as a rule that matches.
+    # form is ``/``-joined on every platform. ``os.path.join`` would hand a
+    # Windows user a ``web\src`` they cannot paste into their own file as a rule
+    # that matches.
     names = ", ".join(
         f"`{parent_rel + '/' + near if parent_rel else near}`"
         for near in suggestion
@@ -649,19 +641,16 @@ def _first_missing_component(
 
     One ``lstat`` per component, never a walk, and ``lstat`` rather than
     ``os.path.exists`` or ``lexists``: ``exists`` answers *False* for a symlink
-    whose target is missing (a dangling link is a name the author can see in the
-    folder, and the matcher judges names, not what they resolve to), and
-    ``lexists`` swallows the ``EACCES`` this has to tell apart from a missing
+    whose target is missing (a dangling link is still a name the author can see),
+    and ``lexists`` swallows the ``EACCES`` this has to tell apart from a missing
     name. The walk stops at the first link, because following it could leave the
-    workspace and a link to a directory elsewhere may hold exactly the folder the
-    rule means.
+    workspace.
 
     Reporting the *first* missing component — not the whole prefix — is what makes
     the suggestion useful: for ``danglin/x`` the author's mistake is the name
     ``danglin`` in the root, and its siblings are the candidates. ``ENOTDIR`` (a
-    component above is a plain file) counts as missing here too, since nothing can
-    be called that. Any other ``OSError`` — an unreadable directory half-way up —
-    answers ``None``: no claim, no error finding.
+    component above is a plain file) counts as missing too, since nothing can be
+    called that. Any other ``OSError`` answers ``None``: no claim, no finding.
     """
     components = prefix.split("/")
     current = os.path.abspath(workspace_root)
@@ -698,14 +687,9 @@ def _sibling_suggestion(
     **Distance**: at most ``MAX_TYPO_EDITS`` character edits apart
     (:func:`_is_a_typo`). A ratio alone cannot tell a mistyped name from an
     unrelated one once names get short — ``.svn`` and ``.venv`` score 0.67 — and
-    this is not an academic case: pol-05's seeded file writes ``.svn``, ``.hg``
-    and the cache directories into **every** workspace it touches, so a project
-    with a ``.venv`` and no Subversion checkout would have its whole policy
-    rejected as a typo the author never typed, refusing every write in it (D4).
-    The claim is "you mistyped this", and a typo is a short edit distance, not a
-    family resemblance: ``node_module``/``node_modules`` and ``danglin``/
-    ``dangling`` are one edit, ``scr``/``src`` is two, and two tool directories
-    that diverge past that are two different directories.
+    the seeded file writes ``.svn``, ``.hg`` and the cache directories into
+    **every** workspace, so a project with a ``.venv`` and no Subversion checkout
+    would have its whole policy rejected as a typo the author never typed.
 
     Both are needed: the ratio rejects a long name with a short common run, the
     distance rejects a short name that happens to share most of its letters.
@@ -757,14 +741,14 @@ def _shadowed_notes(rules: List[shared.Rule]) -> List[shared.PolicyFinding]:
       that answers, so the earlier line does nothing;
     * a rule written *under* an earlier ``hidden`` one (``.git/HEAD`` after
       ``.git``): :func:`policy_shared.verdict_for` treats ``hidden`` as absolute,
-      so a carve-out of a hidden folder is dead on arrival — pol-00's "not even
-      by carve-out", said while the file is still being read.
+      so a carve-out of a hidden folder is dead on arrival — not even by
+      carve-out, said while the file is still being read.
 
     The containment test is one match, and it is sound because of the subtree
     rule: if the earlier ``hidden`` pattern matches the **literal prefix** of the
-    later pattern, then it matches every path that later pattern can reach
-    (pattern matching already handles the wildcards, so ``**/__pycache__`` counts
-    as well as ``.git``). A later pattern with no literal prefix at all —
+    later pattern, it matches every path that later pattern can reach (the
+    matcher already handles the wildcards, so ``**/__pycache__`` counts as well
+    as ``.git``). A later pattern with no literal prefix at all —
     ``**/README.md`` — is never claimed: its reach cannot be summarised by one
     path, and no note beats a wrong note.
     """

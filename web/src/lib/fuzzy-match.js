@@ -1,20 +1,19 @@
-// The Quick Open fuzzy matcher — pure functions, no DOM, no fetch, no Vue.
+// The Quick Open fuzzy matcher — pure functions, no DOM, no request, no Vue.
 //
-// The scoring rules of the quick-open spec §2.4 live here and nowhere else:
-// a case-insensitive smart subsequence over the whole workspace-relative
-// path, scoring contiguity, word boundaries and segment starts, with a
-// bare-name match outranking a mid-path match at equal structure. The module
-// returns index spans, never marked-up strings — the dialog renders the
-// slices itself as `<span>` elements.
+// The scoring rules live here and nowhere else: a case-insensitive smart
+// subsequence over the whole workspace-relative path, scoring contiguity, word
+// boundaries and segment starts, with a bare-name match outranking a mid-path
+// match at equal structure. The module returns index spans, never marked-up
+// strings — the dialog renders the slices itself.
 
 // Characters after which a match counts as a word-boundary match.
 const SEPARATORS = '/._-';
 
 // What one unmatched query character costs. The match is a subsequence — the
 // query's characters must appear in order — but one character of the query may
-// go unmatched (a typo, or a letter the user only thought was in the name:
-// the spec's `usred` finding `src/core/editorfs/redact.py`). Everything else
-// must still be in order, so this is tolerance, not licence.
+// go unmatched (a typo, as when `usred` should still find
+// `src/core/editorfs/redact.py`). Everything else must stay in order, so this
+// is tolerance, not licence.
 const SKIP_PENALTY = 4;
 
 // The bare-name bonus: a match that spells the start of the file's own name
@@ -26,8 +25,8 @@ const isUpper = (ch) => ch >= 'A' && ch <= 'Z';
 const isLower = (ch) => ch >= 'a' && ch <= 'z';
 
 /**
- * A match position is a word boundary when it starts the path, follows a
- * separator, or follows a lower→upper case change (camelCase).
+ * A word boundary: the path start, after a separator, or after a lower→upper
+ * case change (camelCase).
  */
 function isWordBoundary(path, pos) {
   if (pos === 0) return true;
@@ -116,13 +115,11 @@ function bestSubsequence(chars, path) {
 /**
  * Match `query` against `path` as a case-insensitive smart subsequence.
  *
- * Returns `{ score, spans }` for a match, `null` when the query cannot be
- * matched (all but at most one of its characters must appear in order).
- * `spans` are non-overlapping, in-order `[start, end)` index pairs into the
- * path string, covering exactly the matched characters — never marked-up
- * strings; the dialog renders the slices itself.
- *
- * An empty query matches everything with score 0 and no spans.
+ * Returns `{ score, spans }`, or `null` when the query cannot be matched (all
+ * but at most one of its characters must appear in order). `spans` are
+ * non-overlapping, in-order `[start, end)` index pairs covering exactly the
+ * matched characters. An empty query matches everything with score 0 and no
+ * spans.
  */
 export function fuzzyMatch(query, path) {
   if (typeof query !== 'string' || typeof path !== 'string') return null;
@@ -131,9 +128,9 @@ export function fuzzyMatch(query, path) {
   const chars = Array.from(query.toLowerCase());
   const baseStart = path.lastIndexOf('/') + 1;
 
-  // The strict match first, then one attempt per skipped query character;
-  // the best total score wins (the penalty keeps a skipped character last
-  // resort against an equal otherwise-match).
+  // The strict match first, then one attempt per skipped query character; the
+  // best total score wins, so a skip is a last resort against an equal
+  // otherwise-match.
   let best = null;
   for (let skip = -1; skip < chars.length; skip++) {
     const kept =
@@ -143,8 +140,8 @@ export function fuzzyMatch(query, path) {
     const score = match.score - (skip < 0 ? 0 : SKIP_PENALTY);
     if (best && best.score >= score) continue;
 
-    // Bare-name bonus: the match spells the start of the basename
-    // contiguously — the user typed the file's name, not a path fragment.
+    // Bare-name bonus: the match starts at the basename and is contiguous —
+    // the user typed the file's name, not a path fragment.
     const indices = match.indices;
     const bare =
       indices.length > 0 &&
@@ -188,9 +185,9 @@ function comparePaths(a, b) {
 
 /**
  * Rank `paths` against `query`: matched paths sorted by score (best first),
- * ties broken by the tree's own ordering so the list is deterministic.
- * Each row is `{ path, score, spans }`. Paths that do not match are omitted.
- * An empty query matches everything with score 0, in tree order.
+ * ties broken by the tree's own ordering so the list is deterministic. Each row
+ * is `{ path, score, spans }`; paths that do not match are omitted. An empty
+ * query matches everything with score 0, in tree order.
  */
 export function rankMatches(query, paths) {
   const rows = [];

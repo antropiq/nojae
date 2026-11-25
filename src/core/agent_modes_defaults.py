@@ -20,9 +20,10 @@ Two rules the tests hold, because prose rots quietly:
 
 * a persona names the other agents only through the label constants below, so a
   rename cannot leave a stale phrase in someone's prompt;
-* a persona never claims to have read ``AGENTS.md`` — it says "the project
-  instructions above", which is what :func:`config.agent_instructions_block`
-  actually puts there, and every agent receives it.
+* a persona never claims to have read the project instructions file — it says
+  "the project instructions above", which is what
+  :func:`config.agent_instructions_block` actually puts there, and every agent
+  receives it.
 """
 
 from typing import List, Tuple
@@ -41,17 +42,16 @@ CHAT_LABEL = "Chat"
 CODE_LABEL = "Code"
 ARCHITECT_LABEL = "Architect"
 
-#: The app-owned agent (D4): not among the editable ones, not deletable, and the
-#: only one that carries generated blocks.
+#: The app-owned agent: not among the editable ones, not deletable, and the only
+#: one that carries generated blocks.
 TODO_BUILDER_MODE_ID = "todoBuilder"
 TODO_BUILDER_LABEL = "Todo builder"
 
 # -- the three editable personas ------------------------------------------------
 #
-# Second-person instructions, not role descriptions. ``code`` is what the app
-# already does, plus the "you implement" framing that was missing; the others
-# work by taking options away. Each first line names its own agent through the
-# label constant, so a rename cannot leave a stale word in someone's prompt.
+# Second-person instructions, not role descriptions: an agent's job is to remove
+# options. Each first line names its own agent through the label constant, so a
+# rename cannot leave a stale word in someone's prompt.
 
 CHAT_PERSONA: Tuple[str, ...] = (
     "You are a helpful assistant. You can answer questions of every kind, even some not related to the current project or unrelated to software engineering.",
@@ -115,7 +115,7 @@ TODO_BUILDER_PERSONA: Tuple[str, ...] = (
 
 
 #: The three editable built-ins, in the order the seeder writes them — which is
-#: also the dropdown's order. ``todoBuilder`` is deliberately absent (D4): the
+#: also the dropdown's order. ``todoBuilder`` is deliberately absent: the
 #: app-owned agent is rendered from :func:`todo_builder_mode` and sorted last,
 #: whatever a table says.
 BUILT_IN_MODES: Tuple[Tuple[str, str, bool, bool, Tuple[str, ...]], ...] = (
@@ -130,8 +130,7 @@ def default_modes() -> List[AgentMode]:
 
     The store's seeder inserts these rows and :func:`core.agent_modes.resolve_modes`
     answers them when a row is missing, so both read this function rather than a
-    copy. The values are validated by the module's own ``_self_check`` below, which
-    is where a mistake in a persona or a label is caught — at import, not in a
+    copy. The values are validated by ``_self_check`` below — at import, not in a
     workspace.
     """
     return [
@@ -182,13 +181,13 @@ def todo_builder_persona() -> str:
 
 
 def todo_builder_mode() -> AgentMode:
-    """The app-owned agent (D4): persona and instructions rendered from code.
+    """The app-owned agent: persona and instructions rendered from code.
 
     ``instructions`` carries the generated lot conventions; the chat route renders
-    them after AGENTS.md and before the lot's own big picture, so the text stays in
-    the same order for a re-read. The store's boot re-asserts this row from here
-    for every column but ``model_id``, which is what makes re-seeding safe rather
-    than destructive.
+    them after the project instructions and before the lot's own big picture, so
+    the text stays in the same order for a re-read. The store's boot re-asserts
+    this row from here for every column but ``model_id``, which is what makes
+    re-seeding safe rather than destructive.
     """
     return AgentMode(
         id=TODO_BUILDER_MODE_ID,
@@ -208,7 +207,7 @@ def _self_check() -> None:
 
     A persona typed over the cap, a label that no longer matches the id the rest
     of the feature keys on, or an id outside the pattern are all mistakes a later
-    edit can make silently — and every one of them costs someone their persona text
+    edit can make silently — and every one of them costs a user their persona text
     on every turn.
     """
     personas = (

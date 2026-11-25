@@ -1,26 +1,21 @@
 import { reactive } from 'vue'
 
 // ---------------------------------------------------------------------------
-// The Editor status bar's *editor* half: the four facts about the buffer on
-// screen that its right edge shows — the caret, the indentation, the line
-// ending and the file's kind.
+// The Editor status bar's *editor* half: the caret, indentation, line ending and
+// file kind of the buffer on screen.
 //
 // It is a **sink, not a reader**: none of the four can be answered without the
-// Monaco instance, and that instance lives inside `MonacoEditor.vue`, which owns
-// the model and is the only thing that sees a caret move. So the surface reports
-// and this module holds; the bar renders what it holds and asks nothing.
+// Monaco instance in `MonacoEditor.vue`, which owns the model and is the only
+// thing that sees a caret move. The surface reports and this module holds.
 //
-// The labels are formatted at report time, from the pure functions in
-// `lib/editor-facts.js`, and the state holds strings. That is deliberate: a
-// keystroke reports the caret, and a fresh `{tabSize, …}` object per keystroke
-// would repaint the strip on every key even though nothing it shows changed. A
-// string compares by value, so an unchanged fact is a silent write.
+// The labels are formatted at report time (`lib/editor-facts.js`) and the state
+// holds strings: a fresh object per keystroke would repaint the strip even when
+// nothing it shows changed, while a string compares by value.
 //
 // **A fact is keyed by the path it describes**, and a report for another path is
-// dropped: the same rule the server field keeps (§1.3). The surface clears this
-// the moment it goes away (a diff tab, a preview tab, the last tab closing), so
-// an empty state and "no buffer on screen" are the same thing here — the bar
-// shows nothing rather than the file it used to show.
+// dropped. The surface clears this when it goes away (a diff tab, a preview tab,
+// the last tab closing), so an empty state and "no buffer on screen" are the same
+// thing: the bar shows nothing rather than the file it used to show.
 // ---------------------------------------------------------------------------
 
 const state = reactive({
@@ -36,9 +31,9 @@ const state = reactive({
   language: null,
 })
 
-// Report every fact for a buffer, plus the path they belong to. One call for the
-// three moments that change them together: the surface mounting, a buffer swap,
-// and a model's own options/language/line-ending moving under it.
+// Report every fact for a buffer, plus the path they belong to: one call covers
+// the surface mounting, a buffer swap, and a model's own options/language/line
+// ending moving under it.
 /** @param {{ path?: string, cursor?: string, indentation?: string, eol?: string, language?: string }} facts */
 export function reportFile({ path, cursor, indentation, eol, language }) {
   state.path = path ?? null
@@ -48,8 +43,8 @@ export function reportFile({ path, cursor, indentation, eol, language }) {
   state.language = language ?? null
 }
 
-// Report the caret alone. Guarded by the path so a cursor event that arrives
-// after the buffer it belongs to was replaced cannot paint over the new one.
+// Report the caret alone. Guarded by the path, so a cursor event arriving after
+// its buffer was replaced cannot paint over the new one.
 export function reportCursor(path, cursor) {
   if (!path || path !== state.path) return
   state.cursor = cursor ?? null

@@ -12,77 +12,69 @@ import { withWorkspace } from './useWorkspaceSession'
 // wrong answer off the screen.
 //
 // The answer is `POST /api/lsp/query`'s `diagnostics` action: it syncs the
-// document and then reads the hub's per-session inbox without waiting (spec
-// §3.1), so a cold file answers "not analysed yet" and a later ask answers the
-// problems. The route, the envelope and the action table are untouched by this
-// module; it reads one action and shapes the three states the bar exists for
-// (spec §4).
+// document and then reads the hub's per-session inbox without waiting, so a cold
+// file answers "not analysed yet" and a later ask answers the problems. The route
+// and the envelope are untouched here; this module reads one action and shapes
+// the three states the bar exists for.
 //
-// It has **its own state and its own token**, not `useEditorLsp`'s. That
-// composable keeps one `state.answer` for one *gesture*, and a newer gesture
-// drops an older one's in-flight answer on purpose — right for Ctrl+click, and
-// wrong here: a refresh loop travelling that path would cancel a definition
-// request the user is waiting on. So this module posts the same body shape to
-// the same route and guards its own answer, and `useEditorLsp`'s contract is
-// left exactly as it documents it.
+// It has **its own state and its own token**, not `useEditorLsp`'s: that one
+// keeps a single answer for one *gesture* and drops an older in-flight answer on
+// purpose, which is right for Ctrl+click and wrong for a refresh loop, which
+// would cancel a definition request the user is waiting on.
 //
-// The three states, and why they must never be confused (§4):
+// The three states, never to be confused:
 //
 //   * **`no_server`** — nothing will ever analyse this file, and `reason` holds
-//     the sentence saying so (the hub's own wording, D8). No items, no marks.
+//     the hub's own sentence saying so. No items, no marks.
 //   * **`unknown`** — *not analysed yet*. `analysing` says a request is in
-//     flight; with no request in flight it is still unknown, never clean. This
-//     is the row of §4's table the whole feature exists to keep honest: an
-//     empty squiggle set is a claim about the code, and it may only be made
-//     when an analysis was actually reached.
+//     flight; with no request in flight it is still unknown, never clean: an
+//     empty squiggle set is a claim about the code and may only be made when an
+//     analysis was actually reached.
 //   * **`analysed`** — an item list, possibly empty, and that emptiness is a
 //     verdict.
 //
-// **The two guards (D4).** Both are required and both are independent:
+// **The two guards**, both required and independent:
 //
 //   * *The client token.* Stamped on send, checked on arrival, bumped whenever
 //     the buffer being asked about changes — so a late answer can never
 //     overwrite a newer one, and an answer that lost its token is not stored,
 //     not painted and not counted.
 //   * *The answer's version.* An answer describing text older than what has
-//     already been accepted for this buffer is discarded. The comparison is the
-//     one `core/lsphub/editor.py` states: a strictly older version loses, an
-//     equal version is the same analysis, and a version either side did not
-//     give cannot be compared — so it is accepted rather than guessed at. It is
+//     already been accepted for this buffer is discarded, by the rule
+//     `core/lsphub/editor.py` states: a strictly older version loses, an equal
+//     version is the same analysis, and a version either side did not give
+//     cannot be compared — so it is accepted rather than guessed at. It is
 //     deliberately **not** "does the answer's version equal the document's
-//     current version": the shared sync bumps that version on every ask, so
-//     that comparison would call every good answer stale.
+//     current version": the shared sync bumps that version on every ask, so that
+//     comparison would call every good answer stale.
 //
 // A dropped answer changes nothing it cannot improve: the held verdict stays
 // held, because the only answer that can be stale is older than it. `analysing`
 // stays true across the drop all the same — the analysis on screen then
-// describes text that is no longer there, and the honest reading is still *we
-// do not know yet* (D4). The next trigger, or the bar's own re-check, is what
-// clears it.
+// describes text that is no longer there, and the honest reading is still *we do
+// not know yet*. The next trigger, or the bar's own re-check, clears it.
 //
-// **Whole replacement.** An accepted answer's marker set is the new answer's
-// items, built by `lib/monaco-lsp.js`'s `markersForDiagnostics` and never
-// shaped here: the set replaces the previous one whole, which is what makes a
-// fixed defect's underline go away (spec §6). No merging, no diffing.
+// **Whole replacement.** An accepted answer's marker set is built by
+// `lib/monaco-lsp.js`'s `markersForDiagnostics` and never shaped here: it
+// replaces the previous set whole, which is what makes a fixed defect's
+// underline go away. No merging, no diffing.
 //
-// **A memory keyed by path.** A model swap drops its marks with it (spec §2,
-// consequence 3), so an answer must be *re-applied* when a buffer comes back on
-// screen rather than remembered once. Only a real verdict is remembered — a
-// "not analysed yet" answer is not, or a buffer would never be asked about
-// again. A buffer that leaves the strip takes its entry with it (this is a
-// per-open-buffer cache, not a document store), and a new working location
-// empties the whole memory and drops an answer still in flight, through the
-// same keyed `registerReRootHandler` registry the buffers and the search
-// results use.
+// **A memory keyed by path.** A model swap drops its marks with it, so an answer
+// must be *re-applied* when a buffer comes back on screen rather than remembered
+// once. Only a real verdict is remembered — a "not analysed yet" answer is not,
+// or a buffer would never be asked about again. A buffer that leaves the strip
+// takes its entry with it (a per-open-buffer cache, not a document store), and a
+// new working location empties the whole memory and drops an answer still in
+// flight, through the same keyed `registerReRootHandler` registry the buffers
+// and the search results use.
 //
 // **Every answer is quiet.** No server, switched off, errored, not-yet-analysed,
 // an unreachable API and a refused request are a sentence or a silence, never a
-// notice, never a dialog, never an error state (§4, and the lot's "no new
-// notice, ever").
+// notice, never a dialog, never an error state.
 //
-// **The four triggers, and no others (D3).** A refresh happens when (1) the
-// buffer becomes the one on screen, (2) edits settle after the one quiet period
-// below, (3) a save completes, and (4) the user presses the bar's re-check. In
+// **The four triggers, and no others.** A refresh happens when (1) the buffer
+// becomes the one on screen, (2) edits settle after the one quiet period below,
+// (3) a save completes, and (4) the user presses the bar's re-check. In
 // particular there is **no interval, no poll and no timer** other than the
 // settling one, nothing is refreshed while no buffer is on screen (a diff tab, a
 // preview, an empty pane have no text to analyse), and a streaming chat reply is
@@ -92,39 +84,37 @@ import { withWorkspace } from './useWorkspaceSession'
 // a chip click, a tree click, an arrow key on the strip, a close that reveals
 // its neighbour and a reload all change that one value. When the new buffer's
 // analysis is already held the answer is *re-applied* from the memory, which
-// asks for nothing — re-applying is not a fifth moment.
+// asks for nothing.
 //
 // Triggers two and three read signals the buffer record already carries, so no
 // second copy of the text, of the dirty flag or of a save's outcome exists here:
-// `editedAt` rises in `useEditorFiles.updateText` for a real edit only (and that
-// is what a debounce needs — a counter, not a second dirty flag), and `savedAt`
-// rises in the one place a save is *confirmed*, so save-all, a conflict
-// resolution and save-and-close all fire it while a refused save fires nothing.
-//
-// The one timing constant of the feature is `DIAGNOSTICS_SETTLE_MS`: per D3 this
-// debounce is the only place this feature measures time.
+// `editedAt` rises in `useEditorFiles.updateText` for a real edit only — a
+// counter, not a second dirty flag, which is what a debounce needs — and
+// `savedAt` rises in the one place a save is *confirmed*, so save-all, a
+// conflict resolution and save-and-close all fire it while a refused save fires
+// nothing.
 //
 // **The bar reads, this module answers.** The problem count and the
 // `analysing…` word are the bar's *fields*, so their wording lives in the
 // component; what lives here is what they are read from — the state's own
 // `status`/`items` (counted by `lib/monaco-lsp.js`'s one counting function, so
-// the number and the underlines cannot disagree, D7) and `analysing`, which is
-// the middle row of §4 rather than a fourth state. `shownOnScreen` is the guard
-// that keeps any field from describing a buffer that is no longer on screen.
+// the number and the underlines cannot disagree) and `analysing`, which is not
+// a fourth state. `shownOnScreen` is the guard that keeps any field from
+// describing a buffer that is no longer on screen.
 // ---------------------------------------------------------------------------
 
-/** How long edits must be quiet before they are analysed (spec D3).
+/** How long edits must be quiet before they are analysed.
  *
- * Named and exported because it is *the* timing constant of this feature: D3
- * says the settling period is a debounce and that it is the only one. A test may
- * shorten it (fake timers or a smaller value); nothing else here measures time.
+ * Named and exported because it is *the* timing constant of this feature: the
+ * settling period is the only debounce, and nothing else here measures time. A
+ * test may shorten it (fake timers or a smaller value).
  */
 export const DIAGNOSTICS_SETTLE_MS = 400
 
 const state = reactive({
   // The buffer these fields describe, from `ask()` or `reapply()`.
   path: null,
-  // 'unknown' | 'no_server' | 'analysed' — the three states of §4, and no fourth.
+  // 'unknown' | 'no_server' | 'analysed' — the three states, and no fourth.
   status: 'unknown',
   // The accepted answer's items, whole, and the marker set built from them.
   items: [],
@@ -147,8 +137,8 @@ const memory = reactive({})
 
 // The answer above belongs to one question, so it has its own token — not
 // `useEditorLsp`'s, and not `useEditorStatus`'s. Stamped on send, checked on
-// arrival, bumped by `clear()`, by `reapply()` on a different buffer, and by
-// `ask()` itself. Same token trick the tree, the search and the quick-open use.
+// arrival, bumped by `clear()`, by `reapply()` on a different buffer and by
+// `ask()` itself.
 let token = 0
 
 // The path of the request currently in flight, or `null`. Kept beside the token
@@ -181,14 +171,13 @@ function allowedServerIds() {
 }
 
 // One request, one answer, no retry and no throw. A `starting` answer is *not*
-// retried here: the pane's four triggers (D3) are what asks again, and a retry
-// delay in this module would be a second timing constant in a feature that has
-// exactly one.
+// retried here: the pane's four triggers are what asks again, and a retry delay
+// would be a second timing constant in a feature that has exactly one.
 async function post(path, text) {
   const body = { action: 'diagnostics', path }
-  // The buffer is the source of truth (§6): unsaved edits are analysed as
-  // written, so the text travels only when the caller's record says the buffer
-  // is dirty. A clean buffer omits it and the hub reads the file.
+  // The buffer is the source of truth: unsaved edits are analysed as written, so
+  // the text travels only when the caller's record says the buffer is dirty. A
+  // clean buffer omits it and the hub reads the file.
   if (typeof text === 'string') body.text = text
   const allowed = allowedServerIds()
   if (allowed !== null) body.lspEnabled = allowed
@@ -292,8 +281,8 @@ function openBufferPaths() {
 function adoptAnswer(path, answer) {
   const result = answer?.result
   if (!result || result.analysed !== true) {
-    // `analysed: false` — the middle row of §4: *unknown*, never "clean", and
-    // deliberately not an error and not a fourth envelope status.
+    // `analysed: false` — *unknown*, never "clean", and deliberately not an
+    // error and not a fourth envelope status.
     delete memory[path]
     showUnknown(path)
     return
@@ -301,8 +290,8 @@ function adoptAnswer(path, answer) {
   const items = Array.isArray(result.items) ? result.items : []
   const held = {
     items,
-    // The markers are task 04's pure mapping, never shaped here: one `+1`, one
-    // severity rule, one replacement set.
+    // The markers are `lib/monaco-lsp.js`'s pure mapping, never shaped here: one
+    // `+1`, one severity rule, one replacement set.
     markers: markersForDiagnostics(items),
     version: result.version ?? null,
     suppressed: Number.isInteger(result.suppressed) ? result.suppressed : 0,
@@ -313,7 +302,7 @@ function adoptAnswer(path, answer) {
 
 // Ask about one buffer: one request, its own token, both guards, and no notice
 // on any path. The text comes from the buffer record the pane already holds —
-// never from a second copy kept here — and only while it is dirty (§6).
+// never from a second copy kept here — and only while it is dirty.
 //
 // Returns the envelope it accepted, or `null` for every dropped or quiet
 // outcome: a caller has nothing to branch on, and there is nothing to show.
@@ -336,19 +325,19 @@ async function ask(path) {
   if (askedAt !== token) return null
   askedPath = null
 
-  // Guard two, and it is asked *before* the state is touched: a stale answer is
-  // dropped, not painted (D4) — the answer held on screen describes newer text
-  // than this one, so it stays. `analysing` stays true with it: the last thing
-  // an answer had to say was that it described text nobody is looking at, which
-  // is a "we do not know yet" the bar must keep reading as `analysing…` until
-  // the refresh the settling period fires lands.
+  // Guard two, asked *before* the state is touched: a stale answer is dropped,
+  // not painted — the answer held on screen describes newer text than this one,
+  // so it stays. `analysing` stays true with it: the last thing an answer had to
+  // say was that it described text nobody is looking at, which is a "we do not
+  // know yet" the bar must keep reading as `analysing…` until the refresh the
+  // settling period fires lands.
   if (answer.status === 'ok' && isStaleAnswer(path, answer.result?.version)) {
     return null
   }
   state.analysing = false
 
   if (answer.status !== 'ok') {
-    // Every quiet envelope is a sentence or a silence, never a notice (§4). A
+    // Every quiet envelope is a sentence or a silence, never a notice. A
     // no-server answer means nothing will analyse this path; a `starting` one
     // means not yet — and neither may leave the previous verdict on screen.
     delete memory[path]
@@ -361,14 +350,14 @@ async function ask(path) {
   return answer
 }
 
-// The read tasks 07 and 08 use to re-apply an answer when a buffer comes back on
+// The read the pane uses to re-apply an answer when a buffer comes back on
 // screen: for a path, whatever analysis is already held — or `null`, in which
 // case the bar says `analysing…` until the ask the same trigger fires lands.
 //
-// Re-applying is not a fifth moment (D3): it asks for nothing, so a buffer whose
-// analysis is held costs no request. A switch to a *different* buffer bumps the
-// token, so an answer still in flight for the buffer just left is dropped rather
-// than painted under the new one.
+// Re-applying asks for nothing, so a buffer whose analysis is held costs no
+// request. A switch to a *different* buffer bumps the token, so an answer still
+// in flight for the buffer just left is dropped rather than painted under the
+// new one.
 function reapply(path) {
   if (!path) {
     supersede()
@@ -394,8 +383,8 @@ function analysisFor(path) {
 
 // Forget everything, including a request in flight: the token moves, so an
 // answer that arrives afterwards is dropped rather than shown. A working
-// location switch is the reason this exists (§4.13 of the LSP design: paths
-// relative to a root that no longer exists are a lie).
+// location switch is the reason this exists: paths relative to a root that no
+// longer exists are a lie.
 function clear() {
   // A settling period armed for a buffer of the folder just left must not fire
   // an ask about a path that names nothing any more.
@@ -405,19 +394,17 @@ function clear() {
   resetShown()
 }
 
-// -- the four triggers (D3) ---------------------------------------------------
+// -- the four triggers --------------------------------------------------------
 //
 // Armed by the pane and disarmed with it, the shape `useEditorFiles` keeps for
-// its freshness tick: the timer, the watchers and the request stay this
-// module's, and a component only says when the pane is on screen. Nothing here
-// measures time except the one settling period below.
+// its freshness tick: the timer, the watchers and the request stay this module's,
+// and a component only says when the pane is on screen.
 
 // The active *file* buffer's record, or null. A diff tab and a preview tab are
-// records but not buffers — they hold no live text a server could analyse — and
-// this is the pane's own notion of "the buffer on screen", read from the active
-// tab rather than from a DOM event: a chip click, a tree click, an arrow key on
-// the strip, a close that reveals its neighbour and a reload all move that one
-// value.
+// records but not buffers: they hold no live text a server could analyse. Read
+// from the active tab rather than from a DOM event, because a chip click, a tree
+// click, an arrow key on the strip and a close that reveals its neighbour all
+// move that one value.
 function activeRecord() {
   const files = useEditorFiles()
   const key = files.state.active
@@ -442,8 +429,8 @@ function clearSettleTimer() {
 }
 
 // Trigger one: the buffer becomes the one on screen. A held analysis is
-// **re-applied, not re-asked** — re-applying is not a fifth moment and costs no
-// request — and only an unheld buffer asks.
+// **re-applied, not re-asked** — it costs no request — and only an unheld
+// buffer asks.
 function enterActiveBuffer(path) {
   clearSettleTimer()
   if (!path) {
@@ -458,9 +445,9 @@ function enterActiveBuffer(path) {
 
 // Trigger two: edits settle. One timer, reset by each edit and cleared by a
 // buffer switch, so four keystrokes in a row are one ask after the quiet period
-// — never four, and never one per keystroke. An edit that lands while a request
-// is in flight opens no second request in parallel: this period produces one
-// ask, and the two guards above decide which answer wins.
+// — never four. An edit that lands while a request is in flight opens no second
+// request in parallel: this period produces one ask, and the two guards above
+// decide which answer wins.
 function settleEdits(path) {
   clearSettleTimer()
   settleTimer = setTimeout(() => {
@@ -474,7 +461,7 @@ function settleEdits(path) {
 // describe the saved text. `record.savedAt` rises only in the one branch that
 // confirms a save, which is why save-all, a conflict resolution and
 // save-and-close all fire this without a handler on each button — and why a
-// refused save (the stream's, the policy's, a conflict) fires nothing.
+// refused save fires nothing.
 function afterSave(path) {
   clearSettleTimer()
   void ask(path)
@@ -489,7 +476,7 @@ function recheck() {
   return ask(path)
 }
 
-// The scope the three watchers live in while the pane is on screen, or null.
+// The scope the watchers live in while the pane is on screen, or null.
 let triggerScope = null
 
 /**
@@ -537,7 +524,7 @@ function stopRefresh() {
   triggerScope = null
 }
 
-// -- the bar's one control (D1) -----------------------------------------------
+// -- the bar's one control -----------------------------------------------------
 //
 // Whether the re-check has anything to do is answered from this composable's own
 // state, which is the answer for the buffer on screen: a buffer whose last answer
@@ -554,10 +541,10 @@ function stopRefresh() {
  * What makes it inert is an answer that says nothing will ever analyse this
  * path: `no_server` is the one state a refresh cannot improve.
  *
- * False is the button's disabled state — **disabled, never hidden** (D1): a
- * re-check is the only thing a user can do about a stale or absent answer, so the
- * control has to stay visible and say why it is inert, rather than appear and
- * disappear with the tab.
+ * False is the button's disabled state — **disabled, never hidden**: a re-check
+ * is the only thing a user can do about a stale or absent answer, so the control
+ * has to stay visible and say why it is inert, rather than appear and disappear
+ * with the tab.
  */
 const recheckEnabled = computed(() => {
   const path = activeBufferPath()
@@ -578,17 +565,16 @@ const recheckLabel = computed(() => {
   return `Re-check ${path}`
 })
 
-// -- the bar's two readouts (D6, D7) ------------------------------------------
+// -- the bar's two readouts ---------------------------------------------------
 //
 // The Problems and State fields read these three exports and count nothing of
-// their own. The *wording* is the component's (AGENTS.md: components are the
-// widgets, `lib/` is the rule that produced the numbers); what is answered here
-// is *which* buffer the answer describes and *what* its counts are.
+// their own. The *wording* is the component's (components are the widgets, `lib/`
+// is the rule that produced the numbers); what is answered here is *which*
+// buffer the answer describes and *what* its counts are.
 
 /**
  * Whether the shown answer describes the buffer on screen — the one rule that
- * keeps a field from carrying the previous buffer's numbers (§1.3: "there is no
- * 'last buffer' residue").
+ * keeps a field from carrying the previous buffer's numbers.
  *
  * It is a comparison rather than a copy, and it is needed because trigger one
  * runs in a watcher: for the tick between a tab switch and the re-application
@@ -602,7 +588,7 @@ const shownOnScreen = computed(() => {
 })
 
 /**
- * The §4 state for the buffer on screen: `'no_server'`, `'unknown'` or
+ * The state for the buffer on screen: `'no_server'`, `'unknown'` or
  * `'analysed'` — or `null` when nothing is known about *this* buffer, which is
  * the tick between a tab switch and the re-application that follows it. `null`
  * is what makes a field absent rather than wrong.
@@ -610,15 +596,15 @@ const shownOnScreen = computed(() => {
 const status = computed(() => (shownOnScreen.value ? state.status : null))
 
 /**
- * The counts for the accepted answer's items: task 04's one counting function,
- * over one answer. The bar renders these numbers and never counts again with a
- * rule of its own, so the number and the underlines cannot disagree (D7).
+ * The counts for the accepted answer's items: `lib/monaco-lsp.js`'s one counting
+ * function, over one answer. The bar renders these numbers and never counts again
+ * with a rule of its own, so the number and the underlines cannot disagree.
  *
  * Keyed like `status`: an answer about another path is counted as nothing, so a
- * field can never show the previous buffer's numbers (§1.3). `status` is what
+ * field can never show the previous buffer's numbers. `status` is what
  * distinguishes the zeroes — a caller checks it before treating a zero as a
  * *verdict*, because "clean" may only be said about an analysis that was
- * reached (§4).
+ * reached.
  */
 const counts = computed(() =>
   diagnosticCounts(shownOnScreen.value ? state.items : []),
@@ -626,9 +612,9 @@ const counts = computed(() =>
 
 /**
  * Whether an answer for the buffer on screen is awaited or was dropped as stale
- * — the middle row of §4, and the only thing that makes the bar read
- * `analysing…`. `state.analysing` already covers both (it stays true across a
- * drop, D4); the path check keeps it from describing another buffer.
+ * — the only thing that makes the bar read `analysing…`. `state.analysing`
+ * already covers both (it stays true across a drop); the path check keeps it
+ * from describing another buffer.
  */
 const analysing = computed(() => shownOnScreen.value && state.analysing)
 
@@ -662,15 +648,15 @@ export function useEditorDiagnostics() {
     analysisFor,
     clear,
     // The trigger lifecycle the pane arms on mount and disarms on unmount, and
-    // the bar's one control (D1).
+    // the bar's one control.
     startRefresh,
     stopRefresh,
     recheck,
     recheckEnabled,
     recheckLabel,
-    // The bar's two readouts (D6, D7): which buffer the answer describes, which
-    // of §4's states it is in, its counts, and whether an answer is awaited or
-    // was dropped.
+    // The bar's two readouts: which buffer the answer describes, which of the
+    // three states it is in, its counts, and whether an answer is awaited or was
+    // dropped.
     shownOnScreen,
     status,
     counts,

@@ -1,4 +1,4 @@
-"""The wizard's two questions, and the answers it accepts back (§5, §11).
+"""The wizard's two questions, and the answers it accepts back.
 
 The prompts and the *shape* of their answers live in this one module, side by
 side, because a prompt and the parse of its answer are one decision: widen a
@@ -10,11 +10,10 @@ Two steps, one per question:
 * **propose** (:func:`propose_messages`, :func:`parse_proposals`) is the LSP
   flow's first step. There is no catalogue of language servers, by decision, so
   this question is the only place a language-server candidate can come from for
-  that family. It is handed the scan's derived facts (task 02) and the
-  declaration file's path, and it answers an **ordered** list of servers — the
-  ordering rule the prompt states and the parser preserves being that what this
-  folder *clearly lacks* leads and a language the project *already serves* does
-  not.
+  that family. It is handed the scan's derived facts and the declaration file's
+  path, and it answers an **ordered** list of servers — the ordering rule the
+  prompt states and the parser preserves being that what this folder *clearly
+  lacks* leads and a language the project *already serves* does not.
 * **prepare** (:func:`prepare_messages`, :func:`parse_prepared`) is the second
   step of both families. It is handed the chosen candidate (a catalogue
   ``member`` for MCP, a proposal for LSP) plus the same facts, and it answers the
@@ -24,17 +23,15 @@ Two steps, one per question:
 
 Both answers are **one JSON object of a stated shape** (:data:`PROPOSAL_FIELDS`,
 :data:`PREPARED_FIELDS`). :func:`decode_answer` tolerates a text block around
-that object — a model wrapping its answer in prose is ordinary — and tolerates
-nothing else: an answer that is not a JSON object raises
-:class:`AnswerShapeError`, which the step reports as its own named failure rather
-than reading as an empty list.
+that object — a model wrapping its answer in prose is ordinary — and nothing
+else: an answer that is not a JSON object raises :class:`AnswerShapeError`, which
+the step reports as its own named failure rather than reading as an empty list.
 
 Two spellings are settled here and nowhere else, because the snippet is built
-from this module's own words (§8): :data:`PATH_REFERENCE` is how a path is
-written (an environment reference, never a literal absolute path) and
-:data:`SECRET_SENTINEL` is the **one** canonical spelling of "fill this in with
-your key". Task 04's snippet check imports both names instead of spelling them a
-second time.
+from this module's own words: :data:`PATH_REFERENCE` is how a path is written (an
+environment reference, never a literal absolute path) and :data:`SECRET_SENTINEL`
+is the **one** canonical spelling of "fill this in with your key". The snippet
+check imports both names instead of spelling them a second time.
 
 Hermetic by construction: this module builds text and parses text. It speaks to
 no endpoint, reads no file, imports no hub and knows no package name — every fact
@@ -47,13 +44,13 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 # -- the settled spellings -----------------------------------------------------
 
-#: How a path inside a snippet is written (§8): an environment reference, so the
-#: entry survives the folder being moved or the file being copied to another
-#: checkout. ``${NOJAE_PATH_LOCATION}`` is the workspace being served; a member
-#: may append a sub-folder to it.
+#: How a path inside a snippet is written: an environment reference, so the entry
+#: survives the folder being moved or the file being copied to another checkout.
+#: ``${NOJAE_PATH_LOCATION}`` is the workspace being served; a member may append a
+#: sub-folder to it.
 PATH_REFERENCE = "${NOJAE_PATH_LOCATION}"
 
-#: The **one** canonical spelling of "the user's key goes here" (§8). It is not a
+#: The **one** canonical spelling of "the user's key goes here". It is not a
 #: ``${NAME}`` reference and the loader does not expand it — an unreplaced one is
 #: sent upstream and fails at authentication — which is why there is exactly one
 #: spelling and why the page that shows it also says it must be replaced.
@@ -89,9 +86,9 @@ PREPARED_FIELDS: Tuple[str, ...] = (
 )
 
 #: ``${NAME}``, optionally followed by a sub-folder — the only shape a path may
-#: take inside a proposal (§8). A *literal* path is wrong at this step already,
-#: so a proposal carrying one is dropped rather than handed on. Either separator
-#: is accepted for the sub-folder: what the check refuses is a path this machine
+#: take inside a proposal. A *literal* path is wrong at this step already, so a
+#: proposal carrying one is dropped rather than handed on. Either separator is
+#: accepted for the sub-folder: what the check refuses is a path this machine
 #: spells absolutely, not the way a platform joins two names.
 _ENV_REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}(?:[/\\].*)?$")
 
@@ -192,7 +189,7 @@ PREPARE_PROMPT = (
 
 #: What prepare is told about the family it is serving. The difference is *whose*
 #: the command line and the install line are, which is the one thing the two
-#: flows do not share (§9: MCP offers a curated list, LSP a reasoned one).
+#: flows do not share: MCP offers a curated list, LSP a reasoned one.
 PREPARE_FAMILY_LINES: Dict[str, str] = {
     "mcp": (
         "The candidate is one entry of the committed connector catalogue: which "
@@ -272,10 +269,9 @@ def prepare_messages(
 def decode_answer(text: str) -> Dict[str, Any]:
     """The one JSON object an answer carries.
 
-    A text block around it is tolerated — a model that writes "Here is the
-    entry:" before its object has still answered — and anything that is not a
-    JSON object raises :class:`AnswerShapeError`. The whole text is tried first,
-    so an answer that is already the object is never re-sliced.
+    A text block around it is tolerated, and anything that is not a JSON object
+    raises :class:`AnswerShapeError`. The whole text is tried first, so an answer
+    that is already the object is never re-sliced.
     """
     body = (text or "").strip()
     candidates: List[str] = [body]
@@ -327,8 +323,8 @@ def parse_proposals(text: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     An item missing any of :data:`PROPOSAL_FIELDS` — or carrying one in a shape
     that cannot be offered, a literal absolute ``workspaceRoot`` included — is
     **dropped with a note**: nothing is repaired into shape, because a member
-    built from a guessed value is the broken config this feature exists to
-    prevent. An empty list is a real answer, not a parse failure.
+    built from a guessed value is the broken config the wizard exists to prevent.
+    An empty list is a real answer, not a parse failure.
     """
     payload = decode_answer(text)
     if "servers" not in payload:

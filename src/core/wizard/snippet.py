@@ -1,4 +1,4 @@
-"""The snippet, and the three checks that make it trustworthy (§6, §7, §8).
+"""The snippet, and the three checks that make it trustworthy.
 
 Page 2 produces a prepared answer; page 3 must not present it as trustworthy on
 its own word. This module is that second look, and its whole design is *not* to
@@ -7,32 +7,31 @@ be a second opinion:
 * **the member is built, not echoed.** :func:`build_member` answers the ``member``
   group of what it is handed and nothing else — for MCP that is the catalogue
   entry, so an install line, a docs link, a signal and a description are the
-  wizard's own material and cannot reach the JSON (AC-21); for LSP it is the
-  prepared answer. The output is always a **member** (``"id": { … }``), never a
-  whole file (AC-19): a missing declaration file changes a sentence, not the
-  shape.
+  wizard's own material and cannot reach the JSON; for LSP it is the prepared
+  answer. The output is always a **member** (``"id": { … }``), never a whole
+  file: a missing declaration file changes a sentence, not the shape.
 * **check 1 is the hub's own loader.** :func:`loader_verdict` hands the entry to
   ``mcphub.discovery.entry_from_declaration`` /
   ``lsphub.discovery.entry_from_declaration`` — the very functions each
   declaration file walk calls — so the words the user reads are the words the
   panel would have shown after a restart, and a member this module accepts is a
-  member the loader accepts (AC-9). There is no second validator here, by design:
-  if the two ever disagreed the loader would win, so there is only one.
+  member the loader accepts. There is no second validator here, by design: if the
+  two ever disagreed the loader would win, so there is only one.
 * **check 2 resolves a command, it never spawns one.** :func:`readiness` asks
   ``mcphub.process.resolve_command`` over ``mcphub.process.child_environment`` —
   the lookup and the environment the LSP hub's own start uses — so "not
   installed" is a fact about this machine rather than a trial run. Nothing here
   imports ``subprocess``, starts a connector or a language server, or installs
-  anything: resolving a program's path is not starting it (§7).
+  anything: resolving a program's path is not starting it.
 * **check 3 is a warning, never a stop.** :func:`duplicate_warning` reads the
   declaration file to say that the id — or a ``_``-prefixed note key of that name
-  — is already a key of it, and the snippet is offered anyway (AC-11).
+  — is already a key of it, and the snippet is offered anyway.
 * **the values live in one place.** :data:`SECRET_SENTINEL` and
   :data:`PATH_REFERENCE` are :mod:`wizard.prompts`' spellings, imported rather
-  than restated, and :func:`value_findings` answers *which* form the member shows
-  plus what is wrong with it (AC-13). ``${NAME}`` expansion stays the loader's
-  job: nothing here expands a reference, blanks an unresolved one, or consults
-  ``.env``.
+  than restated; :func:`value_form` says *which* form the member shows and
+  :func:`value_findings` what is wrong with it. ``${NAME}`` expansion stays the
+  loader's job: nothing here expands a reference, blanks an unresolved one, or
+  consults ``.env``.
 * **the hub's own reach refusal, in its own words.** A ``local`` candidate the
   deployment refuses arrives as one of the loader's notes, verbatim — asked of
   the hub's predicate by the loader, never restated here.
@@ -40,7 +39,7 @@ be a second opinion:
 What it may not do, stated because that is the whole design: it **writes no
 declaration file** (it reads one, to warn and to name its path, and never touches
 its mtime), starts no process, and re-checks nothing downstream — a pasted
-sentinel surfaces exactly as a wrong value does today (§8).
+sentinel surfaces exactly as a wrong value does.
 """
 
 import json
@@ -59,19 +58,19 @@ from src.core.lsphub.discovery import entry_from_declaration as lsp_entry
 
 from . import prompts
 
-#: The readiness pair (§7) — the two answers check 2 may give. Spelled once, so
-#: the route, the composable and the dialog cannot drift.
+#: The readiness pair — the two answers check 2 may give. Spelled once, so the
+#: route, the composable and the dialog cannot drift.
 READY = "looks installed"
 NOT_INSTALLED = "not installed"
 
-#: Which of the two value forms a member is showing (§8). ``none`` is the honest
-#: third answer: an entry that needs no key shows neither.
+#: Which of the two value forms a member is showing. ``none`` is the honest third
+#: answer: an entry that needs no key shows neither.
 VALUE_FORM_SENTINEL = "sentinel"
 VALUE_FORM_REFERENCE = "environment-reference"
 VALUE_FORM_NONE = "none"
 
-#: What the page says when it is showing the sentinel: the trap §8 names, since
-#: the loader does not expand it and the endpoint therefore sees it as the key.
+#: What the page says when it is showing the sentinel: the loader does not expand
+#: it, so the endpoint sees it as the key.
 SENTINEL_WARNING = (
     "This entry carries " + prompts.SECRET_SENTINEL + " in the value slot: it "
     "will not authenticate until that slot is replaced with your key."
@@ -84,9 +83,9 @@ REFERENCE_NOTE = (
 )
 
 #: A literal path where a reference belongs, and a literal value in a slot that
-#: wants a key — the two things a snippet may never carry (AC-13). Built by
-#: concatenation rather than ``str.format``, because both sentences quote the
-#: settled spellings' own braces: ``format`` would read them as fields.
+#: wants a key — the two things a snippet may never carry. Built by concatenation
+#: rather than ``str.format``, because both sentences quote the settled spellings'
+#: own braces: ``format`` would read them as fields.
 LITERAL_PATH_FINDING = (
     "a literal absolute path inside this workspace. A path in a snippet is an "
     "environment reference — " + prompts.PATH_REFERENCE + ", optionally plus "
@@ -99,8 +98,7 @@ LITERAL_SECRET_FINDING = (
 )
 
 #: The two duplicate sentences: an entry of that id already, and a ``_``-prefixed
-#: note key of that name. Both are warnings — the snippet is still offered, and
-#: every check (including the loader's) still answers about the same member.
+#: note key of that name. Both are warnings — the snippet is still offered.
 DUPLICATE_ENTRY_WARNING = (
     "{name} already declares an entry of that id: pasting this member would "
     "duplicate it, so rename one of the two."
@@ -110,9 +108,8 @@ DUPLICATE_NOTE_WARNING = (
     "member would duplicate the note, so rename one of the two."
 )
 
-#: What the loader answered when it accepted the member. Not a paraphrase of any
-#: sentence the app owns: a refusal is reported in the loader's own words, and
-#: this is only the line for the other outcome.
+#: What the loader answered when it accepted the member. A refusal is reported in
+#: the loader's own words, so this is only the line for the other outcome.
 ACCEPTED_SENTENCE = "The declaration loader accepts this member."
 
 #: A header/env key name that wants a credential rather than a plain value.
@@ -135,10 +132,10 @@ def build_member(source: Mapping[str, Any]) -> Dict[str, Any]:
     """The ``member`` group of ``source`` and nothing else — a deep copy.
 
     One rule for both families: an MCP catalogue entry and an LSP prepared
-    answer both carry their JSON under ``member``, so the identity,
-    requirements and relevance groups cannot leak into a snippet and neither can
-    an install line or a decision line. A source without a ``member`` object has
-    no snippet at all, which is the caller's error rather than a repaired value.
+    answer both carry their JSON under ``member``, so the identity, requirements
+    and relevance groups cannot leak into a snippet, and neither can an install
+    line or a decision line. A source without a ``member`` object has no snippet
+    at all, which is the caller's error rather than a repaired value.
     """
     member = source.get("member") if isinstance(source, Mapping) else None
     if not isinstance(member, dict) or not member:
@@ -147,12 +144,12 @@ def build_member(source: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def render_member(declared_id: str, member: Mapping[str, Any]) -> str:
-    """The snippet's text: one JSON **member**, never a whole file (AC-19).
+    """The snippet's text: one JSON **member**, never a whole file.
 
     ``"id": { … }`` is what the user pastes inside the declaration file's
-    top-level object, so the outer braces of a file are not part of the text —
-    that is the whole difference between a member and a file, and it is what
-    makes a missing declaration file a sentence rather than a different shape.
+    top-level object, so a file's outer braces are not part of the text — which
+    is what makes a missing declaration file a sentence rather than a different
+    shape.
     """
     text = json.dumps({declared_id: member}, indent=2, ensure_ascii=False)
     lines = text.splitlines()[1:-1]
@@ -168,7 +165,7 @@ def declaration_file(family: str) -> Path:
     Resolved through each hub's own ``*_settings_path()`` at call time, so the
     wizard names the file the hub would read — a pinned path, a switched
     workspace and the reserved folder's own name all move together. Never
-    created: a file that is not there is reported, not fixed (§4).
+    created: a file that is not there is reported, not fixed.
     """
     _require_family(family)
     path = (
@@ -208,8 +205,7 @@ def loader_verdict(
         )
     accepted = entry is not None
     # A refusal is the loader's last note; an acceptance keeps every note it
-    # earned (the reach refusal is one of them, and it is the one the user needs
-    # to read *before* a restart rather than after it).
+    # earned (a reach refusal is one, and the user needs it *before* a restart).
     sentence = ACCEPTED_SENTENCE if accepted else (notes[-1] if notes else "")
     return {"accepted": accepted, "sentence": sentence, "notes": list(notes)}
 
@@ -227,7 +223,7 @@ def readiness(
     ``mcphub.process.resolve_command`` over ``child_environment``, which is the
     child's own environment (the entry's ``env`` wins, so a declaration that sets
     ``PATH`` is judged on that ``PATH``). **Nothing is spawned to find out**, and
-    a not-installed candidate is still offered (§7).
+    a not-installed candidate is still offered.
     """
     command = argv_from_command(member.get("command"), member.get("args"))
     if command is None:
@@ -274,7 +270,7 @@ def duplicate_warning(
     Both shapes count: an entry of that id (the pasted member would duplicate it)
     and a ``_``-prefixed note key of that name (a comment key there would make the
     pasted member a duplicate of the note). It is a **warning**: the snippet is
-    offered anyway, because nothing changes until the user pastes it (AC-11).
+    offered anyway, because nothing changes until the user pastes it.
     """
     data = _declared_ids(declaration_path)
     if data is None:
@@ -287,7 +283,7 @@ def duplicate_warning(
     return None
 
 
-# -- the values (§8) -----------------------------------------------------------
+# -- the values ----------------------------------------------------------------
 
 
 def _leaves(
@@ -328,13 +324,12 @@ def value_findings(
 ) -> List[str]:
     """What is wrong with the member's values — a literal path, a literal secret.
 
-    A **finding** is a refusal to offer the snippet (AC-13); both shapes come from
-    §8. A path is judged against the workspace the wizard serves, so a program
-    named absolutely (``/usr/bin/pyright-langserver``) is not mistaken for a
-    workspace root that should have been a reference. A value in a slot whose key
-    names a credential is a secret unless it is the sentinel or a ``${NAME}``
-    reference — an empty string is neither shown nor trusted, so it is a finding
-    too.
+    A **finding** is a refusal to offer the snippet. A path is judged against the
+    workspace the wizard serves, so a program named absolutely
+    (``/usr/bin/pyright-langserver``) is not mistaken for a workspace root that
+    should have been a reference. A value in a slot whose key names a credential
+    is a secret unless it is the sentinel or a ``${NAME}`` reference — an empty
+    string is neither shown nor trusted, so it is a finding too.
     """
     root = workspace_root if workspace_root is not None else workspace.current_root()
     findings: List[str] = []
@@ -367,8 +362,8 @@ def value_form(member: Mapping[str, Any]) -> str:
 
     The sentinel is checked first and by exact equality, because it is the
     default and because it is **not** a reference: a page that confused the two
-    would tell the user their key resolves when it does not (§8). A slot filled
-    with neither is the one case page 3 must not present as a form at all —
+    would tell the user their key resolves when it does not. A slot filled with
+    neither is the one case page 3 must not present as a form at all —
     :func:`value_findings` has already refused it, and calling it a reference
     here would print the wrong sentence beside the refusal.
     """
@@ -409,7 +404,7 @@ def assess(
     * ``accepted``/``verdict``/``notes`` — the loader's own words (check 1);
     * ``readiness``/``program``/``searched`` — the resolution answer (check 2);
     * ``duplicate`` — the warning, plain and non-blocking (check 3);
-    * ``valueForm``/``valueWarning``/``valueFindings`` — the §8 values;
+    * ``valueForm``/``valueWarning``/``valueFindings`` — the value checks;
     * ``declarationPath``/``declarationExists`` — the absolute path it belongs in,
       and whether the user has to create that file;
     * ``snippet``/``member``/``id`` — what to copy, always a member.

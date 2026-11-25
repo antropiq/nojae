@@ -1122,7 +1122,7 @@ class TestTheWizardRoutesAreNotAWriteSurface:
     def test_no_wizard_handler_names_a_write_or_a_spawn(self):
         source = Path(routes.__file__).read_text(encoding="utf-8")
         start = source.index("# -- the connector wizard's routes")
-        end = source.index("# -- the agents routes (appdb-10)")
+        end = source.index("# -- the agents routes", start)
         block = source[start:end]
         for marker in self.FORBIDDEN:
             assert marker not in block, marker

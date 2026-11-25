@@ -1,22 +1,16 @@
 """``LspManager``: spawn language servers and bridge sync callers onto them.
 
-The hub's own asyncio thread (``lsp-hub``) owns every session, so the
-synchronous chat worker threads can call ``call_tool_sync`` without ever
-touching the protocol themselves. This module keeps only the orchestration —
-lifecycle, hot toggles, the path policy, document sync, the sync bridge, the
-idle reaper and the status payload. What it delegates: discovery
-(``discovery.py``), the tool catalogue (``tools.py``), the client-side
-handlers (``features.py``), the per-session state (``session.py``), the
-per-action requests (``actions.py``), rendering (``rendering.py``) and the
-tsserver relay shapes (``tsserver.py``).
+The hub's own asyncio thread (``lsp-hub``) owns every session, so synchronous
+chat worker threads call ``call_tool_sync`` without touching the protocol.
+This module keeps only the orchestration and delegates the rest: discovery,
+the tool catalogue, the feature handlers, session state, actions and rendering.
 
-The hub has a **second caller**: the Editor's code pane, reached through
-:meth:`LspManager.query_editor_sync` — the same path policy, the same sync
-bridge and the same ``last_used`` stamp, answering the editor's own action
-table (``editor.py``) instead of the model's tool catalogue.
+The hub has a **second caller**, the Editor's code pane
+(:meth:`LspManager.query_editor_sync`), on the same path policy, sync bridge
+and ``last_used`` stamp.
 
-The heavy ``pygls``/``lsprotocol`` packages stay lazily imported throughout,
-so discovery and the settings panel keep working without the ``[lsp]`` extra.
+The heavy ``pygls``/``lsprotocol`` packages stay lazily imported, so discovery
+and the settings panel keep working without the ``[lsp]`` extra.
 """
 
 import asyncio
@@ -59,10 +53,8 @@ def _editor_envelope(
 ) -> Dict[str, Any]:
     """The Editor pane's answer envelope — one shape, both sides of the wire.
 
-    ``status`` is ``"ok"``, ``"starting"`` or ``"no_server"``; ``server`` names
-    the answering server (``None`` when none claims the file); ``reason`` is one
-    line, present whenever ``status`` is not ``"ok"``; ``result`` is the
-    action's structured answer, ``None`` unless the answer is ``"ok"``.
+    ``reason`` is present whenever ``status`` is not ``"ok"``; ``result`` is
+    ``None`` unless it is.
     """
     return {
         "status": status,
@@ -76,10 +68,8 @@ def _editor_envelope(
 class LspManager:
     """Spawn language servers and bridge sync callers onto their sessions.
 
-    Lifecycle: :meth:`start_all` on app startup (servers declared
-    ``"lazy": true`` spawn on their first tool call instead), :meth:`stop_all`
-    on shutdown. All LSP I/O runs on a private asyncio thread named
-    ``lsp-hub`` so chat worker threads stay synchronous.
+    All LSP I/O runs on a private asyncio thread named ``lsp-hub``, so chat
+    worker threads stay synchronous.
     """
 
     def __init__(
@@ -110,15 +100,13 @@ class LspManager:
     def _index(servers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """Definition list -> id-keyed live records (also used by :meth:`restart`).
 
-        A refused reach (win-07 / A-D4) is applied *here* rather than only at
-        start time, because a declared-but-never-started server is not merely
-        idle: a ``stopped`` entry with ``enable: true`` has its tools published
-        to chat from its declared list, and its first call would spawn it. Naming
-        it ``error`` at the moment the declaration file is read — boot and every
-        hub reload — takes it out by the two documented exclusions instead
-        (``enable: false`` and ``error``), for lazy servers as well as eager ones.
-        A disabled entry is the user's own switch, so it stays ``stopped``
-        whatever the guardrails can bound — the same shape the MCP hub keeps.
+        A refused reach is applied *here* rather than only at start time: a
+        ``stopped`` entry with ``enable: true`` has its tools published to chat
+        from its declared list, and its first call would spawn it. Naming it
+        ``error`` when the declaration file is read takes it out by the two
+        documented exclusions (``enable: false`` and ``error``), lazy servers
+        included. A disabled entry is the user's own switch, so it stays
+        ``stopped``.
         """
         refused = lsp_reach_is_refused()
         return {
@@ -146,8 +134,7 @@ class LspManager:
         """Spawn every activated server. Never raises.
 
         Servers declared ``"lazy": true`` stay stopped until their first tool
-        call (tsserver's cold start is multi-second and eats RAM); the others
-        come up with the app.
+        call; the others come up with the app.
         """
         await self._start_all_matching(None)
 
@@ -157,10 +144,9 @@ class LspManager:
         """Spawn only the servers whose id is in ``server_ids``. Never raises.
 
         The API passes the ids whose ``enable`` flag is on in the workspace's
-        ``.nojae/lsp-settings.json`` — the one gate (D13), the same answer
-        :meth:`start_all` reaches by itself, so this form exists for the restart
-        path, which hands over a freshly scanned file. An entry whose flag is
-        off stays stopped until the dialog ticks it.
+        ``.nojae/lsp-settings.json``; this form exists for the restart path,
+        which hands over a freshly scanned file. An entry whose flag is off
+        stays stopped until the dialog ticks it.
         """
         await self._start_all_matching(set(server_ids))
 
@@ -209,9 +195,9 @@ class LspManager:
     async def _pump_stderr(self, client: Any, log_path: Path) -> None:
         """Copy the server's stderr pipe into its per-server log file.
 
-        pygls keeps the child's stderr on a pipe (so nothing deadlocks if the
-        server is chatty); draining it is what puts tsserver's own words in
-        the log, where ``_log_tail`` can surface them on an initialize error.
+        pygls keeps the child's stderr on a pipe so a chatty server cannot
+        deadlock; draining it puts tsserver's own words in the log, where
+        ``_log_tail`` can surface them on an initialize error.
         """
         stream = getattr(client._server, "stderr", None)  # noqa: SLF001
         if stream is None:
@@ -223,10 +209,10 @@ class LspManager:
             self._append_log(log_path, line.decode("utf-8", errors="replace"))
 
     async def _watch_exit(self, server_id: str, process: Any) -> None:
-        """Surface a server that dies mid-conversation as a status (crash
-        path): the exit code plus its log tail land in ``info['error']``, so
-        the settings panel shows what happened instead of a stale 'running'.
-        Cancelled by ``_close_session`` for the deliberate shutdown paths."""
+        """Surface a server that dies mid-conversation as a status: the exit
+        code plus its log tail land in ``info['error']``, so the settings panel
+        shows what happened instead of a stale 'running'. Cancelled by
+        ``_close_session`` for the deliberate shutdown paths."""
         try:
             await process.wait()
         except Exception:  # noqa: BLE001 — nothing to report for a dead pipe
@@ -244,8 +230,8 @@ class LspManager:
             + (f": {tail}" if tail else "")
         )
         # Dropping the session means dropping the child's job handle too: a
-        # ctypes handle is a plain integer, so nothing else closes it (B-D5).
-        # With kill-on-close that release is also the kill of whatever the dead
+        # ctypes handle is a plain integer, so nothing else closes it. With
+        # kill-on-close that release is also the kill of whatever the dead
         # server left running — the ghost this teardown exists for — and where
         # the platform's jobs are inert it costs nothing. The full teardown is
         # deliberately not run here: the leader's own exit is what this watcher
@@ -255,16 +241,15 @@ class LspManager:
             self._release_job(dropped)
         self._defs.pop(server_id, None)
 
-    # -- the declared command, resolved before it is spawned (B-D6) -----------
+    # -- the declared command, resolved before it is spawned ------------------
 
     @staticmethod
     def _searched_paths(command: str, env: Dict[str, str]) -> str:
         r"""The folders a lookup of ``command`` in ``env`` walks, as one string.
 
-        ``mcphub.process.searched_paths`` — the shared rule, so a refusal here
-        and the wizard's readiness line name the same folders: one search, one
-        verdict. Reached through this hub rather than restated, because a copy
-        is how the two drift.
+        ``mcphub.process.searched_paths`` is the shared rule, so a refusal here
+        and the wizard's readiness line name the same folders, and neither
+        restates the walk.
         """
         return searched_paths(command, env)
 
@@ -273,11 +258,10 @@ class LspManager:
     ) -> Optional[str]:
         """The program the declaration names, or ``None`` when nothing answers it.
 
-        ``mcphub.process.resolve_command`` — the hub's one lookup of a declared
+        ``mcphub.process.resolve_command`` is the hub's one lookup of a declared
         ``argv[0]``, asked with the environment the child actually gets (see
-        :meth:`_environment`), and shared with the wizard's snippet check so the
-        page cannot call a command installed that the panel would refuse to
-        start.
+        :meth:`_environment`) and shared with the wizard's snippet check, so the
+        page cannot call a command installed that the panel would refuse.
         """
         return resolve_command(command, env)
 
@@ -288,11 +272,10 @@ class LspManager:
 
         Only ``argv[0]`` is resolved: the rest of the declaration's argv is
         arguments, not program names. The answer and the environment it was
-        answered from are handed to :meth:`_start_session` together, so the
-        search and the spawn are one search — nothing can drift between the two
-        environments. A refusal leaves the server at ``error`` with a sentence
-        naming the command and the folders it was looked up in — the way a failed
-        spawn does, on the same card — and nothing is spawned.
+        answered from are handed to :meth:`_start_session` together, so nothing
+        can drift between two environments. A refusal leaves the server at
+        ``error`` with a sentence naming the command and the folders it was
+        looked up in, and nothing is spawned.
         """
         declared = str(info["command"][0])
         child_env = self._environment(info)
@@ -306,8 +289,8 @@ class LspManager:
                 )
             )
             # The log is what the settings panel shows, and on a fresh install
-            # the logs folder does not exist until a session is made — without
-            # it the refusal would be half a report.
+            # the logs folder does not exist yet: without it the refusal would
+            # be half a report.
             self._logs_dir.mkdir(parents=True, exist_ok=True)
             self._append_log(
                 self._logs_dir / f"{server_id}.log",
@@ -322,11 +305,10 @@ class LspManager:
         """One sentence for one spawn the OS refused, naming what was searched.
 
         A Windows unexecutable-image code is translated, because ``[WinError
-        193] %1 is not a valid Win32 application`` names nothing the operator can
-        act on and no search can rule that file out (it *is* a file). Every other
-        OS answer keeps its own words — a denied execute bit or an unresolvable
-        working directory is already the diagnosis — with the declared command,
-        the program it was resolved to and the searched folders beside it.
+        193]`` names nothing the operator can act on and no search can rule that
+        file out (it *is* a file). Every other OS answer keeps its own words — a
+        denied execute bit is already the diagnosis — with the declared command,
+        the program it resolved to and the searched folders beside it.
         """
         if getattr(exc, "winerror", None) in constants.UNEXECUTABLE_IMAGE_WINERRORS:
             note = constants.COMMAND_UNUSABLE_NOTE.format(
@@ -342,21 +324,18 @@ class LspManager:
         """Spawn environment: ``child_environment`` pins a valid TMPDIR
         (a relative ``TMPDIR``/``TMP``/``TEMP`` would otherwise break Node),
         then the entry's own ``env`` overrides (volta shims need a PATH that
-        resolves ``node``) — the one rule the command search also asks."""
+        resolves ``node``) — the same rule the command search asks."""
         return child_environment(self._project_root, info.get("env") or {})
 
     def _refuse_reach(self, server_id: str, info: Dict[str, Any]) -> None:
-        """Mark one server refused: its reach cannot be bounded here (A-D4).
+        """Mark one server refused: its reach cannot be bounded here.
 
         A language server is a stdio child process, so what confines it is
         ``restricted-paths.txt`` plus the connector deny-prefixes — lists that
-        speak both platforms' path forms — and the process-tree teardown that
-        kills what the server spawns of its own, one escalation on either
-        platform's mechanism (``proctree``). Where no entry in those lists can
+        speak both platforms' path forms — and the process-tree teardown of
+        what the server spawns of its own. Where no entry in those lists can
         name this filesystem's paths, the bound is a claim this hub must not
-        make, and there is no partial start worth having: the status carries the
-        sentence the declaration scan carries, in the same place a failed
-        connection carries its error.
+        make, and there is no partial start worth having.
         """
         info["status"] = "error"
         info["error"] = constants.LOCAL_REACH_REFUSAL
@@ -368,25 +347,19 @@ class LspManager:
     async def _start_one(self, server_id: str) -> None:
         """Bring one server up, handshake included. Never raises.
 
-        The guard is deliberately *not* on ``status``. The synchronous entry
+        The guard is deliberately *not* on ``status``: the synchronous entry
         point (:meth:`start_server`) publishes ``starting`` *before* dispatching
         this coroutine onto the hub thread, so a status-based guard rejects the
-        very start that put the server there: it would sit in ``starting``
-        forever — no process, no tools, and no status the settings toggle can
-        retry. "Already up" is a live session; "an attempt is already running"
+        very start that put the server there and it would sit in ``starting``
+        forever. "Already up" is a live session; "an attempt is already running"
         is membership in :attr:`_starting`.
 
-        The reach refusal (win-07) is checked here as well as in
-        :meth:`_index`, because this is the one gate every attempt passes — the
-        settings toggle, the lazy path and a restart of a hub whose entries were
-        indexed before the seam changed — so a refused server is spawned by none
-        of them. It runs *before* the bookkeeping below, so a refusal leaves no
-        half-started session and no ``starting`` marker behind.
-
-        The declared command is resolved at this same gate for the same reason
-        (B-D6): a name nothing on the child's path answers is refused with a
+        The reach refusal is checked here as well as in :meth:`_index`, because
+        this is the one gate every attempt passes, and it runs *before* the
+        bookkeeping below so a refusal leaves no half-started session and no
+        ``starting`` marker behind. The declared command is resolved at the same
+        gate: a name nothing on the child's path answers is refused with a
         sentence rather than handed to the OS to reject with a code, and the
-        program it does answer is what :meth:`_start_session` execs — the
         resolution and the spawn are handed the same child environment, so there
         is one search and one verdict.
         """
@@ -440,9 +413,9 @@ class LspManager:
         log_path = self._logs_dir / f"{server_id}.log"
         argv = list(info["command"])
         # ``program``/``child_env`` are what the start gate resolved ``argv[0]``
-        # to and the environment it resolved it in (B-D6): the spawn execs the
-        # program the *child's* PATH answered, never the declared name, and a
-        # spawn failure below names the folders that same search walked.
+        # to: the spawn execs the program the *child's* PATH answered, never the
+        # declared name, and a spawn failure below names the folders that same
+        # search walked.
 
         client = LanguageClient("nojae", "1.0")
         register_features(
@@ -460,22 +433,16 @@ class LspManager:
         # must not create its own subprocess, or the protocol has no
         # transport to write to. stderr is captured and pumped to the log.
         #
-        # The child's process-tree boundary is opened *before* the spawn
-        # (B-D5): containment in a job is decided when a process is created, so
-        # the handle has to exist before pygls creates anything. The hub does
-        # not spawn the child (``start_io`` calls ``create_subprocess_exec``
-        # itself and offers no hook), so the earliest the pid can be assigned is
-        # the first statement after ``start_io`` returns. That window was
-        # measured here rather than assumed: with the fake server and with a
-        # real ``typescript-language-server``, assigning the leader there still
-        # contained every descendant — the job listed the wrapper plus five Node
-        # children (tsserver among them) and none of them survived its teardown
-        # — because a server creates its children only once its own runtime is
-        # up, far later than one event-loop turn. Measured the other way too: a
-        # process that already exists when the assignment happens is never
-        # migrated into the job, so a child that spawned before its own runtime
-        # started would not be covered — and the teardown says so rather than
-        # claiming a tree it does not hold.
+        # The child's process-tree boundary is opened *before* the spawn:
+        # containment in a job is decided when a process is created, so the
+        # handle has to exist before pygls creates anything. The hub does not
+        # spawn the child (``start_io`` calls ``create_subprocess_exec`` itself
+        # and offers no hook), so the earliest the pid can be assigned is the
+        # first statement after ``start_io`` returns. That is late enough —
+        # measured against a real server, which creates its children only once
+        # its own runtime is up — and a process that already exists at the
+        # assignment is never migrated into the job, so the teardown says so
+        # rather than claiming a tree it does not hold.
         job = proctree_jobs.ProcessJob(f"lsp-{server_id}")
         try:
             await client.start_io(
@@ -483,12 +450,10 @@ class LspManager:
                 *argv[1:],
                 cwd=info["workspaceRoot"],
                 env=child_env,
-                # pygls forwards these to create_subprocess_exec. Leading its
-                # own process group is what lets the teardown signal the whole
-                # tree rather than only the wrapper (see proctree.kill_process_tree).
-                # Not dead on Windows and not to be removed: there it is
-                # accepted and ignored, and the job above is what bounds the
-                # tree instead — one call site, one shape, both platforms.
+                # Leading its own process group is what lets the teardown
+                # signal the whole tree rather than only the wrapper. Accepted
+                # and ignored on Windows, where the job above is the boundary
+                # instead — one call site, one shape, both platforms.
                 start_new_session=True,
             )
         except OSError as exc:
@@ -496,9 +461,8 @@ class LspManager:
             # that would have owned it does not exist.
             job.close()
             info["status"] = "error"
-            # Never the bare OS code: a Windows unexecutable-image answer is
-            # translated and every answer names the command and the folders the
-            # search walked (see :meth:`_spawn_failure_sentence`).
+            # Never the bare OS code: every answer names the command and the
+            # folders the search walked (see :meth:`_spawn_failure_sentence`).
             info["error"] = self._spawn_failure_sentence(
                 exc, argv[0], program, self._searched_paths(argv[0], child_env)
             )
@@ -506,8 +470,7 @@ class LspManager:
         except BaseException:
             # A spawn that failed after creating the process but before storing
             # it (pygls raises on a missing pipe) must still not leave the
-            # handle behind — nothing else owns the job. The child was never
-            # assigned, so this releases the handle and claims nothing more.
+            # handle behind — nothing else owns the job.
             job.close()
             raise
         process = client._server  # noqa: SLF001 — pygls keeps it private
@@ -521,10 +484,10 @@ class LspManager:
         session = ServerSession(info, client, process, log_path, job)
         # Registered before anything else is asked of it — the containment
         # below included: from here on the session owns the job, so a failure
-        # anywhere between the spawn and ``running`` reaches
-        # ``_close_session`` and releases the handle. Registering late is what
-        # would strand it. No await sits between the spawn and the assignment,
-        # so this is still the first moment the pid exists to be contained.
+        # between the spawn and ``running`` reaches ``_close_session`` and
+        # releases the handle. Registering late is what would strand it. No
+        # await sits between the spawn and the assignment, so this is the first
+        # moment the pid exists to be contained.
         self._sessions[server_id] = session
         self._contain_tree(job, process, info, log_path)
         session.stderr_task = asyncio.ensure_future(
@@ -575,11 +538,9 @@ class LspManager:
         info["last_used"] = asyncio.get_event_loop().time()
         info["status"] = "running"
         info["error"] = None
-        # Every session gets a log line of its own. Without it a quiet server
-        # (Volar writes nothing until it is asked something) leaves no
-        # logs/lsp/<id>.log at all, so ``GET /api/lsp/log`` answers "" exactly
-        # when the user needs it most, and there is no record of which config
-        # the tsserver relay will answer with.
+        # Every session gets a log line of its own: a quiet server (Volar
+        # writes nothing until asked) would otherwise leave no log at all, so
+        # the log route answers "" exactly when the user needs it most.
         config_file = find_project_config(Path(info["workspaceRoot"]).resolve())
         self._append_log(
             log_path,
@@ -591,20 +552,17 @@ class LspManager:
 
     def _contain_tree(self, job: Any, process: Any, info: Dict[str, Any],
                       log_path: Path) -> None:
-        """Register the spawned child as the leader of its job (B-D5).
+        """Register the spawned child as the leader of its job.
 
         ``assign`` answers ``None`` where the platform has no jobs — the POSIX
         answer, where the child's own process group is the boundary — so the
-        spawn site is written once for both platforms and the Linux path is
-        exactly what it was. ``True`` means the tree is contained.
+        spawn site is written once for both platforms. ``True`` means the tree
+        is contained.
 
         A ``False`` is not a reason to fail the spawn: that is the stated
-        contract of ``ProcessJob.assign`` (the caller keeps its process either
-        way). It *is* a claim this hub must not make silently, so it is named in
-        the server's own log — the file the settings panel shows — and the
-        teardown's "was never assigned to a job" line is the second place it
-        appears. Ignoring a ``False`` is the "spawn site that forgot the call"
-        that message exists to find.
+        contract of ``ProcessJob.assign``. It *is* a claim this hub must not
+        make silently, so it is named in the server's own log, which the
+        settings panel shows.
         """
         if job.assign(getattr(process, "pid", None), leader=True) is not False:
             return
@@ -625,12 +583,12 @@ class LspManager:
 
         Idempotent: an attempt already in flight on the hub thread is left
         alone, so a second click cannot tear down a handshake the first one
-        started. A ``starting`` with nothing in flight behind it (a start that
-        died before recording anything) is exactly what this call can repair.
+        started. A ``starting`` with nothing in flight behind it is exactly what
+        this call can repair.
 
-        The reach refusal (win-07 / A-D4) is answered *here* as well as in
-        :meth:`_start_one`, so a refused server is never briefly shown as
-        ``starting`` by the toggle that just asked for it.
+        The reach refusal is answered *here* as well as in :meth:`_start_one`,
+        so a refused server is never briefly shown as ``starting`` by the
+        toggle that just asked for it.
         """
         info = self._servers.get(server_id)
         if info is None or self._loop is None or self._stopped:
@@ -687,16 +645,14 @@ class LspManager:
         A tool name is attributed to the first server offering it in
         ``server_ids`` order (names are namespaced, so they never collide).
 
-        A server that is asked for but has no live session yet is still
-        represented, using the tools its config declares (its real
-        capabilities are only known after the handshake, which its first call
-        triggers). This covers both ways a hub ends up without one: a *lazy*
-        server that has not been called yet, and a server the idle reaper tore
-        down mid-conversation — a reaped ``pyright`` would otherwise vanish from
-        the next request's tool list with nothing to bring it back. Including
-        ``starting`` matters too: tsserver's cold start is multi-second, and a
-        server just switched on must not be absent from the very next request.
-        A server that failed (``error``) is deliberately not published.
+        A server asked for but without a live session yet is still represented
+        from its declared tools, since its real capabilities are only known
+        after a handshake its first call triggers: that covers a *lazy* server
+        not yet called and one the idle reaper tore down mid-conversation
+        (which would otherwise vanish from the next request with nothing to
+        bring it back). ``starting`` counts too, so a server just switched on
+        is not absent from the very next request. A failed server (``error``)
+        is deliberately not published.
         """
         tools: List[Dict[str, Any]] = []
         tool_to_server: Dict[str, str] = {}
@@ -752,19 +708,18 @@ class LspManager:
     ) -> Dict[str, Any]:
         """Answer one Editor-pane query from a synchronous thread.
 
-        The second caller beside :meth:`call_tool_sync`, and the same shape: it
-        bridges onto the hub's own loop and returns a plain dict. What differs
-        is the vocabulary — an action from :data:`lsphub.editor.EDITOR_ACTIONS`
-        rather than a tool name — and the answer, which is the structured
-        envelope the browser reads instead of text for a model.
+        Same shape as :meth:`call_tool_sync`: it bridges onto the hub's own loop
+        and returns a plain dict. What differs is the vocabulary — an action
+        from :data:`lsphub.editor.EDITOR_ACTIONS` rather than a tool name — and
+        the answer, which is the structured envelope the browser reads.
 
         **It never raises for an ordinary refusal.** Every "no server",
         "starting", "policy refused" and "server errored" answer is a returned
         envelope, because a Ctrl+click must degrade to the status quo rather
-        than surface a stack trace (spec §4.10). ``allowed_ids`` is the
-        conversation-scoped allowlist the Tools panel holds, already
-        intersected with Settings activation by the caller; ``None`` means "no
-        filter" — the failed-snapshot case, which must not blind the pane.
+        than surface a stack trace. ``allowed_ids`` is the conversation-scoped
+        allowlist the Tools panel holds, already intersected with Settings
+        activation by the caller; ``None`` means "no filter" — the
+        failed-snapshot case, which must not blind the pane.
         """
         if self._loop is None or self._stopped:
             return _editor_envelope(
@@ -795,13 +750,12 @@ class LspManager:
     ) -> Dict[str, Any]:
         """One editor query, on the hub's loop: choose, gate, ask, answer.
 
-        The order is the spec's (§4.4 → §4.12): the server is chosen by
-        extension and root containment in declaration order, the workspace
-        policy then has the last word on the path, ``status`` is answered from
-        the hub's own state, a cold server answers ``starting`` without waiting
-        for its handshake, ``last_used`` is stamped so the idle reaper leaves a
-        server a human is reading with alone, and only then is the document
-        synced and the action asked.
+        The order: the server is chosen by extension and root containment in
+        declaration order, the workspace policy then has the last word on the
+        path, ``status`` is answered from the hub's own state, a cold server
+        answers ``starting`` without waiting for its handshake, ``last_used``
+        is stamped so the idle reaper leaves a server a human is reading with
+        alone, and only then is the document synced and the action asked.
 
         Two gates deliberately do not apply: the agent mode's ``lsptools`` flag
         (a mode narrows the conversation, never the pane) and the batch lock (a
@@ -819,14 +773,13 @@ class LspManager:
 
         # The workspace policy, with the tree's own verdict: a hidden path
         # answers as absent and a read-only path is read normally. The refusal
-        # sentence is the shared one — never a new one.
+        # sentence is the shared one, never a new one.
         #
         # This is ``editorfs``'s read gate rather than ``_resolve_path``, and the
         # difference is the buffer: ``_resolve_path`` requires the file to be on
-        # disk, while a dirty buffer is the whole point of the feature (§4.5) —
-        # a file the user has emptied or deleted still has text to ask about.
-        # The extension check ``_resolve_path`` also makes is the server choice
-        # above, and its size cap is applied below.
+        # disk, while a file the user has emptied or deleted still has text to
+        # ask about. The extension check is the server choice above, and the
+        # size cap is applied below.
         try:
             _normalised, resolved = resolve_in_workspace(path)
         except WorkspacePathError as exc:
@@ -834,27 +787,24 @@ class LspManager:
 
         info = self._servers[server_id]
         if info["status"] == "error":
-            # A server that failed is not serving anything, so it is not the
-            # answer to "which server serves this file" either — its own error
-            # sentence is, in the shape ``_call_tool`` already uses. §4.10 is
-            # unconditional: a file no server claims, a server that is off and
-            # a server that errored all answer ``server: null``.
+            # A server that failed is not serving anything, so its own error
+            # sentence is the answer, in the shape ``_call_tool`` already uses:
+            # a server that is off or errored answers ``server: null``.
             return _editor_envelope(
                 action,
                 reason=f"{server_id} is error: {info['error'] or 'no details'}",
             )
 
         if action == "status":
-            # The answering server's id *is* the answer, and no request is sent
-            # to the server to get it: this is what the pane's status line asks.
-            # It is answered before the cold-start step below, so asking for the
-            # status never spawns a server.
+            # The answering server's id *is* the answer and no request is sent
+            # to get it. It is answered before the cold-start step below, so
+            # asking for the status never spawns a server.
             return _editor_envelope(action, status="ok", server=server_id)
 
         if info["status"] != "running":
             # The lazy path, dispatched rather than awaited: a Ctrl+click must
-            # not block on a multi-second handshake (spec §4.6). The browser
-            # retries once, and the second attempt is what lands.
+            # not block on a multi-second handshake. The browser retries once,
+            # and the second attempt is what lands.
             asyncio.ensure_future(self._start_one(server_id))
             return _editor_envelope(
                 action,
@@ -868,10 +818,9 @@ class LspManager:
             return _editor_envelope(
                 action, reason=f"{server_id} has no live session"
             )
-        # An editor query counts as use (spec §4.12): the same stamp
-        # ``_call_tool`` makes, in the same place — after the session is known
-        # and before the action is asked — so the reaper leaves a server a
-        # human is reading with alone.
+        # An editor query counts as use: the same stamp ``_call_tool`` makes, in
+        # the same place — after the session is known and before the action is
+        # asked — so the reaper leaves a server a human is reading with alone.
         info["last_used"] = asyncio.get_event_loop().time()
         if not editor.supports_action(session.capabilities, action):
             return _editor_envelope(
@@ -881,9 +830,8 @@ class LspManager:
             return _editor_envelope(action, reason=f"{action} needs a position")
         # The size cap ``_resolve_path`` applies to the tool path, in the same
         # words: a language server is not a way to stream a giant file into
-        # memory, and the pane's own read route caps at the same number. Asked
-        # only when the text comes from disk — a given buffer is capped by
-        # ``sync_document`` itself, and its file may legitimately be gone.
+        # memory. Asked only when the text comes from disk — a given buffer is
+        # capped by ``sync_document`` itself, and its file may be gone.
         if text is None:
             try:
                 size = resolved.stat().st_size
@@ -929,24 +877,19 @@ class LspManager:
         the server's ``workspaceRoot``, because the browser's buffers are keyed
         by workspace-relative paths.
 
-        ``diagnostics`` is the one action that sends nothing to the server: the
-        document was just synced, so the notification handler will publish for
-        it in its own time, and this reads whatever the per-session inbox holds
-        **without waiting** (spec §3.1). Waiting — and sending a 3.17 pull
-        request, when the server advertises one — belongs to the model's tool,
-        which has a deadline and a reader expecting an answer. A cold file
-        therefore answers "not analysed yet", and a later call answers it; that
-        is the intended behaviour, not a gap to smooth over. The cap is the same
-        per-server one the model's tool applies.
+        ``diagnostics`` sends nothing to the server: the document was just
+        synced, so the notification handler publishes in its own time and this
+        reads the per-session inbox **without waiting**. Waiting — and a pull
+        request, where the server advertises one — belongs to the model's tool,
+        which has a deadline and a reader expecting an answer, so a cold file
+        answers "not analysed yet" and a later call answers it.
 
-        ``sync`` is that just-finished sync. It is what keeps a *lagging*
-        payload from being read as a verdict: the inbox is filled a loop turn
-        later, so after an edit it still holds the analysis of the previous
-        text — and answering it would paint squiggles under code that no
-        longer has them (the disagreement this action exists to prevent). The
-        floor is the version that text was *sent* at, not the document's
-        current one: an unchanged re-ask leaves it where the held analysis
-        already stands, so re-asking never hides a good verdict.
+        ``sync`` is that just-finished sync. It keeps a *lagging* payload from
+        being read as a verdict: the inbox is filled a loop turn later, so after
+        an edit it still holds the analysis of the previous text, which would
+        paint squiggles under code that no longer has them. The floor is the
+        version that text was *sent* at, so re-asking never hides a good
+        verdict.
         """
         from lsprotocol import types as lsp
 
@@ -956,11 +899,11 @@ class LspManager:
             return editor.diagnostics_answer(
                 session.inbox.peek(uri),
                 session.info.get("maxDiagnostics") or constants.DEFAULT_MAX_DIAGNOSTICS,
-                # The version the text now on the server was sent at: a
-                # payload older than that describes text this sync replaced,
-                # so it is *unknown* rather than a verdict. For unchanged text
-                # it is the older version, so the held analysis still counts —
-                # the version bump alone must never hide an answer (D4).
+                # The version the text now on the server was sent at: a payload
+                # older than that describes text this sync replaced, so it is
+                # *unknown* rather than a verdict. For unchanged text it is the
+                # older version, so the held analysis still counts — a version
+                # bump alone must never hide an answer.
                 oldest_version=sync.text_version if sync is not None else None,
             )
         if action == "definition":
@@ -1003,13 +946,12 @@ class LspManager:
         """The first declared server that serves ``path``, or ``(None, reason)``.
 
         Chosen by extension and root containment, **in declaration order** —
-        the order ``self._servers`` already holds, which is the order the
-        Settings panel shows, so the answer is visible rather than mysterious
-        (spec §4.4). A server with an empty ``extensions`` list serves no file;
-        a server whose ``enable`` flag is off is not a candidate; and
-        ``allowed_ids`` (the Tools panel's switches, already intersected with
-        Settings activation by the caller) narrows the set further, with
-        ``None`` meaning "no filter".
+        the order ``self._servers`` holds, which is the order the Settings panel
+        shows, so the answer is visible rather than mysterious. A server with an
+        empty ``extensions`` list serves no file, a server whose ``enable`` flag
+        is off is not a candidate, and ``allowed_ids`` (the Tools panel's
+        switches, already intersected with Settings activation by the caller)
+        narrows the set further, with ``None`` meaning "no filter".
 
         No match is a quiet answer, never an error: the reason names the suffix
         so the pane's status line can explain the silence.
@@ -1054,9 +996,8 @@ class LspManager:
             if info["status"] in ("stopped", "starting"):
                 # Bring it up on its first tool call — the lazy path, and the
                 # way back for a server the idle reaper stopped. ``starting`` is
-                # accepted too, so a start attempt that never completed (no
-                # session behind the status) is retried here instead of staying
-                # unreachable; an attempt still in flight is a no-op.
+                # accepted too, so an attempt that never completed is retried
+                # here; an attempt still in flight is a no-op.
                 await self._start_one(server_id)
             if info["status"] != "running":
                 return (
@@ -1093,9 +1034,9 @@ class LspManager:
         """Policy-checked absolute path for a tool argument.
 
         Confines reads to the server's declared workspace root, with the
-        expected extension, size-capped. This is what stops
-        "read ~/.ssh/id_rsa through the Python server" style tricks and makes
-        the LSP hub useless as a generic file reader.
+        expected extension, size-capped: that is what stops reading a private
+        key through the Python server and keeps the hub from being a generic
+        file reader.
         """
         info = session.info
         if not isinstance(raw_path, str) or not raw_path.strip():
@@ -1130,12 +1071,11 @@ class LspManager:
     def _missing_path_hint(root: Path, raw_path: str, resolved: Path) -> str:
         """``not a file: …`` plus, when the cause is obvious, the fix.
 
-        ``path`` is documented as workspace-relative, but a model that has
-        just read the root out of the server's own config tends to send it
-        absolute (``web/src/App.vue`` against root ``…/web``), which resolves
-        to a doubled ``…/web/web/src/App.vue``. Saying only ``not a file``
-        makes the model retry the same path; naming the path that does exist
-        costs one line and saves a round trip.
+        ``path`` is workspace-relative, but a model that has just read the root
+        out of the server's own config tends to send it absolute (``app.js``
+        against root ``…/web``), which resolves to a doubled path. Saying only
+        ``not a file`` makes the model retry the same path; naming the path that
+        does exist costs one line and saves a round trip.
         """
         message = f"not a file: {resolved}"
         if not isinstance(raw_path, str):
@@ -1166,11 +1106,9 @@ class LspManager:
 
         TypeScript resolves a project by walking up from the file until it
         finds a config, so the relay walks the same way — but stops at the
-        server's workspace root, which is the boundary the hub promises never
-        to read past. A Vue component three levels down still gets the
-        workspace's own config, and a workspace with no config at all gets
-        ``None`` (Volar's inferred project) instead of some unrelated config
-        from a parent directory.
+        server's workspace root, the boundary the hub never reads past. A
+        workspace with no config at all gets ``None`` (Volar's inferred project)
+        instead of some unrelated config from a parent directory.
         """
         from .rendering import uri_to_path
 
@@ -1201,10 +1139,9 @@ class LspManager:
     async def _close_session(self, server_id: str) -> None:
         """shutdown/exit, then the one shared process-tree teardown.
 
-        The graceful step is the hub's own LSP ``shutdown``/``exit``, and it runs
-        *before* any teardown is asked: inside the job half the first step of the
-        escalation terminates the leader alone, so the grace window is the tree's
-        chance to leave with it.
+        The graceful LSP ``shutdown``/``exit`` runs *before* any teardown is
+        asked: the escalation's first step ends the leader alone, so the grace
+        window is the tree's chance to leave with it.
         """
         session = self._sessions.pop(server_id, None)
         self._defs.pop(server_id, None)
@@ -1231,21 +1168,19 @@ class LspManager:
             process = session.process
             if process is not None:
                 # Signalling only the wrapper is not enough: typescript-language-server
-                # spawns tsserver, and Volar spawns workers. A SIGTERM aimed at the
-                # wrapper leaves those alive, reparented to init, holding a project
-                # index no later hub will ever know about. The server leads its own
-                # process group (``start_new_session``), so ``killpg`` reaches every
-                # descendant — the same teardown the MCP hub applies. This runs even
-                # when the graceful shutdown/exit already stopped the leader: what
-                # has to be empty is the *group*, and the leader's pid names it
-                # whether or not the leader is still running.
+                # spawns tsserver and Volar spawns workers, and a signal aimed at
+                # the wrapper leaves those alive, reparented to init, holding a
+                # project index no later hub will ever know about. The server
+                # leads its own process group, so the group signal reaches every
+                # descendant. This runs even when the graceful shutdown already
+                # stopped the leader: what has to be empty is the *group*, and
+                # the leader's pid names it whether or not it is still running.
                 #
-                # One entry point, both platforms (B-D5): ``proctree`` picks the
+                # One entry point, both platforms: ``proctree`` picks the
                 # mechanism by capability, and on the platform with no process
                 # groups it lands in the job this hub put the child in at the
-                # spawn, which reaches the same descendants. There is no second
-                # escalation here and no platform branch — a hub calling the job
-                # primitives itself is how the hubs and the terminal drift.
+                # spawn. No second escalation here and no platform branch — a hub
+                # calling the job primitives itself is how the hubs drift.
                 pid = getattr(process, "pid", None)
                 if isinstance(pid, int):
                     await proctree.kill_process_tree(
@@ -1255,14 +1190,13 @@ class LspManager:
             # The job belongs to this child, so this is where its handle goes.
             # The teardown closes the job it found (kill-on-close is its last
             # guarantee); ``close`` is idempotent, and this covers the path where
-            # the assignment failed and the teardown therefore had no job to
-            # close — a ctypes handle is a plain integer and nothing closes it
-            # for the hub.
+            # the assignment failed and the teardown had no job to close — a
+            # ctypes handle is a plain integer and nothing else closes it.
             self._release_job(session)
 
     @staticmethod
     def _release_job(session: ServerSession) -> None:
-        """Release one child's job handle — with kill-on-close, the last
+        """Release one child's job handle: with kill-on-close, the last
         guarantee. Idempotent, and inert where the platform has no jobs."""
         if session.job is not None:
             session.job.close()
@@ -1301,13 +1235,11 @@ class LspManager:
             if info["status"] == "starting":
                 # A ``starting`` that outlived the whole start budget is stuck,
                 # not slow: it is the one status no other path clears, so an
-                # attempt that died before recording anything would otherwise
-                # be permanent. The budget (handshake + teardown grace + slack)
-                # is above anything a *successful* attempt can take, so a
-                # healthy cold start is never interrupted — and if an attempt
-                # later does succeed, it simply overwrites this with
-                # ``running``. Naming it as ``error`` makes the panel say so and
-                # lets the settings toggle retry.
+                # attempt that died before recording anything would be
+                # permanent. The budget is above anything a *successful* attempt
+                # can take, so a healthy cold start is never interrupted — and a
+                # later success simply overwrites this with ``running``. Naming
+                # it ``error`` makes the panel say so and lets the toggle retry.
                 elapsed = now - info.get("startingSince", now)
                 if elapsed >= constants.STARTING_STUCK_SECONDS:
                     info["status"] = "error"
@@ -1371,17 +1303,15 @@ class LspManager:
         """Re-read ``.nojae/lsp-settings.json``: shut every server down and respawn.
 
         Unlike :meth:`stop_all`, the manager stays usable afterwards: a fresh
-        ``lsp-hub`` thread (and reaper) is created and *this same object* keeps
-        serving the chat worker threads that already hold a reference to it, so
-        a restart never invalidates an in-flight conversation. ``servers`` is
-        the freshly validated file scan, so a hand-edited declaration — a new
-        server entry, a changed ``command``, another ``workspaceRoot`` — takes
-        effect without restarting the web app.
+        ``lsp-hub`` thread and reaper are created and *this same object* keeps
+        serving the chat worker threads already holding a reference to it, so a
+        restart never invalidates an in-flight conversation. ``servers`` is the
+        freshly validated scan, so a hand-edited declaration takes effect
+        without restarting the web app.
 
-        ``enabled_ids`` re-applies the one gate (the entry's ``enable`` flag)
-        over the fresh scan; ``None`` keeps the startup behaviour of spawning
-        every entry whose flag is on. Never raises: a server that fails to come
-        back up lands in its own ``status``/``error``, exactly as on startup.
+        ``enabled_ids`` re-applies the entry's ``enable`` flag over that scan;
+        ``None`` spawns every enabled entry. Never raises: a server that fails
+        to come back up lands in its own ``status``/``error``.
         """
         await self.stop_all()
         self._servers = self._index(servers)

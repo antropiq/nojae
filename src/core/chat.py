@@ -1,21 +1,17 @@
 """Streaming chat with the configured LLM.
 
 Pure loop + event emission: takes an ``emit`` callable, no FastAPI or browser
-concerns. Reasoning/thinking deltas are
-streamed as ``reasoning_delta`` text (the Chat tab's left panel shows the
-thinking timeline) while a single ``reasoning`` event flags that the model
-started thinking (the app-bar status pill). Reasoning text is never answer
-text: it never reaches ``token`` events nor the assistant message content
+concerns. Reasoning text streams as ``reasoning_delta`` frames while a single
+``reasoning`` event flags that the model started thinking. It is never answer
+text: it reaches neither ``token`` events nor the assistant message content
 sent back to the model.
 
-When ``tools`` and ``tool_executor`` are provided (MCP connectors active
-for the Chat tab), the reply runs an OpenAI-style tool-calling loop: each
-iteration streams the model, executes any ``tool_calls`` it produced via
-the injected executor, feeds the results back, and repeats — up to
-``max_tool_iterations`` — until a plain answer arrives.
+When ``tools`` and ``tool_executor`` are provided, the reply runs an
+OpenAI-style tool-calling loop: each iteration streams the model, executes any
+``tool_calls`` it produced via the injected executor, feeds the results back,
+and repeats — up to ``max_tool_iterations`` — until a plain answer arrives.
 
-A model that names a tool it was not offered sometimes has its call fail the
-server's structured path and arrive as *text* instead. That round is repaired
+A call that arrives as *text* instead of as a ``tool_calls`` delta is repaired
 rather than ending the reply: the markup is kept out of the answer by
 :class:`~src.core.tooltext.TextToolCallFilter`, fed back as a failed tool turn,
 and the loop continues — see :data:`BAD_TOOL_CALL_MESSAGE`.
@@ -46,28 +42,25 @@ from src.core.utils import estimate_completion_tokens
 # Executor bridge onto the MCP manager: name + args in, tool text out.
 ToolExecutor = Callable[[str, Dict[str, Any]], str]
 
-# Some tool-capable chat templates make models reluctant to call tools
-# unless the prompt says they are available; appended (never into the
-# shared LLM_SYSPROMPT) only while MCP tools are actually passed.
+# Some tool-capable chat templates make models reluctant to call tools unless
+# the prompt says they are available; appended only while tools are passed.
 TOOL_NOTICE = (
     "\n\nYou can call the provided tools (browser/console) when they help "
     "answer the user."
 )
 
-# The generation-side twin of llmkit's input sanitizer. Sanitizing the
-# prompt cannot help when the user asks *about* the control tokens: the
-# model generates a raw run, the serving runtime tokenizes it as a single
-# end-of-turn token, and the sampler cuts this very reply mid-sentence --
-# an EOG stop the app cannot even flag as truncation, because at the chunk
-# level it looks like a finished answer. The prevention that works is
-# telling the model to cite the tokens by name or with spaced-out
-# delimiter characters instead of reproducing one. A recorded break showed
-# where the model slips: prose follows the rule, then a fenced code block
-# "showing the real thing" emits one -- so the notice names code fences
-# and examples explicitly. This loop's own addition by design: the notice is
-# appended here and nowhere else, so a prompt built anywhere else carries
-# none. The notice must never contain a raw run itself -- a test guards that
-# with the sanitizer.
+# The generation-side twin of llmkit's input sanitizer. Sanitizing the prompt
+# cannot help when the user asks *about* the control tokens: the model
+# generates a raw run, the serving runtime tokenizes it as a single end-of-turn
+# token, and the sampler cuts this very reply mid-sentence -- an EOG stop the
+# app cannot flag as truncation, because at the chunk level it looks like a
+# finished answer. The prevention that works is telling the model to cite the
+# tokens by name or with spaced-out delimiter characters. A recorded break
+# showed where it slips: prose follows the rule, then a fenced code block
+# "showing the real thing" emits one -- so the notice names code fences and
+# examples explicitly. Appended here and nowhere else, so a prompt built
+# elsewhere carries none. The notice must never contain a raw run itself -- a
+# test guards that with the sanitizer.
 CONTROL_TOKEN_NOTICE = (
     "\n\nWhen discussing chat-template control tokens (im_start, im_end "
     "and their like), never write one in its raw delimiter-wrapped form: "
@@ -84,10 +77,9 @@ CONTROL_TOKEN_NOTICE = (
 def batch_instructions_block(text: str) -> str:
     """The lot's big picture rendered as a system-message block.
 
-    Framed the way ``config.agent_instructions_block`` frames AGENTS.md: the
-    wrapper says this describes a lot worked through *one task at a time*, so a
-    big-picture file that reads "implement the editor tab" is taken as context
-    rather than as an instruction to do the whole lot in this turn.
+    Framed like AGENTS.md: the wrapper says this describes a lot worked through
+    *one task at a time*, so a big-picture file reading "implement the editor
+    tab" is context, not an instruction to do the whole lot in this turn.
     """
     return (
         "The following is the big-picture description of the task lot being "
@@ -97,12 +89,11 @@ def batch_instructions_block(text: str) -> str:
 
 
 def _collect_tool_call_deltas(chunk: Any, acc: Dict[int, Dict[str, Any]]) -> str:
-    """Accumulate streamed tool-call deltas (they can split across chunks).
+    """Accumulate streamed tool-call deltas (they split across chunks).
 
-    Returns the argument text carried by this chunk ("" when it streams no
-    tool-call deltas) — argument fragments are generated tokens too, so the
-    caller both anchors the decode window on them and folds them into the
-    last-resort char-based token estimate.
+    Returns the argument text this chunk carried ("" when it carries none):
+    those fragments are generated tokens too, so the caller anchors the decode
+    window on them and folds them into the char-based token estimate.
     """
     arg_text = ""
     deltas = None
@@ -136,9 +127,8 @@ def _collect_tool_call_deltas(chunk: Any, acc: Dict[int, Dict[str, Any]]) -> str
 BAD_TOOL_CALL_ID = "bad-tool-call"
 
 # What a reply whose tool call arrived as text is told back. The loop repairs
-# the round instead of ending it (the alternative was the user re-sending a
-# message by hand), so the model gets the correction the user used to type and
-# the reply carries on in the same turn.
+# the round instead of ending it, so the model gets the correction and the
+# reply carries on in the same turn.
 BAD_TOOL_CALL_MESSAGE = (
     "Your last tool call did not succeed: it arrived as text instead of as a "
     "tool call, so nothing was executed. Call one of the tools that were "
@@ -161,9 +151,8 @@ def _tool_names(tools: Optional[List[Dict[str, Any]]]) -> Set[str]:
 def _bad_tool_call_content(name: str, offered: Set[str]) -> str:
     """What one text-shaped call's tool turn answers with.
 
-    Two cases, and the distinction is the model's own mistake: a name it *was*
-    offered needs only to be resubmitted, one it invented is told the names it
-    actually had.
+    A name the round *did* offer needs only to be resubmitted; one the model
+    invented is told the names it actually had.
     """
     if name in offered:
         return (
@@ -190,10 +179,9 @@ def _content_text(message: Dict[str, Any]) -> str:
 def _prompt_estimate(messages: List[Dict[str, Any]]) -> int:
     """Char-based (~4 chars/token) estimate of one round's prompt cost.
 
-    Fallback for rounds whose server reported no usage at all: the message
-    history as it stands at the round's start is exactly what the request
-    sends as prompt (the server-side system prompt beyond it is not visible
-    here, so the figure is a floor — flagged through the estimated badge).
+    Fallback for a round whose server reported no usage: the history at the
+    round's start is what the request sends as prompt, so the figure is a floor
+    — flagged through the estimated badge.
     """
     return estimate_completion_tokens("".join(_content_text(m) for m in messages))
 
@@ -202,30 +190,26 @@ def _emit_paused(
     emit: Emit,
     usage: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Terminate a user-interrupted reply: exact usage when still missing,
-    then the ``pause_ack`` terminal frame.
+    """Terminate a user-interrupted reply: optional usage, then the ack.
 
-    ``usage`` is the cumulative figure the stream path needs (its round is
-    folded but never reported), so the chat badges read the server's numbers
-    for the partial turn instead of falling back to the client's ~4
-    chars/token estimate. The tool-loop sites pass nothing: the same figures
-    went out as the pre-tool ``usage`` frame. ``pause_ack`` is what reopens
-    the composer.
+    ``usage`` is the cumulative figure the stream path still needs (its round is
+    folded but never reported), so the badges read the server's numbers rather
+    than the client's ~4 chars/token estimate. The tool-loop sites pass
+    nothing: those figures went out as the pre-tool ``usage`` frame.
     """
     if usage is not None:
         emit({"event": "usage", **usage})
     emit({"event": "pause_ack", "partial": True})
 
 
-# A wait is slept in slices, and the cancel flag is re-checked between them:
-# that is what makes the wait interruptible (spec §5.7 — a Stop must not cost
-# the remaining seconds), and the slice length decides how soon it notices.
+# A wait is slept in slices, the cancel flag re-checked between them: that is
+# what makes it interruptible, so a Stop costs at most one slice, never the
+# seconds still to come.
 WAIT_SLICE_SECONDS = 0.2
 
 #: The sleep itself, as a module attribute so a test can record and skip it
-#: instead of sleeping the configured ten seconds. The wait's *behaviour* —
-#: interruptible by Stop, never shortened by a Pause — is then asserted on the
-#: recorded slices rather than on elapsed wall time.
+#: rather than sleep the configured ten seconds; the wait's behaviour is then
+#: asserted on the recorded slices, not on elapsed wall time.
 _wait_slice = time.sleep
 
 
@@ -233,12 +217,10 @@ def _budget_pair(source: Optional[Callable[[], Any]]) -> Tuple[int, float]:
     """The ``(waits, seconds)`` a round may spend, read **now**.
 
     The source is the caller's own accessor rather than a number handed over at
-    the turn's start: the two keys are read when the retry decision is made
-    (spec §6) and ``core/`` reads no ``.env`` itself. An answer this cannot use
-    — the source raising, a pair that is not a pair, a non-numeric or negative
-    value — reads as *no waiting*, the same shape the feature has when it is
-    switched off, so a mis-set budget can never itself become the reason a turn
-    fails.
+    the turn's start, because the two keys are read when the retry decision is
+    made. An answer this cannot use — the source raising, a pair that is not a
+    pair, a non-numeric or negative value — reads as *no waiting*, so a mis-set
+    budget can never itself become the reason a turn fails.
     """
     if source is None:
         return 0, 0.0
@@ -255,11 +237,10 @@ def _budget_pair(source: Optional[Callable[[], Any]]) -> Tuple[int, float]:
 def _exhausted_failure_message(exc: BaseException, waits: int, waited: float) -> str:
     """The final error sentence once a round's whole budget is spent.
 
-    Today's line, unchanged up to and including the endpoint's own sentence
-    verbatim (spec §9: nothing here interprets it), with what the app already
-    did about it appended — spec §5.10: the old sentence alone would hide the
-    fact that it tried. ``waits`` is this round's waits and ``waited`` the
-    seconds this round slept, so the sentence carries both.
+    The endpoint's own sentence verbatim — nothing here interprets it — with
+    what the app already did appended, since that sentence alone would hide the
+    fact that it tried. ``waits`` and ``waited`` are this round's, so the
+    sentence carries both.
     """
     plural = "" if waits == 1 else "s"
     return (
@@ -277,14 +258,13 @@ def _wait_for_endpoint(
 
     Returns whether the wait ran its full length (``False`` = Stop landed in
     it). The flag is consulted after every slice, so a Stop costs at most one
-    slice of it and none of the seconds still to come.
+    slice and none of the seconds still to come.
 
-    ``pause_event`` is deliberately **not** consulted here (spec §5.8): a Pause
-    armed during a wait arms the flag and is answered where it is always
-    answered — at the first chunk of the next successful round — so the wait
-    keeps its full length. "Handle the pause here too" is the tempting wrong
-    edit: pause means *interrupt the reply and keep what arrived*, and during a
-    wait nothing has arrived to keep. Stop is the affordance that ends a wait.
+    ``pause_event`` is deliberately **not** consulted here: a Pause armed during
+    a wait is answered where it always is — at the first chunk of the next
+    successful round — so the wait keeps its full length. "Handle the pause here
+    too" is the tempting wrong edit: pause means *interrupt the reply and keep
+    what arrived*, and during a wait nothing has arrived to keep.
     """
     total = float(wait_seconds)
     if total <= 0:
@@ -327,60 +307,50 @@ def stream_chat(
     multimodal parts (``text`` / ``image_url`` data URLs); parts are passed
     through to the LLM client untouched.
 
-    Thinking streams as ``reasoning_delta`` (``text``) frames, preceded by
-    the one-shot ``reasoning`` flag frame.
+    With tools active also emits ``tool_call`` / ``tool_result`` events per
+    executed call (``tool_call`` carries ``iteration`` and ``maxIterations``
+    for the UI gauge) plus a cumulative ``usage`` event as soon as each round
+    stops generating — before the tool executes, so the badges tick when
+    generation stops instead of waiting for the tool to return.
 
-    With MCP tools active also emits ``tool_call`` / ``tool_result`` events
-    per executed tool call (``tool_call`` carries ``iteration`` and
-    ``maxIterations`` for the UI gauge) plus a cumulative ``usage`` event as
-    soon as each tool round has finished generating — before the tool
-    executes, so the chat badges tick when generation stops instead of
-    waiting for the tool to return. The terminal ``done`` carries the
-    cumulative ``decode`` seconds (sum of the per-iteration generation
-    windows: tool-call argument deltas included, tool execution and
-    inter-round re-prefill gaps excluded) so the client can compute an
-    accurate tok/s with tools in play. ``tokens``/``usage.tokens`` count
-    **completion tokens only** (the tok/s numerator). ``contextTokens``/
-    ``usage.contextTokens`` carry the LAST (resp. just-ended) round's
-    prompt + generation — the context-window occupancy figure, which can
-    exceed nothing but is NOT summed across rounds; ``contextEstimated``
-    flags it when a fallback estimate was involved. ``done`` also carries
-    ``waited``: the seconds the turn spent waiting on a refused endpoint,
-    summed over every round's waits and ``0`` when it waited on nothing
-    (spec §5.15). It is a figure of its own — a wait has no chunk arrival,
-    so it enters neither ``decode`` nor the token rate — while ``took``
-    keeps spanning the whole request, waits included (spec §5.17).
+    ``decode`` is the sum of the per-round generation windows (tool-call
+    argument deltas in, tool execution and inter-round re-prefill gaps out), so
+    the client can compute an accurate tok/s. ``tokens``/``usage.tokens`` count
+    **completion tokens only** (the tok/s numerator). ``contextTokens`` carries
+    the LAST round's prompt + generation — the context-window occupancy figure,
+    NOT summed across rounds — and ``contextEstimated`` flags a fallback
+    estimate. ``waited`` is the seconds the turn spent waiting on a refused
+    endpoint, summed over every round and ``0`` when it waited on nothing: a
+    wait has no chunk arrival, so it enters neither ``decode`` nor the token
+    rate, while ``took`` spans the whole request, waits included.
+
     Terminal event is exactly one of ``done``, ``error`` or ``pause_ack``
     (unless the call was cancelled — then the client is gone and nothing is
-    emitted). ``pause_ack`` (carrying ``partial: True``) closes a reply the
-    user interrupted through ``pause_event``; when the interrupted round has
-    not been reported yet, a cumulative ``usage`` frame rides with the ack so
-    the chat badges keep the server's exact figures. Precedence is cancel >
-    error > pause — an ``error`` already emitted is never followed by a pause
-    ack, and a pause request that arrives while a round was already finishing
-    honestly still ends on ``done``. A pause never travels to the client as a
-    truncation: the interrupt itself closed the upstream stream, so no
-    ``finish_reason`` was expected and the truncation check is skipped.
+    emitted). ``pause_ack`` (``partial: True``) closes a reply the user
+    interrupted through ``pause_event``; when the interrupted round has not
+    been reported yet, a cumulative ``usage`` frame rides with the ack so the
+    badges keep the server's exact figures. Precedence is cancel > error >
+    pause — an ``error`` already emitted is never followed by an ack, and a
+    pause arriving while a round was already finishing honestly still ends on
+    ``done``. A pause never travels as a truncation: the interrupt closed the
+    upstream stream, so no ``finish_reason`` was expected and the truncation
+    check is skipped.
 
     ``agent_instructions`` (when non-empty) is appended to the system message
-    after the configured prompt, so a conversation starts already carrying the
-    project's own instructions. It is deliberately a separate argument rather
-    than pre-concatenated into ``sysprompt``: ``TOOL_NOTICE`` below is skipped
-    when the prompt already mentions tools, and instruction files are full of
-    the word — keeping them apart lets that check judge only the prompt the
-    user configured. Like the notice above, it is appended to the text of the
-    system message (the Chat API only ever sends plain-text system messages).
+    after the configured prompt, so a conversation starts carrying the
+    project's own instructions. It is a separate argument rather than
+    pre-concatenated into ``sysprompt`` because ``TOOL_NOTICE`` is skipped when
+    the prompt already mentions tools, and instruction files are full of the
+    word — keeping them apart lets that check judge only the user's prompt.
 
     ``skills_instructions`` (when non-empty) is the catalogue of the skills this
-    workspace and the user's home folder hold: one line per skill — name, what it
-    is for, and the path of its file — so the turn starts knowing which know-how
-    exists without any of it being read. ``""`` or an omitted argument means
-    "nothing to inject", exactly as for the blocks above, and this function
-    caches nothing: the caller re-resolves the text for every turn, so an edited
-    skill shows up in the next message. It is a separate argument for the same
-    documented reason as every other block here — the ``TOOL_NOTICE`` word check
-    must judge prompt-like text only, and a catalogue is written for a model that
-    has tools.
+    workspace and the user's home folder hold: name, what it is for, and the
+    path of its file, so the turn starts knowing which know-how exists without
+    reading any of it. ``""`` or an omitted argument means "nothing to inject".
+    Nothing is cached here: the caller re-resolves the text per turn, so an
+    edited skill shows up in the next message. It is separate for the same
+    reason as every block here — the ``TOOL_NOTICE`` word check must judge
+    prompt-like text only, and a catalogue is written for a model with tools.
 
     ``mode_instructions`` (an agent mode's own generated blocks) rides between
     the two below — text only; this function never learns what a mode is.
@@ -388,27 +358,24 @@ def stream_chat(
     ``batch_instructions`` (batch mode's lot big picture) is appended *after*
     the project instructions and the mode blocks, so the system message reads
     sysprompt → tool notice → control-token notice → AGENTS.md → skills → mode
-    blocks → big picture: the project's rules stay the closest thing to the
-    conversation, and the lot description — framed as context below, not as a
-    task — is the furthest. It is re-sent on every task turn because the
-    per-task context reset means nothing else carries it.
+    blocks → big picture: the project's rules stay closest to the conversation
+    and the lot description — context, not a task — furthest. It is re-sent on
+    every task turn because the per-task context reset means nothing else
+    carries it.
 
-    ``retry_budget`` is the **round** wait's budget source: a callable answering
-    ``(waits, seconds)``, called at the moment a refused round is about to be
-    waited on and never before (spec §6 reads the two keys when the decision is
-    made, and this module reads no ``.env`` — hence a callable rather than a
-    number). Omitting it, or a budget of ``0`` waits, means today's behaviour
-    exactly: one seam call per round and the plain error frame. When it allows a
-    wait, a round whose seam call raises a **retryable** failure (the seam's own
-    verdict, see :func:`src.core.llmkit.another_attempt_may_help`) emits one
+    ``retry_budget`` is the **round** wait's budget source: a callable
+    answering ``(waits, seconds)``, called at the moment a refused round is
+    about to be waited on and never before. Omitting it, or a budget of ``0``
+    waits, means one seam call per round and the plain error frame. When it
+    allows a wait, a round whose seam call raises a **retryable** failure (the
+    seam's own verdict, ``llmkit.another_attempt_may_help``) emits one
     non-terminal ``reconnecting`` event — ``attempt`` (1-based within this
     round), ``budget``, ``waitSeconds`` and the endpoint's own ``message`` —
     sleeps, and re-sends the identical request, so the turn still ends on its
-    normal terminal frame (spec §2: the retry lives *inside* the stream, which
-    is why the batch loop reads an ordinary outcome). A final failure, and
-    anything the seam does not recognise, still ends the turn on today's error
-    frame on the first attempt. A mid-stream cut is never replayed (spec §5.4):
-    text already reached the panel, so only the seam *call* is guarded.
+    normal terminal frame and the batch loop reads an ordinary outcome. A final
+    failure, and anything the seam does not recognise, ends the turn on the
+    error frame at the first attempt. A mid-stream cut is never replayed: text
+    already reached the panel, so only the seam *call* is guarded.
     """
     if not messages or messages[0].get("role") != "system":
         messages = [
@@ -423,11 +390,9 @@ def stream_chat(
             "role": "system",
             "content": _content_text(messages[0]) + TOOL_NOTICE,
         }
-    # Every chat turn carries the control-token notice (it is gated on
-    # nothing -- the danger is the model generating a raw run, not the
-    # conversation carrying one). Placed after the TOOL_NOTICE word check
-    # above so its wording never reaches that heuristic, and before the
-    # instruction blocks so it stays part of the base behaviour.
+    # Every turn carries the control-token notice -- the danger is the model
+    # generating a raw run, not the conversation carrying one. Placed after the
+    # TOOL_NOTICE word check so its wording never reaches that heuristic.
     messages[0] = {
         "role": "system",
         "content": _content_text(messages[0]) + CONTROL_TOKEN_NOTICE,
@@ -440,26 +405,18 @@ def stream_chat(
             "content": _content_text(messages[0]) + "\n\n" + agent_instructions,
         }
     if skills_instructions:
-        # Between the project's instructions and the mode's own blocks: AGENTS.md
-        # and the skills catalogue are both standing reference material about the
-        # folder this conversation is about, so they sit adjacent, while the
-        # mode's blocks and the lot's big picture stay further from the
-        # conversation. It is a separate argument rather than text appended to
-        # ``agent_instructions`` for the reason every block here has one: the
-        # TOOL_NOTICE word check above must judge prompt-like text only, and a
-        # catalogue is a list of things to open with a tool.
+        # Adjacent to AGENTS.md: both are standing reference material about this
+        # folder, while the mode's blocks and the lot's big picture stay further
+        # out. Separate from ``agent_instructions`` because the TOOL_NOTICE word
+        # check must judge prompt-like text only, and a catalogue is a list of
+        # things to open with a tool.
         messages[0] = {
             "role": "system",
             "content": _content_text(messages[0]) + "\n\n" + skills_instructions,
         }
     if mode_instructions:
-        # The active mode's own standing instructions (the reserved Todo
-        # builder carries the batch-lot conventions). After the project
-        # instructions and before the lot big picture: AGENTS.md stays the
-        # closest thing to the conversation, and the lot description stays
-        # the furthest. It is a separate argument from agent_instructions
-        # for the same reason those are separate: the TOOL_NOTICE word
-        # check above must judge prompt-like text only.
+        # The active mode's own standing instructions. Separate from
+        # ``agent_instructions`` for the same reason as every block here.
         messages[0] = {
             "role": "system",
             "content": _content_text(messages[0]) + "\n\n" + mode_instructions,
@@ -478,20 +435,15 @@ def stream_chat(
 
     t0 = time.monotonic()
     answer_buffer = ""
-    # Every generated character seen (answer + reasoning + tool-call
-    # arguments): the corpus for the last-resort char-based token estimate
-    # when the server reports no usage at all.
+    # Every generated character (answer + reasoning + tool-call arguments): the
+    # corpus for the char-based estimate when the server reports no usage.
     generated_chars = ""
     completion_tokens = 0
-    # Sum of (total - prompt) per round — each round's total covers its full
-    # prompt, so the per-round differences add up to the loop's completion
-    # tokens; used only when no round reported completion_tokens itself.
+    # Sum of (total - prompt) per round, used only when no round reported
+    # completion_tokens itself.
     usage_derived_completion = 0
-    # Context occupancy of the LAST round: that round's prompt + generation,
-    # i.e. exactly what the server slotted into its window (template and tool
-    # schemas included). Never accumulated across rounds: every round
-    # re-processes the history, but only the latest round's figure says how
-    # full the context window is.
+    # Occupancy of the LAST round only: every round re-processes the history,
+    # but only the latest figure says how full the context window is.
     context_tokens = 0
     context_estimated = False
     reasoning_emitted = False
@@ -499,24 +451,21 @@ def stream_chat(
     t_last: Optional[float] = None
     decode_seconds = 0.0
     # Seconds this turn spent waiting on a refused endpoint, summed over every
-    # round's waits. A wait produces no chunk arrival, so it enters no timing
-    # accumulator above (measurement rule) — it is kept as a figure of its own,
-    # ready for the terminal frame to carry it.
+    # round's waits. A wait has no chunk arrival, so it enters no timing
+    # accumulator above: it is a figure of its own for the terminal frame.
     waited_seconds = 0.0
     capped = False
 
     iteration = 0
     while True:
-        # Prompt cost of this round, estimated from the exact messages the
-        # request is about to send — used only if the server reports no
-        # usable usage for the round (floor: invisible server-side template
-        # tokens are not in it, hence the estimated flag).
+        # Prompt cost of this round, from the exact messages the request is
+        # about to send — used only if the server reports no usable usage (a
+        # floor: server-side template tokens are not in it, hence the flag).
         round_prompt_est = _prompt_estimate(messages)
-        # The one retry site of the whole feature (spec §4, §5.1): this round's
-        # seam call, wrapped in a loop over the round's own budget. The chunk
-        # loop below is never reached by a replay — a refused call raises before
-        # a byte of the reply exists (spec §2) — which is also why both shapes
-        # of a mid-stream cut keep their current paths untouched (spec §5.4).
+        # The one retry site: this round's seam call, looped over the round's
+        # own budget. A replay never reaches the chunk loop below, because a
+        # refused call raises before a byte of the reply exists — which is why
+        # both shapes of a mid-stream cut keep their paths untouched.
         round_waits = 0
         round_waited = 0.0
         while True:
@@ -534,15 +483,13 @@ def stream_chat(
                 )
                 break
             except Exception as exc:
-                # The seam owns the verdict (spec §4): a final status, or an
-                # exception it does not recognise, is today's error path —
-                # unchanged in wording and in shape.
+                # The seam owns the verdict: a final status, or an exception it
+                # does not recognise, is the plain error path.
                 if not another_attempt_may_help(exc):
                     emit({"event": "error", "message": f"LLM call failed: {exc}"})
                     return
-                # The budget is read *here*, at the decision, not at the turn's
-                # start (spec §6); ``_budget_pair`` turns a missing source into
-                # the feature switched off.
+                # The budget is read *here*, at the decision; ``_budget_pair``
+                # turns a missing source into the feature switched off.
                 waits_left, wait_seconds = _budget_pair(retry_budget)
                 if round_waits >= waits_left:
                     message = (
@@ -557,12 +504,11 @@ def stream_chat(
                     # turn the way a Stop during a stream ends one — the client
                     # is gone, so not even the wait's own frame goes out.
                     return
-                # Announce the wait (the UI's only signal that the turn is not
-                # stuck) with the endpoint's own sentence verbatim, sleep, then
-                # re-send the *identical* request: same ``messages`` object as
-                # it stands, same model, URL, key, sampling and tools (spec
-                # §5.9 — the wait re-arms nothing; the turn's connection was
-                # resolved at its start).
+                # Announce the wait (the UI's only sign the turn is not stuck)
+                # with the endpoint's own sentence verbatim, sleep, then re-send
+                # the *identical* request: same ``messages`` object, model, URL,
+                # key, sampling and tools. The wait re-arms nothing; the turn's
+                # connection was resolved at its start.
                 emit(
                     {
                         "event": "reconnecting",
@@ -574,14 +520,12 @@ def stream_chat(
                 )
                 if not _wait_for_endpoint(wait_seconds, cancel_event):
                     # Stop landed inside the wait: nothing emitted, the partial
-                    # turn discarded, none of the remaining seconds spent
-                    # (spec §5.7).
+                    # turn discarded, none of the remaining seconds spent.
                     return
                 round_waits += 1
                 round_waited += wait_seconds
-                # The turn's running total, kept for the terminal frame. A wait
-                # enters no other measurement: it produced no chunk arrival to
-                # anchor to.
+                # The turn's running total for the terminal frame; a wait enters
+                # no other measurement, having produced no chunk arrival.
                 waited_seconds += wait_seconds
 
         iteration_content = ""
@@ -593,33 +537,28 @@ def stream_chat(
         iter_first: Optional[float] = None
         iter_last: Optional[float] = None
         paused = False
-        # The display twin of the seam sanitizer: a token-shaped run can
-        # straddle chunk borders, so what reaches the panels (and the
-        # client's accumulated history) is filtered stream-by-stream,
-        # never frame-by-frame. Raw text still feeds the accumulators
-        # and the estimates -- those are measurement, not display -- and
-        # the re-posted message is cleaned again at the seam anyway.
+        # The display twin of the seam sanitizer: a token-shaped run can straddle
+        # chunk borders, so what reaches the panels is filtered stream-by-stream,
+        # never frame-by-frame. Raw text still feeds the accumulators and the
+        # estimates -- measurement, not display.
         answer_display = StreamNeutralizer()
         reasoning_display = StreamNeutralizer()
-        # The third display filter, and only while tools are offered: a call
-        # the model wrote as text instead of as a `tool_calls` delta is held
-        # back here rather than painted into the conversation. Its calls are
-        # what the round is repaired with below -- the same answer text is
-        # still accumulated raw, because the measurement and the re-posted
-        # message are not the panel.
+        # Only while tools are offered: a call written as text rather than as a
+        # `tool_calls` delta is held back here instead of painted, and its calls
+        # are what the round is repaired with below.
         tool_text = TextToolCallFilter() if use_tools else None
 
         def flush_display() -> None:
-            # Hand over what the filters held back, before any terminal
-            # frame of the round: a held benign partial (an unterminated
-            # delimiter) is the user's text and must not vanish silently.
+            # Hand over what the filters held back before any terminal frame of
+            # the round: a held benign partial (an unterminated delimiter) is
+            # the user's text and must not vanish silently.
             left = reasoning_display.flush()
             if left:
                 emit({"event": "reasoning_delta", "text": left})
             left = answer_display.flush()
             if left:
                 emit({"event": "token", "text": left})
-            # A text-shaped call that never closed is prose after all, so it
+            # A text-shaped call that never closed was prose after all, so it
             # is released here like any other held partial.
             left = tool_text.flush() if tool_text is not None else ""
             if left:
@@ -630,9 +569,9 @@ def stream_chat(
                 if cancel_event is not None and cancel_event.is_set():
                     close_llm_stream(response_generator)
                     return
-                # Cancel wins over pause (checked first, at every site).
-                # Reasoning deltas and tool-call arguments are chunks of this
-                # same loop, so this one check covers them for free.
+                # Cancel wins over pause, checked first at every site; reasoning
+                # and tool-call argument deltas ride this same loop, so one check
+                # covers them too.
                 if pause_event is not None and pause_event.is_set():
                     close_llm_stream(response_generator)
                     paused = True
@@ -653,10 +592,9 @@ def stream_chat(
                     shown = reasoning_display.feed(reasoning)
                     if shown:
                         emit({"event": "reasoning_delta", "text": shown})
-                # Content, reasoning and tool-call argument deltas all open
-                # and extend the decode window: they are all generated tokens
-                # counted in completion_tokens, so neither the thinking phase
-                # nor a tool-call-only round may look free to the tok/s maths.
+                # All three delta kinds open and extend the decode window: they
+                # are generated tokens too, so neither the thinking phase nor a
+                # tool-call-only round looks free to the tok/s maths.
                 if not content and not reasoning and not tool_args_text:
                     continue
                 arrival = time.monotonic()
@@ -684,32 +622,25 @@ def stream_chat(
             emit({"event": "error", "message": f"Stream error: {exc}"})
             return
 
-        # The chunk loop is over for every path that reaches here (finish,
-        # pause break): hand the filters' held remainder over before any
-        # terminal or per-round frame -- truncation error, pause ack,
-        # pre-tool usage, done -- so the panels and the client's history
-        # see the full display text of the round.
+        # The chunk loop is over for every path that reaches here; hand the
+        # filters' held remainder over before any terminal or per-round frame.
         flush_display()
 
-        # The stream ended with no chunk ever carrying a finish_reason: the
-        # server cut this round short (a disconnecting upstream behind
-        # llama.cpp does exactly this) and the chunks of a cut answer look
-        # like the chunks of a finished one. Stop here rather than falling
-        # through: a half-streamed tool call would otherwise be executed with
-        # truncated arguments — and the model would be told *its* JSON was
-        # invalid, blaming it for a transport cut — while the fragment would
-        # be re-posted as a finished assistant turn on the next send.
-        # Checked after the loop: the stream only records the reason while it
-        # is iterated.
+        # No chunk ever carried a finish_reason: the server cut this round short
+        # (a disconnecting upstream behind llama.cpp does exactly this) and the
+        # chunks of a cut answer look like the chunks of a finished one. Stop
+        # here rather than falling through — a half-streamed tool call would be
+        # executed with truncated arguments, blaming the model for a transport
+        # cut, and the fragment would be re-posted as a finished turn. Checked
+        # after the loop because the stream only records the reason while it is
+        # iterated.
         #
         # A pause disqualifies that reading: the interrupt itself closed the
-        # stream, so no finish_reason was ever expected — and a flag armed a
-        # moment before the stream died must not be reported as a server cut
-        # either. Precedence stays cancel > error > pause.
-        # ``saw_finish_reason`` is only meaningful now that the generator is
-        # drained, which is why the raced ordering is settled here rather than
-        # inside the loop: an interrupted round always ends on the ack, a round
-        # that finished honestly (``done``) is never rewritten by a late flag.
+        # stream, so no finish_reason was ever expected, and a flag armed a
+        # moment before the stream died is not a server cut either. Hence the
+        # raced ordering is settled here rather than inside the loop: an
+        # interrupted round always ends on the ack, and a round that finished
+        # honestly (``done``) is never rewritten by a late flag.
         finish_seen = saw_finish_reason(response_generator)
         if (
             not paused
@@ -736,35 +667,32 @@ def stream_chat(
         round_context_est = round_prompt_est + max(
             iteration_completion, estimate_completion_tokens(iteration_chars)
         )
-        # Per-round figure: this round's prompt + generation, which is
-        # ``context_tokens`` — how full the server's window is right now
-        # (the figure of the LAST round only, never the sum over rounds).
+        # This round's own prompt + generation, i.e. ``context_tokens``.
         round_estimated = False
         if iteration_usage is not None:
             total = iteration_usage.get("total_tokens")
             prompt = iteration_usage.get("prompt_tokens")
             if total:
-                # The server's per-round total covers its full prompt plus
-                # generation: the exact occupancy figure for this round.
+                # The per-round total covers the full prompt plus generation:
+                # the exact occupancy figure.
                 round_context = total
             elif prompt:
-                # Exact prompt without a total: keep it, add the completion
-                # (or its char estimate — then flagged).
+                # Exact prompt without a total: add the completion, or its
+                # char estimate — then flagged.
                 round_context = prompt + (
                     iteration_completion
                     or estimate_completion_tokens(iteration_chars)
                 )
                 round_estimated = not iteration_completion
             else:
-                # Prompt unseen (completion-only or empty usage): estimate
-                # the round's prompt from the request we sent — flagged,
-                # never presented as a server-reported count.
+                # Prompt unseen: estimate it, and never present that as a
+                # server-reported count.
                 round_context = round_context_est
                 round_estimated = True
             if not iteration_usage_from_completion and total and prompt:
-                # Only rounds that omitted completion_tokens contribute their
-                # (total - prompt) delta to the fallback sum — a round that did
-                # report it is already counted in completion_tokens.
+                # Only a round that omitted completion_tokens contributes its
+                # (total - prompt) delta: one that reported it is already
+                # counted in completion_tokens.
                 usage_derived_completion += max(total - prompt, 0)
         else:
             round_context = round_context_est
@@ -772,12 +700,11 @@ def stream_chat(
         context_tokens = round_context
         context_estimated = round_estimated
 
-        # A pause that landed inside the chunk loop ends the reply here: this
-        # round's figures were just folded into the cumulative totals but are
-        # never reported by any other frame, so the usage rides with the ack.
-        # Checked *before* the tool-loop decision below, so a round interrupted
-        # while its tool calls were still streaming never executes them: the
-        # client cannot re-post a tool_calls turn, so that fragment is dropped.
+        # A pause from inside the chunk loop ends the reply here: the round's
+        # figures were just folded into the totals but no other frame reports
+        # them, so the usage rides with the ack. Checked *before* the tool-loop
+        # decision so a round interrupted mid tool-call stream never executes
+        # it — the client cannot re-post a tool_calls turn, so it is dropped.
         if paused:
             _emit_paused(
                 emit,
@@ -795,13 +722,12 @@ def stream_chat(
         if not use_tools or tool_executor is None:
             break
 
-        # A round that produced no structured call can still have written one
-        # out as text: the serving runtime gives up on its tool-call parser at
-        # the first name it cannot match, and the markup arrives as ordinary
-        # content. Repair that round instead of ending the reply on it -- the
-        # text was held out of the answer by the display filter, so the panel
-        # never showed the call, and feeding the model a correction keeps the
-        # reply running the way a re-sent message used to.
+        # A round with no structured call may still have written one as text:
+        # the serving runtime gives up on its parser at the first name it cannot
+        # match, and the markup arrives as ordinary content. Repair that round
+        # instead of ending the reply -- the display filter kept the call out of
+        # the answer, so the panel never showed it, and a correction keeps the
+        # reply running.
         text_calls = tool_text.calls if tool_text is not None else []
         if not tool_calls:
             if not text_calls:
@@ -834,12 +760,8 @@ def stream_chat(
                     "bad": True,
                 }
             )
-            # One tool turn per call it wrote: OpenAI-style servers reject a
-            # message list whose call ids were never answered. A call whose
-            # name *was* offered is reported as its own failure (the loop never
-            # produced a structured call for it); one naming something the
-            # round never offered is told back the offered names, which is the
-            # list the model had.
+            # One tool turn per call written: OpenAI-style servers reject a
+            # message list whose call ids were never answered.
             for index, call in enumerate(text_calls):
                 messages.append(
                     {
@@ -866,31 +788,24 @@ def stream_chat(
                 break
             continue
 
-        # A recovered round can mix both spellings (one name matched, the
-        # others did not): the structured calls execute, and the text ones are
-        # answered too rather than left in the history as orphans.
+        # A recovered round can mix both spellings: the structured calls execute,
+        # and the text ones are answered too rather than left as orphans.
         stray_calls = text_calls
 
-        # The cap counts MCP tool rounds only. A round that used nothing but
-        # uncapped tools (the language-server tools, listed in
-        # ``uncapped_tool_names``) does not advance the counter, so an agent
-        # can chain as many LSP lookups as it needs without ever hitting
-        # ``max_tool_iterations`` — that knob is MCP's. A mixed round (at
-        # least one MCP call) counts once, like any other MCP round; the
-        # iteration gauge is the MCP position, and an all-LSP round leaves it
-        # where it was.
+        # The cap is MCP's: a round using nothing but the uncapped tools named in
+        # ``uncapped_tool_names`` does not advance it, so an agent chains as many
+        # of those as it needs. A mixed round counts once; an all-uncapped round
+        # leaves the gauge where it was.
         uncapped = uncapped_tool_names or set()
         if any(
             call["name"] not in uncapped for call in tool_calls.values()
         ):
             iteration += 1
 
-        # This round's generation is over: report cumulative usage *before*
-        # executing the tool(s) (which can take tens of seconds), so the
-        # chat token badge ticks as soon as generation stops. Emitted before
-        # the post-tool cancellation check too: a stop during the tool run
-        # still leaves the client badges on the exact figure of everything
-        # generated so far.
+        # Generation is over: report cumulative usage *before* executing the
+        # tool(s) (which can take tens of seconds), so the badge ticks as soon
+        # as generation stops -- and before the post-tool cancellation check,
+        # so a stop during the tool run still leaves the exact figure.
         emit(
             {
                 "event": "usage",
@@ -917,10 +832,9 @@ def stream_chat(
             }
         )
         for _, call in sorted(tool_calls.items()):
-            # Pause asked for while the tool loop runs: a tool already running
-            # is allowed to finish (Stop covers the hard case); only the
-            # *next* call is skipped. The figures went out as the pre-tool
-            # `usage` frame, so the ack needs no usage of its own.
+            # A tool already running is allowed to finish (Stop covers the hard
+            # case); only the *next* call is skipped. The figures went out as the
+            # pre-tool ``usage`` frame, so the ack needs none of its own.
             if pause_event is not None and pause_event.is_set():
                 _emit_paused(emit)
                 return
@@ -939,10 +853,9 @@ def stream_chat(
                 {
                     "event": "tool_call",
                     "id": call["id"],
-                    # The display name and argument preview reach the chat
-                    # panel too: they are sanitized for the browser, while
-                    # the executor and the re-posted message keep the raw
-                    # text (the seam strips that path on the next round).
+                    # Sanitized for the browser only: the executor and the
+                    # re-posted message keep the raw text (the seam strips it
+                    # on the next round).
                     "tool": neutralize(tool_name),
                     "server": (tool_servers or {}).get(tool_name, ""),
                     "argsPreview": _preview(neutralize(args_preview)),
@@ -972,16 +885,15 @@ def stream_chat(
                     "event": "tool_result",
                     "id": call["id"],
                     "ok": ok,
-                    # Tool output is untrusted text rendered in the panel:
-                    # the preview is run-free for the browser, the message
-                    # re-posted to the model is stripped at the seam.
+                    # Untrusted text rendered in the panel: the preview is
+                    # run-free for the browser, the re-posted message is
+                    # stripped at the seam.
                     "preview": _preview(neutralize(result_text), 400),
                 }
             )
-        # The round's text-shaped calls get an answer too, so no call id of the
-        # re-posted history is left unanswered (a server rejects such a list).
-        # They are not executed: they were never a structured call, and the
-        # model is told to submit them properly.
+        # The text-shaped calls get an answer too, so no call id of the re-posted
+        # history is left unanswered (a server rejects such a list). They are not
+        # executed: the model is told to submit them properly instead.
         offered = _tool_names(tools)
         for index, call in enumerate(stray_calls):
             call_id = f"{BAD_TOOL_CALL_ID}-{index}"
@@ -1011,10 +923,9 @@ def stream_chat(
             )
         if cancel_event is not None and cancel_event.is_set():
             return
-        # Between rounds: a pause asked for during a tool run (which was
-        # allowed to finish) lands here instead of starting another round.
-        # No usage frame — that round's figures went out before the first tool
-        # executed.
+        # A pause asked for during a tool run (which was allowed to finish)
+        # lands here instead of starting another round. No usage frame: that
+        # round's figures went out before the first tool executed.
         if pause_event is not None and pause_event.is_set():
             _emit_paused(emit)
             return
@@ -1034,41 +945,39 @@ def stream_chat(
     tokens_estimated = False
     if not completion_tokens:
         # Servers that omit completion_tokens still report total/prompt per
-        # round: the per-round differences summed cover every tool round
-        # (last_usage alone would keep only the final round's share).
+        # round, and the summed differences cover every tool round — the last
+        # round's usage alone would keep only its own share.
         if usage_derived_completion:
             completion_tokens = usage_derived_completion
         else:
-            # Char heuristic over everything generated: answer text,
-            # reasoning and tool-call arguments alike.
+            # Char heuristic over everything generated: answer text, reasoning
+            # and tool-call arguments alike.
             completion_tokens = estimate_completion_tokens(generated_chars)
             tokens_estimated = completion_tokens > 0
 
     emit({
         "event": "done",
-        # The turn's whole span: ``t0`` to the last chunk arrival, so it spans
-        # the endpoint waits too. That is the documented meaning and it stays —
-        # do NOT subtract ``waited`` from it. The separate field is what lets the
-        # UI tell "this turn took 41 minutes" from "this turn took 1 minute and
-        # waited 40" (spec §5.17), with neither number re-derived.
+        # The turn's whole span, ``t0`` to the last chunk arrival, so it includes
+        # the endpoint waits. Do NOT subtract ``waited`` from it: the separate
+        # field is what lets the UI tell "took 41 minutes" from "took 1 minute
+        # and waited 40", with neither number re-derived.
         "took": took,
         "ttft": ttft,
-        # Cumulative decode seconds across all rounds — the tok/s denominator
-        # once tools ran (took - ttft would wrongly include tool execution
-        # and inter-round gaps). Equals took - ttft for a single round.
+        # Cumulative across all rounds — the tok/s denominator once tools ran
+        # (took - ttft would wrongly include tool execution and inter-round
+        # gaps). Equals took - ttft for a single round.
         "decode": decode_seconds,
-        # Seconds this turn waited on a refused endpoint, summed over every
-        # round's waits (spec §5.15) — 0 when it waited on nothing, never
-        # omitted, so a client reads one shape. A wait has no chunk arrival, so
-        # it is its own number: it enters neither ``decode`` nor the token rate.
+        # Seconds waited on a refused endpoint, summed over every round's waits;
+        # 0 when it waited on nothing, never omitted, so a client reads one
+        # shape. A wait has no chunk arrival, so it enters neither ``decode``
+        # nor the token rate.
         "waited": waited_seconds,
         "tokens": completion_tokens or 0,
         "tokensEstimated": tokens_estimated,
-        # Context occupancy of the FINAL round (prompt + generation — what
-        # the server slotted into its window, template and tool schemas
-        # included). It does not accumulate across rounds, so it is the
-        # figure to compare against the server's context window
-        # (`meta.n_ctx` from /v1/models).
+        # Occupancy of the FINAL round — what the server slotted into its
+        # window, template and tool schemas included. It does not accumulate
+        # across rounds, so it is the figure to compare against the server's
+        # context window (``meta.n_ctx`` from /v1/models).
         "contextTokens": context_tokens,
         "contextEstimated": context_estimated,
     })

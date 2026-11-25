@@ -18,29 +18,24 @@ export function registerBatchGuard(isRunning) {
 }
 
 // ---------------------------------------------------------------------------
-// The model connection as the store holds it (appdb-08).
+// The model connection as the store holds it.
 //
-// The dialog used to edit **one** connection: twelve fields of one workspace
-// file, and a model chosen from that one server. It now edits a *catalogue* —
-// servers, each with its own models — so the state below is a tree plus the
-// dialog's selection inside it, and every write is addressed by the row id the
-// read handed out.
+// The dialog edits a *catalogue* — servers, each with its own models — so the
+// state below is a tree plus the dialog's selection inside it, and every write
+// is addressed by the row id the read handed out.
 //
-// The rules are plain functions at the bottom of this file, so the dialog
-// renders answers rather than deriving them, exactly as the modes and helper
-// composables do. No range, no cap and no reasoning level is spelled here: they
-// arrive in the read's ``caps``.
+// The rules are plain functions in this file, so the dialog renders answers
+// rather than deriving them. No range, no cap and no reasoning level is spelled
+// here: they arrive in the read's ``caps``.
 // ---------------------------------------------------------------------------
 
 const state = reactive({
   config: null,
   configError: null,
-  // The settings store's own state: ``{usable, sentence}``. §5.4 narrows the
-  // app bar to the **store-level** question — is the store usable, and does it
-  // hold at least one model? — because whether *this* turn can run is the
-  // composer's business: that is where the agent is chosen and where the fix is
-  // one click away. One warning in two places would mean two sentences to keep
-  // in step, and a user who cannot tell which one they are answering.
+  // The settings store's own state: ``{usable, sentence}``. The app bar answers
+  // only the **store-level** question — is the store usable, and does it hold at
+  // least one model? Whether *this* turn can run is the composer's business, and
+  // one warning in two places would mean two sentences to keep in step.
   storeState: null,
   activeTab: 'chat', // chat | editor
   settingsOpen: false,
@@ -61,8 +56,8 @@ const state = reactive({
   // ``min``/``max`` and its reasoning options come from here.
   serversCaps: null,
   // ``{agentsWithoutModel, agents}`` — the one thing the connection read answers
-  // about the *other* store, because a fresh install has four agents and no
-  // models, and every one of them is unrunnable until it is given one (D7).
+  // about the *other* store, because a fresh install has agents and no models,
+  // and every one of them is unrunnable until it is given one.
   unassigned: null,
   // Which section the dialog's strip is on. It lives here rather than in the
   // component because the dialog's **one** message band is the shell's answer:
@@ -70,8 +65,8 @@ const state = reactive({
   // and a message area that read component state could not know which it was.
   activeSection: 'servers',
   // Which of the detail column's two pages is drawn (`settings` | `prompt`).
-  // Shell state for the same reason (§4.6): the flow that adds a model from the
-  // server page's listing has to *set* it, and that flow is a shell action.
+  // Shell state because the flow that adds a model from the server page's
+  // listing has to *set* it, and that flow is a shell action.
   detailTab: 'settings',
   // The row a delete is being confirmed for: `{kind, id}`, or null. The id is
   // captured when the question is asked, so the confirmation answers *that*
@@ -81,18 +76,18 @@ const state = reactive({
   // question is asked, cleared with it — the copy is the store's own
   // (`serverDeleteSentence` / `modelDeleteSentence`), never re-derived here.
   pendingDeleteSentence: null,
-  // **The close guard** (the Agents card's D8, ported here): `true` while the
-  // footer's pair asks whether leaving should discard what was typed. It is the
-  // dialog's own question, so it is answered by its two buttons and cleared by
-  // either answer — never by a route that leaves without asking.
+  // **The close guard**: `true` while the footer's pair asks whether leaving
+  // should discard what was typed. It is the dialog's own question, so it is
+  // answered by its two buttons and cleared by either answer — never by a route
+  // that leaves without asking.
   pendingClose: false,
   // The one thing a *deferred* leave was asked for: the band's way into the
   // Agent-modes dialog is a close too, and when the guard stopped it the intent
   // is remembered so the answer that leaves also opens that card.
   pendingCloseOpensAgentModes: false,
   // The tree row to focus once the DOM has caught up. Set when a model is added
-  // from the listing, which must land on its new row (§9.1-3); the component
-  // consumes it and clears it.
+  // from the listing, which must land on its new row; the component consumes it
+  // and clears it.
   focusTreeRowId: null,
   // The dialog's selection: which row the right-hand column edits. ``null`` id
   // with a draft means a row that does not exist yet (the Add affordance).
@@ -108,9 +103,8 @@ const state = reactive({
   // ``*Fetch models*`` answers, keyed by the row it was fetched for: the ids
   // that server's own ``/models`` listed, offered for the model name field. Per
   // server rather than one global dropdown, because a model belongs to the
-  // server that names it (§5.1). The key includes the endpoint the list came
-  // from, so a URL/key edit (or a reused row id) cannot show a dead server's
-  // listing.
+  // server that names it. The key includes the endpoint the list came from, so a
+  // URL/key edit (or a reused row id) cannot show a dead server's listing.
   fetchedModelIds: {},
   fetchedModelsLoading: null, // the key whose listing is in flight, or null
   // Refusals are keyed like the listings: a server that could not be listed is a
@@ -135,23 +129,23 @@ const state = reactive({
   lspServers: [],
   // Server ids ticked in the dialog, saved via saveLsp(). These ticks *are* the
   // activation decision: the save writes the declaration's `enable` flag and
-  // nothing else (D13), so a ticked row runs here.
+  // nothing else, so a ticked row runs here.
   //
   // Named `lspActivated`, never `lspEnabled`: that word belongs to the
   // **conversation**-scoped allowlist the Chat Tools panel holds and the chat /
-  // Editor-query payloads send (D13 — the two meanings must not converge on one
-  // word). This is the workspace-level "does this server run here" set.
+  // Editor-query payloads send — the two meanings must not converge on one word.
+  // This is the workspace-level "does this server run here" set.
   lspActivated: [],
   lspLoading: false,
   lspSaving: false,
   lspError: null,
   lspServersError: null, // .nojae/lsp-settings.json validation errors from the backend
   // The folder this tab works on is **not** held here: it is the tab's own, in
-  // ``useWorkspaceSession`` (clws-02). What stays in the shell is only what the
-  // hub panels need — the connector and language-server rows the workspace read
-  // answered with — because those panels are the shell's state and the app bar
-  // is the one that performs the gesture. The policy note the read reports lives
-  // with the field that renders it, in the session composable.
+  // ``useWorkspaceSession``. What stays in the shell is only what the hub panels
+  // need — the connector and language-server rows the workspace read answered
+  // with — because those panels are the shell's state and the app bar performs
+  // the gesture. The policy note the read reports lives with the field that
+  // renders it, in the session composable.
 })
 
 function describeError(body, fallback) {
@@ -172,11 +166,10 @@ function describeError(body, fallback) {
 // ---------------------------------------------------------------------------
 // The Models section's rules, as plain functions.
 //
-// Every one of these judges a row or a draft that is handed to it, so a test
-// can ask the question without a mounted app, and the dialog only renders the
-// answer. Nothing here holds state and nothing here spells a cap: the ranges
-// and the reasoning levels come from the read's ``caps``, which is what the
-// server refuses against too.
+// Each one judges a row or a draft handed to it, so a test can ask the question
+// without a mounted app and the dialog only renders the answer. Nothing here
+// holds state and nothing spells a cap: the ranges and the reasoning levels come
+// from the read's ``caps``, which is what the server refuses against too.
 // ---------------------------------------------------------------------------
 
 // The six samplers, in the order the form draws them. One list, so the draft,
@@ -209,7 +202,7 @@ export function modelRowDraft(model) {
 }
 
 // What a model write posts. The samplers go out as they stand — a null is the
-// column's "unset", and a ``0`` is a ``0`` (§4.2 keeps them apart).
+// column's "unset", and a ``0`` is a ``0``. The two must stay apart.
 export function modelWritePayload(draft) {
   const payload = {
     name: draft.name,
@@ -248,7 +241,7 @@ export function fetchedModelsErrorFor(draft) {
 
 // Has this row ever been listed? The listing table distinguishes "nothing asked
 // yet" from "asked, and the server answered with no names" — the second is a
-// fact worth saying, the first is not (§9.1-2). Keyed like the listings.
+// fact worth saying, the first is not. Keyed like the listings.
 export function hasFetchedListing(draft) {
   return draft !== null && draft !== undefined &&
     Object.prototype.hasOwnProperty.call(state.fetchedModelIds, draftKey(draft))
@@ -288,7 +281,7 @@ function pruneServerCaches() {
 
 // The unassigned line's text, or null when there is nothing to say. The
 // arithmetic lives here because it is a decision — "2 of 4 agents have no
-// model" — and the dialog renders the sentence (§5.1).
+// model" — and the dialog renders the sentence.
 export function unassignedLine(unassigned) {
   if (!unassigned || !unassigned.agents) return null
   const { agentsWithoutModel, agents } = unassigned
@@ -305,42 +298,35 @@ export function samplerBounds(caps, field) {
 
 // The model the composer's views read a per-model flag off.
 //
-// `GET /api/config` answers **per model** and deliberately names no default
-// (D5), so "the" model is the composer's answer, not the route's. The composer
-// gets a selection in the same task that gives an agent its model dropdown; until
-// then this answers the first entry, which is the shape the two views had while
-// one connection served the whole app. It returns null for an install with no
-// model, so a flag read off it is `false` rather than a guess.
+// `GET /api/config` answers **per model** and deliberately names no default, so
+// "the" model is the composer's answer, not the route's. This answers the first
+// entry until the composer has a real selection, and null for an install with no
+// model — so a flag read off it is `false` rather than a guess.
 export function modelInView(config) {
   const models = config?.models
   return Array.isArray(models) && models.length ? models[0] : null
 }
 
 //: **Would closing this dialog lose something?** — the close guard's only
-//: question, and the only reader of the store's rows as a baseline. It is the
-//: Agents card's D8 verdict, ported: the baseline is always *the store's answer*
-//: (``state.servers``, adopted wholesale by every read and every write, and the
-//: hub reads' ``active`` flags), never what was typed, which is the whole
-//: invariant the guard rests on.
+//: question. The baseline is always *the store's answer* (``state.servers``,
+//: adopted wholesale by every read and every write, plus the hub reads' ``active``
+//: flags), never what was typed, which is the whole invariant the guard rests on.
 //:
-//: Three surfaces can hold work that was typed and never written: the server
-//: form, the model form, and the two hub sections' ticks. An **unsaved** row
-//: (``id == null``, the Add affordance) has no store row to compare against, so
-//: it is judged against the empty form the same verb creates — a form that was
-//: opened and never touched has nothing to lose, and a sentence about unsaved
-//: changes must not be printed over an empty field. A row the store no longer
-//: holds is work that addresses nothing, so it counts.
+//: Three surfaces can hold typed work: the server form, the model form, and the
+//: two hub sections' ticks. An **unsaved** row is judged against the empty form
+//: the Add verb creates, so a form opened and never touched has nothing to lose
+//: and a sentence about unsaved changes is never printed over an empty field. A
+//: row the store no longer holds is work that addresses nothing, so it counts.
 const SERVER_DIRTY_FIELDS = ['name', 'url', 'apiKey']
 const MODEL_DIRTY_FIELDS = [
   'name', 'sysPrompt', 'reasoning', 'supportsVision', ...SAMPLER_FIELDS,
 ]
 
-//: One draft against the baseline it was filled from: the store's row put
+//: One draft against the baseline it was filled from: the store's row went
 //: through **the same constructor that fills the form**, so a comparison never
-//: trips on a shape difference the form itself introduces (an absent `reasoning`
-//: is `''` on both sides). With no row to answer for, the baseline is the empty
-//: form the `+` produced, which is the only honest one: an Add the user opened
-//: and never typed in has nothing to lose.
+//: trips on a shape difference the form introduces (an absent `reasoning` is `''`
+//: on both sides). With no row to answer for, the baseline is the empty form the
+//: `+` produced: an Add opened and never typed in has nothing to lose.
 function draftWouldLose(draft, { row, fields, draftOf }) {
   if (!draft) return false
   const baseline = draftOf(row ?? null)
@@ -412,9 +398,9 @@ function hubTogglesDiffer(selected, rows) {
   return stored.some((id) => !set.has(id))
 }
 
-// The destructive confirmations D12 asks for. They name what else goes with the
-// row, because that is the part a user cannot retype — and the cascade is the
-// schema's, so the client states its consequence without owning its rule.
+// The destructive confirmations. They name what else goes with the row, because
+// that is the part a user cannot retype — and the cascade is the schema's, so
+// the client states its consequence without owning its rule.
 export function serverDeleteSentence(server) {
   const models = server?.models?.length ?? 0
   return models
@@ -524,10 +510,9 @@ export function useAppShell() {
   }
 
   //: Leaving the dialog. **`Close` is its only exit and it writes nothing**, so
-  //: while the dialog holds work that was typed and never written it asks first,
-  //: in place — the Agents card's D8, ported here. `closeSettings` is the act
-  //: itself and is reached by an unguarded close, by `Discard and close`, and by
-  //: nothing else: every other route asks.
+  //: while the dialog holds typed work it asks first, in place. `closeSettings`
+  //: is the act itself and is reached by an unguarded close, by `Discard and
+  //: close`, and by nothing else: every other route asks.
   function closeSettings() {
     state.settingsOpen = false
     state.settingsError = null
@@ -540,9 +525,9 @@ export function useAppShell() {
     state.pendingClose = false
     state.pendingCloseOpensAgentModes = false
     // The **in-memory forms go with the close**, so a re-open reads the store
-    // afresh — the Agents card's rule, and the one that makes this guard's
-    // answer mean what it says: `Discard and close` that left the typing in the
-    // singleton would ask the same question again on the next open, forever.
+    // afresh — the rule that makes this guard's answer mean what it says:
+    // `Discard and close` that left the typing in the singleton would ask the
+    // same question again on the next open, forever.
     state.selectedServerId = null
     state.selectedModelId = null
     state.serverDraft = null
@@ -702,9 +687,9 @@ export function useAppShell() {
   // straight out of the tree is still editable.
   //
   // The detail tab is **not** reset here. A model clicked out of the tree while
-  // the strip is on `System prompt` opens on `System prompt`, which is the
-  // predictable outcome (§4.6); the one flow that *does* choose a page is the
-  // listing's `+`, which asks for Settings explicitly.
+  // the strip is on `System prompt` opens on `System prompt`, the predictable
+  // outcome; the one flow that *does* choose a page is the listing's `+`, which
+  // asks for Settings explicitly.
   function selectModel(id) {
     dismissDeleteRow()
     const parent =
@@ -795,9 +780,9 @@ export function useAppShell() {
   }
 
   // The destructive writes. The confirm is the caller's (the dialog asks), and
-  // the server keeps its own copy of the database first (D12) — the client's
-  // sentence names what else goes with the row, because that is the part the
-  // user cannot undo by retyping.
+  // the server backs up its own database first — the client's sentence names what
+  // else goes with the row, because that is the part the user cannot undo by
+  // retyping.
   async function deleteServerRow(id) {
     if (id === null) return
     const ok = await postConnectionWrite(
@@ -823,15 +808,15 @@ export function useAppShell() {
     state.expandedServers = [...opened]
   }
 
-  // *Fetch models*: the existing live listing call, answering **a server's** own
-  // model list. It dials the URL and key in the draft, so a server whose address
-  // was just corrected is listed from what is typed; the button is gated on the
-  // row existing (§4.4), which is what retires the unsaved-row path.
+  // *Fetch models*: the live listing call, answering **a server's** own model
+  // list. It dials the URL and key in the draft, so a server whose address was
+  // just corrected is listed from what is typed; the button is gated on the row
+  // existing, which retires the unsaved-row path.
   //
   // The previous answer is **not** blanked on the way out: a 200-name table that
   // collapsed to nothing for a second and then re-grew is the exact reflow the
   // layout exists to prevent. An empty answer is still an answer, so it does
-  // replace the rows once it lands (§9.1-2).
+  // replace the rows once it lands.
   async function fetchServerModels() {
     const draft = state.serverDraft
     if (!draft || draft.id === null) return
@@ -879,17 +864,17 @@ export function useAppShell() {
 
   // The detail strip's two pages. Only a model has a second one, so the tab is
   // stored as asked and *read* through `detailPageFor`, which falls back to
-  // Settings for a server (§4.5).
+  // Settings for a server.
   function setDetailTab(tab) {
     state.detailTab = tab === 'prompt' ? 'prompt' : 'settings'
   }
 
-  // The listing's `+`: **a write**, not a pre-fill (§4.4). One click posts the
-  // name, the parent's id and nothing else — the six samplers stay null columns,
-  // so the model runs on the endpoint's own defaults until someone edits them.
-  // The write answers the whole tree, so no merge is needed: expand the parent,
-  // select the new model, ask for its row to be focused, and open its Settings
-  // page, where the name field already holds the name just added.
+  // The listing's `+`: **a write**, not a pre-fill. One click posts the name, the
+  // parent's id and nothing else — the six samplers stay null columns, so the
+  // model runs on the endpoint's own defaults until someone edits them. The write
+  // answers the whole tree, so no merge is needed: expand the parent, select the
+  // new model, ask for its row to be focused, and open its Settings page, where
+  // the name field already holds the name just added.
   async function addModelFromListing(name) {
     const server = selectedServer()
     if (!server || state.settingsSaving) return false
@@ -915,11 +900,10 @@ export function useAppShell() {
     return true
   }
 
-  // The inline delete confirmation (§4.8), replacing `window.confirm`. Asking
-  // puts the store's own sentence in the band — a server delete takes its models
-  // with it, and that is the part nobody can retype — and the toolbar's two
-  // reserved slots carry the answers. The cascade itself is the schema's and is
-  // untouched.
+  // The inline delete confirmation, replacing `window.confirm`. Asking puts the
+  // store's own sentence in the band — a server delete takes its models with it,
+  // and that is the part nobody can retype — and the toolbar's two reserved slots
+  // carry the answers. The cascade itself is the schema's and is untouched.
   function askDeleteRow(kind) {
     if (kind !== 'server' && kind !== 'model') return
     const model =
@@ -986,14 +970,12 @@ export function useAppShell() {
         if (res.status === 429) reportPoolRefusal(state.lspError)
         return
       }
-      // `built` is the visible restart (spec §5.4 rule 23); a live answer
-      // without it clears the bar's restarting line.
+      // `built` is the visible restart; a live answer without it clears the
+      // bar's restarting line.
       noteHubPayload(body)
       state.lspInstalled = !!body.installed
       state.lspServers = body.servers || []
-      // No iteration counter here: the LSP payload stopped carrying the shared
-      // tool-loop cap the moment this section lost its second gate — the cap is
-      // the MCP section's knob alone (and becomes a per-agent value later).
+      // No iteration counter here: the tool-loop cap is the agent's own column.
       state.lspServersError = body.serversError || null
       // `active` is the declaration's `enable` flag, so the ticks mirror the
       // file the save writes back to.
@@ -1026,7 +1008,7 @@ export function useAppShell() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // The whole payload: the route writes the declaration's `enable` flag
-        // for these ids and nothing else (D13).
+        // for these ids and nothing else.
         body: JSON.stringify({ enabled: state.lspActivated }),
       })
       const body = await res.json().catch(() => null)
@@ -1069,8 +1051,8 @@ export function useAppShell() {
       noteHubPayload(body)
       state.mcpInstalled = !!body.installed
       state.mcpConnectors = body.connectors || []
-      // No tool-loop cap here: it is a per-agent column now (D9), so this
-      // section neither reads nor writes one.
+      // No tool-loop cap here: it is a per-agent column now, so this section
+      // neither reads nor writes one.
       state.mcpExternalsError = body.externalsError || null
       state.mcpEnabled = state.mcpConnectors
         .filter((connector) => connector.active)
@@ -1129,21 +1111,21 @@ export function useAppShell() {
     }
   }
 
-  // Paint the hub panels from the ``hubs`` block of a workspace read (clws-02).
+  // Paint the hub panels from the ``hubs`` block of a workspace read.
   //
   // The app bar owns the tab's folder and the gesture that moves it; these two
-  // panels are the shell's state, so the read hands them over rather than the
-  // bar reaching in. Same shape as the two hub loaders above: the declaration
-  // file is the only activation source, so the rows adopted here are the ones
-  // the server says run, and the conversation-scoped panels are re-snapshotted
-  // from them (a locked conversation keeps its frozen toggles — ``loadChatMcp``
-  // is a no-op then).
+  // panels are the shell's state, so the read hands them over rather than the bar
+  // reaching in. Same shape as the two hub loaders above: the declaration file is
+  // the only activation source, so the rows adopted here are the ones the server
+  // says run, and the conversation-scoped panels are re-snapshotted from them (a
+  // locked conversation keeps its frozen toggles — ``loadChatMcp`` is a no-op
+  // then).
   //
   // **Nothing of the installation is reloaded by a move**: the model connection,
-  // the agent list and the prompt helpers are rows of ``nojae.db``, so the
-  // servers, models, agents and bullets a user built once are the same in every
-  // folder (spec §4.2). The tree re-rooting and the buffers closing with it are
-  // the caller's — the gesture that moved the folder owns what it invalidates.
+  // the agent list and the prompt helpers are rows of ``nojae.db``, so what a user
+  // built once is the same in every folder. The tree re-rooting and the buffers
+  // closing with it are the caller's — the gesture that moved the folder owns
+  // what it invalidates.
   function applyWorkspaceHubs(hubs) {
     const mcp = hubs?.mcp
     if (mcp) {

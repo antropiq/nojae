@@ -10,9 +10,9 @@ import { withWorkspace } from './useWorkspaceSession'
 // One singleton, like every other screen's: the query, the scope, the last
 // answer, whether the dialog is up and the one queued reveal live *here*, not
 // in the component, so closing the `<dialog>`, re-opening it, or switching to
-// the WorkBench tab and back cannot lose them (§2.7). The dialog is the only
-// thing that renders this state; the tree menu and the header icon only raise
-// it, and the code pane consumes `pendingReveal`.
+// the WorkBench tab and back cannot lose them. The dialog is the only thing that
+// renders this state; the tree menu and the header icon only raise it, and the
+// code pane consumes `pendingReveal`.
 //
 // That retention is the whole design: re-opening shows the previous query in
 // the field, the previous scope in the label and the previous table, and
@@ -21,26 +21,25 @@ import { withWorkspace } from './useWorkspaceSession'
 // produces the pane's existing refused-open answer (the 404 reason echoed with
 // the path), so no staleness machinery is needed here.
 //
-// One blocking request per search, no stream and no cancel (D1): the scan is
-// bounded server-side by the caps in `editorfs/constants`, so it finishes in
-// well under a second and the only thing the client owes the user is a busy
-// marker while it is in flight. The previous table *stays on screen* during a
-// re-search — clearing it would flash an empty table at the person comparing
-// two queries.
+// One blocking request per search, no stream and no cancel: the scan is bounded
+// server-side by the caps in `editorfs/constants`, so it finishes in well under
+// a second and the only thing the client owes the user is a busy marker while
+// it is in flight. The previous table *stays on screen* during a re-search —
+// clearing it would flash an empty table at the person comparing two queries.
 //
-// The payload is the Contract, verbatim: `result` is what the server sent,
+// The payload is the wire format, verbatim: `result` is what the server sent,
 // unreshaped, and the dialog reads the same names (`matches`, `matchCount`,
-// `footerNote`, `skipped`). The server's `detail` for a refusal is likewise
-// kept word for word — the point of D5 is that `re`'s own message, caret
-// position and all, reaches the user rather than a generic sentence.
+// `footerNote`, `skipped`). The server's `detail` for a refusal is likewise kept
+// word for word, so `re`'s own message, caret position and all, reaches the user
+// rather than a generic sentence.
 //
 // A *new working location* empties all of it. The results are paths relative to
-// a root that no longer exists, so showing them under the new root's label is
-// the lie §2.7 names, and the dialog closes with the tabs. That is the keyed
-// registry the buffers are already forgotten through (`registerReRootHandler`),
-// which is why this module reads the tree and never the Editor's write half:
-// a search result reaches a buffer through the tree's *selection*, so the read
-// model stays a read model.
+// a root that no longer exists, so showing them under the new root's label is a
+// lie, and the dialog closes with the tabs. That is the keyed registry the
+// buffers are already forgotten through (`registerReRootHandler`), which is why
+// this module reads the tree and never the Editor's write half: a search result
+// reaches a buffer through the tree's *selection*, so the read model stays a
+// read model.
 // ---------------------------------------------------------------------------
 
 const state = reactive({
@@ -58,9 +57,9 @@ const state = reactive({
   // the request never reached the server — a refusal and an unreachable API
   // are two different things a user must not have to tell apart by guessing.
   error: null,
-  // search-08's cue: { path, line, column }, applied by the pane once its
-  // model holds the file (a reveal applied before then is erased by the
-  // `model.setValue` that swaps the buffer).
+  // { path, line, column }, applied by the pane once its model holds the file
+  // (a reveal applied before then is erased by the `model.setValue` that swaps
+  // the buffer).
   pendingReveal: null,
 })
 
@@ -79,7 +78,7 @@ export function useWorkspaceSearch() {
   // the three cases the same rule already answers.
   //
   // It clears nothing. Not the query, not the result, not the status: the last
-  // answer is the reason this state is here (§2.7 / D14).
+  // answer is the reason this state is here.
   //
   // With no row focused there is no subject, so the command declines rather than
   // inventing a scope — the same answer every other tree command gives.
@@ -142,7 +141,7 @@ export function useWorkspaceSearch() {
       state.error = { status: res.status, detail: body?.detail ?? '' }
       // `result` deliberately untouched: an invalid pattern shows the inline
       // error *and* keeps the table the user was reading. A failed search does
-      // not destroy the last good one (§6 row 4).
+      // not destroy the last good one.
       return
     }
     state.result = body
@@ -150,10 +149,10 @@ export function useWorkspaceSearch() {
     state.status = 'done'
   }
 
-  // What a row click does, in the order §2.6 gives it: queue the reveal, then
-  // publish the path as the tree's selection, which is what opens or focuses the
-  // buffer. The dialog closes last — taking the hit is what closes it, not a
-  // precondition of the hit (D13).
+  // What a row click does, in this order: queue the reveal, then publish the
+  // path as the tree's selection, which is what opens or focuses the buffer. The
+  // dialog closes last — taking the hit is what closes it, not a precondition of
+  // the hit.
   //
   // The selection needs the tree's own trick for a path it has no listing of.
   // The tree is lazy, so a workspace-wide search almost always hits a collapsed

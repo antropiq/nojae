@@ -1,20 +1,14 @@
-// ---------------------------------------------------------------------------
-// The workspace tree's context menu, as data.
+// The workspace tree's context menu, as data: one ordered table of items, each
+// saying which rows it applies to, with the template a `v-for` over the answer.
+// Adding an item is one row of data.
 //
-// The menu was four `v-if`s over a fixed list of buttons, which meant a fifth
-// item was a fifth button and the *order* of items was an accident of the
-// template. It is the tree's single command surface now — one menu for every
-// row kind — so the shape of it lives here: one ordered table of items, each
-// saying which rows it applies to, and the template is a `v-for` over the
-// answer. Adding an item is one row of data.
-//
-// Two rules the table keeps, both restated where the menu opens:
+// Two rules the table keeps:
 //
 //   * an item is **absent rather than disabled-and-lying**: `Close` only when a
 //     buffer is open for that file, `View diff…` only when git has a committed
-//     side to compare against, `Rename…` / `Delete` never on the root row (the
-//     working location itself is neither renamable nor deletable, and there is
-//     no listing above it to type a new name into);
+//     side, `Rename…` / `Delete` never on the root row (the working location is
+//     neither renamable nor deletable, and there is no listing above it to type
+//     a new name into);
 //   * a row that cannot be mutated *and* has nothing else to offer gets no menu
 //     at all — an empty list is the caller's signal not to open one, because a
 //     menu of one useless item is worse than no menu.
@@ -22,7 +16,6 @@
 // Nothing here knows whether a path is *allowed* to be written: that answer is
 // the server's, so there is no deny-list and no path policy in this file — only
 // the flags the caller already holds.
-// ---------------------------------------------------------------------------
 
 // The one order every row kind is built from. `scope` says which rows the item
 // exists for at all; `needs` names a flag the caller must confirm.
@@ -33,22 +26,19 @@ const ITEMS = [
     title: 'Open this file in the editor',
     scope: 'file',
   },
-  // Search sits immediately after Open, in the group that answers "get at this
-  // thing": its buffer, its contents, its rendered form. `scope: 'row'` covers
-  // file, folder and root, and there is no `needs` flag — asking "where is this
-  // string?" is honest for every row, unlike Close (needs a buffer) or View
-  // diff… (needs a committed side). So a folder or the root, which have no Open,
-  // get Search as their *first* item rather than buried under New file…
+  // `scope: 'row'` covers file, folder and root, and there is no `needs` flag —
+  // asking "where is this string?" is honest for every row, unlike Close (needs
+  // a buffer) or View diff… (needs a committed side). So a folder or the root,
+  // which have no Open, get Search as their *first* item.
   {
     id: 'search',
     label: 'Search…',
     title: 'Search inside this folder, this file, or the whole workspace',
     scope: 'row',
   },
-  // Preview sits right after Open because it is the other answer to "show me
-  // this file": same file, rendered instead of as a buffer. It needs its own
-  // flag rather than being read off an open record — a tree row carries no
-  // language, and the menu is built before any read happens (lib/markdown-preview).
+  // Preview needs its own flag rather than being read off an open record — a
+  // tree row carries no language, and the menu is built before any read happens
+  // (lib/markdown-preview).
   {
     id: 'preview',
     label: 'Preview',
@@ -82,17 +72,15 @@ const ITEMS = [
     scope: 'row',
     needs: 'mutable',
   },
-  // Move to… sits directly after Rename…, the same mutation family, and the two
-  // coexist on one file without being redundant: Rename… asks for the *full
-  // target path* in a field labelled as a name, Move to… asks for the destination
-  // **folder** alone and lists every path it is about to move — the modal is why
-  // the batch exists at all. There is deliberately no `needs` flag: `scope:
-  // 'file'` is exactly the set of rows this item can honour (a folder row can
-  // never join a batch, and the root is not a file row), while a flag would have
-  // to answer "is this writable", which this file's header says is never its
-  // business — the server stays the authority, as it already is for Rename….
-  // `moveCount` feeds the hint only, never presence: a plain right-click on one
-  // unmarked file is the N=1 case of this same item.
+  // Directly after Rename…, the same mutation family, yet not redundant:
+  // Rename… asks for the *full target path* in a field labelled as a name,
+  // Move to… asks for the destination **folder** alone and lists every path it
+  // is about to move.
+  // There is deliberately no `needs` flag: `scope: 'file'` is exactly the set of
+  // rows this item can honour, while a flag would have to answer "is this
+  // writable", which is never this file's business. `moveCount` feeds the hint
+  // only, never presence: a plain right-click on one unmarked file is the N=1
+  // case of this same item.
   {
     id: 'move-batch',
     label: 'Move to…',
@@ -143,13 +131,12 @@ function inScope(scope, { dir, isRoot }) {
 // The items for one row, in the table's order. `flags`:
 //   dir                — the row is a folder (the root row counts as one)
 //   isRoot             — the row is the workspace root itself
-//   isMarkdown         — the row's name ends in `.md` (lib/markdown-preview)
+//   isMarkdown         — the row's name ends in `.md`
 //   diffable           — git says this file has a committed side to compare
 //   hasBuffer          — a tab already holds this file
 //   mutable            — the row may be renamed/deleted (false for the root)
 //   trashRetentionDays — quoted in the delete item's hint
-//   moveCount          — how many rows this row's batch covers (the move item's
-//                        hint; a count of rows, never a claim about writability)
+//   moveCount          — how many rows the move item's batch covers
 export function treeMenuItems(flags) {
   const out = []
   for (const item of ITEMS) {

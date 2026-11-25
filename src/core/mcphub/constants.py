@@ -1,19 +1,11 @@
-"""Static configuration of the MCP hub: paths, port range, retry policy.
+"""Static configuration of the MCP hub: paths, retry policy, refusal wording.
 
-The connector directory and the *workspace's* declaration file are
-*module attributes* on purpose (same idea as ``lsphub.constants``): the
-code that reads them resolves them through this module at call time, so
-pointing the hub at another folder (the tests do exactly this) is one
-attribute patch instead of an import dance.
-
-The declaration itself moved into the workspace: it describes *this*
-folder's connectors, so ``mcp_settings_path()`` is built per call out of
-the active working location — a patched filename or a switched location
-moves the lookup (the ``editorfs.policy_file.policy_path()`` precedent). The
-install-level file beside the connector scripts
-(``mcp_connectors/mcp-settings.default.json``) is no longer read by the
-hub: it is the committed *template* the seed copies when a folder becomes
-the working location.
+Everything here is a *module attribute* read at call time (same idea as
+``lsphub.constants``), so pointing the hub at another folder is one attribute
+patch instead of an import dance. The declaration belongs to the *workspace*,
+so ``mcp_settings_path()`` is built per call out of the active working location;
+the install-level file beside the connector scripts is the committed
+*template* the seed copies when a folder becomes the working location.
 """
 
 import sys
@@ -22,15 +14,13 @@ from typing import Optional
 
 # The one reach-capability seam, re-exported through *this* module so both hubs
 # answer the question with the same function and a test forces it the same way
-# it redirects any other hub constant (win-07 / A-D4).
+# it redirects any other hub constant.
 from .process import guardrails_speak_here  # noqa: F401 — bound as a hub attribute
 from src.core import workspace
 
-# The reserved folder's name is not re-declared here: it comes from
-# ``mcp_connectors/policy_shared``, with the same ``sys.path`` fallback
-# ``core.prompt_helpers`` uses, because that module lives outside ``src`` so
-# the stdio connectors can read it too. Two constants for one folder name is
-# how the folder stops being one folder.
+# The reserved folder's name comes from ``mcp_connectors/policy_shared`` — a
+# module outside ``src`` so the stdio connectors can read it too. Two constants
+# for one folder name is how the folder stops being one folder.
 try:
     from mcp_connectors import policy_shared as shared
 except ImportError:  # pragma: no cover - depends on how the app is started
@@ -46,46 +36,39 @@ MCP_CONNECTORS_DIR = PROJECT_ROOT / "mcp_connectors"
 
 # The workspace's connector declaration file (kilo.json-style, keyed by id),
 # inside the reserved folder at the working location: the one and only source
-# of MCP connectors. It may hold API keys in ``headers``/``env`` and is
-# therefore gitignored (via ``.nojae/``); its contents are never returned by
-# the API. The ``enable`` toggles write back into it — the folder's "edited
-# only outside the app" rule bends for it the way it already does for the
-# prompt-helper store.
+# of MCP connectors. It may hold API keys in ``headers``/``env``, so it is
+# gitignored and its contents are never returned by the API. The ``enable``
+# toggles do write back into it — the folder's "edited only outside the app"
+# rule bends for the switch the UI owns.
 MCP_SETTINGS_FILENAME = "mcp-settings.json"
 
 # The committed install-level template the seed copies, byte for byte, when a
-# folder becomes the working location. Its ``${NAME}`` references
-# (``NOJAE_PYTHON_ROOT``, ``PROJECT_ROOT``, ``NOJAE_PATH_LOCATION``)
-# are *not* substituted at seed time: every one of them resolves on every read
+# folder becomes the working location. Its ``${NAME}`` references are *not*
+# substituted at seed time: every one resolves on every read
 # (``validation.expand_env``), which is what keeps one seeded file correct on
 # every machine and across every workspace switch.
 MCP_SETTINGS_TEMPLATE = MCP_CONNECTORS_DIR / "mcp-settings.default.json"
 
-# The committed catalogue of well-known connectors the wizard offers (§9) —
+# The committed catalogue of well-known connectors the wizard offers —
 # *catalogue*, never declaration: no hub reads it, no process starts because of
-# it, and it is never copied into a workspace. It is looked up through this
-# attribute at call time (``mcphub.catalogue.load_catalogue``), exactly like the
-# template above, so a test redirects the read by patching one name.
+# it, and it is never copied into a workspace. Looked up through this attribute
+# at call time, so a test redirects the read by patching one name.
 MCP_CATALOGUE_PATH = MCP_CONNECTORS_DIR / "catalog-mcp.json"
 
 # **A pin, not the default.** When not ``None`` it wins over the computed path
-# below — the ``editorfs.constants.TRASH_DIR`` precedent: one patchable
-# override keeps the tests' one-attribute redirect without re-introducing an
-# import-time constant. Left at ``None``, the workspace's own file answers.
+# below — one patchable override keeps the tests' one-attribute redirect
+# without re-introducing an import-time constant.
 MCP_SETTINGS_PATH: Optional[Path] = None
 
 
 def mcp_settings_path() -> Path:
     """The active workspace's ``.nojae/mcp-settings.json`` (may not exist).
 
-    Built per call out of module attributes, so the pin above, a patched
-    filename, or a different workspace each move the lookup the same way. The
-    root comes from the seam (:func:`src.core.workspace.current_root`), so a
-    declaration read is always a read **of one workspace**, in that workspace's
-    scope — which is what a second tab on a second folder needs (clws-01).
-
-    A read of an absent file is ``([], [])`` — an unseeded workspace simply has
-    no connectors until its declaration is written.
+    Built per call, so the pin above, a patched filename, or a different
+    workspace each move the lookup the same way. The root comes from the seam
+    (:func:`src.core.workspace.current_root`), so a declaration read is always a
+    read **of one workspace**, in that workspace's scope — which is what a
+    second tab on a second folder needs.
     """
     if MCP_SETTINGS_PATH is not None:
         return MCP_SETTINGS_PATH
@@ -103,33 +86,23 @@ STOP_GRACE_SECONDS = 5.0
 # How long a synchronous caller waits for one tool call before giving up
 # (``McpManager.call_tool_sync``). **A safety net, not a budget**: the connector
 # owns the real limit (``execute_command``'s own ``timeout`` argument) and hands
-# back what the command had already printed when *it* fires. This number only
-# answers "the connector never came back at all", and it used to be a literal
-# 120 in the manager -- shorter than the backend test suite, so a legitimate
-# long run was cut off mid-flight and came back as a failed call. A caller that
-# knows better (the chat side, for a language server's cold start) passes its
-# own; patch this attribute to move the net.
+# back what the command had already printed when *it* fires. A caller that knows
+# better (the chat side, for a language server's cold start) passes its own;
+# patch this attribute to move the net.
 TOOL_CALL_TIMEOUT: Optional[float] = 3600.0
 
 CONNECTORS_MISSING_HINT = (
     'The "mcp" package is not installed — run: pip install -e ".[mcp]"'
 )
 
-# win-07 / A-D4, as lifted by target B1 (G-D8): a `local` (stdio) connector's
-# reach is bounded by the deny-prefixes of ``mcp_connectors/path_policy``,
-# which now speak both platforms' path forms. Where they speak *nothing* — a
-# working location whose form no prefix can name — the bound is a claim the app
-# must not make, and the entry is refused instead: same channel as an
-# unresolved ``${NAME}``, with a sentence naming the gap and pointing at the
-# capability that closes it. Asserted identical to ``lsphub.constants``' copy:
-# the two hubs refuse in one wording, because since lspfinal-04 they refuse on
-# one and the same fact — an inert guardrail list — and on nothing else.
-#
-# lspfinal-06 dropped the ``(see target B)`` pointer: target B is finished for
-# the hub that used to need it, so it named a closed plan rather than the thing
-# to fix. What is left is the sentence's own diagnosis — a guardrail list with
-# no entry in this filesystem's path form — which is what an operator acts on
-# (the list is a file they edit, not a roadmap).
+# A `local` (stdio) connector's reach is bounded by the deny-prefixes of
+# ``mcp_connectors/path_policy``, which speak both platforms' path forms. Where
+# they speak *nothing* — a working location whose form no prefix can name — the
+# bound is a claim the app must not make, and the entry is refused instead: same
+# channel as an unresolved ``${NAME}``, with a sentence naming the gap. The
+# sentence diagnoses what an operator can fix: a guardrail list with no entry in
+# this filesystem's path form. Asserted identical to ``lsphub.constants``' copy,
+# because the two hubs refuse on one and the same fact — an inert guardrail list.
 LOCAL_REACH_REFUSAL = (
     "its reach cannot be bounded on this filesystem: no guardrail entry speaks "
     "this working location's path form"

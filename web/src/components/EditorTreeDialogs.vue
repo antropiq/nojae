@@ -3,20 +3,14 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { TRASH_FOLDER, TRASH_RETENTION_DAYS, useEditorFiles } from '../composables/useEditorFiles'
 import { useWorkspaceTree } from '../composables/useWorkspaceTree'
 
-// The Editor tab's dialogs, one file for all of them: the save conflict, the
-// close confirm for a dirty buffer, and the delete confirm. They share one file
-// rather than three because they are the same shape — a
-// `<dialog>` + `showModal()` over composable state, the pattern
-// RegistrationMemoryDlg.vue and BatchModeDialog.vue follow — and because an
-// answer that belongs to the pane should not be spread over whichever component
-// happened to trigger it.
+// The Editor tab's three dialogs — save conflict, close confirm, delete confirm —
+// share one file because they are the same shape: a `<dialog>` + `showModal()`
+// over composable state.
 //
-// Nothing here decides what a conflict *is*: that is the probe's table in
-// useEditorFiles; equally, nothing here decides whether closing a tab needs
-// asking — `requestCloseTab` raised `state.closePrompt` only for a buffer that
-// holds unsaved edits. This component names which copy or which file is at
-// stake and offers the answers, all reachable by keyboard (they are plain
-// buttons inside the modal, and `showModal()` puts the caret on the first one).
+// Nothing here decides what a conflict *is* or whether closing a tab needs
+// asking: useEditorFiles owns both. This component names what is at stake and
+// offers the answers, plain buttons inside the modal, so all are keyboard
+// reachable.
 const {
   state,
   reloadFile,
@@ -30,18 +24,18 @@ const {
   confirmDelete,
 } = useEditorFiles()
 
-// Only the *cached listing* is read from the tree, for the lower-bound line
-// below — this component never asks the tree for anything and never walks it.
+// Only the tree's *cached listing* is read, for the lower bound below — never a
+// fetch and never a walk.
 const tree = useWorkspaceTree()
 
 const dialogEl = ref(null)
 const busy = ref(false)
 
 const conflict = computed(() => state.conflict)
-// Dismissing is not answering: the record keeps its conflict, its marker and
-// its edits, and only the modal stops. `conflictDismissedAt` (composable state,
-// so it survives this component) is what keeps *this* news from returning as a
-// modal on the next probe tick, while a genuinely new one still shows.
+// Dismissing is not answering: the record keeps its conflict, its marker and its
+// edits, and only the modal stops. `conflictDismissedAt` (composable state, so it
+// survives this component) keeps *this* news from returning on the next probe
+// tick, while a genuinely new one still shows.
 const isOpenNews = computed(
   () => !!conflict.value && conflict.value.raisedAt !== state.conflictDismissedAt,
 )
@@ -69,8 +63,8 @@ const body = computed(() =>
       'version on disk, or keep your edits.',
 )
 
-// The disk's timestamp, when there is one to name — shown as a time, because
-// the point is *when* the file moved, not the float itself.
+// The point of the disk timestamp is *when* the file moved, so it is shown as a
+// time rather than as the float.
 const diskWhen = computed(() => {
   const at = conflict.value?.diskMtime
   return typeof at === 'number' ? new Date(at * 1000).toLocaleString() : ''
@@ -111,7 +105,7 @@ async function reload() {
 }
 
 // Compare gets out of the way of what it shows: closing the dialog is what
-// reveals the two sides. The answer set is one click on the chip away again.
+// reveals the two sides.
 async function compare() {
   if (!conflict.value || busy.value) return
   busy.value = true
@@ -122,8 +116,8 @@ async function compare() {
 }
 
 // The escape hatch: save without the mtime token, past the guard that refused
-// it. The least prominent button, and the only caller allowed to omit the
-// token — the server logs a token-less save for exactly this reason.
+// it. The only caller allowed to omit the token — the server logs a token-less
+// save for exactly this reason.
 async function overwrite() {
   if (!conflict.value || busy.value || isDeleted.value) return
   busy.value = true
@@ -132,16 +126,13 @@ async function overwrite() {
   if (result.ok) dialogEl.value?.close()
 }
 
-// Nothing is exposed: re-opening after a dismissal goes through
-// `raiseConflict` in the composable (the chip's marker calls it), which
-// re-stamps the conflict and clears the dismissal, so the watch above sees news
-// again without this component holding the only copy of that state.
+// Nothing is exposed: re-opening after a dismissal goes through `raiseConflict`,
+// which re-stamps the conflict and clears the dismissal, so the watch above sees
+// news again without this component holding that state.
 
-// The close confirm. It exists only because a dirty buffer's edits live in this
-// page and nowhere else: closing the tab drops them, so one gesture is never
-// allowed to be the whole decision. `state.closePrompt` is raised by
-// `requestCloseTab` for a dirty buffer alone, so the mere presence of this
-// state means "there is work to lose".
+// The close confirm exists because a dirty buffer's edits live in this page and
+// nowhere else: closing the tab drops them, so one gesture is never the whole
+// decision.
 const closeDialogEl = ref(null)
 const closePrompt = computed(() => state.closePrompt)
 
@@ -188,12 +179,10 @@ function discardViaDialog() {
   closeDialogEl.value?.close()
 }
 
-// The delete confirm. `state.deletePrompt` is raised by `requestDelete` for
-// every path the tree or the `Delete` key asks about — a delete is destructive
-// whatever the buffers hold, so one gesture is never the whole decision. The
-// server has the rules (the gate, the subtree check, the trash); this dialog's
-// job is to name *what* is about to go, where it will be kept, and what unsaved
-// work is in the way.
+// The delete confirm. A delete is destructive whatever the buffers hold, so one
+// gesture is never the whole decision. The server has the rules (the gate, the
+// subtree check, the trash); this dialog's job is to name *what* is about to go,
+// where it will be kept, and what unsaved work is in the way.
 const deleteDialogEl = ref(null)
 const deletePrompt = computed(() => state.deletePrompt)
 
@@ -208,11 +197,10 @@ const deleteScope = computed(() =>
     : 'this file',
 )
 
-// The listing the tree already holds for that folder may say how many entries
-// are visible — a *lower bound* only, and labelled as one: the tree is lazy, so
-// a collapsed branch was never listed, and the policy hides entries the row
-// count cannot know about. Counting properly is the server's walk, and its
-// number comes back in the answer, never guessed here from the browser.
+// The tree's cached listing for that folder gives a *lower bound* only: the tree
+// is lazy, so a collapsed branch was never listed, and the policy hides entries
+// the row count cannot know about. Counting properly is the server's walk, and
+// its number comes back in the answer.
 const deleteShownAtLeast = computed(() => {
   const prompt = deletePrompt.value
   if (!prompt?.dir) return 0
@@ -319,11 +307,10 @@ async function deleteViaDialog() {
     </article>
   </dialog>
 
-  <!-- The close confirm: three answers, and Cancel is the default (a
-       destructive default in a confirm is a bug — so Esc, the backdrop and the
-       first button all mean Cancel). Discard names its own consequence because
-       there is no undo and no trash behind a closed tab: the buffer *is* the
-       only copy. -->
+  <!-- The close confirm: three answers, and Cancel is the default (a destructive
+       default in a confirm is a bug — so Esc, the backdrop and the first button
+       all mean Cancel). Discard names its own consequence because there is no
+       undo and no trash behind a closed tab. -->
   <dialog
     ref="closeDialogEl"
     class="editor-close-dialog"
@@ -360,12 +347,10 @@ async function deleteViaDialog() {
     </article>
   </dialog>
 
-  <!-- The delete confirm. Nothing is unlinked: the path is *moved* into a
-       batch under the workspace's own `.nojae/trash`, which is why the
-       confirmation can name it and the retention out loud — a mistaken delete
-       is two terminal commands away from being undone. Cancel is first and
-       therefore the default; Delete is the destructive answer and wears the
-       danger tone. -->
+  <!-- The delete confirm. Nothing is unlinked: the path is *moved* into a batch
+       under the workspace's own `.nojae/trash`, which is why the confirmation can
+       name it and the retention out loud. Cancel is first and therefore the
+       default; Delete is the destructive answer. -->
   <dialog
     ref="deleteDialogEl"
     class="editor-delete-dialog"

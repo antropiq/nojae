@@ -3,9 +3,9 @@
 A connector and a language server are bound to a folder **at birth** — a local
 connector is spawned with the folder as its ``--root-dir``, a language server
 with the folder as its ``workspaceRoot``, and neither can be pointed elsewhere
-for the rest of its life (spec §3.1). So two workspaces cannot be served by one
-hub: each folder needs **one of each**, spawned against it, answering about it
-and nothing else, and torn down with it (spec §4.3, §5.4 rule 20).
+for the rest of its life. So two workspaces cannot be served by one hub: each
+folder needs **one of each**, spawned against it, answering about it and nothing
+else, and torn down with it.
 
 **The pool is the long-lived singleton, not the manager.** The app holds one
 :class:`HubPool`; a workspace's two managers live inside its :class:`HubSet` and
@@ -15,8 +15,7 @@ at its turn's start for the whole turn. That is the same reason the managers' ow
 ``restart`` docstrings give for keeping their object identity, read one level up:
 something other than a single request owns the object.
 
-Four rules bound the set (spec §4.4), and all four are this module's, not the
-routes':
+Four rules bound the set, and all four are this module's, not the routes':
 
 * **the ceiling** — at most :data:`MAX_LIVE_WORKSPACES` workspaces are alive at
   once, and the ``N+1``th is refused with :func:`ceiling_sentence`, which names
@@ -32,7 +31,7 @@ routes':
   attempt on a busy workspace is skipped and tried again next tick;
 * **the visible restart** — :meth:`HubPool.acquire` reports whether it *built*
   the set, so a tab returning to a workspace whose tools were let go is told its
-  tools are coming back rather than silently left without them (rule 23).
+  tools are coming back rather than silently left without them.
 
 **Admission is the one moment a folder's reserved folder is seeded** — the same
 actions the boot performs, in the same order, with the same contract (a seeding
@@ -45,8 +44,8 @@ pool rather than a copy of the pool's seeding.
 :func:`src.core.workspace.scope` around the seeding, the declaration scan and the
 build, so ``${NOJAE_PATH_LOCATION}`` in a workspace's declaration expands to
 *that* workspace while ``${PROJECT_ROOT}`` still means the installation in every
-one of them (spec §4.3). Neither manager takes a root argument: they read their
-declarations through ``constants.*_settings_path()``, which reads the scope.
+one of them. Neither manager takes a root argument: they read their declarations
+through ``constants.*_settings_path()``, which reads the scope.
 
 Core only: no FastAPI, no browser, and every bound (:data:`MAX_LIVE_WORKSPACES`,
 :data:`IDLE_RELEASE_SECONDS`, :data:`REAPER_INTERVAL_SECONDS`) and every
@@ -68,12 +67,12 @@ from src.core.mcphub import McpManager, ensure_mcp_settings_file, load_externals
 logger = logging.getLogger("nojae.hubpool")
 
 #: How many workspaces may be alive at once. Small and stated, because "as many
-#: tabs as I open" (spec D3) is not a licence to keep N sets of connector
-#: processes and N language-server indexes resident forever (spec §4.4). Six:
-#: the count includes the installation folder every new tab lands on, so a
-#: smaller bound would leave room for only two or three real projects — and
-#: reaching it is a hard stop for the tab that asked. Read at call time, so a
-#: test patches this attribute rather than the pool.
+#: tabs as I open" is not a licence to keep N sets of connector processes and N
+#: language-server indexes resident forever. Six: the count includes the
+#: installation folder every new tab lands on, so a smaller bound would leave room
+#: for only two or three real projects — and reaching it is a hard stop for the
+#: tab that asked. Read at call time, so a test patches this attribute rather
+#: than the pool.
 MAX_LIVE_WORKSPACES = 6
 
 #: How long a workspace nobody has asked anything about is kept alive: long
@@ -85,15 +84,15 @@ IDLE_RELEASE_SECONDS = 1800.0
 #: LSP hub's own idle reaper keeps (``lsphub.constants.REAPER_INTERVAL_SECONDS``).
 REAPER_INTERVAL_SECONDS = 30.0
 
-#: The two dev/test switches, honoured **per workspace** exactly as the lifespan
-#: honoured them for the one hub of each kind: the endpoints stay usable, nothing
-#: is connected. A hermetic test therefore reaches no hub, on any workspace.
+#: The two dev/test switches, honoured **per workspace**: the endpoints stay
+#: usable, nothing is connected. A hermetic test therefore reaches no hub, on any
+#: workspace.
 DISABLE_MCP_ENV = "NOJAE_DISABLE_MCP"
 DISABLE_LSP_ENV = "NOJAE_DISABLE_LSP"
 
 
 def ceiling_sentence(live_roots: Sequence[str], limit: int = MAX_LIVE_WORKSPACES) -> str:
-    """The one sentence the ceiling answers with (spec §4.4, rule 22).
+    """The one sentence the ceiling answers with.
 
     It names the bound, names the workspaces that hold it, and says what to do —
     point another tab away, or wait for an idle one to be let go. Built here so
@@ -150,19 +149,18 @@ class HubSet:
         """Tear both managers down, through their own ``stop_all``.
 
         Those *are* the shared ``proctree`` teardown (process trees, not
-        wrappers): the pool adds no second teardown path. The LSP hub goes first
-        because that is the order the app's shutdown block has always used.
+        wrappers): the pool adds no second teardown path. The LSP hub goes first,
+        the order the app's shutdown block uses.
 
         Both are asked even if the first raises, and the first error is then
         re-raised: a language server that would not join must not be what keeps a
         workspace's connector children alive. Neither manager's own ``stop_all``
         is expected to raise, so this is the guard, not the normal path.
 
-        A half that is **absent** is skipped rather than failed on. An absent hub
-        is the documented degradation case the hub routes answer with 503, and a
-        teardown that tripped over it would put a traceback in the one log line
-        that reports a workspace whose tools did *not* stop cleanly — the same
-        condition :meth:`state` already tolerates.
+        A half that is **absent** is skipped rather than failed on: that is the
+        degradation case the hub routes answer with 503, and a teardown that
+        tripped over it would put a traceback in the one log line reporting a
+        workspace whose tools did *not* stop cleanly.
         """
         failures: List[BaseException] = []
         for manager in (self.lsp, self.mcp):
@@ -191,11 +189,10 @@ class HubSet:
 
         The scan happens inside this workspace's scope, so the fresh list is this
         folder's ``.nojae/mcp-settings.json`` and ``${NOJAE_PATH_LOCATION}`` in it
-        expands to this folder — which is the whole of spec §4.3 for a restart,
-        and the reason the route cannot do the scan itself. The dev/test switch is
-        honoured by :func:`declared_connectors`, the same reader the build used,
-        so a restart on a switched-off hub rebuilds it empty rather than
-        connecting anything.
+        expands to this folder — which is why the route cannot do the scan
+        itself. The dev/test switch is honoured by :func:`declared_connectors`,
+        the same reader the build used, so a restart on a switched-off hub
+        rebuilds it empty rather than connecting anything.
         """
         with workspace.scope(self.root):
             await self.mcp.restart(declared_connectors())
@@ -249,9 +246,9 @@ class HubSet:
 class Acquisition(NamedTuple):
     """What :meth:`HubPool.acquire` answers: the set, and two facts about it.
 
-    ``built`` is the visible-restart flag (rule 23): true when this call is the
-    one that admitted the workspace, so the API can carry "this workspace's tools
-    are starting" into its payload instead of leaving the tab to find out.
+    ``built`` is the visible-restart flag: true when this call is the one that
+    admitted the workspace, so the API can carry "this workspace's tools are
+    starting" into its payload instead of leaving the tab to find out.
     ``refusal`` is the ceiling's sentence — and when it is set there is **no**
     set, because the workspace refused is the one that was asked for, never a
     live one.
@@ -277,10 +274,9 @@ class HubPool:
     one lock is **per root** and covers an admission, for two reasons pointing the
     other way from each other: the slow part of an admission — a cold local
     connector burning its retry window — must not delay the admission of a
-    *different* workspace (spec §5.3 rule 13: a second tab is a peer, not a
-    guest), and two requests naming **one** unseen folder must build one set, so
-    the second waits on that folder's lock and then reuses the answer the first
-    built.
+    *different* workspace (a second tab is a peer, not a guest), and two requests
+    naming **one** unseen folder must build one set, so the second waits on that
+    folder's lock and then reuses the answer the first built.
     """
 
     def __init__(self) -> None:
@@ -299,11 +295,9 @@ class HubPool:
         self._admitting: List[str] = []
         self._stopped = False
         #: The folder the app admitted at boot — the installation folder in
-        #: production, and the folder the interim location names under the test
-        #: suite's own pin. Every hub route now names the folder its request
-        #: carries, so nothing asks "which folder did boot land on" any more;
-        #: this stays because the boot's own admission and the suite's pin both
-        #: need to say which folder that was.
+        #: production, and the suite's own pin under test. No request asks this
+        #: any more (each names its own folder); it stays because the boot and the
+        #: suite both need to say which folder that was.
         self.boot_root: Optional[str] = None
 
     # -- the API's questions ---------------------------------------------------
@@ -314,7 +308,7 @@ class HubPool:
         A read of a workspace must never start processes or write files, so the
         surfaces that only report ask this. ``None`` means "this folder is not
         alive in this process" — an answer, not an error, and never a reason to
-        answer about a different folder (spec §5.2 rule 12).
+        answer about a different folder.
         """
         return self._entries.get(workspace.canonical(root))
 
@@ -437,18 +431,16 @@ class HubPool:
     def acquire_sync(self, root: str) -> Acquisition:
         """:meth:`acquire` from a thread that has no event loop of its own.
 
-        The hub routes that must stay synchronous — the two panels' reads, the
-        two ``enable``-flag writes, the Editor pane's query and the log tail —
-        run in a worker thread, where the blocking half of an admission
-        (``stop_connector`` waiting on its own hub thread, a tool query waiting
-        on a future) belongs. They still need *this workspace's* set, so the
-        admission is dispatched onto the pool's own loop and waited for here.
+        The hub routes that must stay synchronous run in a worker thread, where
+        the blocking half of an admission (``stop_connector`` waiting on its own
+        hub thread, a tool query waiting on a future) belongs. They still need
+        *this workspace's* set, so the admission is dispatched onto the pool's own
+        loop and waited for here.
 
-        It is waited for **without a timeout**, which is the same choice the
-        awaited restart route has always made: an admission is bounded by the
+        It is waited for **without a timeout**: an admission is bounded by the
         managers' own connect-retry windows, and a route that gave up mid-build
-        would leave a set nobody owns. The wait happens on a worker thread, so
-        the loop it is waiting on is free to run the admission.
+        would leave a set nobody owns. The wait happens on a worker thread, so the
+        loop it is waiting on is free to run the admission.
 
         Raises :class:`RuntimeError` when the pool has no loop, i.e. before the
         app that starts the reaper has started — a pool nobody runs cannot
@@ -469,7 +461,7 @@ class HubPool:
         empty catalogue. So the read asks whether admission *would* be refused,
         and answers the same sentence the refusal would have carried — one
         sentence, built by :func:`ceiling_sentence`, wherever the ceiling is
-        reached (spec §5.2 rule 10).
+        reached.
         """
         resolved = workspace.canonical(root)
         if resolved in self._entries:
@@ -480,13 +472,13 @@ class HubPool:
         return None
 
     def summary(self) -> Dict[str, Any]:
-        """The pool's own line, for the interface to render (spec §4.4, rule 22).
+        """The pool's own line, for the interface to render.
 
         Which workspaces are live (with the state each one is in), the bound,
         whether it has been reached, and the one sentence for when it has. The
-        ``GET /api/workspace`` read carries this beside the two hub payloads so
-        a tab can say "your tools are not running here" and "too many workspaces
-        are open" as the two different answers they are.
+        ``GET /api/workspace`` read carries this beside the two hub payloads so a
+        tab can tell "your tools are not running here" from "too many workspaces
+        are open".
         """
         limit = MAX_LIVE_WORKSPACES
         holders = self._slot_holders()
@@ -584,10 +576,9 @@ class HubPool:
 
         The **same** actions the boot performs, and the boot calls this rather
         than repeating them: the policy file, the MCP declaration, and the LSP
-        *template* — the LSP declaration itself is hand-written and is still
-        never seeded, because every entry names machine-local paths. Plus the
-        trash sweep, which is what keeps a folder nobody deletes into any more
-        from rotting (the boot has always done it at this same moment).
+        *template* — the LSP declaration itself is hand-written and is never
+        seeded, because every entry names machine-local paths. Plus the trash
+        sweep, which keeps a folder nobody deletes into any more from rotting.
 
         Each action already answers a dict instead of raising, so what is guarded
         here is only the unexpected, and a hiccup stays a note: an unseeded
@@ -610,9 +601,8 @@ class HubPool:
                 ),
             ):
                 answers[name] = _note(name, root, action)
-        # The one answer with a number worth saying out loud: the boot logged this
-        # line before the sweep moved here, and a folder that never gets a delete
-        # is exactly the case where it is the only trace.
+        # The one answer with a number worth saying out loud: a folder that never
+        # gets a delete is exactly the case where this line is the only trace.
         removed = answers["trash"].get("removed")
         if isinstance(removed, int) and removed:
             logger.info("removed %d expired trash batch(es) of %s", removed, root)
@@ -656,7 +646,7 @@ def declared_connectors() -> List[Dict[str, Any]]:
     """This workspace's connectors (every entry, ``enable`` flag included).
 
     Reads the declaration of **the workspace in scope**, so the answer a
-    :class:`HubSet` gets is its own folder's — which is the whole of spec §4.3.
+    :class:`HubSet` gets is its own folder's.
     """
     if os.environ.get(DISABLE_MCP_ENV):
         return []
@@ -667,8 +657,8 @@ def declared_connectors() -> List[Dict[str, Any]]:
 def declared_servers() -> Tuple[List[Dict[str, Any]], List[str]]:
     """This workspace's servers, and the ids whose ``enable`` flag is on.
 
-    The one activation gate (D13), stated once so admission and restart cannot
-    disagree about what "this server runs here" means.
+    The one activation gate, stated once so admission and restart cannot disagree
+    about what "this server runs here" means.
     """
     if os.environ.get(DISABLE_LSP_ENV):
         return [], []
@@ -679,8 +669,8 @@ def declared_servers() -> Tuple[List[Dict[str, Any]], List[str]]:
 def _note(what: str, root: str, action: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
     """Run one seeding action, turning a hiccup into a note in the log.
 
-    The contract every seed in this app already holds, kept here so admission
-    cannot fail a workspace over a file it could not leave behind.
+    The contract every seed in this app holds, so admission cannot fail a
+    workspace over a file it could not leave behind.
     """
     try:
         answer = action()

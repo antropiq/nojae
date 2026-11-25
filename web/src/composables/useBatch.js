@@ -16,50 +16,49 @@ import {
 //
 // This composable owns *only* the batch: the conversation, the stream and the
 // measurements stay in useChat, and every task turn goes through
-// useChat.sendBatchTurn(). The loop is deliberately client-side (B1) — which is
-// also why a browser reload discards a batch (E8): there is no server-side "a
-// batch is running" to reconnect to.
+// useChat.sendBatchTurn(). The loop is deliberately client-side, which is also
+// why a browser reload discards a batch: there is no server-side "a batch is
+// running" to reconnect to.
 //
 // Three invariants the rest of the design rests on:
-//   * the app never reads a task body (B13). The instruction names the file's
-//     path and the model opens it with its own connectors, so the listing
-//     endpoint stays the only file surface batch mode has;
+//   * the app never reads a task body: the instruction names the file's path and
+//     the model opens it with its own connectors, so the listing endpoint stays
+//     the only file surface batch mode has;
 //   * a task is only *finished* when its file left the lot folder. The move into
 //     `<dir>/done` is the agent's own acknowledgement of completeness and, with
-//     B13, the re-listing is the only way the app can read it. So after every
-//     turn the loop checks it: a task whose file is still in the lot is
-//     relaunched with a retry note appended to its instruction instead of the
+//     the rule above, the re-listing is the only way the app can read it. So
+//     after every turn the loop checks it: a task whose file is still in the lot
+//     is relaunched with a retry note appended to its instruction instead of the
 //     lot moving on — up to MAX_TASK_RETRIES times, after which the lot aborts.
-//   * the LLM context is reset per task (B6): sendBatchTurn posts one message,
-//     and the screen is wiped between tasks (useChat's reset()) so a task is
-//     shown on a clean conversation too — chat stream, reasoning/tool panel,
-//     ctx badge and stopwatch included. Continuity between tasks comes from
-//     disk (git, todos/done/) plus the system prompt — which is why the lot's
-//     big picture rides on every request as `batchContext`.
+//   * the LLM context is reset per task: sendBatchTurn posts one message, and
+//     the screen is wiped between tasks (useChat's reset()) so a task is shown
+//     on a clean conversation too — chat stream, reasoning/tool panel, ctx badge
+//     and stopwatch included. Continuity between tasks comes from disk (git,
+//     todos/done/) plus the system prompt — which is why the lot's big picture
+//     rides on every request as `batchContext`.
 // ---------------------------------------------------------------------------
 
 // The per-task user message, verbatim. `<task_location>` is the root-relative
-// path returned by the listing, which both connectors and the agent-instructions
-// block resolve against the project root. It asks for no commit: a batch leaves
-// its edits in the working tree, for the human to review and commit.
+// path returned by the listing, which connectors and the agent-instructions block
+// resolve against the project root. It asks for no commit: a batch leaves its
+// edits in the working tree for the human to review.
 export const TASK_INSTRUCTION_TEMPLATE =
   "You've been given task: <task_location> to proceed. Do the coding tasks " +
   'needed to implement the feature. Once done move it into the todos/done ' +
   'folder.'
 
 // How many times an unfinished task may be relaunched before the lot is given
-// up on (the spec's "n is 1 to 3"). Fixed rather than configurable: an agent
-// that forgot the move needs one nudge, and every attempt costs a full turn of
-// the whole lot.
+// up on. Fixed rather than configurable: an agent that forgot the move needs one
+// nudge, and every attempt costs a full turn of the whole lot.
 export const MAX_TASK_RETRIES = 3
 
 // How long to wait before each relaunch, in milliseconds, indexed by the retry
 // number about to be made (1-based). A task can stay in the lot folder because
-// the agent's own `mv` has not landed yet — a slow move, or a brief network cut
-// to the model — and relaunching straight away would re-open a turn for work
-// that was already finishing. The rising schedule gives the trailing write more
-// time on each try: a cut of under 5s is absorbed by the first relaunch, one of
-// under 20s by the second, and under 50s by the third.
+// its own `mv` has not landed yet — a slow move, or a brief network cut to the
+// model — and relaunching straight away would re-open a turn for work that was
+// already finishing. The rising schedule gives that trailing write more time on
+// each try: a cut of under 5s is absorbed by the first relaunch, under 20s by
+// the second, and under 50s by the third.
 export const RELAUNCH_DELAYS_MS = [5000, 15000, 30000]
 
 // The wait before the retry number `attempt` (1-based). Past the schedule
@@ -71,11 +70,10 @@ export function relaunchDelayMs(attempt) {
 }
 
 // Appended to the instruction of a relaunched task, so the model is told *why*
-// it is being asked again — the file not having left the lot folder is the only
+// it is being asked again — the file still sitting in the lot folder is the only
 // evidence the app has that the task is unfinished (the usual causes are context
 // overflow, a connectivity error, a tool-loop cap, or simply forgetting the
-// move). The wording and the markdown emphasis are the architect's, and render
-// in the user bubble like the instruction itself.
+// move). Its markdown emphasis renders in the user bubble like the instruction.
 export const RETRY_NOTE_TEMPLATE =
   'Important: The task as been relaunch because *it has not been moved* to ' +
   'the **todos/done** folder (retry number *<retry_number>*)'
@@ -95,30 +93,20 @@ export const REQUIRED_MCP_CONNECTORS = [
   { id: 'console', what: 'run mv into todos/done' },
 ]
 
-// A lot runs its tasks in **the agent the composer's dropdown shows** — one rule
-// for every kind of session, batch included: there is no agent a lot picks for
-// itself. What is pinned at launch (see `pinLotMode`) is that *selection*, so a
-// dropdown the user moves while task 4 is streaming reaches neither that turn nor
-// task 5. The id is read from the loaded agent list rather than sent blind, and
-// an unreadable list or an agent with no model is a **launch refusal**: the lot
-// never runs under an agent nobody chose.
-//
-// **A lot's workspace is part of the same pin** (`pinLotWorkspace`), for exactly
-// the same reason read one level wider: its lot is one folder's lot, its tools
-// are that folder's tools, and every task turn names that folder — so a tab that
-// moves during the run re-roots nothing. That is the rule AGENTS.md states for
-// the mode ("a lot runs every task in one mode, pinned at launch"), applied to
-// the folder (spec §5.7 rule 33): a change of agent **or of folder** in any tab
-// afterwards reaches no task in the run.
+// A lot runs its tasks in **the agent the composer's dropdown shows** — there is
+// no agent a lot picks for itself — and in **the folder of the tab that started
+// it**; both are pinned at launch (`pinLotMode`, `pinLotWorkspace`) so a
+// dropdown or a folder moved mid-lot reaches no task in the run. Either one
+// unresolvable, or an agent with no model, is a **launch refusal**: the lot never
+// runs under an agent nobody chose.
 //
 // "A batch is running" is therefore a fact about **one workspace's tab**, never
 // about the app: the flag (`state.active`) and the two guards registered from it
 // below (`useChat`'s busy guard and `useAppShell`'s `batchGuard`) are module
 // state of this composable, and a browser tab is one module instance — so
-// starting a lot in A blocks neither a lot nor a conversation nor a save in B
-// (spec §5.7 rule 35, §5.3 rule 13). The server-side counterpart of the same
-// rule is the in-flight chat slot, which task 04 keyed by workspace
-// (``routes._CHAT_TASKS``); this file's half is the tab's.
+// starting a lot in A blocks neither a lot nor a conversation nor a save in B.
+// The server-side counterpart of the same rule is the in-flight chat slot, which
+// is keyed by workspace (``routes._CHAT_TASKS``); this file's half is the tab's.
 //
 // Last, a lot needs the folder's **tools** to exist: a workspace the hub pool
 // refused (the ceiling) would run its tasks with no connectors, so the launch
@@ -153,20 +141,19 @@ const state = reactive({
   prefix: '', // the prefix picked in the dropdown ('ed-')
   dir: 'todos', // relative to the working location
   // The dropdown's options, from GET /api/batch/prefixes: one entry per prefix
-  // that has at least one task in `dir` ({ prefix, tasks, hasLot }). Names
-  // only -- batch mode reads no file body (B13), and a prefix is offered exactly
-  // when listing it would give a non-empty lot.
+  // that has at least one task in `dir` ({ prefix, tasks, hasLot }). Names only
+  // -- batch mode reads no file body, and a prefix is offered exactly when
+  // listing it would give a non-empty lot.
   prefixes: [],
   prefixesLoading: false,
   listing: null, // payload of GET /api/batch/tasks
   loading: false, // the lot listing fetch
   error: null, // fetch / validation message inside the dialog
   // --- run state ---
-  active: false, // batch_in_progress — the one flag the UI locks on (B10/B11)
+  active: false, // batch_in_progress — the one flag the UI locks on
   total: 0, // taskCount (the highest task number, not a file count)
-  index: 0, // highest task number whose turn ran to its end (a gap in the
-            // numbering still fills the bar honestly; a stopped or failed turn
-            // does not advance it — Stop on task 3 leaves the bar at 2/3)
+  index: 0, // highest task number whose turn ran to its end: a numbering gap
+            // still fills the bar honestly, a stopped turn does not advance it
   current: null, // { number, name, taskLocation } of the streaming turn
   // One entry per *turn* started — a relaunched task has one entry per attempt:
   // { number, attempt, outcome, moved }. `outcome` is how the turn ended
@@ -176,29 +163,24 @@ const state = reactive({
   // still there, so the task is relaunched) or null (the check could not run).
   outcomes: [],
   status: 'idle', // idle | running | stopped | failed | finished
-  // The agent id this lot's task turns run in: the composer's dropdown selection,
-  // read once at launch (`pinLotMode`) and sent per turn from here, so a dropdown
-  // the user moves during task 7 cannot reach task 8. A selection that cannot run
-  // — an unreadable agent list, or an agent with no model — is a **launch
-  // refusal**: there is no other agent a lot may fall back on. Set only once
-  // `ensureSelectedAgentRunnable` has accepted it.
+  // The agent id this lot's task turns run in, read once at launch (`pinLotMode`)
+  // and sent per turn from here. Set only once `ensureSelectedAgentRunnable` has
+  // accepted it.
   pinnedMode: null,
-  // The folder this run belongs to — the tab's workspace, read **once at launch**
-  // (`pinLotWorkspace`) and named by every task turn, every re-listing and the
-  // pool gate, so a tab that moves mid-lot re-roots nothing (spec §5.7 rule 33).
-  // Null outside a run, and cleared with the run (`clearBatchRun`). It is the
-  // text the tab holds (the server's canonical realpath), never what was typed.
+  // The folder this run belongs to, read once at launch (`pinLotWorkspace`) and
+  // named by every task turn, re-listing and pool gate. It is the text the tab
+  // holds (the server's canonical realpath), never what was typed.
   pinnedWorkspace: null,
   // A quiet line in the batch status area, kept for a run's own note (none
   // today): a lot that could not resolve its agent never launched, so a running
-  // one always has an agent and nothing to explain here. null otherwise.
+  // one always has an agent and nothing to explain here.
   modeNote: null,
 })
 
 // A batch owns the conversation even in the fraction of a second between two
 // task turns, when useChat.state.phase is back to 'idle'. Registering the
-// predicate here lets useChat's hub guards (B11) see it without useChat
-// importing this module: the dependency direction stays acyclic
+// predicate here lets useChat's hub guards see it without useChat importing this
+// module: the dependency direction stays acyclic
 // (useBatch -> useChat -> nothing new).
 registerChatBusyGuard(() => state.active)
 // ... and the same for the tab/settings guards owned by useAppShell.
@@ -220,9 +202,9 @@ export function taskCountedForProgress({ outcome, moved }) {
 // What the loop does after one attempt at a task. A table rather than inline
 // branches so the retry rule is one testable function (the shape
 // lib/inference-state.js uses) and the loop reads as its actions:
-//   'failed'  — the turn itself failed: the lot is one job, so it is over (B8);
-//   'stopped' — the user stopped it (B9), which outranks a pending retry: a
-//               relaunch would restart work they just interrupted;
+//   'failed'  — the turn itself failed: the lot is one job, so it is over;
+//   'stopped' — the user stopped it, which outranks a pending retry: a relaunch
+//               would restart work they just interrupted;
 //   'abort'   — the file is still in the lot and the retry budget is spent, so
 //               the *remaining* tasks are not started either;
 //   'retry'   — relaunch this same task, one retry note further;
@@ -262,14 +244,10 @@ export function useBatch() {
     chat.error = message
   }
 
-  // The dropdown's options: every prefix that has at least one task in `dir`, of
-  // **the folder this lot belongs to** — the pin while a run is going, the tab's
-  // workspace otherwise (see `lotWorkspace`). Fires when the dialog opens and
-  // whenever `dir` changes — the folder is the only thing the option list
-  // depends on. A folder that cannot be listed is reported on the dialog's error
-  // line (the same honesty as the listing): an empty dropdown next to a silent
-  // failure would read as "no tasks", which is a different and much less
-  // actionable statement.
+  // The dropdown's options: every prefix with at least one task in `dir`, of the
+  // folder `lotWorkspace()` answers. A folder that cannot be listed is reported
+  // on the dialog's error line: an empty dropdown next to a silent failure would
+  // read as "no tasks", a much less actionable statement.
   async function fetchPrefixes() {
     state.error = null
     state.prefixesLoading = true
@@ -344,9 +322,9 @@ export function useBatch() {
     }
   }
 
-  // Launch needs WorkBench at its initial state (B14): a task lot on top of a
-  // human thread is meaningless, and the transcript is never auto-purged — so
-  // refusing beats silently wiping somebody's conversation.
+  // Launch needs WorkBench at its initial state: a task lot on top of a human
+  // thread is meaningless, and the transcript is never auto-purged — so refusing
+  // beats silently wiping somebody's conversation.
   function ensureFreshChat() {
     if (chat.phase !== 'idle') {
       fail('Cannot start a batch while a reply is streaming.')
@@ -365,10 +343,9 @@ export function useBatch() {
   // snapshot could not load the request carries no filter at all (the server
   // keeps every activated connector), so there is nothing to judge.
   //
-  // The agent the lot will run in — the dropdown's selection — belongs to the
-  // *same* check: an agent whose `mcp_enable` is false makes those connectors
-  // unreachable for every task, which is the identical failure — one list, one
-  // reason, one place the user learns why Launch is disabled. This only judges.
+  // The agent's own `mcp_enable` belongs to the *same* check: false makes those
+  // connectors unreachable for every task — one list, one reason, one place the
+  // user learns why Launch is disabled. This only judges.
   function ensureToolsAvailable() {
     const needs = []
     const fixes = []
@@ -412,10 +389,10 @@ export function useBatch() {
   }
 
   // The folder this lot belongs to: the run's **pin** while one is going, the
-  // tab's workspace otherwise (spec §5.7 rule 33). One answer for every batch
-  // request, so a two-tab pair cannot list one folder's lot and turn into
-  // another's. `''` is a value here (the interim "no field"), which is why the
-  // test is `??` and not `||`: a run that pinned "no folder" keeps it.
+  // tab's workspace otherwise. One answer for every batch request, so a two-tab
+  // pair cannot list one folder's lot and turn into another's. `''` is a value
+  // here (the interim "no field"), which is why the test is `??` and not `||`: a
+  // run that pinned "no folder" keeps it.
   function lotWorkspace() {
     return state.pinnedWorkspace ?? useWorkspaceSession().state.workspace
   }
@@ -426,13 +403,12 @@ export function useBatch() {
     return withWorkspaceRoot(url, lotWorkspace())
   }
 
-  // A lot needs its folder's **tools**, and a folder needs a set of them: if the
-  // hub pool refused it — the ceiling, with its own sentence naming the bound and
-  // the live workspaces — every task would run with no connectors, so the launch
-  // refuses here instead (spec §4.4, §5.4 rule 22). The pool's sentence is the
-  // server's own (`GET /api/workspace` answers 429 with it), so the client
-  // re-spells no rule of its own (spec §5.2 rule 10), and it lands on the
-  // dialog's message line while the dialog is still open.
+  // A lot needs its folder's **tools**: if the hub pool refused it — the ceiling,
+  // with its own sentence naming the bound and the live workspaces — every task
+  // would run with no connectors, so the launch refuses here instead. The pool's
+  // sentence is the server's own (`GET /api/workspace` answers 429 with it), so
+  // the client re-spells no rule of its own, and it lands on the dialog's message
+  // line while the dialog is still open.
   //
   // Only a refusal refuses: an unreachable API is left to the first task turn,
   // which is where a dead server already reports itself — a launch gate that
@@ -479,25 +455,17 @@ export function useBatch() {
     return false
   }
 
-  // Hold the accepted agent for the whole run. The composer's selection is read
-  // **once, here**, and each turn sends what was read — so a dropdown change
-  // during task 7 cannot reach task 8. `ensureSelectedAgentRunnable` ran first,
-  // so there is no unresolved case left to explain.
+  // Hold the accepted agent for the whole run. `ensureSelectedAgentRunnable` ran
+  // first, so there is no unresolved case left to explain.
   function pinLotMode() {
     state.pinnedMode = lotMode().id
     state.modeNote = null
   }
 
-  // Hold the folder for the whole run, for the same reason and one level wider:
-  // the tab's workspace is read **once, here**, and every task turn, every
-  // re-listing and the pool gate name what was read — so a tab that moves during
-  // task 7 cannot re-root task 8, nor make the completion check judge one folder's
-  // lot by another folder's listing (spec §5.7 rules 32–33).
-  //
-  // Read beside `pinLotMode`, at the same moment and for the same reason: the
-  // mode pin says *which agent*, this one says *which folder*, and together they
-  // are the lot's identity for its whole run. `lotWorkspace()` is the single
-  // reader of the answer, so nothing else has to remember it is pinned.
+  // Hold the folder for the whole run, one level wider than the agent pin: a tab
+  // that moves mid-lot must not make the completion check judge one folder's lot
+  // by another folder's listing. `lotWorkspace()` is the single reader of the
+  // answer, so nothing else has to remember it is pinned.
   function pinLotWorkspace() {
     state.pinnedWorkspace = useWorkspaceSession().state.workspace
   }
@@ -505,9 +473,7 @@ export function useBatch() {
   // A second, quiet listing of the same lot — the completion check's only
   // source. Deliberately *not* `validate()`: the dialog is closed while a lot
   // runs, so a failed fetch must not write into `state.error`/`state.listing`
-  // (which would leave the launch-time listing inconsistent with the loop that
-  // is still iterating it). `openDialog()` re-lists on its own when the user
-  // looks again.
+  // and leave the launch-time listing inconsistent with the loop iterating it.
   // Returns the payload, or null when the folder could not be listed.
   async function relistLot() {
     try {
@@ -525,19 +491,16 @@ export function useBatch() {
 
   // Did the task file leave the lot folder? That move into `<dir>/done` is the
   // agent's own acknowledgement of completeness, and — because batch mode reads
-  // no task body (B13) and has no stat route — the re-listing above is the only
-  // way the app can see it.
+  // no task body and has no stat route — the re-listing above is the only way
+  // the app can see it.
   //
-  // Returns `false` when the fresh listing still carries the task's
-  // `taskLocation` (unfinished: relaunch it), `true` when it is gone, and
-  // `null` when the check could not run at all (listing failed, or the lot
-  // folder itself disappeared). `null` must not be folded into `false`:
-  // retrying a finished task on an outage costs a full turn, and a lot whose
-  // folder vanished cannot be judged by anything this endpoint can say.
+  // `false` when the fresh listing still carries the task's `taskLocation`
+  // (unfinished: relaunch it), `true` when it is gone, `null` when the check
+  // could not run at all. `null` must not be folded into `false`: retrying a
+  // finished task on an outage costs a full turn.
   //
-  // "Gone from the listing" is the honest limit of what is checkable: a file
-  // renamed inside the lot folder to a name the prefix no longer matches also
-  // reads as moved, and the app has no route to tell the two apart.
+  // "Gone from the listing" is the honest limit: a file renamed inside the lot
+  // folder to a name the prefix no longer matches also reads as moved.
   async function taskMovedOutOfLot(task) {
     const fresh = await relistLot()
     if (!fresh || !Array.isArray(fresh.tasks)) return null
@@ -601,25 +564,16 @@ export function useBatch() {
   // `attempt` is how many times this task has already been relaunched: it only
   // selects the message text (the retry note), never a different flow.
   //
-  // The turn carries the agent the lot launched with (`pinLotMode` read the
-  // dropdown's selection once): every task of one lot runs under one agent
-  // whatever the dropdown is showing while they stream. That id is always
-  // resolved by the time a turn runs — launch refuses otherwise — so this never
-  // sends a turn without an `agentMode`.
-  //
-  // It carries the **folder** the same way, from the same pin: `workspace` is
-  // named explicitly on every task turn, so a tab whose field moves mid-lot
-  // re-roots neither the task streaming nor the next one — and the model's tools
-  // therefore keep opening that folder's files (spec §5.7 rules 32–33). Without
-  // the explicit value a moved tab would silently send its *new* folder, which is
-  // the one thing the pin exists to prevent.
+  // The turn carries the agent **and** the folder from the launch pin, named
+  // explicitly, so whatever the dropdown or the tab shows mid-lot reaches
+  // neither this turn nor the next one.
   async function runOneTurn(task, attempt = 0) {
     // The lot's big picture rides on every task turn whenever the listing found
     // one: there is no opt-out — a 00 file is the lot's context, and the per-task
-    // context reset (B6) is exactly why it must not be left to a checkbox.
+    // context reset is exactly why it must not be left to a checkbox.
     const lotText = state.listing?.lot?.text ? state.listing.lot.text : null
-    // E14: a turn that never fires would hang the loop on a phase change that
-    // never happens, so sendBatchTurn's boolean decides immediately.
+    // A turn that never fires would hang the loop on a phase change that never
+    // happens, so sendBatchTurn's boolean decides immediately.
     if (
       !sendBatchTurn(taskInstructionForAttempt(task.taskLocation, attempt), {
         batchContext: lotText,
@@ -637,16 +591,16 @@ export function useBatch() {
     // interactive Stop takes it, and the reason we are back at idle is the user.
     if (!state.active) return 'stopped'
     const message = chat.messages[chat.messages.length - 1]
-    // E4: a server-cut stream counts as done and the lot moves on — but it has
-    // to be read before `chat.error`, because the truncation frame sets both.
+    // A server-cut stream counts as done and the lot moves on — but it has to be
+    // read before `chat.error`, because the truncation frame sets both.
     if (message?.truncated) return 'truncated'
-    // E16 / C2: the reply hit the shared tool-iteration cap and still ended as
-    // a normal `done`. Both numbers come from the server-reported frames; the
-    // client never re-derives the limit, and never advises about the value.
+    // The reply hit the shared tool-iteration cap and still ended as a normal
+    // `done`. Both numbers come from the server-reported frames; the client never
+    // re-derives the limit, and never advises about the value.
     if (message && message.mcpMax > 0 && message.mcpIteration >= message.mcpMax) {
       return 'capped'
     }
-    // E3: an errored turn aborts the batch — the lot is one job, and 8 identical
+    // An errored turn aborts the batch — the lot is one job, and 8 identical
     // failures teach nothing while each costs a round-trip.
     if (chat.error) return 'error'
     return 'done'
@@ -654,18 +608,14 @@ export function useBatch() {
 
   // Between two tasks: wipe the visible conversation exactly as the Restart
   // button does. The LLM context was already per-task (sendBatchTurn posts one
-  // message), but the browser thread kept task N's bubbles — so task N+1 opened
-  // with its bubbles and its reasoning blocks already on screen, and the ctx
-  // badge still read task N's occupancy (`contextUsage` walks the messages
-  // backwards and a fresh placeholder carries contextTokens 0) until task
-  // N+1's first `usage` frame landed, which is what made the context look like
-  // it carried over. Only called when a next turn really follows: a stopped or
-  // failed lot keeps its residue, like an interactive Stop (B9).
+  // message), but the browser thread kept task N's bubbles and its ctx badge
+  // read task N's occupancy until task N+1's first `usage` frame landed. Only
+  // called when a next turn really follows: a stopped or failed lot keeps its
+  // residue, like an interactive Stop.
   function startNextTaskOnCleanSlate() {
     // refetchHubs: false — the wipe must not unlock and re-seed the
-    // conversation-scoped MCP/LSP toggles: the whole lot runs under one
-    // identical tool set (§2.2), and a connector activated mid-lot must not
-    // join task N+1's tools.
+    // conversation-scoped MCP/LSP toggles: the whole lot runs under one identical
+    // tool set, and a connector activated mid-lot must not join task N+1's tools.
     resetChat({ refetchHubs: false })
   }
 
@@ -679,21 +629,14 @@ export function useBatch() {
     // refusals stop the lot here, before anything is held or sent.
     if (!ensureSelectedAgentRunnable()) return
     // ...and neither can a folder the pool refused: its tasks would run with no
-    // connectors at all, which is a lot that cannot move a file (spec §5.4 rule
-    // 22). The refusal is the pool's sentence, and it stops the lot here — before
-    // the pins, so a lot that never launched owns neither an agent nor a folder.
+    // connectors at all, which is a lot that cannot move a file. The refusal is
+    // the pool's sentence, and it stops the lot here — before the pins, so a lot
+    // that never launched owns neither an agent nor a folder.
     if (!toolsChecked && !(await ensureWorkspaceToolsAvailable())) return
-    // The dropdown's selection is read once per run, after the refusals (a lot
-    // that never launched owns no agent), and each turn sends what was read (see
-    // `runOneTurn`) — so a dropdown change during task 7 cannot reach task 8.
-    // That is also why the composer's select is inert for the whole run: moving
-    // it could reach neither the streaming turn nor the next task of the lot.
+    // Both pins are read after the refusals — a lot that never launched owns
+    // neither an agent nor a folder — and together, because they are one
+    // decision: which folder, as which agent.
     pinLotMode()
-    // And the folder, at the same moment and for the same reason (spec §5.7 rule
-    // 33): the tab's workspace is read once here, so a tab pointed elsewhere
-    // mid-lot re-roots neither the streaming task nor the next one. Both halves
-    // of the pin are read together because they are one decision — which folder,
-    // as which agent — and the whole run depends on both.
     pinLotWorkspace()
 
     const tasks = state.listing.tasks
@@ -704,7 +647,7 @@ export function useBatch() {
     state.active = true // batch_in_progress — the flag the UI locks on
     try {
       for (const task of tasks) {
-        if (!state.active) return // Stop won between the turns (E2)
+        if (!state.active) return // Stop won between the turns
         state.current = task
         let attempt = 0
         // One task, retried until its file leaves the lot folder (or until the
@@ -772,24 +715,24 @@ export function useBatch() {
       state.current = null
       // The folder pin lasts exactly as long as the run: its whole job is the
       // tasks still to come, and once the lot is over the dialog must list the
-      // folder the tab is on **now** rather than the one this run started on
-      // (spec §5.7 rule 32). Releasing it here is what keeps a re-opened dialog
-      // from offering a lot belonging to a folder the user has left.
+      // folder the tab is on **now** rather than the one this run started on.
+      // Releasing it here is what keeps a re-opened dialog from offering a lot
+      // belonging to a folder the user has left.
       state.pinnedWorkspace = null
     }
   }
 
   // The dialog's Launch, in this exact order: re-validate, ask the pool, switch
-  // to the WorkBench tab *before* the lock-down flag exists (E11 — the setTab
-  // guard added for a running batch would otherwise block the launch's own tab
+  // to the WorkBench tab *before* the lock-down flag exists (the setTab guard
+  // added for a running batch would otherwise block the launch's own tab
   // switch), close the dialog, then run.
   //
   // The **pool** question is asked here, while the dialog is still open, because
   // its answer is a dialog line: a folder the ceiling refused would otherwise run
   // its tasks with no connectors at all, and the sentence belongs where the user
   // can act on it (point another tab away, or wait) rather than on a WorkBench
-  // error line under a dialog that has already gone (spec §4.4, §5.4 rule 22).
-  // `launch` is told not to ask a second time.
+  // error line under a dialog that has already gone. `launch` is told not to ask
+  // a second time.
   async function requestLaunch() {
     if (state.active || state.loading) return
     if (!PREFIX_PATTERN.test(state.prefix.trim())) {
@@ -807,14 +750,13 @@ export function useBatch() {
   // The lot folder changed (or the dialog opened): the option list is the first
   // thing to re-read, because it is what the selected prefix belongs to. Only a
   // prefix that survived the re-fetch is worth listing — `fetchPrefixes` clears
-  // the selection when it did not, and listing an empty one would put a folder
-  // error on the dialog for a folder the user just typed.
+  // the selection when it did not.
   async function refreshLot() {
     await fetchPrefixes()
     if (state.prefix.trim()) await validate()
   }
 
-  // Stop kills the whole lot (B9); the transcript is kept, exactly like an
+  // Stop kills the whole lot; the transcript is kept, exactly like an
   // interactive Stop, and there is no resume. The loop's inter-task guard reads
   // `state.active`, so the flag is cleared here rather than in the loop.
   function stopBatch() {
@@ -824,10 +766,9 @@ export function useBatch() {
     stop() // useChat.stop(): aborts the in-flight turn
   }
 
-  // Restart (B15) means Stop + wipe: the one way back to a launchable state
-  // after a stopped batch. Pair this with useChat's reset() — otherwise the
-  // loop is left stranded on a wiped conversation, the same class of bug the
-  // pause lot had to fix for pausePending.
+  // Restart means Stop + wipe: the one way back to a launchable state after a
+  // stopped batch. Pair this with useChat's reset() — otherwise the loop is left
+  // stranded on a wiped conversation.
   function clearBatchRun() {
     stopBatch()
     state.status = 'idle'
@@ -835,12 +776,9 @@ export function useBatch() {
     state.index = 0
     state.current = null
     state.outcomes = []
-    // The mode pin belongs to one run: a lot about to be re-launched resolves it
-    // again (`pinLotMode` in `launch`), and a cleared run has no line to keep.
+    // Both pins belong to one run and die with it: a re-launched lot resolves
+    // them again, and a re-opened dialog must list the folder the tab is on now.
     state.pinnedMode = null
-    // The folder pin belongs to the same run and dies with it, for the same
-    // reason (`pinLotWorkspace`): a re-opened dialog must list the folder the tab
-    // is on now, never the one a cleared run started on (spec §5.7 rule 32).
     state.pinnedWorkspace = null
     state.modeNote = null
   }
@@ -864,8 +802,7 @@ export function useBatch() {
     state.open = true
     // A lot that just ran left its tasks in `done/`, so both the option list and
     // the count are re-read: a prefix whose lot is empty now must disappear from
-    // the dropdown, which is what keeps a finished task from being launched a
-    // second time.
+    // the dropdown, keeping a finished task from being launched a second time.
     refreshLot()
   }
 
@@ -877,8 +814,7 @@ export function useBatch() {
   })
 
   // The dialog's count line: how many task files are actually in the lot —
-  // `tasks.length`, not `taskCount`. `taskCount` is the *highest* task number
-  // (the bar's scale, so a numbering gap still fills it honestly), which would
+  // `tasks.length`, not `taskCount`, which is the *highest* task number and would
   // read as "N left to do" when earlier numbers already moved into done/.
   // '—' before any listing.
   const countLabel = computed(() =>
@@ -898,10 +834,9 @@ export function useBatch() {
     return lot ? `big picture: ${lot.name}` : 'no 00 file'
   })
 
-  // The empty case: the folder was read and holds no task lot at all. Not while
-  // it is still being listed, and not when the read itself failed — that already
-  // has its own line, and "no batch items" would be a lie about a folder the app
-  // could not open.
+  // The empty case: the folder was read and holds no task lot at all — not while
+  // it is still being listed, and not when the read itself failed, where "no
+  // batch items" would be a lie about a folder the app could not open.
   const noBatchItems = computed(
     () =>
       !state.prefixesLoading &&

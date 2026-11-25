@@ -1,11 +1,9 @@
 """What a workspace **is**: the folder a request is about, and nothing else.
 
-The seam client-owned-workspace (clws-01) introduces. Before it, "which folder"
-had one answer per **process**, read live at every call from an environment
-value, so two browser tabs on two folders were impossible no matter what the
-client asked for. This module makes the folder a **value**: a request names one,
-the API resolves it here, and every path-resolving surface under ``src/core``
-reads the answer back from here rather than from the environment.
+The folder is a **value**: a request names one, the API resolves it here, and
+every path-resolving surface under ``src/core`` reads the answer back from here
+rather than from process-wide state — which is what lets two browser tabs work
+on two folders.
 
 Two things it owns, and is the only place that owns them:
 
@@ -21,14 +19,14 @@ Two things it owns, and is the only place that owns them:
   cannot leak into a concurrent one. Two requests, two folders, no shared state.
 
 **There is no default scope.** Reading :func:`current_root` outside one is an
-error, never the installation folder (spec §5.2 rule 12: "no surface falls back
-to a different folder").
+error, never the installation folder: no surface falls back to a different
+folder.
 
 Two placeholders must not be confused, and :func:`src.config.provided_env_values`
 is where they are handed to the declaration expansion:
 
-* ``${NOJAE_PATH_LOCATION}`` means **the folder being served** — the scope
-  (spec §4.3: a tab on A gets A's connectors, so A's declaration expands to A);
+* ``${NOJAE_PATH_LOCATION}`` means **the folder being served** — the scope, so a
+  tab on A gets A's connectors;
 * ``${PROJECT_ROOT}`` means **the installation**, always, in every workspace.
 
 Core only: no FastAPI, no browser concerns, and no import of ``src.api``. The
@@ -50,10 +48,8 @@ class WorkspaceNotScoped(RuntimeError):
 
     Named so a caller can tell "nobody said which workspace" from "the workspace
     that was said is not a folder" (:func:`resolve` answers the second with a
-    sentence, never by raising). It is the reason the seam must never silently
-    answer the installation folder: the interim environment fallback is gone
-    (clws-10), so a surface reached outside a scope has **no** folder rather
-    than a wrong one.
+    sentence, never by raising). A surface reached outside a scope has **no**
+    folder rather than the installation one or a previous request's.
     """
 
 
@@ -66,10 +62,9 @@ class Workspace:
     per-root caches key on the resolved root, so a second workspace gets its own
     entry with no change here).
 
-    ``root`` is the same canonical form the app has always compared against:
-    ``realpath`` with ``~`` already expanded, so two spellings of one folder —
-    through a symlink, with a trailing ``.``, with a home reference — are one
-    workspace and one cache key.
+    ``root`` is ``realpath`` with ``~`` already expanded, so two spellings of one
+    folder — through a symlink, with a trailing ``.``, with a home reference — are
+    one workspace and one cache key.
     """
 
     __slots__ = ("root",)
@@ -90,11 +85,9 @@ class Workspace:
 def canonical(text: str) -> str:
     """The one canonical form a folder is held in: ``realpath``, ``~`` expanded.
 
-    Public because a second owner of the same key needs the same answer: the hub
-    pool maps workspace → tools (clws-05), and two spellings of one folder must
-    be one entry there exactly as they are one workspace here. A pool keyed on
-    the raw text would give ``~/proj`` and ``/home/me/proj`` two sets of
-    connectors.
+    Public because the hub pool keys on the same answer: two spellings of one
+    folder must be one entry there exactly as they are one workspace here, or
+    ``~/proj`` and ``/home/me/proj`` would get two sets of connectors.
     """
     return os.path.realpath(os.path.expanduser((text or "").strip()))
 
@@ -107,11 +100,10 @@ def installation() -> str:
     in this app follows.
 
     Three things ask this question and must agree on one answer: it is the folder
-    a new tab lands on (spec D4), the folder :func:`is_self_workspace` compares a
-    workspace against (spec §5.6 rule 30 — the app's own built-in rules apply
-    **only** while the workspace *is* the installation), and the value
-    ``${PROJECT_ROOT}`` expands to in a declaration. It is never a workspace
-    chosen by a request.
+    a new tab lands on, the folder :func:`is_self_workspace` compares a workspace
+    against (the app's own built-in rules apply **only** while the workspace *is*
+    the installation), and the value ``${PROJECT_ROOT}`` expands to in a
+    declaration. It is never a workspace chosen by a request.
     """
     return os.path.realpath(str(config.PROJECT_ROOT))
 
@@ -149,8 +141,7 @@ def current_root() -> str:
 
     The scope's answer when one is entered, and :class:`WorkspaceNotScoped`
     outside one. Never the installation folder as a guess — a wrong folder is
-    worse than no answer, because every path below it would resolve *somewhere*
-    (spec §5.2 rule 12).
+    worse than no answer, because every path below it would resolve *somewhere*.
     """
     root = _CURRENT_ROOT.get()
     if root is not None:
@@ -169,11 +160,10 @@ def current_workspace() -> Workspace:
 def provided_path_location() -> str:
     """What ``${NOJAE_PATH_LOCATION}`` expands to: **the folder being served**.
 
-    The one meaning the placeholder has in this app (spec §4.3): a declaration
-    read for a workspace expands to *that* workspace, which is what makes one
-    declaration file correct in two tabs at once. It is the scope and nothing
-    else, so outside one this raises like every other read of the seam (rule 12)
-    — the boot seeds and the hub scans all run inside the pool's scope.
+    A declaration read for a workspace expands to *that* workspace, which is what
+    makes one declaration file correct in two tabs at once. It is the scope and
+    nothing else, so outside one this raises like every other read of the seam —
+    the boot seeds and the hub scans all run inside the pool's scope.
 
     ``${PROJECT_ROOT}`` is **not** this: it keeps meaning the installation, in
     every workspace, and the two must never converge.
@@ -184,10 +174,9 @@ def provided_path_location() -> str:
 # --- the one validator ---------------------------------------------------------
 
 #: The four refusals, in the order they are asked. Each names the folder and the
-#: rule that fired, and never what the refusal stopped itself from looking at
-#: (spec §5.2 rule 11). The deny-list wording is the one the tree and the old
-#: location switch already emitted, because rule 10 asks for **one** sentence
-#: wherever the same wrong folder is asked about.
+#: rule that fired, and never what the refusal stopped itself from looking at.
+#: The deny-list wording is the one the tree already emits, because the same
+#: wrong folder asks for **one** sentence wherever it is asked about.
 EMPTY_REFUSAL = "Working location must not be empty"
 
 
@@ -206,20 +195,15 @@ def _deny_list_refusal(denied: str) -> str:
 def resolve(raw: Optional[str]) -> Tuple[Optional[Workspace], Optional[str]]:
     """``(Workspace, None)`` for a folder a request may work on, else ``(None, sentence)``.
 
-    Four questions, in this order, each with its own sentence:
-
-    1. is anything named at all;
-    2. is the name an **absolute** path once ``~`` is expanded (a relative name
-       would mean a folder chosen by the server's working directory, which is
-       never the answer a browser is entitled to get);
-    3. does it name an existing **directory**;
-    4. is it on the restricted-roots deny-list — the same list the tree refuses
-       by and the old location switch refused by, so a folder cannot be admitted
-       as a workspace and then refused as a tree root.
+    Four questions, in this order, each with its own sentence: is anything named
+    at all, is it **absolute** once ``~`` is expanded (a relative name would mean
+    a folder chosen by the server's working directory), does it name an existing
+    **directory**, and is it on the restricted-roots deny-list — the same list the
+    tree refuses by, so a folder cannot be admitted as a workspace and then
+    refused as a tree root.
 
     Answers a **sentence**, never a status: the route decides what the refusal
-    costs. The sentence is the whole answer — a caller that got one must not
-    also try a folder of its own (spec §5.2 rule 12).
+    costs, and a caller that got one must not also try a folder of its own.
     """
     text = (raw or "").strip()
     if not text:
@@ -239,12 +223,12 @@ def resolve(raw: Optional[str]) -> Tuple[Optional[Workspace], Optional[str]]:
 def _restricted_refusal(root: str) -> Optional[str]:
     """The deny-list sentence for ``root``, or ``None`` when it is not denied.
 
-    The same compare the tree's own root lock makes: the entries are realpaths,
-    containment is the shared component-wise rule, and the **case** answer comes
-    from the probe of the workspace being admitted — one answer per running
-    configuration, and no probe of a folder this call has just decided it may not
-    open (``editorfs.policy._is_within`` records that choice). Asked only when the
-    list has entries, so a hub without a deny-list costs no disk question.
+    The entries are realpaths, containment is the shared component-wise rule, and
+    the **case** answer comes from the probe of the workspace being admitted — one
+    answer per running configuration, and no probe of a folder this call has just
+    decided it may not open (``editorfs.policy._is_within`` records that choice).
+    Asked only when the list has entries, so a hub without a deny-list costs no
+    disk question.
     """
     # Lazy, both: each of these modules imports *this* one, so a module-level
     # import here would be a cycle.

@@ -1,35 +1,23 @@
-"""Level A: the rules nojae has about **itself** (pol-03).
+"""Level A: the rules nojae has about **itself**.
 
 These are the files *this app* writes, regenerates, or keeps for its own use —
 the half of :func:`editorfs.policy_modes.mode_for` that no workspace file can
-configure. They are conditional on purpose:
+configure. They are conditional on purpose: the rule that stops a pane editing
+``.env`` is not "``.env`` is dangerous", it is "this installation owns the
+``.env`` names at its own root". That is false for every other project, so
+pointing the working location at another checkout must make its ``.env`` an
+ordinary, editable file.
 
-*the rule that stops a pane editing ``.env`` is not "``.env`` is dangerous", it
-is "this installation owns the ``.env`` names at its own root: it gitignores
-them, and the one that used to hold its configuration is gone — those keys are
-boot flags now". That second sentence is false for every other project, so the
-rule must be false for them too — point the working location at another checkout
-and its ``.env`` is an ordinary file, visible in the tree and editable.
+:func:`is_self_workspace` decides that, and it is the only condition in this
+file: a rule that has to apply to a foreign workspace belongs in the seeded
+workspace policy instead, where the user can read and change it. The reserved
+folder is the one exception, because the app owns that relationship in every
+workspace.
 
-The rule is **kept** although the app reads and writes no such file any more: a
-name this install gitignores and declares its own is still not something a pane
-should edit half the time, and the same pattern covers the hand-kept or
-half-migrated files of an install that predates the boot flags.*
-
-That is what :func:`is_self_workspace` decides, and it is the only condition in
-this file. If a rule here ever needs to apply to a foreign workspace, it is the
-wrong rule for this file: it belongs in the seeded policy (pol-05), where the
-user can read and change it.
-
-The reserved folder is the one exception to the condition, and it is not a
-coincidence: ``.nojae`` holds the rules, and the app owns that relationship in
-every workspace (D5).
-
-Rules are written in pol-02's pattern language and matched against the
-**normalised workspace-relative** path — the same form the level-B file uses, so
-one matcher answers both. Order is part of the semantics (:func:`mode_for` reads
-the index for its last-match-wins step), which is why this is a tuple of tuples
-and not a dict.
+Patterns are matched against the **normalised workspace-relative** path — the
+same form the level-B file uses, so one matcher answers both. Order is part of
+the semantics (:func:`mode_for` reads the index for its last-match-wins step),
+which is why this is a tuple of tuples and not a dict.
 """
 
 from typing import List, Tuple
@@ -46,14 +34,9 @@ def is_self_workspace() -> bool:
 
     One comparison of two things the seam already resolves: the **scope** (the
     folder this request is about — :func:`editorfs.policy.workspace_root`) and
-    the **installation** (:func:`src.core.workspace.installation`). Everything
-    level A owns hangs on this, so it gets one function and one docstring rather
-    than an inline ``==`` at each rule.
-
-    Since clws-01 the left-hand side is the scope rather than a process-wide
-    value, which is what makes spec §5.6 rule 30 a **per-workspace** fact: a tab
-    rooted at the install directory is stricter than a tab rooted elsewhere, and
-    the two answers coexist in one process.
+    the **installation** (:func:`src.core.workspace.installation`). The scope is
+    per request, so a tab rooted at the install directory is stricter than a tab
+    rooted elsewhere and both answers coexist in one process.
 
     The comparison is **exact**, not a prefix: the app's own parent directory, or
     a copy of the repo somewhere else, is not the app — the file that copy
@@ -61,7 +44,7 @@ def is_self_workspace() -> bool:
     """
     # Read at call time on both sides, so a test can move either one — the
     # installation through ``src.config.PROJECT_ROOT``, the workspace through the
-    # seam's scope (or, while the interim fallback is on, through the location).
+    # seam's scope.
     return workspace_root() == workspace_seam.installation()
 
 
@@ -70,51 +53,33 @@ def is_self_workspace() -> bool:
 # this because this install owns the name" is a different conversation from
 # "your policy hides it" — and the first is a rule the reader cannot edit.
 BUILTIN_RULES: Tuple[Tuple[str, str, str], ...] = (
-    # The ``**/`` is the point: what this rule replaces is a *name* check — the
-    # connector floor's ``DENY_FILE_PREFIXES = (".env",)``, which reaches
-    # ``.env``, ``.env.test`` and ``sub/.env.local`` at any depth. Level A has to
-    # reach the same set or the swap would open ``.env`` files it never meant to.
-    # A bare ``.env**`` would cover only the root one, because pol-02's ``**``
-    # never crosses a component *backwards*. It is ``hidden`` rather than ``ro``
-    # for the same reason as the floor's name check: the name is this install's
-    # own (gitignored, and the file it used to configure itself with before the
-    # boot flags), so a pane has nothing to do with one at its own root — and a
-    # leftover of an older install, holding whatever it holds, is the last thing
-    # to be opened by an agent or a careless save.
+    # The ``**/`` is the point: the name has to be caught at any depth, and a
+    # bare ``.env**`` would cover only the root one, because ``**`` never crosses
+    # a component *backwards*. ``hidden`` rather than ``ro`` because the name is
+    # this install's own (gitignored), so a pane has nothing to do with one at
+    # its own root.
     (
         "**/.env**",
         shared.HIDDEN,
         "nojae's own configuration file name — this install owns it",
     ),
-    # The store (``src/core/appdb.py``) and its WAL sidecars — ``nojae.db``,
-    # ``nojae.db-wal``, ``nojae.db-shm`` — sit at the install root, which is
-    # inside the tree whenever the workspace *is* this checkout (D10). The file
-    # holds the model credentials and the app is its only reader and writer, so a
-    # pane that could open it would be a second one over the same bytes:
-    # ``hidden``, like the ``.env`` rule above, not ``ro``. The ``**/`` is that
-    # rule's reason again (a bare root-anchored pattern would not
-    # reach the name at depth), and the trailing ``*`` is what reaches the
-    # sidecars, which hold committed bytes and so are part of the store rather
-    # than decoration beside it. A folder that is not this installation has no
-    # reason to hide a file called ``nojae.db``, which is why this is level A
-    # and not the seeded file. The name is spelled here rather than imported
-    # from ``appdb``: this is a rule *about* a name, not a lookup of one, and
-    # the connectors' own floor (``mcp_connectors/path_policy.py``) has to
-    # spell it too — the two lists stay separate by rule, and
-    # ``tests/test_appdb_store.py`` pins both files as the named exceptions to
-    # "only ``appdb`` names the store".
+    # The store and its WAL sidecars sit at the install root, which is inside the
+    # tree whenever the workspace *is* this checkout. The file holds the model
+    # credentials and the app is its only reader and writer, so ``hidden``, like
+    # the ``.env`` rule above, not ``ro``. The trailing ``*`` is what reaches the
+    # sidecars, which hold committed bytes and so are part of the store. The name
+    # is spelled here rather than imported: this is a rule *about* a name, not a
+    # lookup of one — ``tests/test_appdb_store.py`` pins this file as a named
+    # exception to "only the store module names the store".
     (
         "**/nojae.db*",
         shared.HIDDEN,
         "nojaé's own settings store, which holds the model credentials",
     ),
-    # ``BACKUP_DIR`` (``constants.py``) lives under ``logs/``, beside the
-    # ``fedit`` connector's chain — outside the workspace *by path*, but inside
-    # the tree whenever the workspace is the repo, so the Editor could browse
-    # the app's own pre-save copies. A workspace pointed at another project has
-    # no reason to hide a folder called ``logs``, which is exactly why this rule
-    # is level A and not the seeded file. The trash is not in here: it lives in
-    # each workspace's reserved ``.nojae/trash``, hidden by D5's reservation.
+    # ``BACKUP_DIR`` lives under ``logs/``: outside the workspace *by path*, but
+    # inside the tree whenever the workspace is the repo, so the Editor could
+    # browse the app's own pre-save copies. The trash is not in here — it lives
+    # in each workspace's reserved ``.nojae/trash``.
     ("logs/**", shared.HIDDEN, "the app's own backups"),
     # Build output: worth looking at, never worth hand-editing, and
     # ``npm run build`` overwrites whatever is there.
@@ -141,16 +106,15 @@ def builtin_rule_list() -> List[shared.Rule]:
     What the resolver filters, unfiltered: :func:`builtin_rules` is this list
     narrowed by the matcher, so a panel that shows *this* list shows the exact
     rules the resolver holds — the same ``Rule`` objects, the same indices, no
-    second copy of the table that could drift (the point pol-01 made about one
-    source).
+    second copy of the table that could drift.
 
     The reserved folder is deliberately **not** in here: it is level A's one
     unconditional rule, and the policy panel treats it as its own line rather
     than as one of the workspace-conditional rules.
 
-    Empty when the workspace is not this installation — which is the condition
-    pol-03 exists for, and what the panel renders as a caption rather than as an
-    empty rule list that would look like a rule the user could have deleted.
+    Empty when the workspace is not this installation — what the panel renders
+    as a caption rather than as an empty rule list that would look like a rule
+    the user could have deleted.
     """
     if not is_self_workspace():
         return []
@@ -168,26 +132,26 @@ def builtin_rules(rel: str, *, fold: bool = False) -> List[shared.Rule]:
     asking (the three locks in :mod:`editorfs.policy`), and a rule here is a
     statement about a *name*, not about what is on disk under it.
 
-    ``fold`` (win-05) is the active workspace's case answer, handed down by
+    ``fold`` is the active workspace's case answer, handed down by
     :func:`editorfs.policy_modes.mode_for` — this module does not probe anything,
     and the default keeps the comparison exact for every other caller. It changes
-    only whether a rule *matches*: level A's patterns, and the reserved name in
-    the ``Rule`` below, are still reported in the spelling they are written in,
-    so the panel and a 422 quote ``logs/**`` and never ``LOGS/**``.
+    only whether a rule *matches*: patterns are still reported in the spelling
+    they are written in, so the panel and a 422 quote ``logs/**`` and never
+    ``LOGS/**``.
 
     The reserved folder is the one rule that applies in **every** workspace,
     self or foreign, whether or not a policy file exists or loaded — and no
-    level-B rule can override it (D5): a pattern naming ``.nojae`` is rejected
-    by pol-04's validation, and even a matching one could not beat ``hidden``,
-    which :func:`policy_shared.verdict_for` treats as absolute.
+    level-B rule can override it: a pattern naming it is rejected by the
+    workspace file's validation, and even a matching one could not beat
+    ``hidden``, which :func:`policy_shared.verdict_for` treats as absolute.
     """
     if policy_glob.reserved_component_hit(rel, constants.POLICY_DIRNAME,
                                           fold=fold) is not None:
         # Quoted as the reserved name itself, so the refusal names the folder the
         # user has to edit the file in — not a pattern they never wrote. It is a
         # **built-in** verdict, so the sentence says nojae reserved it and
-        # not "your policy did" — and pol-08's connectors build the same Rule
-        # with the same level, which is what makes their refusal match this one.
+        # not "your policy did" — and the connectors build the same Rule with the
+        # same level, which is what makes their refusal match this one.
         return [
             shared.Rule(
                 mode=shared.HIDDEN,

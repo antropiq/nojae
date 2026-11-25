@@ -11,18 +11,14 @@ from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-# The shared policy modules live outside ``src`` so the two stdio connectors can
-# read them too (pol-08), so they are imported the connectors' own way — the same
-# ``sys.path`` fallback ``core.batch`` uses, because the project root is not
-# always on the path. They hold the vocabulary and the machinery, never a rule
-# list: that is what ``.nojae/read-write-policy.json`` and ``builtin_policy`` are.
-# ``policy_glob`` (pol-02) is the matcher both policy levels are evaluated with,
-# and level A (pol-03) is written in that pattern language, so it is mirrored
-# here beside the vocabulary for the same reason: patchability. ``path_norm``
-# (win-02) answers what a path *text* is — the canonical ``/``-joined form and
-# whether that text is qualified at all — and it is the one place that knows the
-# difference, so the Editor's inbound lock and the two stdio connectors cannot
-# disagree about what a path *is*. It is mirrored here for that same reason.
+# These live outside ``src`` so the two stdio connectors can read them too, hence
+# the connectors' own ``sys.path`` fallback (the project root is not always on the
+# path). They hold the vocabulary and the machinery, never a rule list: that is
+# what ``.nojae/read-write-policy.json`` and ``builtin_policy`` are. ``policy_glob``
+# is the matcher both policy levels are evaluated with, and ``path_norm`` is the
+# one place that knows what a path *text* is, so the Editor's inbound lock and the
+# two stdio connectors cannot disagree about what a path is. Mirrored here so a
+# test can patch the lookup.
 try:
     from mcp_connectors import path_norm, policy_glob, policy_shared
 except ImportError:  # pragma: no cover - depends on how the app is started
@@ -35,10 +31,6 @@ except ImportError:  # pragma: no cover - depends on how the app is started
         policy_shared,
     )
 
-# Entries one directory listing may return. A huge checkout stays responsive
-# because the tree is one level per request, and the cap bounds even that one
-# level (a folder with 100k files would otherwise serialise all of them). The
-# payload says ``truncated: true`` rather than dropping entries silently.
 # Paths one quick-open listing (``editorfs.quickopen``) may send. The whole
 # workspace is one payload here, so this is the sibling of ``MAX_SEARCH_FILES``
 # rather than of ``MAX_TREE_ENTRIES_PER_DIR``: paths past it are still counted
@@ -46,6 +38,10 @@ except ImportError:  # pragma: no cover - depends on how the app is started
 # rather than dropping them in silence.
 MAX_QUICKOPEN_FILES = 5000
 
+# Entries one directory listing may return. The tree is one level per request, and
+# this bounds even that one level (a folder with 100k files would otherwise
+# serialise all of them); the payload says ``truncated: true`` rather than
+# dropping entries silently.
 MAX_TREE_ENTRIES_PER_DIR = 2000
 
 # Largest file the editor may load. Same number and same argument as
@@ -66,20 +62,17 @@ GIT_COMMAND_TIMEOUT = 10.0
 # bounded list plus ``truncated: true`` instead of a huge response.
 MAX_STATUS_ENTRIES = 5000
 
-# How many files one batch move (``move_paths_batch``) may name. The batch is
-# one request and one validation pass over every entry before any of them moves, so
-# this bounds *that*: a marked-up tree of thousands of rows would otherwise hold
-# the whole workspace inside one gesture, and a hand-built body could name the
-# entire checkout. It is not a promise that a bigger lot is impossible — the
-# client splits one lot into batches, one cap per request.
+# How many files one batch move (``move_paths_batch``) may name: one request and
+# one validation pass over every entry before any of them moves, so this bounds
+# that. A hand-built body could otherwise name the entire checkout; the client
+# splits one lot into batches, one cap per request.
 MAX_MOVE_BATCH = 200
 
 # -- the workspace search (``editorfs.search``) --------------------------------
 #
-# The same three siblings' rule applied to a scan that reads *contents* rather
-# than names: each bound is one number a test patches by name here, and the
-# payload answers a footer sentence about which one cut rather than dropping
-# rows in silence.
+# A scan that reads *contents* rather than names: each bound is one number a test
+# patches by name here, and the payload answers a footer sentence about which one
+# cut rather than dropping rows in silence.
 
 # Result rows one search may send. Matches past it are still counted, so
 # ``matchCount`` stays the truth about the scope while the table stays a screenful.
@@ -101,10 +94,8 @@ MAX_SEARCH_SNIPPET_BYTES = 240
 
 # -- the path-policy vocabulary, mirrored from ``mcp_connectors/policy_shared`` --
 #
-# Those names live outside ``src`` so the two stdio connectors can read them
-# too (pol-08), and a test patches *this* copy — the ``mcphub.constants`` /
-# ``lsphub.constants`` convention: a module attribute exists precisely so a test
-# can move the lookup without touching the connector processes' default.
+# A module attribute exists precisely so a test can move the lookup without
+# touching the connector processes' default.
 POLICY_DIRNAME: str = policy_shared.POLICY_DIRNAME
 POLICY_FILENAME: str = policy_shared.POLICY_FILENAME
 POLICY_VERSION: int = policy_shared.POLICY_VERSION
@@ -112,13 +103,11 @@ POLICY_VERSION: int = policy_shared.POLICY_VERSION
 # -- the guarded write surface -------------------------------------------------
 
 # Where a pre-save copy of a file lands. Deliberately in the *app* repo, not in
-# the workspace: the working location may be ``$HOME``, so a backup tree inside
-# it would be a second copy of the user's home, and it would show up in the
-# ``git status`` of whatever is being edited. ``logs/`` is gitignored already,
-# for the same reason ``fedit_mcp`` keeps its backups out of the tree.
-# Separate from ``logs/fedit_backups/`` on purpose too: that one is the fedit
-# connector's chain, and its ``list_edits``/``revert_edit`` must keep answering
-# only about files that connector actually touched.
+# the workspace: the working location may be ``$HOME``, so a backup tree inside it
+# would be a second copy of the user's home and would show up in the ``git status``
+# of whatever is being edited. Separate from ``logs/fedit_backups/`` on purpose:
+# that one is the fedit connector's chain, and its ``list_edits``/``revert_edit``
+# must keep answering only about files that connector actually touched.
 BACKUP_DIR = PROJECT_ROOT / "logs" / "editor_backups"
 
 # Pre-save copies kept per file; older ones are pruned after each backup.
@@ -140,21 +129,18 @@ MTIME_GUARD_EPSILON = 0.01
 # workspace's own reserved folder, ``<workspace>/.nojae/trash``, resolved **per
 # call** by :func:`editorfs.mutate.trash_dir` — so a settings switch moves the
 # trash with the workspace instead of filing another project's deleted bytes
-# inside the install directory.
+# inside the install directory. The move is a *rename*, so the folder holds
+# exactly what the user deleted and nothing that is still on disk.
 #
-# A trash inside the workspace is not the second copy of ``$HOME`` the old
-# comment feared: the move is a *rename*, so the folder holds exactly what the
-# user deleted and nothing that is still on disk. And it is not browsable —
-# ``.nojae`` is reserved by code in every workspace (pol-00 D5), hidden from the
-# tree, the read and the write route whatever the policy file says. That is a
-# stronger guarantee than the level-A ``logs/**`` rule this replaces, which was
-# only live while the workspace was nojae's own checkout.
+# It is not browsable either: ``.nojae`` is reserved by code in every workspace,
+# hidden from the tree, the read and the write route whatever the policy file
+# says.
 TRASH_SUBDIR: str = "trash"
 
 # ``None`` = derive from the active workspace (``<root>/.nojae/trash``). A test
 # — or a deployment — that pins one absolute folder sets this instead; it is
 # read at call time, never captured at import, which is what keeps the pin
-# patchable in the ``lsphub.constants`` style.
+# patchable.
 TRASH_DIR: Optional[Path] = None
 
 # Where the batches the *old* code wrote still live. Swept by ``sweep_trash``,

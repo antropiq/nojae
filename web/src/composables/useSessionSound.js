@@ -17,8 +17,7 @@ import sessionEndedUrl from '../assets/sounds/session_ended.mp3'
 // useChat.state.phase: the shared predicate keeps ⚡/✨ and the chime telling
 // the same story, and it means a batch lot chimes once when the lot is done,
 // not once per task turn (the phase is 'idle' between turns while a task is
-// still owed). The flip back to idle caused by Stop/Pause chimes too — same
-// rule, and it costs nothing to keep one predicate instead of two.
+// still owed). The flip back to idle caused by Stop/Pause chimes too.
 
 const STORAGE_KEY = 'nojae:sound'
 
@@ -38,7 +37,7 @@ function storedEnabled() {
 
 const state = reactive({ enabled: storedEnabled() })
 
-// Whether the busy->idle watcher has been registered (see useSessionSound).
+// Whether the busy->idle watcher has been registered.
 let watcherArmed = false
 
 // Built on first use, so a session that never reaches an idle edge and a

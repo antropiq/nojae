@@ -6,9 +6,9 @@ import { withWorkspace } from './useWorkspaceSession'
 // Editor terminal bridge: the state behind EditorTerminal.vue.
 //
 // One singleton, like every other composable. It owns the WebSocket to
-// `WS /api/terminal`, the xterm `Terminal` instance, and the connection state,
+// `WS /api/terminal`, the xterm `Terminal` instance and the connection state,
 // so the shell survives a peek at another tab (App keeps the Editor view
-// mounted with v-show) — and so a second mount of the pane never opens a second
+// mounted with v-show) and a second mount of the pane never opens a second
 // socket behind the user's back.
 //
 // The xterm classes (Terminal, FitAddon, WebLinksAddon) are imported *lazily*,
@@ -23,9 +23,9 @@ import { withWorkspace } from './useWorkspaceSession'
 // and reflects the connection to the header.
 //
 // The socket's URL is the one place this composable names a workspace, and it
-// goes through `withWorkspace` — the field's name is never written here (spec
-// §8, D9). A shell is born in the folder the tab holds when the socket opens
-// and keeps it; a folder change reaches the *next* shell, never an open one.
+// goes through `withWorkspace`, the only writer of the field's name. A shell is
+// born in the folder the tab holds when the socket opens and keeps it; a folder
+// change reaches the *next* shell, never an open one.
 // ---------------------------------------------------------------------------
 
 const CLOSE_POLICY = 4403
@@ -35,7 +35,7 @@ const CLOSE_UNSUPPORTED = 4501
 const state = reactive({
   // idle -> connecting -> open -> (closed | error). No silent reconnect: a
   // dropped socket may have orphaned a shell, so the pane shows its reason and
-  // waits for an explicit New session (see the todo's no-auto-reconnect rule).
+  // waits for an explicit New session.
   status: 'idle',
   pid: null,
   cwd: '',
@@ -58,9 +58,7 @@ let disposed = false
 const theme = useTheme().theme
 
 // The palette is JavaScript, not CSS, but it must follow the app's own tokens:
-// read them off the live custom properties the stylesheet already maintains
-// (`--bi-surface` for the panel this host sits in, `--pico-color` for text,
-// `--pico-primary` for the cursor) instead of shipping a third palette.
+// read them off the live custom properties instead of shipping a third palette.
 function terminalTheme() {
   const style = getComputedStyle(document.documentElement)
   const read = (name, fallback) => (style.getPropertyValue(name) || fallback).trim()
@@ -109,16 +107,13 @@ function connect() {
   setStatus('connecting', 'Starting a shell…')
 
   // A socket has no per-request body, so the tab's folder is supplied **when
-  // the socket opens** — the same query parameter, on the socket's URL, built
-  // by `withWorkspace` from the session composable's *current* value at this
-  // instant (spec §8). Read here, not captured at module load: this tab may
-  // have been pointed somewhere else since.
+  // the socket opens**: `withWorkspace` builds the URL from the session
+  // composable's *current* value at this instant, not from a value captured at
+  // module load — this tab may have been pointed somewhere else since.
   //
-  // That is the whole mechanism, and its limit is deliberate: a folder change
-  // does **not** touch a live shell. It keeps the folder it was born in, and
-  // only the next `connect()` — this pane's New session, or a reconnect after
-  // a drop — starts somewhere else. The pane's docstring says so too, so the
-  // next reader does not "fix" it.
+  // The limit is deliberate: a folder change does **not** touch a live shell.
+  // It keeps the folder it was born in, and only the next `connect()` — this
+  // pane's New session, or a reconnect after a drop — starts somewhere else.
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   socket = new WebSocket(
     withWorkspace(`${proto}://${location.host}/api/terminal`),
@@ -181,13 +176,12 @@ function connect() {
     // A refused upgrade names itself with a close code; surface it instead of a
     // generic "connection closed".
     //
-    // The workspace refusal is the one case that arrives **twice**: the server
-    // sends the seam's sentence in an `error` frame and then closes with the
-    // same words as the reason — bounded, because a close reason is capped at
-    // 123 bytes. The frame is therefore the fuller text and already on screen,
-    // so the close must not overwrite it with the truncated form. (Status is
-    // `connecting` until a frame lands, so this cannot swallow the close of a
-    // refused Origin, which never accepted and so never sent a frame.)
+    // The workspace refusal arrives **twice**: the seam's sentence in an `error`
+    // frame, then the same words as the close reason — truncated, because a
+    // reason is capped at 123 bytes. The frame's fuller text is already on
+    // screen, so the close must not overwrite it. (Status is `connecting` until
+    // a frame lands, so this cannot swallow the close of a refused Origin,
+    // which never accepted and so never sent a frame.)
     if (event.code === CLOSE_POLICY) {
       if (!(state.status === 'error' && state.message)) {
         setStatus('error', `Connection refused: ${event.reason || 'origin not allowed'}`)
@@ -197,12 +191,9 @@ function connect() {
     } else if (event.code === CLOSE_UNSUPPORTED) {
       setStatus('error', event.reason || 'The terminal is unavailable on this platform.')
     } else {
-      // A clean `exit`/`kill` leaves the status already `closed` with a
-      // specific reason (the shell announced it, or the user asked for it).
-      // The server then closes the socket normally, which fires onclose here;
-      // do not downgrade that reason to a generic line. Only an *unexpected*
-      // drop (socket died while the session looked open/connecting) gets the
-      // generic "connection closed".
+      // A clean `exit`/`kill` leaves the status already `closed` with a specific
+      // reason, and the server then closes the socket normally. Do not downgrade
+      // that reason to a generic line: only an *unexpected* drop gets one.
       if (state.status === 'open' || state.status === 'connecting') {
         setStatus('closed', 'Connection closed.')
       }
@@ -238,8 +229,7 @@ function kill() {
 // session. The old socket's close tears its shell down server-side.
 //
 // This — not a folder change — is what moves a shell: `connect()` reads the
-// tab's workspace as it is *now*, so the new session is born in the folder the
-// tab is currently on, while the old one kept the folder it was born in.
+// tab's workspace as it is *now*, while the old shell kept its birth folder.
 function newSession() {
   term?.reset()
   connect()
@@ -278,8 +268,8 @@ function keyHandler(event) {
   return true
 }
 
-// web-links decision: default click handler (window.open), but show the full
-// URL on hover so a printed link is diagnosable before the user opens it.
+// Default click handler (window.open), plus the full URL on hover so a printed
+// link is diagnosable before it is opened.
 function attachLinkTooltip() {
   let tip = null
   const hide = () => {
@@ -307,9 +297,8 @@ async function attach(host) {
   if (disposed) return
   hostEl = host
 
-  // The xterm classes are lazy so the WorkBench tab never downloads them; their
-  // CSS is imported statically at the component's module top (see the file
-  // header), which bundles it into the same Editor chunk.
+  // Lazy so the WorkBench tab never downloads xterm; its CSS is imported
+  // statically at the component's module top, into the same Editor chunk.
   const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
     import('@xterm/xterm'),
     import('@xterm/addon-fit'),
@@ -318,9 +307,9 @@ async function attach(host) {
   if (disposed) return // unmounted before the import resolved
 
   term = new Terminal({
-    // The plain JetBrains Mono carries ordinary text; the 'JetBrains Mono Nerd'
-    // face (web/src/fonts/nerd-fonts.css, unicode-range-gated to PUA icons) is
-    // what makes shell-prompt icons render instead of xterm's missing-glyph box.
+    // The plain JetBrains Mono carries ordinary text; the Nerd face
+    // (`web/src/fonts/nerd-fonts.css`, gated to PUA icons) makes shell-prompt
+    // icons render instead of xterm's missing-glyph box.
     fontFamily: "'JetBrains Mono', 'JetBrains Mono Nerd', ui-monospace, SFMono-Regular, monospace",
     fontSize: 13,
     lineHeight: 1.25,
@@ -368,21 +357,17 @@ watch(theme, () => {
 
 // Unload: no confirmation, and an explicit teardown of the remote tty.
 //
-// A shell has no buffer worth keeping. What unload *does* owe the server is
-// prompt teardown of the PTY, so a refresh cannot leave a shell (and anything it
-// started) alive until the browser's socket cleanup happens to land: `kill` asks
-// for the session's explicit tree kill, `dispose()` then closes the socket,
-// which is the belt-and-braces path — if the frame is lost in the unload race,
-// the closed socket makes `Session.run` see the disconnect and
-// `Session.teardown` runs the same SIGTERM→reap→SIGKILL
-// (src/core/termhub/session.py). Teardown is
-// idempotent, so the two paths cannot double-kill.
+// A shell has no buffer worth keeping, but unload owes the server prompt
+// teardown of the PTY, so a refresh cannot leave a shell (and anything it
+// started) alive: `kill` asks for the session's explicit tree kill, `dispose()`
+// then closes the socket — the belt-and-braces path, since a closed socket makes
+// `Session.run` see the disconnect and run the same SIGTERM→reap→SIGKILL
+// (`src/core/termhub/session.py`). Teardown is idempotent, so the two paths
+// cannot double-kill.
 //
-// `pagehide`, not `beforeunload`: it is the event that fires whenever the
-// document really goes away (reload, tab close, navigation), whereas a
-// `beforeunload` listener that only calls preventDefault can be cancelled by the
-// user, and a listener that closes the socket there would then have destroyed a
-// session for a page that stayed.
+// `pagehide`, not `beforeunload`: it fires whenever the document really goes
+// away (reload, tab close, navigation), whereas a `beforeunload` prompt the user
+// can cancel would close the socket for a page that stayed.
 window.addEventListener('pagehide', () => {
   if (disposed) return
   if (socket && socket.readyState === WebSocket.OPEN) {
@@ -396,12 +381,10 @@ window.addEventListener('pagehide', () => {
 })
 
 // There is deliberately no `beforeunload` listener here. A "leave without
-// saving?" prompt is owed by the *buffers*, not by a shell, and it is registered
-// in useEditorFiles (next to the dirty state it reads). It must stay a separate
+// saving?" prompt is owed by the *buffers*, not by a shell, and it lives in
+// useEditorFiles beside the dirty state it reads. It must stay a separate
 // listener from the `pagehide` teardown above: cancelling that prompt means the
-// user stays, and staying must not have closed the socket — which is why the PTY
-// kill rides `pagehide`, the event that only fires once the document is really
-// going away.
+// user stays, and staying must not have closed the socket.
 
 export function useTerminal() {
   return {

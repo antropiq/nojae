@@ -10,12 +10,11 @@ import {
 const props = defineProps({
   open: { type: Boolean, default: false },
   // The row this dialog edits, as the store's id — or ``null`` for a bullet that
-  // does not exist yet, which is what "Add bullet" opens. A slot index is gone
-  // with the count rule: the id is the only handle that survives a delete.
+  // does not exist yet, which is what "Add bullet" opens: the id is the only
+  // handle that survives a delete.
   //
-  // ``helperId`` rather than a bare ``id``: in a component's public API the
-  // unqualified word answers nothing, and this card's template already uses
-  // ``id`` for the heading's own ``aria-labelledby``.
+  // ``helperId`` rather than a bare ``id``, because this card's template already
+  // uses ``id`` for the heading's own ``aria-labelledby``.
   helperId: { type: Number, default: null },
 })
 const emit = defineEmits(['close', 'add'])
@@ -31,23 +30,22 @@ const error = ref('')
 
 const busy = computed(() => state.saving)
 const isNew = computed(() => props.helperId === null)
-// The heading says which bullet this is by **position**, because that is the
-// number the row draws. A new bullet has no position yet, so it is named by
-// what it is.
+// The heading names the bullet by **position**, because that is the number the
+// row draws; a new bullet has none yet, so it is named by what it is.
 const title = computed(() => {
   if (isNew.value) return 'New memory bullet'
   const index = state.slots.findIndex((slot) => slot.id === props.helperId)
   return `Memory bullet ${bulletNumber(index < 0 ? state.slots.length : index)}`
 })
 
-// Prefill from the row and show, following the SettingsDialog pattern
-// (watch + showModal, backdrop click, native-close sync).
+// Prefill from the row and show, following the SettingsDialog pattern: watch +
+// showModal, backdrop click, native-close sync.
 //
 // ``shownFor`` is why the row is tracked by id rather than by "is the dialog
 // already open": the parent can move this form from one row to another **while
 // it stays open** — that is what "Add bullet" does — and each move has to
-// prefill. A slots change alone must not, or a reload would wipe what the user
-// is typing.
+// prefill; a slots change alone must not, or a reload would wipe the user's
+// typing.
 const shownFor = ref(null)
 
 watch(
@@ -75,8 +73,8 @@ function onBackdropClick(event) {
   if (event.target === dialogEl.value) emit('close')
 }
 
-// Esc (or a programmatic close): sync the parent so Cancel/Esc discards and
-// never inserts anything.
+// Esc (or a programmatic close): sync the parent, so Cancel never inserts
+// anything.
 function onNativeClose() {
   if (props.open) emit('close')
 }
@@ -97,9 +95,9 @@ async function save() {
   if (saved !== '') appendDraft(saved)
 }
 
-// Appends a bullet and hands the parent the open-a-new-form request. The current
-// edits are discarded on purpose: "Add" is a new bullet, not a second save, and
-// a silent overwrite of the row being edited would be the worse surprise.
+// Hands the parent the open-a-new-form request. The current edits are discarded
+// on purpose: "Add" is a new bullet, not a second save, and a silent overwrite of
+// the row being edited would be the worse surprise.
 function addBullet() {
   if (state.saving) return
   emit('add')
@@ -151,10 +149,10 @@ async function removeBullet() {
           <input v-model="color" type="color" />
         </label>
         <footer class="settings-actions">
-          <!-- Delete sits left of Cancel and asks first: the store keeps a copy
-               of the whole database before the row goes (D12), but the bullet
-               itself is gone from the row, so the confirmation is the one guard.
-               It never exists for a bullet that has not been created. -->
+          <!-- Delete sits left of Cancel and asks first: the store copies the
+               whole database before the row goes, but the bullet itself is gone
+               from the row, so the confirmation is the one guard. It never
+               exists for a bullet that has not been created. -->
           <button
             v-if="!isNew"
             class="secondary contrast memory-bullet-delete"

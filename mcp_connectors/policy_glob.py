@@ -1,37 +1,34 @@
-"""The path-aware matcher both policy levels are evaluated with (pol-02).
+"""The path-aware matcher both policy levels are evaluated with.
 
 One question, answered identically for every surface and both processes: *does
 this pattern match this workspace-relative path?* Nothing here reads the
-filesystem, resolves a root or knows what a mode is -- pol-04 wires the matcher
-to rules, pol-06 to paths on disk, and pol-08 lets the two stdio connectors ask
-it too. That is why the module is stdlib-only and lives outside ``src`` beside
+filesystem, resolves a root or knows what a mode is, which is why the module is
+stdlib-only and lives outside ``src`` beside
 :mod:`mcp_connectors.policy_shared`, whose docstring records the packaging
-constraint (the wheel ships ``src`` only, and a 400-line connector must not
-pull in FastAPI to compare two strings).
+constraint (the wheel ships ``src`` only, and a connector must not pull FastAPI
+in to compare two strings).
 
 Why not ``fnmatch``: its ``*`` matches any characters *including* ``/`` (what
-``path_policy.glob_hit`` relies on today, line 132 -- harmless for a one-level
-deny-list entry), so ``web/*`` would cover ``web/src/api/routes.py`` as well as
-``web/index.html``, and a lone ``*`` would match everything. A user-authored
-policy is read the other way: ``*`` means *the names in this folder*, so the
-over-match silently hides or locks whole trees.
-``pathlib.PurePosixPath.match`` is no help either -- a pattern with no ``**`` in
-it is right-anchored, so it compares a *suffix*
+``path_policy.glob_hit`` relies on for a one-level deny-list entry), so ``web/*``
+would cover ``web/src/api/routes.py`` as well as ``web/index.html``, and a lone
+``*`` would match everything. A user-authored policy is read the other way: ``*``
+means *the names in this folder*, so the over-match silently hides or locks whole
+trees. ``pathlib.PurePosixPath.match`` is no help either -- a pattern with no
+``**`` in it is right-anchored, so it compares a *suffix*
 (``PurePosixPath("a/b/c").match("b/c")`` is ``True``), which is exactly the
-surprise a policy author must not get. The semantics below are written out
-instead of delegated.
+surprise a policy author must not get.
 
-The vocabulary pol-00, pol-04 and pol-06 rely on:
+The vocabulary the callers rely on:
 
 * ``*`` matches any characters **within one name**, ``?`` one character, and
   ``**`` **zero or more whole path components**.
 * **Component boundary, always**: a wildcard ends on a ``/`` or at the end of a
   name, never mid-name -- unless the pattern says so (``.env*``, ``node*``). So
-  ``web/node`` never matches ``web/node_modules/x``. Case: ``Dist`` and ``dist``
-  are two directories on a filesystem that keeps them apart, and one directory
-  on one that does not -- so comparison folds only when the caller says it may
-  (the ``fold`` keyword, win-05). The default is ``False``, which is the answer
-  for every caller that has not probed a filesystem, and exactly right on POSIX.
+  ``web/node`` never matches ``web/node_modules/x``. ``Dist`` and ``dist`` are two
+  directories on a filesystem that keeps them apart and one on a filesystem that
+  does not, so comparison folds only when the caller says it may (the ``fold``
+  keyword). The default ``False`` is the answer for every caller that has not
+  probed a filesystem, and exactly right on POSIX.
 * **A rule naming a directory covers its subtree**: the pattern is tested as a
   whole-component prefix of the path too, so ``web/node_modules`` matches
   ``web/node_modules/react/index.js`` without writing ``web/node_modules/**``.
@@ -42,9 +39,9 @@ The vocabulary pol-00, pol-04 and pol-06 rely on:
   what they typed.
 
 One thing besides matching lives here: :func:`reserved_component_hit`, the
-component test for the folder that holds the policy (pol-00 D5). It is not a
-pattern, but it is the same kind of pure text answer about a workspace-relative
-path, and pol-08 needs the two stdio connectors to reach that one too.
+component test for the folder that holds the policy. It is not a pattern, but it
+is the same kind of pure text answer about a workspace-relative path, and the
+stdio connectors need to reach that one too.
 
 The workspace root itself (``rel == ""``) is matched by **no** pattern: the only
 pattern that would mean "this whole workspace" is a bare ``**``, and
@@ -66,11 +63,10 @@ except ImportError:  # run as a plain script path, as externals.json does
 # included, is literal.
 _WILDCARD_CHARS: frozenset[str] = frozenset({"*", "?"})
 
-# ``**`` is the only component that crosses a directory boundary.
-# Public because pol-04's parser names it too, when it asks what a pattern's
-# components mean rather than matching them: the spelling of the one
-# cross-directory wildcard belongs to this module, and a second literal ``"**"``
-# somewhere else is a second definition of the language.
+# ``**`` is the only component that crosses a directory boundary. Public because
+# the parser names it too when it asks what a pattern's components mean rather
+# than matching them: a second literal ``"**"`` elsewhere would be a second
+# definition of the language.
 CROSS_COMPONENT = "**"
 
 
@@ -84,17 +80,15 @@ def pattern_matches(pattern: str, rel: str, *, fold: bool = False) -> bool:
     folder's own listing.
 
     Never raises on a weird pattern: one that :func:`pattern_error` rejects
-    matches nothing. pol-04 turns that verdict into a message, and "a rule that
-    cannot be read applies to no path" is the safe half of the deal.
+    matches nothing, so "a rule that cannot be read applies to no path" holds.
 
-    ``fold`` (win-05, A-D3) says whether ``Dist`` and ``dist`` are one name:
-    the **caller's filesystem** decides it, never this module, which reads no
-    disk. The app passes the answer of :func:`editorfs.fscase.case_folded` for
-    the active workspace; the two stdio connectors leave the default, which is
-    what is true of their POSIX reach today (target B is what gives them a
-    real value). Folding is **comparison only**: the pattern, the path, a
-    verdict's ``pattern`` field and a refusal sentence all keep the spelling
-    the author typed, because a rule that prints ``DIST/**`` when the file said
+    ``fold`` says whether ``Dist`` and ``dist`` are one name: the **caller's
+    filesystem** decides it, never this module, which reads no disk. The app
+    passes the answer of :func:`editorfs.fscase.case_folded` for the active
+    workspace; the stdio connectors leave the default, which is true of their
+    POSIX reach. Folding is **comparison only**: the pattern, the path, a
+    verdict's ``pattern`` field and a refusal sentence all keep the spelling the
+    author typed, because a rule that prints ``DIST/**`` when the file said
     ``dist/**`` is a panel that lies about the user's own file.
     """
     if pattern_error(pattern) is not None:
@@ -113,10 +107,10 @@ def literal_prefix(pattern: str) -> str:
     ``""``; ``"a/*/b"`` -> ``"a"``; ``".env*"`` -> ``""`` (a wildcard already in
     the first segment).
 
-    pol-04 calls a rule **unreachable** when that prefix does not exist in the
-    workspace, which is how a typo becomes a message instead of a rule that
-    quietly never fires. An empty answer is legitimate and means "this rule
-    starts with a wildcard, so there is no prefix to check" -- not a failure.
+    A rule is **unreachable** when that prefix does not exist in the workspace,
+    which is how a typo becomes a message instead of a rule that quietly never
+    fires. An empty answer is legitimate and means "this rule starts with a
+    wildcard, so there is no prefix to check" -- not a failure.
     """
     prefix: List[str] = []
     for component in pattern.split("/"):
@@ -133,8 +127,8 @@ def pattern_error(pattern: str) -> Optional[str]:
 
     These are the shapes that cannot be what the author meant -- not the shapes
     the matcher would find awkward (:func:`pattern_matches` is total either
-    way). The answer is a sentence, because pol-04 shows it verbatim next to the
-    line that caused it.
+    way). The answer is a sentence, because it is shown verbatim next to the line
+    that caused it.
     """
     if "\x00" in pattern:
         return "it contains a NUL byte"
@@ -172,19 +166,19 @@ def reserved_component_hit(
     Checked on the **component list, before any ``stat``**: an absent path still
     has a name, so the answer for ``.nojae/whatever`` must not depend on whether
     the folder exists. It is not a pattern and is not matched by the matcher — a
-    rule naming the folder that holds the rules is a contradiction (pol-00 D5),
-    so the check has to survive a broken or absent policy file.
+    rule naming the folder that holds the rules is a contradiction — so the check
+    has to survive a broken or absent policy file.
 
-    ``fold`` means what it means in :func:`pattern_matches` (win-05): on a
-    filesystem that keeps ``.NOJAE`` and ``.nojae`` as one folder, the
-    reservation has to cover both spellings or the reserved folder stops being
-    reserved there. The answer is always ``dirname`` — the name in use — never
-    the spelling the caller arrived with, so a refusal still quotes the folder
-    the user has to edit the file in.
+    ``fold`` means what it means in :func:`pattern_matches`: on a filesystem that
+    keeps ``.NOJAE`` and ``.nojae`` as one folder, the reservation has to cover
+    both spellings or the reserved folder stops being reserved there. The answer
+    is always ``dirname`` — the name in use — never the spelling the caller
+    arrived with, so a refusal still quotes the folder the user has to edit the
+    file in.
 
     It lives in this module because it is the same kind of pure text test, and
-    pol-08 has the two stdio connectors make it too: they cannot import ``src``,
-    so the one implementation has to sit where both reach it.
+    the stdio connectors make it too: they cannot import ``src``, so the one
+    implementation has to sit where both reach it.
     """
     if not dirname:
         return None
@@ -209,14 +203,13 @@ def _path_segments(rel: str) -> Optional[List[str]]:
 
     The split is :func:`mcp_connectors.path_norm.path_parts` — the one splitter
     the ancestor walk, the search prune and the batch lot use too, so the
-    matcher and the locks agree about what a component is *by construction*
-    (win-04/win-05). That splitter is deliberately forgiving about shapes the
-    lock refuses outright, so the tripwire is stated here rather than inherited
-    from it: a backslash, a leading separator or a ``..``, and anything not
-    already in canonical form, answers ``None``. A rule is written relative to
-    the workspace, so a path that is not relative has nothing for a rule to be
-    about -- matching its tail would be right-anchoring, the very thing this
-    module refuses to do (see the module docstring on ``PurePosixPath.match``).
+    matcher and the locks agree about what a component is *by construction*.
+    That splitter is deliberately forgiving about shapes the lock refuses
+    outright, so the tripwire is stated here: a backslash, a leading separator,
+    a ``..`` or anything else not already in canonical form answers ``None``. A
+    rule is written relative to the workspace, so a path that is not relative has
+    nothing for a rule to be about -- matching its tail would be right-anchoring,
+    the very thing this module refuses to do.
     """
     if not rel:
         return []
@@ -276,8 +269,8 @@ def _name_matches(component: str, name: str, *, fold: bool = False) -> bool:
     the component boundary comes from for free. Comparison is exact **where the
     filesystem is exact** and folded where it is not: ``fold`` is the caller's
     probe answer, and it changes only the comparison below -- never the pattern,
-    the path, or anything returned or printed (A-D3). Folding unconditionally
-    would make ``Dist`` and ``dist`` one folder on Linux, where they are two.
+    the path, or anything returned or printed. Folding unconditionally would
+    make ``Dist`` and ``dist`` one folder on Linux, where they are two.
     """
     if fold:
         # Two local names, deliberately: the caller's strings are never rewritten.

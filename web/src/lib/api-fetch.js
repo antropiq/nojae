@@ -1,20 +1,16 @@
 // One read-only GET, retried, and a sentence for when it still fails.
 //
-// Why this exists: a settings dialog opens by fetching four or five things at
-// once, and the browser's network stack raises `TypeError: Error in input stream`
-// whenever a request's connection dies mid-flight — a Wi-Fi drop, a laptop
-// waking, a proxy restarting. Without a second attempt the dialog shows the raw
-// TypeError and the user has to reopen it; with one, a short blip is invisible.
+// Why: a settings dialog opens by fetching four or five things at once, and the
+// browser's network stack raises `TypeError: Error in input stream` whenever a
+// request's connection dies mid-flight — a Wi-Fi drop, a laptop waking, a proxy
+// restarting. Without a second attempt the dialog shows the raw TypeError and the
+// user has to reopen it; with one, a short blip is invisible.
 //
-// Scoped deliberately to GET loaders. POSTs (save settings, save LSP/MCP, set
-// the working location, chat) are NOT wrapped here: a retry on those would
-// either duplicate a write or resume a half-streamed reply, and each of those
-// already carries its own user-visible error the user acts on.
-//
-// Only the *transport* failure retries. A response that comes back with a 4xx
-// or 5xx reached the server fine and the server had something to say about it,
-// so the loader's own `!res.ok` path renders the answer — retrying a 422 would
-// hide a real error behind a longer wait.
+// Scoped deliberately to GET loaders: a retry on a POST (save settings, save
+// LSP/MCP, set the working location, chat) would duplicate a write or resume a
+// half-streamed reply. Only the *transport* failure retries — a 4xx or 5xx
+// reached the server fine, so the loader's own `!res.ok` path renders that answer
+// and retrying a 422 would hide a real error behind a longer wait.
 
 const DEFAULT_RETRIES = 2
 const DEFAULT_BASE_DELAY_MS = 300
@@ -41,13 +37,11 @@ export async function fetchWithRetry(
   throw lastError
 }
 
-// Turn a transport failure into a sentence a person can act on. The raw error
-// (`TypeError: Error in input stream`, `TypeError: Failed to fetch`, a
-// DOMException for an aborted request, ...) is browser-stack noise: it names a
-// socket, not the problem. After `fetchWithRetry` has retried and still failed,
-// the one true cause left is that the server was not reachable, so that is what
-// we say — the raw error is kept in a trailing bracket for the console, not read
-// as the message.
+// Turn a transport failure into a sentence a person can act on: the raw error
+// (`TypeError: Failed to fetch`, a DOMException for an abort, ...) names a socket,
+// not the problem. Once `fetchWithRetry` has retried and still failed, the one
+// cause left is an unreachable server, so that is what we say — the raw error
+// stays in a trailing bracket for the console, never as the message.
 export function describeTransportError(exc) {
   const raw = exc instanceof Error ? `${exc.name}: ${exc.message}` : String(exc)
   return `Network unavailable — could not reach the server. Check the connection and try again. [${raw}]`

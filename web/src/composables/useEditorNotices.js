@@ -1,33 +1,29 @@
 import { reactive } from 'vue'
 
-// ---------------------------------------------------------------------------
-// The Editor's write-feedback channel: a small stack of notices, shown at the
+// The Editor's write-feedback channel: a small stack of notices, fixed at the
 // bottom-centre of the app.
 //
-// It exists because `useEditorFiles.state.message` — the one line above the
-// code pane — is the right shape for a *refused open* and the wrong shape for a
-// write. A failed save is news about work the user still holds, so a click on
-// another tab must not eat the reason; and a refused rename or delete happens
-// while the user is looking at the *tree*, which the pane's message line does
-// not reach. This channel answers both: it is dismissible, it does not clear on
-// the next click, and it is rendered as a fixed stack so it is visible from
-// whichever half of the Editor the eyes are on.
+// The pane's own message line is the right shape for a refused *open* and the
+// wrong shape for a write: a failed save is news about work the user still
+// holds, so a click on another tab must not eat the reason, and a refused
+// rename or delete happens while the user looks at the tree, which that line
+// does not reach. So this channel is dismissible, does not clear on the next
+// click, and is visible from whichever half of the Editor the eyes are on.
 //
 // Three rules hold it together:
 //
 //   * **dedupe** — the same (tone, text, path) inside a short window is one
-//     notice, not a stack of them, so anything that can be asked repeatedly (a
-//     held chord, the 5 s freshness tick) makes noise at most once;
+//     notice, so anything that can be asked repeatedly (a held chord, the
+//     freshness tick) makes noise at most once;
 //   * **a refusal never times out** — only `ok` expires, because a refusal that
 //     vanishes on a timer is the bug this channel exists to avoid;
 //   * **a success answers the failure it was about** — `dismissForPath` drops
 //     the error line once that path's write lands, so the stack never claims a
 //     buffer is still unwritten.
 //
-// Nothing here decides *what* a refusal means. The callers pass the server's
-// own `detail` verbatim, prefixed by what was attempted, and this layer only
-// decides how long it stays and how many of them are on screen.
-// ---------------------------------------------------------------------------
+// Nothing here decides *what* a refusal means: callers pass the server's own
+// `detail` verbatim, prefixed by what was attempted, and this layer only
+// decides how long it stays and how many are on screen.
 
 // How long a confirmation stays up on its own. `error` and `warn` never do:
 // they leave when the user dismisses them or when the thing they are about is
@@ -35,14 +31,12 @@ import { reactive } from 'vue'
 export const NOTICE_TTL_MS = 4000
 
 // Inside this window, an identical notice is silence rather than a new row.
-// Longer than the freshness poll (FRESHNESS_POLL_MS) so a tick re-reporting the
-// same news cannot add one per tick, short enough that a genuinely repeated
-// failure much later is reported again.
+// Longer than the freshness poll so a tick re-reporting the same news cannot add
+// one per tick, short enough that a genuinely repeated failure is reported again.
 export const NOTICE_DEDUPE_WINDOW_MS = 8000
 
-// The stack's size: three lines is what a bottom-centre stack can hold without
-// covering the pane, and once newer refusals are up the oldest news is the
-// least actionable of them.
+// The stack's size: three lines is what a bottom-centre stack holds without
+// covering the pane.
 export const MAX_VISIBLE_NOTICES = 3
 
 const state = reactive({
@@ -97,13 +91,12 @@ function sameOrUnder(candidate, path) {
 }
 
 // A write that landed answers the refusal it was fighting: drop the error/warn
-// lines about that path (or its subtree) rather than leave a stack of them
-// describing work that is safely on disk. `ok` lines are left alone — a
-// confirmation about a path is not made false by a later write.
+// lines about that path (or its subtree) rather than leave them describing work
+// that is safely on disk. `ok` lines are left alone.
 //
-// `tone` narrows that to one kind, which is what lets a probe that found the
-// disk back in agreement silence *its* warning without swallowing an unrelated
-// save refusal about the same file.
+// `tone` narrows that to one kind, which lets a probe that found the disk back
+// in agreement silence *its* warning without swallowing an unrelated save
+// refusal about the same file.
 function dismissForPath(path, tone = null) {
   if (!path) return
   for (const item of [...state.notices]) {
@@ -132,9 +125,8 @@ function repointNotices(from, to) {
   }
 }
 
-// The refusal a path currently carries, if any. The read-only badge quotes it
-// so the pane can answer "why did Ctrl+S do nothing?" from where the user is
-// already looking.
+// The refusal a path currently carries, if any: the read-only badge quotes it so
+// the pane can answer "why did Ctrl+S do nothing?" where the user is looking.
 function noticeForPath(path) {
   return state.notices.find((item) => item.tone !== 'ok' && item.path === path) ?? null
 }

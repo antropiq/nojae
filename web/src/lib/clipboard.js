@@ -1,10 +1,9 @@
 // Put text on the system clipboard, answering whether it landed.
 //
 // The async Clipboard API is the route; the hidden-textarea `execCommand`
-// fallback stays for a non-secure context (plain http on a LAN host), where
-// `navigator.clipboard` is absent or refuses. Every copy surface in the app
-// goes through here so the two of them (the composer's "Copy conversation"
-// and a message's copy chip) cannot drift apart on the fallback.
+// fallback covers a non-secure context (plain http on a LAN host), where
+// `navigator.clipboard` is absent or refuses. Every copy surface goes through
+// here so none drifts apart on the fallback.
 
 export async function copyText(text) {
   try {

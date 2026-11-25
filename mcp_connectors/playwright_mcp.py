@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Playwright MCP Server
-Exposes browser automation tools via MCP (Model Context Protocol)
-on http://localhost:8934/mcp
+Playwright MCP Server: browser automation tools exposed over MCP
+(Model Context Protocol) at /mcp.
 
 Usage:
     python -m mcp_connectors.playwright_mcp               # Serve on 127.0.0.1:8934
@@ -38,8 +37,8 @@ RESTRICTED_FQDN_FILE = Path(__file__).resolve().parent / "restricted-fqdn.txt"
 def load_restricted_fqdns() -> list[str]:
     """Read restricted FQDNs from the file (one per line, # comments allowed).
 
-    The file is re-read on every call so edits are picked up without restart.
-    A missing or unreadable file simply means no restrictions.
+    Re-read on every call so edits need no restart; a missing or unreadable file
+    means no restrictions.
     """
     try:
         lines = RESTRICTED_FQDN_FILE.read_text(encoding="utf-8").splitlines()
@@ -91,7 +90,7 @@ async def get_browser():
     if _browser is None:
         from playwright.async_api import async_playwright
         pw = await async_playwright().start()
-        # FIX: Added --no-sandbox and other flags to prevent hanging in systemd/headless env
+        # These flags keep the launch from hanging in a systemd/headless env.
         _browser = await pw.chromium.launch(
             headless=True,
             args=[
@@ -111,8 +110,8 @@ async def get_page():
         browser = await get_browser()
         _page = await browser.new_page()
         await _page.route("**/*", block_restricted_routes)
-        # Set a shorter default timeout to prevent long hangs
-        # (sync in playwright >= 1.63, coroutine in older versions)
+        # A shorter default bounds a hang; the call is sync in newer playwright
+        # releases and awaitable in older ones.
         timeout_result: object = _page.set_default_timeout(10000)
         if inspect.isawaitable(timeout_result):
             await timeout_result
@@ -300,7 +299,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch a tool call."""
     try:
         if name == "browser_navigate" and is_restricted_url(arguments.get("url", "")):
-            # Restricted FQDN: return an empty response, not an error.
+            # A restricted FQDN gets an empty answer, not an error.
             return [TextContent(type="text", text="")]
 
         page = await get_page()
@@ -380,7 +379,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
-        # Return error details to n8n instead of hanging
+        # Answer with the error rather than raising, so no caller is left waiting.
         return [TextContent(type="text", text=f"Error executing tool: {str(e)}")]
 
 
@@ -404,8 +403,7 @@ server = Server(
 # HTTP transport (Streamable HTTP, served at /mcp)
 # ---------------------------------------------------------------------------
 
-# DNS rebinding protection is left off to preserve the original server's
-# behavior of accepting any Host/Origin.
+# Rebinding protection stays off, so the server accepts any Host/Origin.
 starlette_app = server.streamable_http_app(
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )

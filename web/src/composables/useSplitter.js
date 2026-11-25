@@ -1,13 +1,10 @@
 import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
-// Defaults of the chat splitter, kept as defaults so the original two-argument
-// call — `useSplitter(shell, input)` in WorkBenchView — is unchanged.
+// Defaults, so the two-argument call `useSplitter(shell, input)` needs no options.
 const CHAT_STORAGE_KEY = 'nojae:chatSplit'
-// Enough room for the whole input column stack: the composer row (four icon
-// buttons, the memory bullets and up to three run buttons — one line of 36px
-// controls plus the row's own margins) and a one-line textarea. The badges and
-// the session clock left this column for the app bar, so the floor came down
-// with them; `.chat-input`'s `min-height` states the same number.
+// Enough for the whole input column stack: the composer row plus a one-line
+// textarea. `.chat-input`'s `min-height` states the same number — change both
+// together.
 const CHAT_MIN_RESIZED = 96
 const CHAT_MIN_OTHER = 160
 const KEYBOARD_STEP = 24
@@ -37,19 +34,18 @@ function save(storageKey, value) {
 /**
  * Draggable splitter inside a two-pane shell.
  *
- * `orientation` names the separator bar itself, exactly as `aria-orientation`
- * does, and with it which pane the drag measures:
+ * `orientation` names the separator bar, as `aria-orientation` does, and with it
+ * which pane the drag measures:
  *   'horizontal' (default) — the bar spans the shell; the pane *after* it (the
  *   bottom one, `resizedRef`) grows upwards: ↑↓ keys, `row-resize` cursor.
  *   'vertical' — the bar stands between the panes; the pane *before* it (the
  *   left one, `resizedRef`) grows to the right: ←→ keys, `col-resize` cursor.
  *
- * Options: `storageKey` (localStorage entry), `minResized` / `minOther` (the
- * two clamped minima), `maxRatio` (0 = unbounded; 0.5 caps the pane at half
- * the shell) and `sizeVar`. With `sizeVar` set to a CSS custom-property name,
- * the size reaches the layout through `shellStyle` on the shell — which a grid
- * template consumes via `var(…)` — instead of the flex-basis pair
- * `topStyle` / `bottomStyle` (which stay null).
+ * Options: `storageKey`, `minResized` / `minOther` (the two clamped minima),
+ * `maxRatio` (0 = unbounded; 0.5 caps the pane at half the shell) and `sizeVar`,
+ * a CSS custom-property name that makes the size reach the layout through
+ * `shellStyle` on a grid shell instead of the flex-basis pair `topStyle` /
+ * `bottomStyle` (which then stay null).
  *
  * The size persists to localStorage; double-click or `Home` resets it to the
  * shell's own CSS default.
@@ -87,8 +83,8 @@ export function useSplitter(shellRef, resizedRef, options = {}) {
   function shellExtent() {
     const shell = shellRef.value
     if (!shell) return 0
-    // The panes live inside the shell's padding, so the space they can be
-    // given is the content box — clientWidth/Height alone would count it twice.
+    // The panes live inside the shell's padding, so the space they can be given
+    // is the content box.
     const inside = vertical ? shell.clientWidth : shell.clientHeight
     const style = window.getComputedStyle(shell)
     const pad = vertical
@@ -135,8 +131,8 @@ export function useSplitter(shellRef, resizedRef, options = {}) {
   function onPointerMove(event) {
     if (!dragging.value) return
     const coord = vertical ? event.clientX : event.clientY
-    // The bottom pane grows towards the shell's origin, the left pane away
-    // from it — the sign is all that differs between the two orientations.
+    // The bottom pane grows towards the shell's origin, the left pane away from
+    // it — the sign is all that differs between the two orientations.
     apply(vertical ? startSize + (coord - startCoord) : startSize - (coord - startCoord))
   }
 
@@ -174,31 +170,24 @@ export function useSplitter(shellRef, resizedRef, options = {}) {
   }
 
   function onResize() {
-    // While the tab is hidden (App.vue toggles tabs with v-show), the shell has
-    // no layout and its extent is 0. Clamping the restored size against a
-    // zero-size shell collapses it to the minimum, which is what made the saved
-    // split position look lost after a page refresh.
+    // While the tab is hidden (App.vue toggles tabs with v-show) the shell has no
+    // layout and its extent is 0. Clamping a restored size against a zero-size
+    // shell collapses it to the minimum, which is what made a saved split
+    // position look lost after a page refresh.
     if (!size.value || shellExtent() <= 0) return
     size.value = clamp(size.value)
   }
 
-  // A ResizeObserver catches window resizes and the moment the shell gains
-  // layout again when the Chat tab becomes visible — no resize event fires
-  // for the latter, and the first observer callback doubles as the initial
-  // check, so the restored height is validated as soon as it can be.
+  // A ResizeObserver catches window resizes and the moment the shell gains layout
+  // again when the Chat tab becomes visible — no resize event fires for the
+  // latter, and the first callback doubles as the initial check.
   let observer = null
   //
-  // Both hooks belong to a component instance. Everywhere the app builds a
-  // splitter it is inside a `setup()`, and that is also what makes the pair
-  // worth registering: the mount attaches the observer, the unmount detaches
-  // it, so neither leaks.
-  //
-  // A splitter can also be created headlessly — `useChatLayout` with no shell
-  // refs, which is how the focus axis is unit-tested — and there Vue has no
-  // instance to hang the hooks on: it warns once per call and drops the
-  // registration. Asking first is the same outcome without the warning, and a
-  // headless splitter wants no observer anyway: with no shell there is no
-  // layout to re-clamp against, and `onResize` returns on a zero extent.
+  // The hooks need a component instance, and a splitter can also be created
+  // headlessly (`useChatLayout` with no shell refs, which is how the focus axis is
+  // unit-tested): there Vue warns once per call and drops the registration. Asking
+  // first is the same outcome without the warning, and a headless splitter wants
+  // no observer anyway.
   if (getCurrentInstance()) {
     onMounted(() => {
       const shell = shellRef.value

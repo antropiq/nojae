@@ -1,16 +1,15 @@
 """``McpManager``: run the declared connector sessions and bridge sync callers.
 
-The hub's own asyncio thread (``mcp-hub``) owns every client session, so
-the synchronous chat worker threads can call ``call_tool_sync`` without
-ever running an event loop themselves. This module keeps only the
-orchestration — lifecycle, hot toggles, the tool/status payloads and the
-sync bridge. What it delegates: discovery (``discovery.py``), tool/result
-rendering (``formatting.py``) and the subprocess environment
-(``process.py``). Timeouts and the retry policy are read through
-:mod:`mcphub.constants` at call time.
+The hub's own asyncio thread (``mcp-hub``) owns every client session, so the
+synchronous chat worker threads can call ``call_tool_sync`` without ever running
+an event loop themselves. This module keeps only the orchestration — lifecycle,
+hot toggles, the tool/status payloads and the sync bridge — and delegates
+discovery (``discovery.py``), tool/result rendering (``formatting.py``) and the
+subprocess environment (``process.py``). Timeouts and the retry policy are read
+through :mod:`mcphub.constants` at call time.
 
-The heavy ``mcp`` package stays lazily imported throughout, so the manager
-can be constructed (and its bookkeeping tested) without the ``[mcp]`` extra.
+The heavy ``mcp`` package stays lazily imported throughout, so the manager can be
+constructed (and its bookkeeping tested) without the optional extra.
 """
 
 import asyncio
@@ -29,10 +28,9 @@ from .process import connector_environment
 def _wants_local_run(connector: Dict[str, Any]) -> bool:
     """Is this entry a ``local`` connector the declaration file wants running?
 
-    The refusal is about a capability the user asked for and cannot be had, so
-    an ``enable: false`` entry is excluded: its silence is the switch it already
-    made, not a missing guardrail (and on Linux the whole question is never
-    asked).
+    The refusal is about a capability the user asked for and cannot be had, so an
+    ``enable: false`` entry is excluded: its silence is the switch it already
+    made, not a missing guardrail.
     """
     return bool(connector.get("enable")) and connector.get("kind") == "local"
 
@@ -41,8 +39,6 @@ class McpManager:
     """Run every declared connector session and bridge sync callers onto it.
 
     Lifecycle: :meth:`start_all` on app startup, :meth:`stop_all` on shutdown.
-    All MCP client I/O runs on a private asyncio thread so chat worker threads
-    can call tools without owning an event loop.
     """
 
     def __init__(
@@ -70,14 +66,13 @@ class McpManager:
     def _index(connectors: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """Definition list -> id-keyed live records (also used by :meth:`restart`).
 
-        A ``local`` entry that asks to run whose reach cannot be bounded
-        (win-07 / A-D4) is named ``error`` here, at the moment the declaration
-        file is read, rather than only when a start is attempted: the panel then
-        shows the sentence the validation scan shows, and the entry is kept out
-        of the tool catalogue by the rule that already excludes a failed
-        connection. ``remote`` entries keep their ``stopped`` starting state —
-        they have no local path reach — and a disabled entry is the user's own
-        switch, so it stays ``stopped`` whatever the guardrails can bound.
+        A ``local`` entry that asks to run whose reach cannot be bounded is named
+        ``error`` here, at the moment the declaration file is read, rather than
+        only when a start is attempted: the panel then shows the sentence the
+        validation scan shows, and the entry stays out of the tool catalogue by
+        the rule that already excludes a failed connection. ``remote`` entries
+        keep their ``stopped`` starting state — they have no local path reach —
+        and a disabled entry is the user's own switch, so it stays ``stopped``.
         """
         refused = mcp_reach_is_refused()
         records: Dict[str, Dict[str, Any]] = {}
@@ -98,8 +93,8 @@ class McpManager:
     async def start_all(self) -> None:
         """Connect a client to every enabled connector. Never raises.
 
-        Disabled entries (``enable: false`` in ``.nojae/mcp-settings.json``) stay
-        ``stopped`` until :meth:`start_connector`.
+        Disabled entries (``enable: false``) stay ``stopped`` until
+        :meth:`start_connector`.
         """
         if self._started or self._stopped:
             return
@@ -127,12 +122,12 @@ class McpManager:
     async def _start_one(self, connector_id: str) -> None:
         """Bring one connector up. Never raises.
 
-        The refusal (win-07 / A-D4) lands here rather than only in
-        :meth:`start_all`, because this is the one gate every start path goes
-        through — boot, the settings toggle, and a hub restart — so a ``local``
-        connector cannot be spawned by any of them while its guardrails match
-        nothing. The status is the same sentence the declaration scan reports,
-        so the card and the note cannot disagree.
+        The refusal lands here rather than only in :meth:`start_all`, because
+        this is the one gate every start path goes through — boot, the settings
+        toggle, and a hub restart — so a ``local`` connector cannot be spawned by
+        any of them while its guardrails match nothing. The status is the same
+        sentence the declaration scan reports, so the card and the note cannot
+        disagree.
         """
         info = self._connectors[connector_id]
         if info.get("kind") == "local" and mcp_reach_is_refused():
@@ -233,10 +228,10 @@ class McpManager:
         """Start (or restart) one connector from a synchronous caller. Never raises.
 
         Fire-and-forget: the status flips to ``starting`` right away and the
-        connection attempt runs on the hub thread. The reach refusal (win-07 /
-        A-D4) is answered *here* rather than left to the queued coroutine, so a
-        refused entry is never briefly shown as ``starting`` by the settings
-        toggle that just asked for it.
+        connection attempt runs on the hub thread. The reach refusal is answered
+        *here* rather than left to the queued coroutine, so a refused entry is
+        never briefly shown as ``starting`` by the settings toggle that just
+        asked for it.
         """
         info = self._connectors.get(connector_id)
         if info is None or self._loop is None or self._stopped:
@@ -307,15 +302,14 @@ class McpManager:
         """Execute a tool call from a synchronous thread, returning its text result.
 
         ``timeout`` is the safety net for a connector that never answers at all;
-        ``None`` reads :data:`mcphub.constants.TOOL_CALL_TIMEOUT` at call time
-        (this module's convention for every timeout it owns). It is *not* the
-        length limit of the command: the connector enforces its own ``timeout``
-        argument and returns the output it managed to print, so a long run that
-        is still making progress is left alone.
+        ``None`` reads :data:`mcphub.constants.TOOL_CALL_TIMEOUT` at call time.
+        It is *not* the length limit of the command: the connector enforces its
+        own ``timeout`` argument and returns the output it managed to print, so a
+        long run that is still making progress is left alone.
 
-        Raising on that net is a failure the model cannot act on by itself --
-        the LSP side reads a ``concurrent.futures.TimeoutError``'s empty
-        ``str()`` -- so it is raised with a sentence naming the rule.
+        Raising on that net is a failure the model cannot act on by itself — the
+        LSP side reads a ``concurrent.futures.TimeoutError``'s empty ``str()`` —
+        so it is raised with a sentence naming the rule.
         """
         if self._loop is None:
             raise RuntimeError("McpManager is not started")
@@ -383,9 +377,8 @@ class McpManager:
                 await asyncio.wait_for(
                     http_client.aclose(), timeout=constants.STOP_GRACE_SECONDS
                 )
-        # A local connector's stdio child belongs to the client transport:
-        # closing the stack (above) shuts it down, there is nothing else to
-        # terminate.
+        # A local connector's stdio child belongs to the client transport: closing
+        # the stack (above) shuts it down, there is nothing else to terminate.
 
     async def _stop_on_loop(self) -> None:
         for connector_id in list(self._connectors):
@@ -415,12 +408,11 @@ class McpManager:
     async def restart(self, connectors: List[Dict[str, Any]]) -> None:
         """Re-read the declaration file: tear everything down and rebuild.
 
-        Unlike :meth:`stop_all`, the manager stays usable afterwards: a fresh
-        hub thread is created and *this same object* keeps serving the chat
-        worker threads that already hold a reference to it, so a restart never
+        Unlike :meth:`stop_all`, the manager stays usable afterwards: a fresh hub
+        thread is created and *this same object* keeps serving the chat worker
+        threads that already hold a reference to it, so a restart never
         invalidates an in-flight conversation. ``connectors`` is the freshly
-        validated ``.nojae/mcp-settings.json`` scan, so a hand-edited declaration (a new
-        connector, a changed command, a different ``cwd``) is picked up without
+        validated scan, so a hand-edited declaration is picked up without
         restarting the web app.
 
         Never raises: a connector that fails to come back up lands in its own

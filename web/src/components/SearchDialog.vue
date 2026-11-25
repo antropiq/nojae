@@ -6,8 +6,8 @@ import { useWorkspaceSearch } from '../composables/useWorkspaceSearch'
 // state — the same shape EditorTreeDialogs.vue, BatchModeDialog.vue and
 // RegistrationMemoryDlg.vue follow, and for the same reason. Nothing here is a
 // second store: the query, the scope, the last answer and the busy marker are the
-// composable's (§2.7), so closing the popup, switching to the WorkBench tab and
-// back, or re-raising the dialog shows the *same* table without another request.
+// composable's, so closing the popup, switching to the WorkBench tab and back, or
+// re-raising the dialog shows the *same* table without another request.
 //
 // There is deliberately no `v-if` on the `<dialog>`: unmounting it throws away the
 // caret position in the field and any scrolling in the results, which is exactly
@@ -17,32 +17,29 @@ import { useWorkspaceSearch } from '../composables/useWorkspaceSearch'
 // What this component *does* own is the presentation of the payload, and two
 // rules live only here:
 //
-//   * **a snippet is a string, never markup** (D12). It is a line of somebody's
-//     file, so it is interpolated and gets no HTML at all: no directive that
-//     parses it, and no trip through the app's HTML renderer (that one renders
-//     *rendered* HTML, and piping file bytes through a sanitiser here would
-//     satisfy a rule about something else). The matched span is a `<span>`
-//     wrapped around a *slice* of the string, so three text nodes carry it;
-//   * **the footer sentence is the server's** (D8). That sentence is written once,
-//     in `editorfs/search.py`, from the caps in `editorfs/constants`, and this
+//   * **a snippet is a string, never markup**. It is a line of somebody's file,
+//     so it is interpolated and gets no HTML at all: no directive that parses it,
+//     and no trip through the app's renderer (that one renders *rendered* HTML,
+//     and piping file bytes through a sanitiser here would satisfy a rule about
+//     something else). The matched span is a `<span>` wrapped around a *slice* of
+//     the string, so three text nodes carry it;
+//   * **the footer sentence is the server's**. That sentence is written once, in
+//     `editorfs/search.py`, from the caps in `editorfs/constants`, and this
 //     component renders it as it arrives — reading the payload's field exactly
 //     once. Composing a count here would have to know those cap numbers a second
 //     time, and the two would drift.
 //
-// Nothing raises this dialog yet — search-07 wires the menu row and the header
-// icon — and nothing consumes `state.pendingReveal` yet (search-08). A row click
-// calls `openHit`, which is the composable's own close (D13), so this component
-// never closes the popup itself and the close keeps one owner.
+// A row click calls `openHit`, which is the composable's own close, so this
+// component never closes the popup itself and the close keeps one owner.
 const { state, closeDialog, run, openHit } = useWorkspaceSearch()
 
 const dialogEl = ref(null)
 const fieldEl = ref(null)
 
-// The house pattern (EditorTreeDialogs.vue:152-161): the state decides, the
-// element follows. The focus call is part of the same tick — §2.3's "one
-// `<input>`, autofocused" is done here rather than trusted to the attribute,
-// because the element is not re-mounted per open and the browser's own autofocus
-// only runs when it is inserted.
+// The house pattern (EditorTreeDialogs.vue): the state decides, the element
+// follows. The focus call is part of the same tick rather than trusted to the
+// attribute, because the element is not re-mounted per open and the browser's own
+// autofocus only runs when it is inserted.
 watch(
   () => state.open,
   async (open) => {
@@ -57,7 +54,7 @@ watch(
 )
 
 // Esc and a click outside both end in `closeDialog()`, which keeps query, scope
-// and result (D14). The native `@close` writes the state instead of leaving it
+// and result. The native `@close` writes the state instead of leaving it
 // disagreeing with the element — otherwise the next `openFor()` on the same scope
 // would find `state.open` already true and never show the dialog again.
 function onBackdropClick(event) {
@@ -78,9 +75,8 @@ function onFieldEnter(event) {
 
 const scope = computed(() => state.scope)
 
-// §2.8: the kind is part of the sentence, because `docs/old` as a folder and
-// `docs/old` as a file are two different searches and the label is read-only in
-// both cases.
+// The kind is part of the sentence, because the same path as a folder and as a
+// file are two different searches, and the label is read-only in both cases.
 const SCOPE_KIND_LABEL = {
   folder: 'folder',
   file: 'file',
@@ -94,24 +90,24 @@ const running = computed(() => state.status === 'running')
 // `state.error` is only the *current* answer while the status says so: a later
 // search clears it, and a stale error line over a fresh table would be a lie.
 const error = computed(() => (state.status === 'error' ? state.error : null))
-// The one sentence about what the scan could not give. It is read straight off
-// the payload (D8): the caps are backend numbers, so the dialog has no
-// arithmetic of its own to be right about.
+// The one sentence about what the scan could not give, read straight off the
+// payload: the caps are backend numbers, so the dialog has no arithmetic of its
+// own to be right about.
 const footerLine = computed(() => result.value?.footerNote ?? '')
 // "no matches" is an answer, so it belongs to a *finished* search. Before the
 // first one the results area is simply empty, and while one runs the previous
 // table (or nothing) stays where it was.
 const noMatches = computed(() => state.status === 'done' && matches.value.length === 0)
 
-// One row of the Contract, with the slice bounds the highlight needs.
+// One row of the payload, with the slice bounds the highlight needs.
 //
-// `column` is 1-based and names the *start of the match*; the snippet is that
-// line trimmed at `MAX_SEARCH_SNIPPET_BYTES`, so the offset of the match inside
-// the snippet is `column - 1` — clamped to the snippet's length, because a line
-// cut at 240 characters can end *before* the match begins. The end is clamped too,
-// and `matchLength: 0` is legal (a zero-width regex match, or that same trim): the
-// highlight span is then empty rather than the whole line. A wrong slice puts the
-// highlight on the wrong text, which is worse than no highlight at all.
+// `column` is 1-based and names the *start of the match*; the snippet is that line
+// trimmed at its byte cap, so the offset of the match inside the snippet is
+// `column - 1` — clamped to the snippet's length, because a trimmed line can end
+// *before* the match begins. The end is clamped too, and `matchLength: 0` is legal
+// (a zero-width regex match, or that same trim): the highlight span is then empty
+// rather than the whole line. A wrong slice puts the highlight on the wrong text,
+// which is worse than no highlight at all.
 const rows = computed(() =>
   matches.value.map((hit) => {
     const snippet = typeof hit.snippet === 'string' ? hit.snippet : ''
@@ -146,12 +142,12 @@ function clampIndex(value, length) {
         <h2 id="editor-search-title">Search</h2>
       </header>
 
-      <!-- 1. The scope, read-only and before the field (2.8): it is derived from
-           the row the gesture was made on, so a typed scope would name a search
-           the tree never offered. -->
+      <!-- 1. The scope, read-only and before the field: it is derived from the
+           row the gesture was made on, so a typed scope would name a search the
+           tree never offered. -->
       <!-- The space before the kind is in the text, not in CSS: the template
            compiler drops the whitespace between two elements on separate lines,
-           and `docs/old(folder)` is what a screen reader would then say. -->
+           and a screen reader would then run the path and the kind together. -->
       <p class="caption editor-search-scope">
         Search in:
         <span class="editor-search-scope-path">{{ scope?.label }}</span>
@@ -194,7 +190,7 @@ function clampIndex(value, length) {
            disabled while a search runs: the answer to a *different* combination
            may be the next thing typed, and the composable's generation token
            already discards a late reply. The regex one names the engine the
-           pattern runs in (2.3) — the answer did not come from a JS `RegExp`, and
+           pattern runs in — the answer did not come from a JS `RegExp`, and
            promising parity with one would be a lie about `\d`, `$1` and named
            groups. The `title` is on the label, because that is what is visible
            and hoverable: Pico positions the checkbox box itself absolutely. -->
@@ -210,7 +206,7 @@ function clampIndex(value, length) {
       </div>
 
       <!-- A 400 for an invalid pattern is `re`'s own message, caret position and
-           all (D5), shown here rather than in the notice stack: the fix is in the
+           all, shown here rather than in the notice stack: the fix is in the
            field just above, and a bottom-centre toast is nowhere near the caret
            that typed it. -->
       <p v-if="error" class="error-line editor-search-error" role="alert">
@@ -257,10 +253,10 @@ function clampIndex(value, length) {
                 </button>
               </td>
               <td class="editor-search-cell-line">{{ row.hit.line }}</td>
-              <!-- D12: three text nodes, never markup built from the file's
-                   bytes. The cell's `title` holds the same string (§2.4: the full
-                   line lives in the row's title), and a `title` is an attribute,
-                   not a subtree, so it cannot inject either. The awkward `>`
+              <!-- Three text nodes, never markup built from the file's bytes.
+                   The cell's `title` holds the same string (the full line lives
+                   in the row's title), and a `title` is an attribute, not a
+                   subtree, so it cannot inject either. The awkward `>`
                    placement keeps the three nodes adjacent — a newline here would
                    put a space inside the snippet. -->
               <td class="editor-search-cell-snippet" :title="row.hit.snippet">

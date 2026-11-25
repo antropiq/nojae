@@ -1,12 +1,11 @@
 """The client side of the conversation: what the hub answers a server.
 
 pygls 2.x calls a feature handler with a single ``params`` argument, and
-tsserver/Volar are the noisiest here: an unanswerable
+tsserver/Volar are the noisiest callers: an unanswerable
 ``workspace/configuration`` or ``client/registerCapability`` is what makes or
-breaks the TS/Vue servers. Kept apart from the manager so these handlers can
-be read as one contract; they reach the live session only through the
-``sessions`` mapping and log through ``append_log``, so a restart simply
-re-binds a fresh set.
+breaks the TS/Vue servers. Kept apart from the manager so these handlers read
+as one contract; they reach the live session only through the ``sessions``
+mapping and log through ``append_log``, so a restart re-binds a fresh set.
 """
 
 from contextlib import suppress
@@ -29,10 +28,10 @@ from .tsserver import (
 
 
 def client_capabilities() -> Any:
-    """What the hub declares it supports. Deliberately explicit: Pyright
-    only publishes diagnostics when the client advertises
-    ``publishDiagnostics``, and only asks ``workspace/configuration`` when
-    the client declares ``configuration``."""
+    """What the hub declares it supports. Deliberately explicit: Pyright only
+    publishes diagnostics when the client advertises ``publishDiagnostics``,
+    and only asks ``workspace/configuration`` when the client declares
+    ``configuration``."""
     from lsprotocol import types as lsp
 
     return lsp.ClientCapabilities(
@@ -52,11 +51,9 @@ def client_capabilities() -> Any:
             hover=lsp.HoverClientCapabilities(
                 content_format=[lsp.MarkupKind.Markdown, lsp.MarkupKind.PlainText]
             ),
-            # The hub renders both shapes (Location and LocationLink),
-            # so it can accept links. Declaring False made Volar refuse
-            # to answer definition requests for Vue components and log
-            # "textDocument.definition.linkSupport is not supported by
-            # the client but could be used by the server".
+            # The hub renders both shapes (Location and LocationLink), so it
+            # can accept links. Declaring False made Volar refuse definition
+            # requests for Vue components outright.
             definition=lsp.DefinitionClientCapabilities(
                 link_support=True,
             ),
@@ -97,15 +94,12 @@ def register_features(
     def on_configuration(params: Any) -> List[Any]:
         """One answer per requested section: ``null`` means 'not set'.
 
-        The LSP spec's ``ConfigurationResponse`` is a per-item value that
-        is ``null`` when nothing is configured. Answering ``{}`` instead
-        (as this handler used to) is not a no-op: a server doing the
-        idiomatic ``getConfiguration('x') ?? []`` keeps the ``{}`` because
-        it is not nullish, and then iterates it — which is exactly how
-        Volar dies on ``html.customData`` with ``TypeError: paths is not
-        iterable``, taking the whole process down on the first Vue
-        completion request. ``null`` makes every such fallback land on
-        its own default.
+        The LSP protocol's ``ConfigurationResponse`` is a per-item value that is
+        ``null`` when nothing is configured. Answering ``{}`` is not a no-op: a
+        server doing the idiomatic ``getConfiguration('x') ?? []`` keeps the
+        ``{}`` because it is not nullish and then iterates it — which is how
+        Volar dies on ``html.customData``. ``null`` makes every such fallback
+        land on its own default.
         """
         answers: List[Any] = []
         for item in getattr(params, "items", None) or []:
@@ -115,9 +109,9 @@ def register_features(
             if section in info.get("settings", {}):
                 answers.append(info["settings"][section])
             elif section in OBJECT_SETTINGS_SECTIONS:
-                # The language-settings sections the css/html/json servers
-                # hand to ``configure()`` want an object, not null: see
-                # OBJECT_SETTINGS_SECTIONS for the crash a null answer causes.
+                # The css/html/json servers' ``configure()`` wants an object,
+                # not null: see OBJECT_SETTINGS_SECTIONS for the crash a null
+                # answer causes.
                 answers.append({})
             else:
                 answers.append(None)
@@ -157,20 +151,17 @@ def register_features(
             client.feature(ignored)(lambda params: None)
 
     # Volar's tsserver relay. It owns no tsserver: it asks *us* for the
-    # answers a VS Code extension host would get from its tsserver child
-    # process, and awaits them inside ``getLanguageService()``. Refusing
-    # to answer is worse than answering wrongly — the awaited promise
-    # never settles, so every request touching that file times out.
+    # answers a VS Code extension host would get from its tsserver child, and
+    # awaits them inside ``getLanguageService()``. Refusing to answer is worse
+    # than answering wrongly — the awaited promise never settles, so every
+    # request touching that file times out.
     #
-    # The hub does not run a tsserver (that would double the RAM bill and
-    # duplicate the ``typescript`` server). It answers the one command
-    # that gates everything else, ``_vue:projectInfo``, with the
-    # workspace's own tsconfig/jsconfig; Volar then builds its language
-    # service itself and serves documentSymbol/hover/completion/diagnostics
-    # from Vue's own semantic model. Commands it still asks for are
-    # component-detail helpers (props/slots/directives/meta) — answered
-    # ``null`` so their awaited promise settles and Vue degrades those
-    # features instead of hanging the whole session.
+    # The hub runs no tsserver (that would double the RAM bill and duplicate
+    # the ``typescript`` server). It answers the one command that gates
+    # everything else, ``_vue:projectInfo``, with the workspace's own
+    # tsconfig/jsconfig, and Volar builds its language service from that.
+    # Commands it still asks for are component-detail helpers, answered
+    # ``null`` so their awaited promise settles.
     @client.feature(TSSERVER_REQUEST)
     def on_tsserver_request(params: Any) -> None:
         session = sessions.get(info["id"])

@@ -44,7 +44,7 @@ class SamplingParams(BaseModel):
         return value
 
     def to_kwargs(self) -> Dict[str, Any]:
-        """Return only the sampling parameters as request-body kwargs."""
+        """The sampling parameters as request-body kwargs; an unset one is omitted."""
         return self.model_dump(include=set(SAMPLING_FIELDS), exclude_none=True)
 
 
@@ -76,25 +76,23 @@ class EndpointsConfig(SamplingParams):
 
         ``server`` and ``model`` are the rows ``core.appdb`` hands out, which
         carry the **payload** names (``url``, ``apiKey``, ``sysPrompt``,
-        ``topP``, …) because §4.2 puts the column-name translation in that
-        module. The few names that are still not this model's fields — the
-        server's ``url``, the model's ``name`` — are the store's own vocabulary
-        for a thing this model calls by the request's name, and they are mapped
-        here, once.
+        ``topP``, …) because that module owns the column-name translation. The
+        few names still not this model's fields — the server's ``url``, the
+        model's ``name`` — are the store's vocabulary for a thing this model
+        calls by the request's name, and they are mapped here, once.
 
         The values reach pydantic **as the row holds them**: native
         ``True`` / ``0.2`` / ``20``, no string-parsing shim.
 
-        The "absent means" table is unchanged, with a nullable **column**
-        standing in for an absent member: a ``NULL`` sampler stays ``None`` so
-        ``to_kwargs()`` **omits** it from the request body, while a ``0`` column
-        keeps it. The two are different values and must not converge — which is
-        why the schema gives those columns no default (§4.2). An empty
-        ``sysPrompt`` is ``DEFAULT_LLM_SYSPROMPT``, an absent
+        A nullable **column** stands in for an absent member: a ``NULL`` sampler
+        stays ``None`` so ``to_kwargs()`` **omits** it from the request body,
+        while a ``0`` column keeps it. The two are different values and must not
+        converge — which is why the schema gives those columns no default. An
+        empty ``sysPrompt`` is ``DEFAULT_LLM_SYSPROMPT``, an absent
         ``supportsVision`` is ``False``.
 
         A row that is ``None`` is neither a crash nor a guess: it is the state
-        the resolution seam refuses (D7), so this builder answers a valid empty
+        the resolution seam refuses, so this builder answers a valid empty
         configuration — no server, no model — for a caller that has already
         decided to refuse. That is the reachable shape of a model naming a
         server row that is not there, which only a hand-edited database
@@ -126,5 +124,5 @@ class EndpointsConfig(SamplingParams):
         return cls.model_validate(data)
 
     def model_list(self) -> List[str]:
-        """Return the tested model names."""
+        """The one model name a request can be sent with, or nothing."""
         return [self.endpoint] if self.endpoint else []

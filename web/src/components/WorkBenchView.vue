@@ -25,13 +25,9 @@ const { state: batch } = useBatch()
 const { state: appShellState, loadConfig } = useAppShell()
 const { loadPromptHelpers } = usePromptHelpers()
 
-// Keep config.supportsVision (which gates the attach button) and the
-// conversation-scoped MCP snapshot fresh when the chat tab is opened:
-// settings may have been saved, or a hub declaration edited and refreshed,
-// meanwhile (App.vue's initial loadConfig covers the first render). A locked
-// (started) conversation keeps its frozen list — loadChatMcp ignores locked
-// state. The prompt helper bullets refresh the same way (they may have been
-// edited meanwhile).
+// Refresh what the chat tab reads when it is opened: the settings (they gate the
+// attach button), the hub snapshot and the prompt helper bullets may all have
+// been edited meanwhile. A locked conversation keeps its frozen hub list.
 watch(
   () => appShellState.activeTab,
   (tab) => {
@@ -45,41 +41,28 @@ watch(
   },
 )
 
-// Where the edit affordance draws itself: on the **first** message of the last
-// unanswered group of user turns, so the gesture is discoverable where the group
-// begins rather than at its end. The rule (adjacency, no marker in the thread) is
-// `useChat`'s; the view renders its answer and derives no index of its own.
+// Where the edit affordance draws itself: the first message of the last
+// unanswered group, so the gesture is discoverable where the group begins. The
+// rule is `useChat`'s; the view derives no index of its own.
 const lastGroupStart = computed(() => lastUserGroupStart(state.messages))
 
-// The card's "Thinking…" caption has to stop while the endpoint is refusing.
-// Its condition — a streaming reply that has produced no text yet — is true
-// during a wait on the **first** round too, which is exactly the confusion
-// spec §5.11 forbids: `waiting` means "sent, no first token yet", a wait means
-// "the endpoint refused". Of the two honest treatments the task offers
-// (suppress the caption, or make it say what the strip says), this one
-// **suppresses** it: the composer strip already carries the one line that
-// names the wait, and repeating it in the card would be two captions for one
-// wait — the drift this lot keeps refusing. The caption comes back on its own
-// for the replayed round, because the wait's state clears at that round's
-// first arrival (see `useChat`'s `endpointWait`).
-//
-// The read is the composable's state, not a phase list here: `endpointWait` is
-// set by the wait's own frame and cleared by every arrival and every ending, so
-// the caption and the strip's line cannot disagree about whether a wait is
-// running.
+// The card's "Thinking…" caption has to stop while the endpoint is refusing: its
+// condition — a streaming reply with no text yet — also holds during a wait on
+// the first round, where `waiting` means "sent, no first token yet" but a wait
+// means "the endpoint refused". The caption is suppressed rather than reworded,
+// because the composer strip already carries the one line naming the wait. It
+// comes back for the replayed round, whose first arrival clears the wait.
 const waitInProgress = computed(() => !!state.endpointWait)
 
 const input = ref(null)
 const panel = ref(null)
 
-// Image opened in the full-size lightbox popup (null = closed). Pure view
-// state, deliberately outside the useChat singleton.
+// Image opened in the full-size lightbox popup (null = closed). Pure view state,
+// deliberately outside the useChat singleton.
 const preview = ref(null)
 // Everything that changes the pane's height, so the auto-scroll re-anchors when
-// it moves. The whole pending-image list counts: the composer draws one chip row
-// per attached image, so adding or removing one changes the height. The strip
-// counts the same way, so a stage — or a row dropped or pulled back — scrolls
-// the conversation the way typing does.
+// it moves: the messages, the draft, one chip row per pending image, and the
+// strip — a stage, or a row dropped or pulled back, scrolls like typing does.
 const contentVersion = computed(() =>
   state.messages
     .map((m) => `${m.role}:${m.raw.length}:${m.images?.length ?? 0}`)
@@ -100,14 +83,13 @@ const leftCol = ref(null)
 const rightCol = ref(null)
 const dock = ref(null)
 
-// Two splitters, one per column: the right one sizes the composer row (it used
-// to span the whole shell and so sized the left column too), the left one
-// sizes the tools dock under the reasoning timeline. See useChatLayout.
+// Two splitters, one per column: the right one sizes the composer row, the left
+// one the tools dock under the reasoning timeline.
 //
-// `focus` / `leftHidden` / the two toggles drive the gutter between the
-// columns: the state is the composable's, the template only renders it.
-// `chatBusy` reaches the fold through the same seam, so the rule that refuses a
-// fold mid-reply is useChat's own and not a second copy of it (see useChatLayout).
+// `focus` / `leftHidden` / the two toggles drive the gutter: the state is the
+// composable's, the template only renders it. `chatBusy` reaches the fold
+// through the same seam, so the rule that refuses a fold mid-reply stays
+// useChat's own rather than a second copy of it.
 const {
   column: dockSplit,
   composer: composerSplit,
@@ -121,11 +103,10 @@ const {
 
 <template>
   <!-- The two focalisations reach the screen as state classes on the shell,
-       never on the columns: this is where the chat geometry is already decided
+       never on the columns: the shell is where the chat geometry is decided
        (it carries the breakpoint-overridden --bi-chat-panel-width), and the two
-       rules those names drive in theme.css are the whole geometry of the
-       feature. The reads below render useChatLayout's state (D1); the template
-       computes no transition. -->
+       rules those names drive in theme.css are the whole geometry. The template
+       renders useChatLayout's state and computes no transition. -->
   <div
     class="chat-shell"
     :class="{
@@ -138,10 +119,9 @@ const {
       class="chat-col chat-col--left"
     >
       <WorkBenchToolPanel />
-      <!-- The bar belongs to the dock's body: folding takes both out of the
-           flow (the dock then sizes itself by its head strip), which is the
-           only thing the dock's contents decide about the layout. The column's
-           width is not one of them — it is the two panels' width whatever the
+      <!-- The bar belongs to the dock's body: folding takes both out of the flow
+           (the dock then sizes itself by its head strip). The column's width is
+           not the dock's to decide — it is the two panels' width whatever the
            hub declaration files hold. -->
       <div
         v-if="!dockCollapsed"
@@ -188,11 +168,10 @@ const {
                   <path d="M4 21a8 8 0 0 1 16 0" />
                 </svg>
               </span>
-              <!-- The gesture returns the whole unanswered group — every user
-                   turn the model has not answered — to the strip, so it draws on
-                   the group's first message and says what it does rather than
-                   claiming to touch one message. Gated exactly as it always was:
-                   idle, and no batch runs. -->
+              <!-- The gesture returns the whole unanswered group to the strip,
+                   so it draws on the group's first message and says what it
+                   does rather than claiming to touch one message. Gated: idle,
+                   and no batch running. -->
               <button
                 v-if="i === lastGroupStart && state.phase === 'idle' && !batch.active"
                 class="chat-turn-chip chat-turn-edit"
@@ -226,21 +205,19 @@ const {
             </div>
           </div>
           <article v-else class="chat-answer-card">
-            <!-- The reply's own copy affordance, on the card's top-right corner
-                 (the composer's button above the textarea is the one that copies
-                 the whole conversation). -->
+            <!-- The reply's own copy affordance. The composer's button is the
+                 one that copies the whole conversation. -->
             <MessageCopyChip :text="messageClipboardText(message)" />
             <MarkdownStream :html="message.html" mermaid />
             <!-- Sticky marker: the transient error line above the composer is
                  cleared by the next send, but the fragment stays in the
-                 conversation (and is re-posted to the model on the next turn),
-                 so the reply itself has to say it was cut short. -->
+                 conversation and is re-posted, so the reply itself says it was
+                 cut short. -->
             <p v-if="message.truncated" class="caption chat-truncated" role="status">
               &#9888; Cut short by the server — this reply is incomplete.
             </p>
-            <!-- The user's own interruption: unlike the line above this is not
-                 a fault, and the fragment is deliberately part of the
-                 conversation, so it says what happens next. -->
+            <!-- The user's own interruption: not a fault, and the fragment is
+                 deliberately kept, so it says what happens next. -->
             <p v-if="message.paused" class="caption chat-paused" role="status">
               &#9208; Interrupted by you — the partial reply above is kept in
               the conversation.
@@ -254,10 +231,9 @@ const {
             </p>
           </article>
         </template>
-        <!-- One chip per attached image, in attachment order (the order they
-             will be posted in): each carries its own thumbnail, its own
-             lightbox target and its own remove button, so a set of mockups is
-             reviewable and individually editable before it is sent. -->
+        <!-- One chip per attached image, in attachment order: each carries its
+             own thumbnail, lightbox target and remove button, so a set of
+             mockups is individually editable before it is sent. -->
         <div
           v-for="(image, index) in state.pendingImages"
           :key="index"
@@ -295,12 +271,10 @@ const {
             </svg>
           </button>
         </div>
-        <!-- The strip: the messages the composer has accepted but no turn has
-             carried yet, in flush order. Drawn in the pane, directly above the
-             draft preview and beside the lightbox their thumbnails open, because
-             a staged message is the next thing that will be sent — not a part of
-             the conversation, and not something the composer row decides about.
-             It renders nothing at all until the first stage. -->
+        <!-- The strip: messages the composer accepted that no turn has carried
+             yet, in flush order. Drawn in the pane because a staged message is
+             the next thing to be sent, not a part of the conversation. It
+             renders nothing until the first stage. -->
         <StagedMessageStrip @preview="preview = $event" />
         <div
           v-if="state.draft.html"

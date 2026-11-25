@@ -1,35 +1,32 @@
 """The sibling mutations of the guarded write: create, rename, and delete.
 
 ``files.py`` stays about reading plus one whole buffer back to disk; the
-operations that make, move and remove *paths* live here, as the write half's
-sibling of ``tree.py``/``files.py``. Entry points:
+operations that make, move and remove *paths* live here. Entry points:
 
-* :func:`create_path` — the create route: one empty file or one folder, never
-  over anything that is already there.
-* :func:`rename_path` — the rename route: one path to a new workspace path. A
-  rename with a different parent *is* a move, so it is one operation — and the
-  one where the policy has the most ways to go wrong, because two
-  user-supplied paths describe one filesystem action.
-* :func:`move_paths_batch` — the move-batch route: N files into one folder that
-  already exists, the same rules as a rename asked of every entry **before the
-  first one moves**, so the set either moves whole or nothing moves at all.
-* :func:`trash_path` — the delete route: one file or one whole folder, **moved**
-  into a dated batch under the active workspace's own trash (``trash_dir()``,
-  ``<workspace>/.nojae/trash``) and never ``unlink``ed, so a
-  mistaken delete is a ``mv`` away from being undone.
+* :func:`create_path` — one empty file or one folder, never over anything that
+  is already there.
+* :func:`rename_path` — one path to a new workspace path. A rename with a
+  different parent *is* a move, so it is one operation whose two user-supplied
+  paths describe one filesystem action.
+* :func:`move_paths_batch` — N files into one folder that already exists, every
+  entry validated **before the first one moves**, so the set either moves whole
+  or nothing moves at all.
+* :func:`trash_path` — one file or one whole folder, **moved** into a dated
+  batch under the active workspace's own trash (``trash_dir()``,
+  ``<workspace>/.nojae/trash``) and never ``unlink``ed, so a mistaken delete is a
+  ``mv`` away from being undone.
 
 The gate is the one the save goes through — the whole ancestor chain, each level
-asked of the policy verdict — and the same promise holds: this is a browser
-surface, reached from the SPA and from nothing else. No MCP connector, LSP tool
-or chat code path may call it; the guard suite in ``tests/test_editorfs_write.py``
+asked of the policy verdict — and this is a browser surface, reached from the SPA
+and from nothing else: the guard suite in ``tests/test_editorfs_write.py``
 asserts that instead of trusting the prose.
 
-What the verdict means for a *path* operation (pol-00 D3): an ``ro`` folder
-cannot be deleted, emptied, renamed **or added to** — the rule is about its
-subtree *and* about the folder's own directory entries, because a move out of it
-rewrites them just as surely as a move into it. A ``hidden`` name cannot be
-created either: the write gate answers 422 naming the rule, never the 404 that
-would tell the caller the name is free.
+What the verdict means for a *path* operation: an ``ro`` folder cannot be
+deleted, emptied, renamed **or added to** — the rule covers its subtree *and* the
+folder's own directory entries, because a move out of it rewrites them just as
+surely as a move into it. A ``hidden`` name cannot be created either: the write
+gate answers 422 naming the rule, never the 404 that would tell the caller the
+name is free.
 """
 
 import errno
@@ -64,7 +61,6 @@ class WorkspacePathExists(WorkspacePathError):
     ``detail`` is the sentence for a log; :attr:`detail_object` is what goes on
     the wire, because the client's answer to "already there" is a *re-action*
     (re-list the folder, select the row that exists), not a message to read.
-    Same shape as the save guard's conflict object, for the same reason.
     """
 
     def __init__(self, path: str, *, is_dir: bool) -> None:
@@ -114,28 +110,17 @@ def create_path(rel: str, *, is_dir: bool) -> Dict[str, Any]:
       are both refused, 422 naming the rule, **before the name is looked for on
       disk**;
     * the parent must already be a directory; a missing one is **409** naming it.
-      A typo in a name input becomes a refusal rather than a stray tree, and a
-      deeper path stays the client's decision, one gated request per level —
-      there is no ``mkdir -p`` side effect here;
+      There is no ``mkdir -p`` side effect here: a deeper path stays the client's
+      decision, one gated request per level;
     * **never overwrite**. An occupied name — file, folder, or dangling symlink —
       answers 409 ``{"reason": "exists", …}`` with the disk untouched. A create
       that silently truncated an existing file is the worst bug this function
       could have, so the race is *closed* rather than checked: ``os.mkdir`` and
       ``O_CREAT | O_EXCL`` fail on an existing name, so of two tabs creating the
       same one, one wins and the other gets this same 409;
-    * ``is_dir`` picks ``os.mkdir`` over an ``O_WRONLY`` open of an empty file;
     * the parent's entry is fsync'd, so the new name survives a crash;
     * the payload answers ``path``/``dir``/``size``/``mtime`` — the same shape a
       save answers, so the client re-baselines on one shape.
-
-    There is one policy model here, not two: **``hidden`` is a write rule** (a
-    name the policy hides cannot be created — D8, and the answer is 422 naming
-    the rule, never the 409 that would confirm the name is free), **``ro`` is a
-    write rule**, and neither is a *read* rule except ``hidden``. The old note
-    explained why the tree's ignored-names set and the connector deny-list
-    disagreed about a folder called ``node_modules``; under one policy there is
-    nothing to disagree about — the seeded file makes that name read-only, so
-    creating it is refused and the answer says so.
     """
     normalised, parent, name = resolve_parent_in_workspace(rel)
 
@@ -179,7 +164,7 @@ def create_path(rel: str, *, is_dir: bool) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Rename / move: one path, and everything that answered for it, to a new path.
+# Rename / move: one path to a new path.
 # ---------------------------------------------------------------------------
 
 
@@ -228,18 +213,16 @@ def rename_path(frm: str, to: str) -> Dict[str, Any]:
 
     * gate ``from`` — itself **and every ancestor of it** — with the write
       verdict, then resolve it (404 when it is not there), and refuse a
-      top-level **symlink** (400, the delete's argument: the link's target may be
-      outside the workspace, and moving the link is not a rename of a file);
+      top-level **symlink** (400: the link's target may be outside the
+      workspace, and moving the link is not a rename of a file);
     * gate ``to`` **and every ancestor of ``to``** the same way. This is the
       both-ends rule: ``from`` may be perfectly innocent while ``to`` sits in a
       folder the policy hides or locks, and the refusal has to arrive from the
-      target's side too. It is also what makes pol-00 D3's "renaming **out** of
-      an ``ro`` folder is refused" need no new code — a move out of a locked
-      folder is refused by its own source end, because a move rewrites that
-      folder's directory entries exactly as a move into one would.
+      target's side too. It also makes "renaming **out** of an ``ro`` folder is
+      refused" need no new code — a move rewrites the source folder's directory
+      entries exactly as a move into one would.
     * the target's parent must already be a directory — **409** naming it, no
-      implicit ``mkdir`` (the create's rule, restated for the same reason: a
-      typo in a name input becomes a refusal rather than a stray tree);
+      implicit ``mkdir``;
     * ``from`` and ``to`` normalising to the same path is **400**. A case-only
       rename is *not* that (on a case-sensitive filesystem the two normalised
       paths differ), and it must work;
@@ -251,15 +234,10 @@ def rename_path(frm: str, to: str) -> Dict[str, Any]:
       ``{"reason": "exists", …}``. ``os.rename`` would *silently replace* a file
       here, which is the data loss this route exists to prevent;
     * the working location itself (``from == ""``) is refused outright (400);
-    * ``os.rename`` — same filesystem, so atomic. An ``EXDEV`` (a bind mount
-      inside the workspace) is refused by name rather than worked around:
-      copy-then-delete is not atomic and loses the mode and the extended
-      attributes that make a file what it is.
+    * ``os.rename`` — same filesystem, so atomic.
 
     There is deliberately **no backup** for a rename, unlike a save: the bytes
     did not change, and the trash plus ``git status`` already describe the move.
-    A backup tree of every file that was ever renamed would be a second copy of
-    the workspace for information that costs nothing to recover by renaming back.
 
     The payload answers ``from``/``to``/``dir``/``size``/``mtime``. ``mtime`` is
     the moved file's own — a rename does not touch content, so an open buffer
@@ -359,8 +337,7 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
     * every **source**: gated through itself and its whole ancestor chain, then
       it must exist (**404** for the first absent one), must be a **file** —
       a folder is 400 naming the path, so the route cannot be talked into moving
-      a tree — and must not be a top-level **symlink** (400, the delete's and the
-      rename's argument verbatim);
+      a tree — and must not be a top-level **symlink** (400);
     * ``to_parent`` must already be a directory — **409** naming it, no implicit
       ``mkdir``. Asked before the targets, because one folder describes the
       whole batch: a destination that is a file gets *this* sentence rather than
@@ -374,14 +351,13 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
       second ``os.rename`` silently replace the first;
     * **then** the renames, in the given order.
 
-    Step 7 is not atomic across N paths — there is no filesystem transaction to
-    borrow — and that is owned out loud rather than papered over: the loop stops
-    at the first ``OSError`` and never continues past one, so a partial apply can
-    only ever leave a **prefix** of the list moved — and ``moved`` reports exactly
-    what landed rather than what was asked for. The window between the occupied
-    check and here is the same one a single :func:`rename_path` already accepts,
-    and ``EXDEV`` / ``ENOENT`` map to the same 409 sentences through
-    :func:`_rename_oserror`, naming the entry that failed.
+    The renames are not atomic across N paths — there is no filesystem
+    transaction to borrow — and the loop stops at the first ``OSError`` and never
+    continues past one, so a partial apply can only ever leave a **prefix** of the
+    list moved, and ``moved`` reports exactly what landed rather than what was
+    asked for. The window between the occupied check and here is the same one a
+    single :func:`rename_path` already accepts, and the errors map to the same
+    409 sentences through :func:`_rename_oserror`, naming the entry that failed.
 
     There is deliberately **no backup**, as for a rename: the bytes did not
     change, and the trash plus ``git status`` already describe the move.
@@ -403,8 +379,8 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
 
     parent_rel = normalise_rel(to_parent)
 
-    # Step 3 — every source, gated and answered for, before any target is
-    # looked at. The first entry that fails decides the answer.
+    # Every source, gated and answered for, before any target is looked at. The
+    # first entry that fails decides the answer.
     entries: List[Dict[str, Any]] = []
     for raw in paths:
         from_rel = normalise_rel(raw)
@@ -422,9 +398,9 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
                 f"(a batch moves files into one folder; moving a whole tree "
                 f"is what Rename does)",
             )
-        # The **spelled** path, not the resolved one — the delete's argument:
-        # the gate hands back the realpath, which is a link's target and never a
-        # link itself, so symlink-ness has to be judged one level up.
+        # The **spelled** path, not the resolved one: the gate hands back the
+        # realpath, which is a link's target and never a link itself, so
+        # symlink-ness has to be judged one level up.
         spelled = Path(os.path.join(workspace_root(), from_rel))
         if spelled.is_symlink():
             raise WorkspacePathError(
@@ -434,15 +410,15 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
                 f"the link would move it without moving what it points at)",
             )
 
-        # Step 4's input, joined **here** (D11): the client never sends a target,
-        # so the ancestor gate cannot be shown one folder and landed in another.
+        # The target is joined **here**: the client never sends one, so the
+        # ancestor gate cannot be shown one folder and landed in another.
         name = from_rel.rpartition("/")[2]
         to_rel = f"{parent_rel}/{name}" if parent_rel else name
         entries.append({"from": from_rel, "to": to_rel, "source": from_path})
 
-    # Step 5 (R3) — asked **before** each target, deliberately: one folder
-    # describes the whole batch, so a locked one is 422 naming the rule and a
-    # folder that is missing *or is a file* is the same 409 sentence naming it.
+    # Asked **before** each target, deliberately: one folder describes the whole
+    # batch, so a locked one is 422 naming the rule and a folder that is missing
+    # *or is a file* is the same 409 sentence naming it.
     # ``resolve_parent_in_workspace`` would answer a file with its own 400, which
     # is not what a destination field is shown — and there is no implicit
     # ``mkdir`` anywhere in this function.
@@ -450,8 +426,8 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
     if not parent_path.is_dir():
         raise _parent_missing_error(parent_rel)
 
-    # Step 4 — every target through its own ancestor chain. The leaf name is not
-    # on disk, so it is judged by its own verdict exactly as a create judges it:
+    # Every target through its own ancestor chain. The leaf name is not on disk,
+    # so it is judged by its own verdict exactly as a create judges it:
     # a name the policy hides or locks *at the destination* is refused there even
     # though the same name was innocent at the source.
     targets: Dict[str, Tuple[Path, str]] = {}
@@ -474,9 +450,9 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
         if os.path.lexists(str(target)):
             raise _exists_answer(entry["to"], str(target))
 
-    # Step 7 — only now the moves, in the given order, stopping at the first
-    # failure (there is no filesystem transaction to borrow, so the payload says
-    # what landed rather than pretending the whole list did).
+    # Only now the moves, in the given order, stopping at the first failure
+    # (there is no filesystem transaction to borrow, so the payload says what
+    # landed rather than pretending the whole list did).
     moved: List[Dict[str, Any]] = []
     for entry in entries:
         from_rel = str(entry["from"])
@@ -511,13 +487,9 @@ def move_paths_batch(paths: List[str], to_parent: str) -> Dict[str, Any]:
 def trash_dir() -> Path:
     """The workspace in scope's trash — ``.nojae/trash`` under the resolved root.
 
-    Resolved **per call**, never captured at import: the root is
-    :func:`editorfs.policy.workspace_root`, which since clws-01 is the
+    Resolved **per call**, never captured at import: the root is the
     **request's** workspace, so two tabs deleting into two folders get two
     trashes and neither one's bytes ever land in the other's reserved folder.
-    (Before the seam the same per-call resolution is what made a settings switch
-    move the trash with the workspace rather than leave a project's deleted
-    bytes inside the install directory.)
 
     ``constants.TRASH_DIR`` stays as the pin for a test (or a deployment) that
     wants one absolute folder instead; it is read here, at call time.
@@ -528,9 +500,9 @@ def trash_dir() -> Path:
     resolver lives here — the one module that already imports both sides.
 
     The destination is app-chosen space inside the reserved folder, so it is
-    **never** put through the write gate: the gate refuses every ``.nojae/...``
-    path with a 422 naming the reservation, and a delete that gated its own
-    destination could never move anything. Only the *source* is gated.
+    **never** put through the write gate: the gate refuses every path naming the
+    reservation, and a delete that gated its own destination could never move
+    anything. Only the *source* is gated.
 
     ``resolve()`` normalises both sides of every later comparison — the batch
     label rebases on this path, and :func:`_rel_in_workspace` works on the
@@ -548,10 +520,10 @@ def trash_dir() -> Path:
 def trash_digest(resolved: Path) -> str:
     """The digest identifying *what* a trashed batch holds.
 
-    Keyed on the resolved path, not the spelling in the request (the reasoning
-    the editor's backups use too): two mount spellings of one tree are one
-    directory, and two batches that could collide by name are easier to read
-    when the name they collide on is the digest of the same file.
+    Keyed on the resolved path, not the spelling in the request: two mount
+    spellings of one tree are one directory, and two batches that could collide
+    by name are easier to read when the name they collide on is the digest of
+    the same file.
     """
     return hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:12]
 
@@ -590,13 +562,12 @@ def sweep_trash(*, older_than_days: Optional[int] = None,
     batch that cannot be deleted is not worth failing a delete over.
 
     It prunes **both** the active workspace's trash and the legacy
-    ``logs/trash`` folder the batches written before this task live in. The
-    legacy folder is only ever expired, never *moved* into the new shape:
-    rewriting bytes nobody is looking at is a worse surprise than a batch that
-    outlives its usefulness one day longer, and age is the only signal left for
-    a path the app no longer addresses. Because the sweep is best-effort, it is
-    also called once from the app's startup, so the legacy folder drains even
-    when no further delete ever happens.
+    ``logs/trash`` folder older batches live in. The legacy folder is only ever
+    expired, never *moved* into the new shape: rewriting bytes nobody is looking
+    at is a worse surprise than a batch that outlives its usefulness one day
+    longer. Because the sweep is best-effort, it is also called once from the
+    app's startup, so the legacy folder drains even when no further delete ever
+    happens.
 
     Like the move it follows, the sweep walks these folders with plain ``os`` /
     ``shutil`` calls — the trash sits inside the reserved folder, which the
@@ -651,14 +622,11 @@ def _rel_in_workspace(resolved: Path) -> Optional[str]:
     always a symlink's target, since the walk starts at a resolved root — sits
     where no policy of this workspace reaches, and the caller refuses that.
 
-    Containment is the one shared rule (A-D2.2, win-06) rather than a prefix
-    built here: what this function used to do was trim the root's trailing
-    separator, append one, and compare that against slash-joined text — which
-    never matched a ``C:\\…`` root, so it answered ``None`` for *every* path on
-    Windows and each folder delete was refused with the "outside the working
-    location" wording (roadmap §2's loud-but-correct row).
-    The fold comes from the workspace's own filesystem, and the remainder keeps
-    ``/`` separators like every other Editor payload.
+    Containment is the one shared rule rather than a prefix built here: a
+    hand-built prefix never matched a ``C:\\…`` root, so it answered ``None``
+    for *every* path on Windows and each folder delete was refused. The fold
+    comes from the workspace's own filesystem, and the remainder keeps ``/``
+    separators like every other Editor payload.
     """
     workspace = workspace_root()
     text = str(resolved)
@@ -666,7 +634,7 @@ def _rel_in_workspace(resolved: Path) -> Optional[str]:
         return None
     # Same component list the containment compare used, so the two cannot
     # disagree about where the workspace stops. The remainder keeps the
-    # spelling of the path on disk — folding is comparison only (A-D3).
+    # spelling of the path on disk — folding is comparison only.
     parent_parts = _absolute_parts(workspace)
     return "/".join(_absolute_parts(text)[len(parent_parts) :])
 
@@ -685,7 +653,7 @@ def _subtree_refusal(
     Both strict modes count: a folder rule matches everything under it, so this
     is what makes ``ro`` mean "this subtree does not move", and ``hidden`` mean
     the same about a subtree the tree never showed. A descendant whose answer
-    cannot be settled is refused too — an unchecked subtree is not a checked one.
+    cannot be settled is refused too.
 
     ``descendants`` is the caller's walk (the same one that counts ``entries``),
     so a delete of a big folder walks it once, not twice.
@@ -724,10 +692,10 @@ def _batch_label(batch: Path) -> str:
 
     **Workspace-relative** (``.nojae/trash/<batch>``) whenever the batch sits in
     the active workspace's trash — the same frame every other Editor payload
-    uses, and the one the e2e witness joins onto the working location. It names
-    a folder the pane *deliberately cannot open* (the reserved folder is hidden
-    from the tree and the read route), so the confirmation has to phrase it as a
-    path to ``cd`` to in a terminal, not as a browsable location.
+    uses. It names a folder the pane *deliberately cannot open* (the reserved
+    folder is hidden from the tree and the read route), so the confirmation has
+    to phrase it as a path to ``cd`` to in a terminal, not as a browsable
+    location.
 
     Absolute when a deployment (or a test) pinned ``TRASH_DIR`` outside the
     workspace — a label that is wrong is worse than one that is longer.
@@ -737,8 +705,8 @@ def _batch_label(batch: Path) -> str:
         rel = batch.relative_to(workspace)
     except ValueError:
         return str(batch)
-    # ``/``-joined whatever the host separator (A §7, roadmap §9 rule 1): this
-    # label is Editor payload text, and a payload field never carries ``\``.
+    # ``/``-joined whatever the host separator: this label is Editor payload
+    # text, and a payload field never carries ``\``.
     return rel.as_posix()
 
 
@@ -768,16 +736,13 @@ def trash_path(rel: str) -> Dict[str, Any]:
       a restore a plain ``mv`` — with a bare ``f.py`` one cannot tell ``src/f.py``
       from ``web/f.py``, and a name collision inside one batch would be data loss.
       ``shutil.move`` preserves the subtree, and on a workspace that sits on
-      another filesystem it degrades to a copy + delete: slower, and correct,
-      which is the trade being taken here.
+      another filesystem it degrades to a copy + delete: slower, and correct.
       The **destination** is built with plain ``mkdir`` calls and is never put
       through :func:`resolve_write_target`: it lives under the reserved folder,
-      which that gate refuses for every path that names it, and it is app-chosen
-      space no route can address anyway. Only the source is gated.
-      A batch can never be trashed into itself either — nothing can delete
-      ``.nojae`` or anything inside it, and no folder under the root contains the
-      trash path — so the ``shutil.move`` "directory into itself" hazard does not
-      arise.
+      which that gate refuses for every path that names it. Only the source is
+      gated. A batch can never be trashed into itself either — nothing can delete
+      the reserved folder or anything inside it — so the ``shutil.move``
+      "directory into itself" hazard does not arise.
     * the sweep (:func:`sweep_trash`) runs after the move, so a failed prune can
       never lose the copy that was just made.
 

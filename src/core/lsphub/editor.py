@@ -10,9 +10,7 @@ tool to the model's list**. The two sets overlap and are deliberately not the
 same, and they do not even share an answer where they overlap: ``diagnostics``
 appears in both, and the model gets a rendered, truncated text report while the
 pane gets structured items. Sharing one return shape would mean the pane
-parsing English back out of a prompt paragraph, or the model receiving raw JSON
-(spec §3). The model also gets document symbols, workspace symbols, completion,
-signature help and formatting, none of which the pane needs in v1.
+parsing English back out of a prompt paragraph, or the model receiving raw JSON.
 
 Positions on the wire are **0-based**, LSP-native. The ``+1`` that turns them
 into Monaco's 1-based coordinates happens once, in the browser's ``lib/``
@@ -28,19 +26,19 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from . import rendering
 
 # The absent/``False``/``None`` capability rule is ``tools.py``'s, imported
-# rather than copied: two copies of it would drift, and the editor and the
-# model must agree on what "this server advertises the capability" means.
+# rather than copied: the editor and the model must agree on what "this server
+# advertises the capability" means.
 from .tools import _capability_present
 
 #: action -> the LSP request method it maps to, the server capability that
 #: gates it (in the shape ``TOOL_SPECS`` uses), and whether it needs a
 #: position. ``status`` maps to no method: the hub's own state answers it.
-#: ``diagnostics`` names no method either, and for a different reason: it is
+#: ``diagnostics`` names no method either, for a different reason: it is
 #: answered from the per-session inbox the notification handler already fills,
-#: without waiting for a push and without sending a 3.17 pull request (spec
-#: §3.1). Its capability is ``None`` — "always offered" — because a push
-#: notification is not a capability anything advertises, the same rule the
-#: model's own diagnostics tool follows.
+#: without waiting for a push and without sending a 3.17 pull request. Its
+#: capability is ``None`` — "always offered" — because a push notification is
+#: not a capability anything advertises, the same rule the model's own
+#: diagnostics tool follows.
 #:
 #: Every method here is a query, and every action here is the **Editor's,
 #: never a tool**: this table and :data:`lsphub.tools.TOOL_SPECS` overlap on
@@ -82,8 +80,7 @@ EDITOR_ACTIONS: Dict[str, Dict[str, Any]] = {
 def supports_action(capabilities: Any, action: str) -> bool:
     """Whether a server advertises the capability ``action`` needs.
 
-    The absent/``False``/``None`` rule is ``tools.py``'s, imported rather than
-    copied: one rule, one place. An unknown action is not supported.
+    An unknown action is not supported.
     """
     spec = EDITOR_ACTIONS.get(action)
     if spec is None:
@@ -96,8 +93,7 @@ def _relative_path(workspace_root: Union[str, Path], uri: str) -> str:
 
     Relative to the **working location**, not the server's root, and with the
     separators the browser's buffers use. A path outside the workspace falls
-    back to its absolute form rather than raising: the answer is still a
-    position, and the caller decides what to do with it.
+    back to its absolute form rather than raising.
     """
     path = Path(rendering.uri_to_path(uri))
     root = Path(workspace_root)
@@ -255,14 +251,12 @@ def diagnostics_answer(
     arrived for it — and ``limit`` is the server's own cap on how many reach the
     browser, the same one the model's tool applies.
 
-    The answer distinguishes the three states the bar exists for (spec §4),
-    because an empty list means *clean* only once an analysis was actually
-    reached:
+    The answer distinguishes the three states the bar exists for, because an
+    empty list means *clean* only once an analysis was actually reached:
 
     - ``analysed: False`` — the hub holds no analysis for this document. This is
-      *unknown*, never "clean", and it is deliberately **not** an error and not
-      a fourth envelope status: it is a normal ``ok`` answer whose result says
-      nothing has been analysed yet.
+      *unknown*, never "clean", and deliberately **not** an error: it is a
+      normal ``ok`` answer whose result says nothing has been analysed yet.
     - ``analysed: True`` with an empty ``items`` — analysed and clean.
     - ``analysed: True`` with items — analysed, N problems.
 
@@ -270,25 +264,16 @@ def diagnostics_answer(
     (``actions.DocumentSync.text_version``). A payload below it was analysed
     from text a later sync replaced, so it describes bytes nobody is looking at
     and the honest answer is ``analysed: False`` — never that payload, whose
-    squiggles would sit under code that no longer has them. A payload at or
-    above it describes the open text, and an unchanged re-ask leaves the number
-    where the held analysis already stands, so re-asking never hides a verdict
-    (D4: the version bump alone is not staleness).
+    squiggles would sit under code that no longer has them. ``None`` means no
+    comparison is possible (the caller has no sync, or the server published no
+    version) and then the payload is accepted rather than guessed at.
 
-    That is not waiting (spec §3.1): it is refusing to present a superseded
-    analysis as a verdict, and the next of D3's four triggers is what asks
-    again. ``None`` means "no comparison is possible" — the caller has no sync,
-    or the server published no version — and then the payload is accepted
-    rather than guessed at, since guessing would either drop every good answer
-    or keep every bad one.
-
-    ``version`` is the document version the payload belongs to, and it is
-    absent when there is no payload. **The client compares successive answers
-    for one buffer**: a strictly *older* version is the stale one and an equal
-    version is the same analysis. It must not test "this version equals the
-    document's current version" — the shared sync bumps that version on every
-    call, so that comparison would call every answer stale, a good one included
-    (D4).
+    ``version`` is the document version the payload belongs to, absent when
+    there is no payload. **The client compares successive answers for one
+    buffer**: a strictly *older* version is the stale one and an equal version
+    is the same analysis. It must not test "this version equals the document's
+    current version" — the shared sync bumps that version on every call, so that
+    comparison would call every answer stale, a good one included.
 
     ``suppressed`` is what the cap hid, so a truncated list is never presented
     as the whole truth. A range stays 0-based on the wire, and there is no path
@@ -312,9 +297,8 @@ def diagnostics_answer(
     for diagnostic in published[:cap]:
         item: Dict[str, Any] = {
             "range": _range_answer(getattr(diagnostic, "range", None)),
-            # The absent-severity rule is the rendering module's, imported
-            # rather than restated: a server that omitted the field means
-            # "error", and a second copy of that rule would be a second answer.
+            # The absent-severity rule is the rendering module's: a server that
+            # omitted the field means "error".
             "severity": rendering.severity_name(getattr(diagnostic, "severity", None)),
             "message": str(getattr(diagnostic, "message", "") or ""),
         }

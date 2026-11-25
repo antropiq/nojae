@@ -10,8 +10,7 @@ for the whole lifetime of the app, on a dedicated asyncio thread, so
 synchronous callers (chat worker threads) can bridge onto it with
 :meth:`McpManager.call_tool_sync`.
 
-Layout — the module members live one concern per file, mirroring
-``core/lsphub``:
+Layout — one concern per file, mirroring ``core/lsphub``:
 
 * :mod:`mcphub.constants` paths (including the workspace declaration
   resolver), retry/timeout policy
@@ -43,10 +42,8 @@ from .seed import ensure_mcp_settings_file, mcp_settings_file_state
 from .validation import argv_from_command, str_map
 
 # Make the constants re-exported through ``__getattr__`` visible to type
-# checkers (they appear in ``__all__`` and are readable as ``mcphub.X``).
-# These imports are never executed at runtime, so the names are still
-# resolved dynamically by ``__getattr__`` and stay patchable on
-# ``mcphub.constants``.
+# checkers. Never executed at runtime, so the names are still resolved
+# dynamically by ``__getattr__`` and stay patchable on ``mcphub.constants``.
 if TYPE_CHECKING:
     from .constants import (
         CONNECT_INTERVAL,

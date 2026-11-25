@@ -40,8 +40,8 @@ function tooltip(data) {
     : data.content
 }
 
-// Filled bullet: click appends its text to the draft, Ctrl/Cmd+click (or a
-// click on an empty bullet) opens the registration dialog.
+// A filled bullet appends its text to the draft; Ctrl/Cmd+click or an empty
+// bullet opens the dialog.
 function onClick(event, data) {
   if (batch.active) return
   if (isFilled(data) && !event.ctrlKey && !event.metaKey) {
@@ -53,10 +53,8 @@ function onClick(event, data) {
 </script>
 
 <template>
-  <!-- As many bullets as the store holds, numbered by position (§5.3). The row
-       is empty — and so renders nothing — for a user who deleted every bullet,
-       until the dialog's Add puts one back. `.memory-bullets` already wraps
-       rather than overflowing, which is the layout rule a longer list needs. -->
+  <!-- As many bullets as the store holds, numbered by position; the row wraps
+       rather than overflowing, and renders nothing when every bullet is deleted. -->
   <div class="memory-bullets" role="group" aria-label="Memory bullets">
     <button
       v-for="(data, index) in state.slots"
@@ -75,11 +73,8 @@ function onClick(event, data) {
     >
       {{ bulletNumber(index) }}
     </button>
-    <!-- The row's one extra affordance, and it exists only in the state the old
-         nine-slot row could never reach: **no bullets at all**. Without it the
-         dialog — where Add lives — would be unreachable, because the only way to
-         open it was to click a bullet. A row that has bullets shows nothing extra,
-         so today's look is unchanged. -->
+    <!-- Needed only with no bullets at all: otherwise the dialog, where Add lives,
+         would be unreachable because a bullet click is the only way in. -->
     <button
       v-if="!state.slots.length"
       type="button"

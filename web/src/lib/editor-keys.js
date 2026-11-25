@@ -1,14 +1,9 @@
 // The Editor pane's window-level chords, decided apart from the listener that
-// dispatches them — the same split `lib/tab-strip-wheel.js` makes for the
-// strip: the component owns the DOM and the effects, this owns the question
-// "which key, on which screen, with what modifiers — and so what?".
-//
-// It is worth a module because the answer is a table of preconditions a test
-// can enumerate (another tab visible, no active buffer, the wrong modifiers)
-// and because all four chords belong to *one* owner. Splitting `Ctrl+S` into a
-// Monaco keybinding and `Ctrl+W` into this listener is how one of them quietly
-// stops working: the pane is read-only while a reply streams, and a command
-// registered on the editor is not reachable then. The window listener always is.
+// dispatches them. All the chords belong to *one* owner: splitting `Ctrl+S` into
+// a Monaco keybinding and `Ctrl+W` into this listener is how one of them quietly
+// stops working, because the pane is read-only while a reply streams and a
+// command registered on the editor is not reachable then. The window listener
+// always is.
 
 // Returns the action for this event, or null when the pane must not consume it
 // at all — which is also the signal *not* to call `preventDefault()`, so the
@@ -19,8 +14,7 @@ export function editorChord(event, context) {
   if (context.activeTab !== 'editor') return null
   if (!(event.ctrlKey || event.metaKey)) return null
   // Alt is never part of these chords: accepting Ctrl+Alt+S would take a key
-  // some window managers and input methods already own, and the app would never
-  // know it had stolen it.
+  // some window managers and input methods already own.
   if (event.altKey) return null
 
   const key = event.key.toLowerCase()
@@ -29,26 +23,21 @@ export function editorChord(event, context) {
     return context.active ? { action: event.shiftKey ? 'save-all' : 'save' } : null
   }
  if (key === 'p' && !event.shiftKey) {
-   // Ctrl+P is the quick-open finder (qop-07). It needs no active buffer — the
-   // dialog is useful on an empty pane — but it is still the Editor tab's
-   // chord only: elsewhere the browser keeps Print.
+   // Ctrl+P is the quick-open finder. It needs no active buffer, but it is
+   // still the Editor tab's chord only: elsewhere the browser keeps Print.
    return { action: 'quick-open' }
  }
  if (key === 'w' && !event.shiftKey) {
-    // Whether the close needs a confirmation is the record's business
-    // (`requestCloseTab` decides); this only says the gesture was meant here.
-    // Ctrl+Shift+W is left alone: it means "close all" in the browsers this app
-    // runs in, and taking a chord the app has no answer for is how a user loses
-    // a whole window they meant to leave one tab in.
+    // Whether the close needs a confirmation is `requestCloseTab`'s business.
+    // Ctrl+Shift+W is left alone: it means "close all" in these browsers, and
+    // taking a chord the app has no answer for loses the user a whole window.
     return context.active ? { action: 'close' } : null
   }
   return null
 }
 
-// The single place the modifier test is written, so the listener reads as the
-// intent rather than as a boolean expression: consume the event only for a
-// chord this app owns, keeping the browser's Save-page / close-tab dialogs from
-// appearing on top of the app's own answer.
+// Consumes the event only for a chord this app owns, keeping the browser's
+// Save-page and close-tab dialogs from appearing on top of the app's answer.
 export function applyEditorChord(event, context, handlers) {
   const chord = editorChord(event, context)
   if (!chord) return false

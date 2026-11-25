@@ -1,28 +1,17 @@
 """The POSIX driver behind the terminal's pty seam: kernel mechanics, nothing else.
 
-C-D1's seam in one sentence: ``session.py`` keeps every session guarantee —
-the frame contract, the ``PTY_READ_BYTES`` chunk framing, the incremental
-UTF-8 decoder, the session cap, the tree teardown — and the pseudo-terminal
-itself sits behind one small named surface. This module is that surface for
-POSIX:
+``session.py`` keeps every session guarantee — the frame contract, the
+``PTY_READ_BYTES`` chunk framing, the incremental UTF-8 decoder, the session cap,
+the tree teardown — and the pseudo-terminal itself sits behind one small named
+surface, which is what this module is for POSIX.
 
-* :func:`open_pair` — the terminal pair (today's ``pty.openpty()``);
-* :meth:`PosixPty.set_size` / :meth:`PosixPty.get_size` — the window-size
-  ioctls (``TIOCSWINSZ`` / ``TIOCGWINSZ``);
-* :meth:`PosixPty.read` / :meth:`PosixPty.write` — byte-level I/O on the master;
-* :meth:`PosixPty.close_slave` — the slave-close rule, with its why;
-* :class:`FarEndGone` — the ``EIO`` translation, the seam's answer to
-  *"is the far end gone?"*;
-* :meth:`PosixPty.close_master` — releasing the master (the rule about *when*
-  it is safe to close stays with the session, which owns the reader thread).
+:func:`available` is this driver's answer to the seam's selection question: the
+machinery below is there exactly when it imported.
 
-:func:`available` is this driver's answer to the seam's selection question
-(csl-04): the machinery below is there exactly when it imported.
-
-It is a mechanics layer only: it decides no policy, owns no process, spawns no
-child and knows nothing about WebSockets or frames. ``read`` answers bytes —
-never already-decoded text — so the session's framing and decoder stay the
-single source of truth every platform's driver shares.
+A mechanics layer only: it decides no policy, owns no process, spawns no child
+and knows nothing about WebSockets or frames. ``read`` answers bytes — never
+already-decoded text — so the session's framing and decoder stay the single
+source of truth every platform's driver shares.
 """
 
 import errno
@@ -52,8 +41,8 @@ def available() -> bool:
 
     The runtime import block above already answers the question — the three
     modules exist exactly on POSIX — so the probe is that verdict, not an
-    ``os.name`` test (roadmap §9 rule 2). ``termhub.drivers`` asks it to
-    decide whether a session may spawn at all.
+    ``os.name`` test. ``termhub.drivers`` asks it to decide whether a session may
+    spawn at all.
     """
     return pty is not None and fcntl is not None and termios is not None
 
@@ -61,24 +50,21 @@ def available() -> bool:
 class FarEndGone(OSError):
     """The seam's answer to *"is the far end gone?"*.
 
-    :meth:`PosixPty.read` raises it for the ``EIO`` the master answers once
-    every holder of the slave is gone — the fact ``session.py`` relies on
-    twice: it is how the pump learns the shell exited on its own, and how a
-    read blocked in a worker thread is unblocked by the teardown ("it is
-    unblocked by the teardown, because once the shell and its children are
-    gone the master answers ``EIO``").
+    :meth:`PosixPty.read` raises it for the ``EIO`` the master answers once every
+    holder of the slave is gone — the fact ``session.py`` relies on twice: the
+    pump learns the shell exited on its own, and a read blocked in a worker thread
+    is unblocked by the teardown.
 
-    An ``OSError`` subclass on purpose: an unexpected read error stays the
-    error it was and keeps the pump's single ``except OSError`` path, and a
-    driver for another platform answers the same question by raising this
-    same exception.
+    An ``OSError`` subclass on purpose: an unexpected read error stays the error
+    it was and keeps the pump's single ``except OSError`` path, and a driver for
+    another platform answers the same question with this same exception.
     """
 
 
 class PosixPty:
     """One terminal pair as two descriptors: the master to pump, the slave to
-    hand the child. Every method is exactly one syscall on one fd; the fds are
-    closed once, by the session, in the order the session's rules demand.
+    hand the child. Every method is one syscall on one fd; the fds are closed once,
+    by the session, in the order its rules demand.
     """
 
     def __init__(self, master_fd: int, slave_fd: int) -> None:
@@ -99,9 +85,8 @@ class PosixPty:
     def get_size(self) -> tuple[int, int]:
         """The window size the kernel has for this PTY, as ``(cols, rows)``.
 
-        ``TIOCGWINSZ`` — the server-side answer to "what width does the kernel
-        think this PTY has". The shell's own ``stty size`` is the client-side
-        view of the same number.
+        ``TIOCGWINSZ`` is the server-side answer; the shell's own ``stty size`` is
+        the client-side view of the same number.
         """
         rows, cols, _, _ = struct.unpack(
             "HHHH",
@@ -112,9 +97,8 @@ class PosixPty:
     def read(self, max_bytes: int) -> bytes:
         """One bounded read of the master — bytes, never decoded text.
 
-        The cap and the decode belong to the session's framing rule
-        (``PTY_READ_BYTES``, the incremental decoder); the driver only moves
-        bytes, and translates.
+        The cap and the decode belong to the session's framing rule; the driver
+        only moves bytes, and translates.
         """
         try:
             return os.read(self._master_fd, max_bytes)
@@ -129,12 +113,11 @@ class PosixPty:
     def close_slave(self) -> None:
         """Close *this process's* copy of the slave, right after the spawn.
 
-        The slave-close rule: while any process holds the slave open, a read
-        of the master never reports the shell's death, so a leftover duplicate
-        would hang the reader forever. It belongs in the spawning thread —
-        that is the process holding the copy — and right after the spawn,
-        because the descriptor only needs to stay open long enough to become
-        the child's stdio.
+        While any process holds the slave open, a read of the master never
+        reports the shell's death, so a leftover duplicate would hang the reader
+        forever. It belongs in the spawning thread — the process holding the copy
+        — and right after the spawn, because the descriptor only needs to stay open
+        long enough to become the child's stdio.
         """
         os.close(self._slave_fd)
 
@@ -145,8 +128,8 @@ class PosixPty:
 def open_pair() -> PosixPty:
     """The kernel's terminal pair, master and slave.
 
-    Setting the window size is the caller's, *before* it spawns the child — so
-    the first prompt already wraps at the right width. That ordering is session
+    Setting the window size is the caller's, *before* it spawns the child, so the
+    first prompt already wraps at the right width. That ordering is session
     policy, so it lives in ``session.py``.
     """
     master_fd, slave_fd = pty.openpty()

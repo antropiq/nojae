@@ -2,16 +2,15 @@
 model endpoint.
 
 Core-only transport: no FastAPI, no event bus, no ``.env`` read — a caller
-passes ``model`` / ``server_url`` / ``api_key`` / ``sampling`` in, exactly as
-it passed them to the streamed call this package replaces. Layout mirrors
-``core/mcphub`` and ``core/lsphub``:
+passes ``model`` / ``server_url`` / ``api_key`` / ``sampling`` in. Layout
+mirrors ``core/mcphub`` and ``core/lsphub``:
 
 * :mod:`llmkit.constants` -- the tuning numbers (timeouts, wire sentinels)
-* :mod:`llmkit.sanitize` -- neutralising delimiter-wrapped control-token
-  runs in outgoing message content, applied by both call shapes
+* :mod:`llmkit.sanitize` -- neutralising delimiter-wrapped control-token runs
+  in outgoing content, applied by both call shapes
 * :mod:`llmkit.sse` -- SSE lines to parsed chat-completion chunk dicts
 * :mod:`llmkit.client` -- the two call shapes, the error type, the verdict on
-  a failed call (retryable or final), the URL rules
+  a failed call, the URL rules
 """
 
 from .client import (

@@ -7,14 +7,13 @@ import { useSessionStats } from '../composables/useSessionStats'
 // one is live — and keeps ticking while the user watches the Editor tab, which
 // is what makes a background session readable at all. Between two replies it
 // holds the total the conversation has spent, because asking again continues
-// the same session; only the composer's Restart puts it back to 00:00:00. See
-// useSessionStats for the source resolution.
+// the same session; only the composer's Restart puts it back to 00:00:00.
 //
 // **The clock's total excludes the seconds a turn spent waiting on a refused
-// endpoint** (spec §5.16 — a 40-minute provider outage is not a 40-minute
-// session). The turn's own span is still the composable's answer (spec §5.17),
-// but this component no longer renders it: the caption under the clock made the
-// actions row taller than the bar.
+// endpoint** — a 40-minute provider outage is not a 40-minute session. The
+// turn's own span is still the composable's answer, but this component does not
+// render it: the caption under the clock made the actions row taller than the
+// bar.
 const stats = useSessionStats()
 
 // Ticked on its own interval rather than on SSE events, so the digits keep

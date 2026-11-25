@@ -1,9 +1,8 @@
 """Result rendering: LSP structures -> compact, line-numbered text.
 
-What a tool call hands back to the model is text, and these helpers are the
-whole contract: 1-based positions for readability (the input schemas ask for
-0-based), capped output, and an explicit "suppressed" note instead of a
-silent cut. They touch no session state, so they are testable on fixtures.
+Output is capped and cut with an explicit "suppressed" note rather than
+silently; positions read 1-based here though the input schemas ask for
+0-based. No session state is touched, so these helpers test on fixtures.
 """
 
 from pathlib import Path
@@ -45,7 +44,7 @@ def render_diagnostics(
     """``path:line:col severity: message (code)`` lines.
 
     ``publishDiagnostics`` carries the URI on the *notification*, not on each
-    diagnostic, so the owning document's URI is passed in as ``default_uri``.
+    diagnostic, hence ``default_uri``.
     """
     if not diagnostics:
         return "No diagnostics."
@@ -72,7 +71,7 @@ def render_diagnostics(
 
 def location_line(root: Path, location: Any) -> str:
     # A Location carries uri/range; a LocationLink (definition/declaration
-    # responses) carry target_uri/target_range instead.
+    # responses) carries target_uri/target_range instead.
     uri = getattr(location, "uri", None) or getattr(location, "target_uri", None)
     range_ = getattr(location, "range", None) or getattr(location, "target_range", None)
     if uri is None or range_ is None:
@@ -84,8 +83,7 @@ def location_line(root: Path, location: Any) -> str:
 def render_locations(root: Path, locations: Any, limit: int = 40) -> str:
     if not locations:
         return "No results."
-    # Some servers (pyright) come back through cattrs as a tuple rather than
-    # a list; treat any list/tuple as a collection of locations.
+    # Some servers (pyright) answer a tuple through cattrs, not a list.
     if not isinstance(locations, (list, tuple)):
         locations = [locations]
     lines = [location_line(root, location) for location in locations[:limit]]
@@ -210,11 +208,10 @@ def render_symbols(root: Path, symbols: Any, limit: int = 40) -> str:
 def apply_whole_line_edits(text: str, edits: List[Any]) -> str:
     """Apply TextEdits to a copy of ``text`` (for the formatting diff preview).
 
-    Each position becomes an absolute offset and the edits are applied
-    bottom-up, so the offsets of the not-yet-applied edits stay valid. Both
-    ends are clamped into the text: a whole-document format edit routinely
-    ends at ``(line_count, 0)`` — one line past the last — and an insertion
-    may start there too. Never touches the file on disk.
+    Edits are applied bottom-up, so the offsets of the not-yet-applied ones
+    stay valid. Both ends are clamped into the text: a whole-document format
+    edit routinely ends at ``(line_count, 0)`` — one line past the last — and
+    an insertion may start there too. Never touches the file on disk.
     """
     ordered = sorted(
         edits,

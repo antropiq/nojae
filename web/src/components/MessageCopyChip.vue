@@ -2,12 +2,9 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { copyText } from '../lib/clipboard'
 
-// One message's copy affordance: the chip on an assistant card that puts *that
-// reply* on the clipboard (the composer's own button above the textarea is the
-// one that copies the whole conversation).
+// Copies *this* reply; the composer's own button copies the whole conversation.
 const props = defineProps({
-  // The text to copy — the reply as the model wrote it, sentinels removed (see
-  // useChat's messageClipboardText).
+  // The reply as the model wrote it, sentinels removed (see messageClipboardText).
   text: { type: String, default: '' },
 })
 

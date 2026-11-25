@@ -1,11 +1,9 @@
 """Discovery and validation of the declared language servers.
 
 Reads the workspace's ``.nojae/lsp-settings.json`` into the dicts the rest
-of the package consumes. The declaration path is looked up through
-``lsphub.constants.lsp_settings_path()`` *inside* each function call, so a
-switched working location moves the read and a patched pin redirects it —
-one attribute, not an import dance. The deny-list is still an
-``lsphub.constants`` attribute read the same way.
+of the package consumes. The declaration path and the deny-list are resolved
+through ``lsphub.constants`` *inside* each call, so a switched working
+location moves the read and a patched pin redirects it.
 """
 
 import importlib.util
@@ -14,8 +12,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-# The path-*text* questions the shared connector policy answers (win-02): what
-# root a prefix is spelled with, on either platform, with no ``os.path`` branch.
+# The path-*text* questions the shared connector policy answers: what root a
+# prefix is spelled with, on either platform, with no ``os.path`` branch.
 # Imported the connectors' own way, because ``mcp_connectors`` sits outside
 # ``src`` and is not always on ``sys.path`` (the same fallback
 # ``mcphub.process`` and ``editorfs.constants`` use).
@@ -29,16 +27,13 @@ except ImportError:  # pragma: no cover - depends on how the app is started
         sys.path.insert(0, _root)
     from mcp_connectors import path_policy  # type: ignore[no-redef]
 
-# The one containment rule (A-D2.2, win-06). Direction of this import: the
-# editorfs surface reaches *this* module for ``restricted_lsp_roots`` — lazily,
-# inside the one function that asks — while this module needs only the pure
-# compare, which imports nothing from ``lsphub``. So no cycle: importing
-# ``editorfs.policy`` here pulls in ``src.config`` and the ``mcp_connectors``
-# policy modules, never ``lsphub``. ``fscase`` is where the fold answer comes
-# from, and it is the *workspace's* filesystem that is probed for every one of
-# these compares (see ``_is_within``'s docstring for that choice) — aliased,
-# because this module's own entries carry a ``workspaceRoot`` and the local
-# spelling of that name is a string, not the function.
+# The one containment rule. Direction of this import: the editorfs surface
+# reaches *this* module for ``restricted_lsp_roots`` — lazily, inside the one
+# function that asks — while this module needs only the pure compare, which
+# imports nothing from ``lsphub``. So no cycle. ``fscase`` answers the fold from
+# the *workspace's* filesystem (see ``_is_within``'s docstring); the root
+# accessor is aliased because this module's own entries carry a ``workspaceRoot``
+# and that local name is a string, not the function.
 from src.core.editorfs import fscase
 from src.core.editorfs.policy import _is_within
 from src.core.editorfs.policy import workspace_root as active_workspace_root
@@ -71,24 +66,16 @@ def restricted_lsp_roots(path: Optional[Path] = None) -> List[str]:
     r"""Workspace-root prefixes refused by the hub, from ``restricted-paths.txt``.
 
     One absolute prefix per line, ``#`` starts a comment, and a line may name an
-    environment variable as ``${NAME}`` (or ``${NAME:-fallback}``): it is expanded
-    here, at read time, through the same helper a declaration's values go
-    through, so one committed list stays machine-neutral and carries **both**
-    platforms' path forms (B-D1). Nothing in the file may spell a drive letter or
-    a home directory — ``${USERPROFILE}/.ssh`` and ``${SystemRoot}`` resolve to
-    whatever the running OS states, and a runner that states neither gains
-    nothing, which is what keeps the Linux verdicts unchanged.
+    environment variable as ``${NAME}`` (or ``${NAME:-fallback}``), expanded here
+    at read time so one committed list stays machine-neutral and carries both
+    platforms' path forms with no drive letter or home directory spelled in it.
 
-    A line whose reference does **not** resolve is dropped, not kept
-    as written. For a declaration the rule is the opposite (an unresolved
-    ``${NAME}`` stays verbatim so the typo is visible in that entry's note), and
-    the difference is what makes an un-expanded line dangerous *here*: it is a
-    prefix, so it reads to ``guardrails_speak_here`` as an entry that speaks this
-    filesystem's root form while protecting nothing — the list would look
-    meaningful, the reach seam would be lifted on that reading, and every entry
-    that *did* resolve would go unenforced. A guardrail that cannot be honoured
-    is absent, not guessed: the same sentence ``path_policy._env_absolute``
-    already applies to the connector lists.
+    A line whose reference does **not** resolve is dropped, not kept as written —
+    the opposite of a declaration's rule, and for a reason: an un-expanded prefix
+    reads to ``guardrails_speak_here`` as an entry that speaks this filesystem's
+    root form while protecting nothing, so the reach seam would be lifted on that
+    reading and the entries that *did* resolve would go unenforced. A guardrail
+    that cannot be honoured is absent, not guessed.
     """
     root = path or constants.LSP_RESTRICTED_PATHS
     try:
@@ -104,13 +91,10 @@ def restricted_lsp_roots(path: Optional[Path] = None) -> List[str]:
         entry = entry.strip()
         # ``missing`` first and on its own: a half-resolved line — ``/home/
         # ${NOPE}/.ssh`` — still has a rooted shape, so testing only the shape
-        # would let the literal reference into the list as a working prefix. A
-        # line that cannot be honoured is simply absent (see the docstring: the
-        # reach seam must not read it as a bound). It is dropped in silence: a
-        # cross-platform list drops its other-platform lines by design, so any
-        # note here would be pure noise — the mechanism is documented, not
-        # logged. Only a resolved, absolute line joins the effective list, and
-        # one guardrail stated twice is noise in a deny-list.
+        # would let the literal reference in as a working prefix. Dropped in
+        # silence: a cross-platform list drops its other-platform lines by
+        # design, so a note here would be pure noise. A guardrail stated twice
+        # is noise too.
         honoured = not missing and _is_prefix(entry)
         if honoured and entry not in entries:
             entries.append(entry)
@@ -121,19 +105,16 @@ def _is_prefix(text: str) -> bool:
     r"""Is ``text`` an absolute prefix at all — on **either** platform?
 
     Asked of the shared text classifier, never of ``os.path.isabs``: that answers
-    ``False`` for ``/etc`` on Windows, and a line is either a real POSIX guardrail
-    or a dead one depending on the runner it was read on. What makes a prefix
-    speak a path is its *root* (``path_policy.root_form``), the same basis
-    ``lists_are_meaningful`` and the hub's own reach seam compare — so the file's
-    POSIX half stays in force on a Windows runner, and only text with no root at
-    all (``~/.ssh``, a relative path, a leading reference that resolved to
-    nothing) is dropped for being unrooted.
+    ``False`` for ``/etc`` on Windows, which would make a POSIX guardrail dead on
+    the runner it was read on. What makes a prefix speak a path is its *root*
+    (``path_policy.root_form``); only text with no root at all (``~/.ssh``, a
+    relative path) is dropped for being unrooted.
     """
     return path_policy.root_form(text) in ("absolute", "drive", "unc")
 
 
 def lsp_reach_is_refused() -> bool:
-    """Must a declared language server be refused here? (win-07 / A-D4.)
+    """Must a declared language server be refused here?
 
     The LSP hub's call of the shared predicate (``mcphub.process``, which the
     MCP hub calls too), so a refusal cannot be argued differently in the two
@@ -143,17 +124,13 @@ def lsp_reach_is_refused() -> bool:
     entries, the connector prefix lists, so an absent list is not mistaken for
     a bound that has stopped matching.
 
-    That is the whole question (lspfinal-04): what refuses here is an **inert
-    list**, never an operating system. A rule that stops matching produces no
-    error — the verdict falls back to allowing — so a language server whose
-    ``workspaceRoot`` no prefix can name is one whose reach the app has bounded
-    in words only, and that is refused. Everything else about the bound is a
-    capability this hub holds on either platform: the spawn puts the child in a
-    Job Object where there are no process groups, the teardown is the one shared
-    entry point (B-D5, ``proctree`` / ``proctree_jobs``), and the list gains its
-    Windows forms from the running environment at read time (B-D1). A
-    deployment is therefore fixed by *writing values*, not by the code knowing
-    which OS it is on.
+    What refuses here is an **inert list**, never an operating system: a rule
+    that stops matching produces no error, so a server whose ``workspaceRoot`` no
+    prefix can name is one whose reach the app has bounded in words only. The
+    rest of the bound is a capability this hub holds on either platform (the
+    spawn's Job Object, the shared ``proctree`` teardown, the Windows path forms
+    read from the environment), so a deployment is fixed by *writing values*, not
+    by the code knowing which OS it is on.
     """
     return not constants.guardrails_speak_here(restricted_lsp_roots() or None)
 
@@ -161,13 +138,12 @@ def lsp_reach_is_refused() -> bool:
 def denied_roots() -> Tuple[List[str], bool]:
     """``(real deny-list, one fold answer)`` — the pair a scan computes once.
 
-    Two facts, asked together because they always travel together and both are
-    properties of the running configuration rather than of one entry: the
-    deny-list's entries as real paths, and whether the *workspace's* filesystem
-    folds case (``_is_within``'s docstring records why that is the fold). The
-    file walk hands the pair to :func:`entry_from_declaration`, and so does the
-    wizard's snippet check — one computation, one verdict, and no probe of a
-    folder the hub is about to refuse.
+    Two facts that always travel together and are properties of the running
+    configuration rather than of one entry: the deny-list's entries as real
+    paths, and whether the *workspace's* filesystem folds case (``_is_within``'s
+    docstring records why that is the fold). The file walk and the wizard's
+    snippet check both hand the pair to :func:`entry_from_declaration` — one
+    computation, one verdict.
     """
     denied = [os.path.realpath(entry) for entry in restricted_lsp_roots()]
     return denied, fscase.case_folded(active_workspace_root()) if denied else False
@@ -186,21 +162,18 @@ def entry_from_declaration(
 
     The **only** place the shape of a server entry is judged, so the file walk
     (:func:`load_lsp_servers`) and the connector wizard's snippet check
-    (:mod:`wizard.snippet`) cannot drift: a member the wizard accepts is a
-    member this loader accepts, in the same words, because it is this function
-    that answers both. Its mirror is
+    (:mod:`wizard.snippet`) cannot drift. Its mirror is
     :func:`mcphub.discovery.entry_from_declaration` — same name, same shape, so
-    the two hubs keep mirroring each other (AGENTS.md).
+    the two hubs keep mirroring each other.
 
     ``name`` is the declaration file's name, which the sentences begin with.
     Answers ``(server, errors)``: a refused entry is ``None`` with its refusal
     as the last error, a loaded one a dict plus the notes it earned (an
     unresolved ``${NAME}``, a refused reach).
 
-    ``denied``/``fold`` are the scan's deny-list and its one fold answer — a
-    property of the running configuration, computed once per load.
-    ``refused_reach`` likewise; ``None`` asks the seam here, which is what a
-    caller checking a single entry wants.
+    ``denied``/``fold`` and ``refused_reach`` are properties of the running
+    configuration, computed once per load; ``refused_reach=None`` asks the seam
+    here, which is what a caller checking a single entry wants.
     """
     prefix = f"{name}: '{server_id}'"
     errors: List[str] = []
@@ -209,11 +182,10 @@ def entry_from_declaration(
     if not isinstance(entry, dict):
         errors.append(f"{prefix}: entry must be a JSON object — skipped")
         return None, errors
-    # Everything that may carry a ``${NAME}`` reference is expanded here,
-    # in one block, before the checks that consume it — so an unresolved
-    # reference is reported by name *and* explains the shape error it
-    # causes below (an unset ``${ROOT}`` turns into a relative path, which
-    # would otherwise read like a typo in the file).
+    # Everything that may carry a ``${NAME}`` reference is expanded here, in one
+    # block, before the checks that consume it — so an unresolved reference is
+    # reported by name *and* explains the shape error it causes below (an unset
+    # ``${ROOT}`` turns into a relative path, which would read like a typo).
     missing: List[str] = []
     command = argv_from_command(entry.get("command"), entry.get("args"))
     if command is None:
@@ -241,11 +213,10 @@ def entry_from_declaration(
         return None, errors
     initialization_options, names = expand_env_json(initialization_options)
     missing.extend(names)
-    # Answers handed back to the server's own workspace/configuration
-    # requests, keyed by LSP section ('html.customData',
-    # 'vue.suggest.propNameCasing', …). Anything not listed is answered
-    # null, i.e. "not set", which is what the LSP spec prescribes and
-    # what makes a server's own ?? fallback land on its default.
+    # Answers to the server's own workspace/configuration requests, keyed by LSP
+    # section ('html.customData', 'vue.suggest.propNameCasing', …). Anything not
+    # listed is answered null, "not set", so the server's own ?? fallback lands
+    # on its default.
     settings = entry.get("settings")
     if settings is not None and not isinstance(settings, dict):
         errors.append(f"{prefix}: settings must be an object — skipped")
@@ -299,16 +270,13 @@ def entry_from_declaration(
         )
         return None, errors
     if refused_reach and bool(entry.get("enable", False)):
-        # Every declared server here is a stdio child process, and the lists
-        # above are what confines its path reach — so when no entry in them
-        # can name this filesystem's paths (win-07 / A-D4), there is no bound
-        # to claim. The tree half of that bound is a capability on either
-        # platform (the spawn's Job Object, the shared ``proctree`` teardown),
-        # so it is no longer part of this question. The entry is still
-        # loaded, because a card naming the gap beats a vanished server, and
-        # the hub marks it ``error`` with these same words rather than
-        # spawning it. Asked only of an entry that wants to run: a disabled
-        # server is not a missing capability, it is a switch the user made.
+        # Every declared server here is a stdio child process whose path reach
+        # the lists above must confine — so when no entry in them can name this
+        # filesystem's paths there is no bound to claim. The entry is still
+        # loaded, because a card naming the gap beats a vanished server, and the
+        # hub marks it ``error`` with these same words rather than spawning it.
+        # Asked only of an entry that wants to run: a disabled server is not a
+        # missing capability, it is a switch the user made.
         errors.append(
             f"{prefix}: {constants.LOCAL_REACH_REFUSAL} — not started"
         )
@@ -350,17 +318,12 @@ def load_lsp_servers(
     a per-entry note; unknown keys are ignored. Entries keep their ``enable``
     flag; the caller decides what to do with disabled ones. Never raises.
 
-    ``command``/``args``, ``env``, ``workspaceRoot``, ``initializationOptions``
-    and ``settings`` may reference environment variables as ``${NAME}`` (or
-    ``${NAME:-fallback}``): they are expanded here, once, before any of the
-    path/shape checks below run, so the rest of the package never sees a
-    reference and one declaration file works on every machine. An entry that
-    references an unset name is still loaded (subject to the usual checks)
-    with a note saying so.
+    Environment references in a declaration's values are expanded here, once,
+    before any path/shape check runs. An entry that references an unset name is
+    still loaded (subject to the usual checks) with a note saying so.
 
     One entry is judged by :func:`entry_from_declaration`, which this walk only
-    calls — the rule has one home, so a caller checking a member that does not
-    exist yet reads the same verdict as this walk.
+    calls — the rule has one home.
     """
     root = path or constants.lsp_settings_path()
     servers: List[Dict[str, Any]] = []
@@ -374,10 +337,9 @@ def load_lsp_servers(
         return [], [f"{root.name} is not readable JSON: {exc}"]
     if not isinstance(data, dict):
         return [], [f"{root.name} must contain an object of servers keyed by id"]
-    # The deny-list and its one fold answer, and one reach answer: both are
-    # properties of the running configuration, so every note in one load has to
-    # agree with every other. This hub is asked about its own deny-list, the
-    # rules that would confine a server's reach (``lsp_reach_is_refused``).
+    # The deny-list, its fold answer and the reach answer are properties of the
+    # running configuration, so every note in one load has to agree with every
+    # other.
     denied, fold = denied_roots()
     refused_reach = lsp_reach_is_refused()
     for server_id in sorted(data):
@@ -411,7 +373,7 @@ def all_servers(
 def set_lsp_enabled(
     enabled: Dict[str, bool], path: Optional[Path] = None
 ) -> List[str]:
-    """Write ``enable`` flags back to ``.nojae/lsp-settings.json``, keeping everything else.
+    """Write ``enable`` flags back to ``.nojae/lsp-settings.json``.
 
     Only entries already present in the file are touched; other keys, entry
     order, and unknown ids are preserved. A missing file is a no-op; a file

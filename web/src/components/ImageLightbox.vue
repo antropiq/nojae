@@ -8,9 +8,9 @@ const emit = defineEmits(['close'])
 
 const dialogEl = ref(null)
 
-// Mirror SettingsDialog's native <dialog> pattern: the component stays
-// mounted, the parent's `image` prop drives showModal()/close(). flush post
-// so the <img> src is already rendered when the dialog opens (correct size).
+// Mirror SettingsDialog's native <dialog> pattern: the component stays mounted
+// and the `image` prop drives showModal()/close(). `flush: 'post'` lets the
+// <img> render first, so the dialog measures at the right size.
 watch(
   () => props.image,
   (image) => {

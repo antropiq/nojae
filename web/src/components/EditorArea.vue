@@ -19,45 +19,41 @@ import { applyEditorChord } from '../lib/editor-keys'
 
 // The centre pane: the open-file tab strip and the surface that shows the
 // active tab — a Monaco buffer for a file, the diff editor for a diff, or the
-// rendered-markdown panel for a preview. The header chrome and the tab chips
-// are the pane's own markup; inside `.monaco-host` (the two Monaco surfaces)
-// everything belongs to Monaco, which owns the DOM there and the line-number
-// gutter that used to be a hand-rolled `<pre>` column here.
+// rendered-markdown panel for a preview. The header chrome and the tab chips are
+// the pane's own markup; inside `.monaco-host` everything belongs to Monaco,
+// which owns the DOM there.
 //
 // The pane's mode — editable while the WorkBench is idle, read-only while a
 // reply streams — is decided once in useEditorMode and *displayed* in the file
-// tree's header, where it always fits; this component only applies it to the
-// surface below.
+// tree's header; this component only applies it to the surface below.
 const files = useEditorFiles()
 const tree = useWorkspaceTree()
 const search = useWorkspaceSearch()
 const appShell = useAppShell()
 const chat = useChat()
 const { paneReadonly } = useEditorMode()
-// The quick-open finder (qop-07): the composable owns the dialog's state, this
-// pane only raises it (the two chord sources below) and answers the focus
-// question after a pick — the composable must not import the pane, so the
-// one-way `registerPaneFocus` registry carries the answer back.
+// The quick-open finder: the composable owns the dialog's state, this pane only
+// raises it (the two chord sources below) and answers the focus question after a
+// pick — the composable must not import the pane, so the one-way
+// `registerPaneFocus` registry carries the answer back.
 const quickOpen = useQuickOpen()
 // The buffer's problems: the state, the four triggers and the bar's one control
-// all live in this composable (spec D3, D1). This pane arms them while it is on
-// screen and is the **one** place that hands a marker set to the surface.
+// all live in this composable. This pane arms them while it is on screen and is
+// the **one** place that hands a marker set to the surface.
 const diagnostics = useEditorDiagnostics()
 
-// Focus back into the code pane after a pick. The surface's own `focus()` puts
-// the caret in Monaco's textarea; when no code surface is mounted (a diff, a
-// preview, nothing open) the focus stays where the browser puts it — the dialog
-// just closed, so the body is a reasonable resting place rather than a wrong
-// buffer.
+// Focus back into the code pane after a pick. When no code surface is mounted (a
+// diff, a preview, nothing open) the focus stays where the browser puts it — the
+// dialog just closed, so the body is a reasonable resting place.
 function focusPane() {
   editorSurface.value?.focus?.()
 }
 registerPaneFocus(focusPane)
 
-// The freshness tick belongs to the pane that shows its answer, and it runs
-// only while that answer can be read: the Editor tab visible and something open
-// (the watcher below). `probeIsUseful` re-checks both — plus the streaming rule
-// — on every tick, so a poll can never slip through a stale timer.
+// The freshness tick belongs to the pane that shows its answer, and it runs only
+// while that answer can be read: the Editor tab visible and something open (the
+// watcher below). `probeIsUseful` re-checks both — plus the streaming rule — on
+// every tick, so a poll can never slip through a stale timer.
 function probeShouldRun() {
   // A streaming reply is a known writer, the pane is read-only meanwhile, and
   // a conflict the user cannot act on is noise — so the tick stops with it.
@@ -76,11 +72,10 @@ function syncProbe() {
 const state = files.state
 // The buffer the pane shows — a file or a diff, whichever tab is active. The
 // tree's selection and this are separate state: a click that is refused (binary,
-// over the cap) selects a row and leaves the previous buffer on screen, which is
-// what the user is still looking at.
+// over the cap) selects a row and leaves the previous buffer on screen.
 //
 // Matched on `key`, not `path`: a file buffer and a diff of that same file are
-// two tabs about one path (useEditorFiles), and the pane has to tell them apart.
+// two tabs about one path, and the pane has to tell them apart.
 const tab = computed(() => state.open.find((item) => item.key === state.active) ?? null)
 const isDiff = computed(() => tab.value?.kind === 'diff')
 const isPreview = computed(() => tab.value?.kind === 'preview')
@@ -89,9 +84,8 @@ const isPreview = computed(() => tab.value?.kind === 'preview')
 // guess which side is which — and never reads the left side as the truth.
 const diffNote = computed(() => {
   if (!isDiff.value) return ''
-  // The conflict comparison is the *opposite* pairing from a git diff: there
-  // the right side is the disk, here the left side is the disk and the right
-  // side is the unsaved buffer. Saying so is the whole point — a reader who
+  // The conflict comparison is the *opposite* pairing from a git diff: here the
+  // left side is the disk and the right side is the unsaved buffer. A reader who
   // assumed the git polarity would keep the wrong side.
   if (tab.value.source === 'conflict') {
     return 'left: as it is on disk now — right: your unsaved buffer'
@@ -106,8 +100,7 @@ const diffNote = computed(() => {
 })
 
 // A buffer whose file is gone from disk says so in the pane, not only on its
-// chip: what is on screen is all that is left of it, and presenting this
-// surface as a view of a live file would be a lie.
+// chip: presenting this surface as a view of a live file would be a lie.
 const deletedNote = computed(() =>
   tab.value?.kind === 'file' && tab.value.deleted
     ? 'this file no longer exists on disk — what is here is the buffer only'
@@ -115,18 +108,17 @@ const deletedNote = computed(() =>
 )
 
 // Three surfaces share this pane, never at once: the code editor (one surface,
-// one model, swapped between file buffers), the diff editor (two models, and it
+// one model, swapped between file buffers), the diff editor (two models, so it
 // cannot use the code pane's single model) and the rendered markdown preview —
 // an app-owned sibling, because the bundled `monaco-editor` ESM build ships no
 // markdown preview widget and `.monaco-host` must stay empty of app markup (it
 // is the scope of the `monaco-pico.css` overrides and of e2e selectors). Each is
-// mounted only for the tab kind that needs it, so the last tab closing disposes
-// the surface it belongs to and none of them pays for the others.
+// mounted only for the tab kind that needs it.
 //
-// Known and accepted for v1: a preview shows no relative *image* (the app has no
+// Known and accepted: a preview shows no relative *image* (the app has no
 // byte-serving route, so `<img src="diagram.png">` resolves against the app
-// origin and renders broken), and a relative link navigates the SPA away.
-// See the note in lib/markdown-preview.js.
+// origin and renders broken), and a relative link navigates the SPA away. See
+// the note in lib/markdown-preview.js.
 
 // Which chip is the selected one of the tablist (the roving tabindex and the
 // pane's aria-labelledby both key on it).
@@ -141,8 +133,7 @@ const editorSurface = ref(null)
 //
 // Selections published *by* this pane (`source: 'tab'`, see useWorkspaceTree
 // .reveal) are skipped: they are the echo of the active-buffer watcher below,
-// and replaying one would be a redundant open/focus of the buffer that caused
-// it.
+// and replaying one would be a redundant open of the buffer that caused it.
 watch(
   () => tree.state.selected,
   (selected) => {
@@ -154,9 +145,9 @@ watch(
 
 // The other direction of the same link: whichever way the active buffer changes
 // — a chip click, an arrow key on the strip, the neighbour a closed tab leaves —
-// the tree selects that file, opening the collapsed branches its row hides
-// under (`reveal` fetches the listings on the way down, since the tree is lazy).
-// No DOM focus moves here: the chip the user just clicked keeps it.
+// the tree selects that file, opening the collapsed branches its row hides under
+// (`reveal` fetches the listings on the way down, since the tree is lazy). No DOM
+// focus moves here: the chip the user just clicked keeps it.
 //
 // `state.active` is a tab *key*, so it is translated to the file path first: a
 // diff tab belongs to the same row in the tree as the file it diffs.
@@ -168,26 +159,24 @@ watch(
   },
 )
 
-// The third, independent watcher: a clicked search hit asks the pane to move
-// the caret (spec §2.6). It watches the queued coordinates *and* the active
-// tab, because the click and the buffer are not in the same moment: `openHit`
-// queues the reveal and *then* publishes the selection, so the hit's file may
-// still be fetching, or may not be a tab at all. Handing the coordinates over
-// at that moment would move the caret in whatever buffer the single shared
-// surface is showing and spend the queue, so the pane waits until the active
-// tab *is* the hit's path; the surface's own queue then absorbs the remaining
-// timing (the `setValue` of a buffer swap clears the cursor — D11).
+// The third, independent watcher: a clicked search hit asks the pane to move the
+// caret. It watches the queued coordinates *and* the active tab, because the
+// click and the buffer are not in the same moment: `openHit` queues the reveal
+// and *then* publishes the selection, so the hit's file may still be fetching,
+// or may not be a tab at all. Handing the coordinates over too early would move
+// the caret in whatever buffer the shared surface is showing and spend the
+// queue, so the pane waits until the active tab *is* the hit's path.
 //
 // `flush: 'post'` belongs to the same race: for a file that only now becomes a
 // tab, the surface has to exist (rendered, model holding the text) by the time
 // it is told to reveal.
 //
 // A diff or preview tab of the hit's path has no caret to move: `editorSurface`
-// is `null` for those branches, so the `?.` makes a stale hit a no-op instead
-// of a throw, and the queue is still cleared. A hit whose file never opens
-// leaves the queue alone — the pane's refused-open message is the answer, and
-// the next click overwrites it. Once handed over, the clear is what keeps a
-// later re-render from re-applying an old reveal: the queue has one owner.
+// is `null` for those branches, so the `?.` makes a stale hit a no-op instead of
+// a throw, and the queue is still cleared. A hit whose file never opens leaves
+// the queue alone — the pane's refused-open message is the answer. Once handed
+// over, the clear keeps a later re-render from re-applying an old reveal: the
+// queue has one owner.
 watch(
   [() => search.state.pendingReveal, () => tab.value],
   ([reveal, activeTab]) => {
@@ -198,15 +187,14 @@ watch(
   { flush: 'post' },
 )
 
-// A definition answer that names *another* file (spec §6). The surface never
-// opens a buffer — the pane owns that — so the target arrives here as
+// A definition answer that names *another* file. The surface never opens a
+// buffer — the pane owns that — so the target arrives here as
 // `{path, line, column}` in the pane's own 1-based coordinates.
 //
 // The open goes through the existing `openFile` flow, so a refused open (binary,
-// over the cap, gone since) is answered by the pane's own message and nothing
-// new is invented for it. The reveal then goes through the surface's existing
-// queue and clamp — the same one a search hit uses — which is what absorbs the
-// timing: the surface may still be swapping its model to the new buffer.
+// over the cap, gone since) is answered by the pane's own message. The reveal
+// then goes through the surface's queue and clamp — the same one a search hit
+// uses — which absorbs the timing: the surface may still be swapping its model.
 //
 // A target in the *same* file reveals directly: there is no buffer to open.
 async function onDefinition(target) {
@@ -226,8 +214,7 @@ async function onDefinition(target) {
 
 // A click on the chip that is *already* active changes nothing in `state.active`,
 // so the watcher above cannot carry it to the tree. Reveal here as well: the
-// tree's selection follows the tab the user pointed at, even when that buffer
-// was already on screen.
+// tree's selection follows the tab the user pointed at.
 function selectTab(key) {
   files.focusTab(key)
   const record = files.recordForKey(key)
@@ -242,21 +229,17 @@ function closeTabRequested(key) {
 }
 
 // The pane's save affordances, both outside the strip's scroller so they survive
-// a strip full of chips. It is about the buffer on screen — `tab`, the same
-// record the pane renders — so it goes enabled only for a dirty file buffer: a
-// clean one has nothing to save, and a diff has no buffer at all.
+// a strip full of chips. It is about the buffer on screen — `tab` — so it goes
+// enabled only for a dirty file buffer: a clean one has nothing to save, and a
+// diff has no buffer at all.
 const canSaveActive = computed(
   () => tab.value?.kind === 'file' && tab.value.dirty,
 )
 const dirtyCount = computed(() => files.dirtyCount.value)
 // Names the tab's own kind, so the tooltip does not claim "diff" over a preview
-// (the button itself is already disabled for every non-buffer kind).
-//
-// The no-tab wording is `Nothing to save`, which is this button's own state — the
-// Editor pane holding no buffer at all. It is **not** the agents card's dropped
-// `Nothing to save` state (docs/agents-dialog-rework.md Q2), which was about
-// disabling Save for an agent whose form had not been touched; that verb is the
-// toolbar's and no longer has such a reason.
+// (the button itself is already disabled for every non-buffer kind). The no-tab
+// wording is `Nothing to save` — this button's own state, the Editor pane
+// holding no buffer at all.
 const saveButtonTitle = computed(() => {
   const record = tab.value
   if (!record) return 'Nothing to save'
@@ -283,9 +266,9 @@ function saveAll() {
 const tabs = ref(null)
 
 // The wheel scrolls the strip sideways once its tabs overflow it (VS Code's
-// behaviour); the rule itself lives in lib/tab-strip-wheel.js so it can be
-// tested without a browser. It is bound by hand rather than `@wheel`, because
-// the handler needs `passive: false` to cancel the event.
+// behaviour); the rule itself lives in lib/tab-strip-wheel.js so it can be tested
+// without a browser. Bound by hand rather than `@wheel`, because the handler
+// needs `passive: false` to cancel the event.
 function onTabsWheel(event) {
   scrollStripWithWheel(tabs.value, event)
 }
@@ -314,16 +297,16 @@ async function onTabsKeydown(event) {
 // One owner for all three, deliberately: a Monaco keybinding is the other way to
 // bind Ctrl+S, but the editor is read-only while a reply streams, and a chord
 // that stops working depending on the pane's mode is worse than one more
-// listener. (A browser that consumes Ctrl+W itself cannot be overridden from the
-// page; the chip's × is the path that always works.)
+// listener. (A browser that consumes Ctrl+W cannot be overridden from the page;
+// the chip's × is the path that always works.)
 function onKeydown(event) {
   applyEditorChord(event, { activeTab: appShell.state.activeTab, active: state.active }, {
     save: saveActive,
     'save-all': saveAll,
     close: () => files.requestCloseTab(state.active),
-    // Ctrl+P from the tree or the strip (qop-07): the same dialog the Monaco
-    // command raises. `applyEditorChord` has already preventDefault'ed, so
-    // Print never fires on the Editor tab from this path either.
+    // Ctrl+P from the tree or the strip: the same dialog the Monaco command
+    // raises. `applyEditorChord` has already preventDefault'ed, so Print never
+    // fires on the Editor tab from this path either.
     'quick-open': () => void quickOpen.openDialog(),
   })
 }
@@ -337,14 +320,13 @@ watch(
   { immediate: true },
 )
 
-// The marker surface's one caller (ediag-05/07). An accepted answer reaches it
-// here — and *only* here — and a re-application after a buffer swap reaches it
-// through the same watcher, because the path is part of what is watched: a model
-// swap drops its marks with the model (spec §2, consequence 3), so the set has
-// to be handed over again when the buffer comes back, not remembered once by
-// the surface. Whole replacement is the surface's own semantics, so what travels
-// is exactly the composable's current set — including an empty one, which is how
-// a fixed defect's underline, or a buffer that turned out clean, is cleared.
+// The marker surface's one caller. An accepted answer reaches it here — and
+// *only* here — and a re-application after a buffer swap reaches it through the
+// same watcher, because the path is part of what is watched: a model swap drops
+// its marks with the model, so the set has to be handed over again when the
+// buffer comes back. Whole replacement is the surface's own semantics, so what
+// travels is exactly the composable's current set — including an empty one,
+// which is how a fixed defect's underline is cleared.
 function applyMarkers() {
   // Only a *file* buffer has a code surface to mark: a diff tab, a preview tab
   // and an empty pane have none. The surface's own empty-path rule would make
@@ -362,9 +344,9 @@ watch(
 
 // The four triggers are armed while this pane is on screen and disarmed with it.
 // Where they live matters: the composable owns the timer, the watchers and the
-// request (AGENTS.md), and this pane only says when they are wanted — the same
-// split the freshness tick above keeps. Nothing here is a trigger of its own:
-// there is no interval, no poll and no DOM listener in this block.
+// request, and this pane only says when they are wanted — the same split the
+// freshness tick above keeps. Nothing here is a trigger of its own: no interval,
+// no poll and no DOM listener in this block.
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   // `passive: false` so the handler above can call preventDefault (a passive
@@ -393,9 +375,9 @@ onBeforeUnmount(() => {
         @keydown="onTabsKeydown"
       >
         <!-- A chip is a span, not a button: the × is a button of its own, and
-             nesting one button in another is invalid markup. Middle-click asks
-             to close too; a dirty buffer answers with a prompt rather than
-             silently dropping its edits. -->
+             nesting one button in another is invalid markup. A dirty buffer
+             answers a close request with a prompt rather than dropping its
+             edits. -->
         <!-- Keyed by `item.key`: a file buffer and a diff of it share a path, so
              keying on the path would make Vue treat the two chips as one. -->
         <span
@@ -406,13 +388,12 @@ onBeforeUnmount(() => {
           :title="item.path"
           @mouseup.middle.prevent="closeTabRequested(item.key)"
         >
-          <!-- The freshness marker: the disk disagrees with this buffer. It is
-               a *button* of its own (nesting one in the tab would be invalid
-               markup, and the × already sets that shape) and it sits first, so
-               an ellipsised name cannot push it away. A conflict the user turned
-               down is still unanswered, so this is how the answer set is reached
-               again — the conflict itself lives on the record and is never lost,
-               only un-shown. -->
+          <!-- The freshness marker: the disk disagrees with this buffer. A
+               button of its own (nesting one in the tab would be invalid markup,
+               and the × already sets that shape) and first, so an ellipsised name
+               cannot push it away. A conflict the user turned down is still
+               unanswered, so this is how the answer set is reached again — the
+               conflict lives on the record and is never lost, only un-shown. -->
           <button
             v-if="item.stale || item.deleted"
             class="editor-tab-stale"
@@ -449,7 +430,7 @@ onBeforeUnmount(() => {
               (unsaved changes)
             </span>
             <!-- Same visually-hidden pattern for the freshness marker, whose
-                 button carries no text of its own. -->
+                 button carries no text. -->
             <span v-if="item.deleted" class="editor-tab-stale-sr">(deleted on disk)</span>
             <span v-else-if="item.stale" class="editor-tab-stale-sr">(changed on disk)</span>
           </button>
@@ -466,11 +447,10 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- The save affordances, beside the scroller rather than inside it: a
-           strip full of chips scrolls under its own rule, and a button that
-           scrolls away with it is a button the user cannot find. Both are
-           icon+title+aria-label, the same shape as a chip's ×. Save-all appears
-           only when there is more than one dirty buffer — with one, the plain
-           Save button *is* save-all. -->
+           button that scrolls away with the strip is a button the user cannot
+           find. Both are icon+title+aria-label, the same shape as a chip's ×.
+           Save-all appears only when there is more than one dirty buffer — with
+           one, the plain Save button *is* save-all. -->
       <div class="editor-save-actions">
         <button
           class="editor-save-button"
@@ -531,17 +511,17 @@ onBeforeUnmount(() => {
         <!-- A probe that could not answer is not evidence that a file changed,
              so no buffer is marked — but the pane should not imply its buffers
              are fresh either. A plain caption, not an alert and not dismissible:
-             it is a state of the pane (probe broken), and it clears by itself
-             as soon as a probe answers again. -->
+             it is a state of the pane, and it clears by itself as soon as a
+             probe answers again. -->
         <p v-if="state.probeError" class="caption editor-probe-error" role="status">
           {{ state.probeError }}
         </p>
 
         <!-- A refused or confirmed *write* does not appear here: it goes to the
              notice stack (EditorNoticeStack.vue, mounted by EditorView), because
-             it must survive the next click and must be readable while the user
-             is looking at the tree. This line is only ever about a refused
-             *open* — one sentence, cleared by the next focus or close. -->
+             it must survive the next click and stay readable while the user looks
+             at the tree. This line is only ever about a refused *open* — one
+             sentence, cleared by the next focus or close. -->
         <p
           v-if="state.message"
           class="editor-raw-message"
@@ -562,10 +542,10 @@ onBeforeUnmount(() => {
         </p>
 
         <template v-if="tab && isDiff">
-          <!-- What the two columns are, in the pane's own words rather than
-               left to be guessed: left is the file as of the last commit, right
-               is the file on disk. A rename names the old path, because the
-               left side is the blob under that name. -->
+          <!-- What the two columns are, rather than left to be guessed: left is
+               the file as of the last commit, right is the file on disk. A rename
+               names the old path, because the left side is the blob under that
+               name. -->
           <p class="caption editor-raw-note">
             {{ diffNote }}
           </p>
@@ -600,10 +580,10 @@ onBeforeUnmount(() => {
             {{ files.humanSize(tab.truncatedAt) }}
           </p>
           <!-- App-owned, and it carries `id="editor-pane"` like the other two
-               panels: exactly one element holds that id at a time, which is what
-               makes the chips' `aria-controls` honest. It is *not* `.editor-monaco`
-               — that is `overflow: hidden` because Monaco owns its own scroller,
-               and reusing it would leave a rendered document that cannot scroll. -->
+               panels: exactly one element holds that id at a time, which makes the
+               chips' `aria-controls` honest. It is *not* `.editor-monaco` — that
+               is `overflow: hidden` because Monaco owns its own scroller, and
+               reusing it would leave a rendered document that cannot scroll. -->
           <div
             class="editor-preview"
             id="editor-pane"
@@ -616,9 +596,8 @@ onBeforeUnmount(() => {
 
         <template v-else-if="tab">
           <!-- A partial is never presented as a whole: the server only sets
-               `truncated` when the file grew past its cap mid-read, so this
-               says which prefix is on screen rather than implying the file
-               ends here. -->
+               `truncated` when the file grew past its cap mid-read, so this says
+               which prefix is on screen rather than implying the file ends here. -->
           <p v-if="tab.truncated" class="caption editor-raw-note">
             file grew while it was being read — showing its first
             {{ files.humanSize(tab.truncatedAt) }}
@@ -654,8 +633,7 @@ onBeforeUnmount(() => {
 
     <!-- The pane's dialogs. Mounted here rather than in EditorView so the
          conflict is scoped to the code pane it is about; the file stays one
-         component for all of the Editor's confirmations, whatever the later
-         write tasks add to it. -->
+         component for all of the Editor's confirmations. -->
     <EditorTreeDialogs />
     <!-- The batch move's modal, beside the confirms: it asks about tree rows,
          but the answer set is the pane's too — an open buffer of a moved file
@@ -663,7 +641,7 @@ onBeforeUnmount(() => {
          would mean two dialogs answering one `movePrompt`. -->
     <EditorMoveDialog />
     <!-- The quick-open finder's modal. Mounted here like the other dialogs, but
-         it raises itself: the Ctrl+P chord (qop-07) calls `openDialog()` on the
+         it raises itself: the Ctrl+P chord calls `openDialog()` on the
          composable, and the watch inside the dialog follows the state — so this
          mount carries no wiring of its own. -->
     <QuickOpenDialog />

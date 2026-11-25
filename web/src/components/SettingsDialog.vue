@@ -20,9 +20,9 @@ const {
 
 // **The dialog decides nothing.** Every enablement verdict, every tooltip, the
 // detail page that is drawn and the one message the band says are answered by
-// `useSettingsServers`; this file turns those answers into fields and buttons
-// (plan §6.1). A condition in this template would be a rule that can drift from
-// the control that shows it.
+// `useSettingsServers`; this file turns those answers into fields and buttons. A
+// condition in this template would be a rule that can drift from the control that
+// shows it.
 const {
   addSlot,
   saveSlot,
@@ -53,17 +53,17 @@ const {
 
 // This dialog edits the **installation's** catalogue — servers, models, the MCP
 // and LSP declarations — and deliberately has **no workspace control**: the
-// folder belongs to the tab and lives in the app bar's field (spec D2, §5.1
-// rule 9). Nothing here imports `useWorkspaceSession`, reads a workspace value
-// or spells one on a request, because a folder field here would say the folder
-// and the catalogue are one setting. The requests this dialog's composables make
-// carry the tab's folder through `withWorkspace`; that is the tab's own field
-// riding along, not a setting this dialog owns.
+// folder belongs to the tab and lives in the app bar's field. Nothing here
+// imports `useWorkspaceSession`, reads a workspace value or spells one on a
+// request, because a folder field here would say the folder and the catalogue are
+// one setting. The requests this dialog's composables make carry the tab's folder
+// through `withWorkspace`; that is the tab's own field riding along, not a setting
+// this dialog owns.
 const dialogEl = ref(null)
 
 // The three sections, and the strip that chooses between them. The first is
 // named for the tree's root object — a **server**, with its models under it —
-// which is what the toolbar's heading reads too (plan §4.1 / §4.2).
+// which is what the toolbar's heading reads too.
 const SECTIONS = [
   { id: 'servers', label: 'Servers' },
   { id: 'mcp', label: 'MCP' },
@@ -72,8 +72,8 @@ const SECTIONS = [
 
 // The section strip's selection is the shell's, not this component's, for one
 // reason: the strip and the **one** message band have to agree about which
-// section the sentence on screen belongs to (§4.7). Choosing a section is a
-// plain assignment — no verdict is decided here.
+// section the sentence on screen belongs to. Choosing a section is a plain
+// assignment — no verdict is decided here.
 function setSection(id) {
   state.activeSection = id
 }
@@ -116,8 +116,8 @@ function setDetailTabRef(el, index) {
 // walk between them, and only the selected one is in the tab order. A model is
 // the only row with two pages, so the list the keys walk is the composable's
 // `visibleTabs` — empty on the server page, where the strip is reserved but the
-// tabs are hidden (§4.5). The refs are kept by position in the **full** list,
-// which is what the `v-for` indexes, so the walked tab is looked up there.
+// tabs are hidden. The refs are kept by position in the **full** list, which is
+// what the `v-for` indexes, so the walked tab is looked up there.
 function onDetailTabKeydown(event, index) {
   const step = { ArrowRight: 1, ArrowLeft: -1 }
   const walkable = visibleTabs.value
@@ -135,9 +135,9 @@ function onDetailTabKeydown(event, index) {
   detailTabRefs[tabs.value.findIndex((tab) => tab.id === target.id)]?.focus()
 }
 
-// A model added from the listing must land on its own tree row (§9.1-3): the
-// name is already in the field, so focusing the row is what makes the tree's
-// keyboard position coherent and lets Tab walk into the form from there.
+// A model added from the listing must land on its own tree row: the name is
+// already in the field, so focusing the row is what makes the tree's keyboard
+// position coherent and lets Tab walk into the form from there.
 watch(
   () => state.focusTreeRowId,
   async (id) => {
@@ -150,10 +150,9 @@ watch(
 )
 
 // One gate decides whether a language server runs in this workspace: the
-// `enable` flag of its entry in `.nojae/lsp-settings.json`, which is what a
-// tick here writes (D13). The tick used to be one of two switches that had to
-// agree, so the tooltip says what it means now — and says it in the file's
-// terms, because the file is the record.
+// `enable` flag of its entry in `.nojae/lsp-settings.json`, which is what a tick
+// here writes. The tooltip says it in the file's terms, because the file is the
+// record.
 const LSP_TOGGLE_TOOLTIP =
   'Run this server in this workspace: the tick is the whole decision, and it is ' +
   "saved as the entry's `enable` flag in .nojae/lsp-settings.json"
@@ -237,10 +236,10 @@ function serverDetail(server) {
     .join('\n')
 }
 
-// The app-level notice (§5.1) — *no model configured*, or the store itself
-// unusable — is no longer assembled here: it is one of the lines the band's
-// single `messageFor` verdict chooses, so the dialog has one message area and
-// not six that each push different content down at a different moment.
+// The app-level notice — *no model configured*, or the store itself unusable —
+// is not assembled here: it is one of the lines the band's single `messageFor`
+// verdict chooses, so the dialog has one message area and not six that each push
+// different content down at a different moment.
 </script>
 
 <template>
@@ -276,30 +275,29 @@ function serverDetail(server) {
 
       <div class="settings-body">
         <div class="settings-editor">
-          <!-- The Servers section (§4): the store's servers on the left, each
+          <!-- The Servers section: the store's servers on the left, each
                expandable to its own models, and the selected row's fields on the
-               right. It is the old LLM and Sampling sections merged, because a
-               model carries its own samplers — the split only made sense while
-               there was one connection and one model.
+               right. A model carries its own samplers, so the old LLM and Sampling
+               sections are one section now.
 
                No model is marked as special anywhere in here: which agent runs on
                which model is the agent's own field, and the question is asked in
-               the Agent-modes dialog (D5). What this section says about that is
-               the band's cross-store line, not a line of its own (§4.7).
+               the Agent-modes dialog. What this section says about that is the
+               band's cross-store line, not a line of its own.
 
                The body is the shared two-column grid, with the toolbar and the
                tree down the left column's two rows and the detail column spanning
                both — the Agents card's geometry, so the two dialogs put a toolbar
-               over a list in the same place (§4.3, §6.2). It has no heading of its
-               own: the section strip one row above already reads `Servers`, and
-               repeating it there is a second title for the thing it titles. -->
+               over a list in the same place. It has no heading of its own: the
+               section strip one row above already reads `Servers`, and repeating
+               it there is a second title for the thing it titles. -->
           <section v-show="state.activeSection === 'servers'" class="settings-models">
             <!-- **Three verb slots, a spacer, two reserved confirmation slots** —
                  the Agents card's toolbar, in the shared classes. Every slot keeps
                  its size whether or not it holds a button, so the pair's arrival
                  moves nothing and the toolbar never changes height. The verbs are
                  scoped to the page that is visible, which is why no label spells
-                 its scope (§4.3). -->
+                 its scope. -->
             <div class="agent-modes-toolbar" role="group" aria-label="Server and model actions">
               <span class="agent-modes-slot">
                 <button
@@ -355,10 +353,10 @@ function serverDetail(server) {
                 </button>
               </span>
               <span class="agent-modes-toolbar-space"></span>
-              <!-- The delete pair, **absent from the DOM** until asked (§4.8). Its
-                   slots were already reserved, so the three verbs do not move when
-                   it arrives; the sentence naming what the delete takes with it is
-                   the band's, not the toolbar's. -->
+              <!-- The delete pair, **absent from the DOM** until asked. Its slots
+                   were already reserved, so the three verbs do not move when it
+                   arrives; the sentence naming what the delete takes with it is the
+                   band's, not the toolbar's. -->
               <span class="agent-modes-slot">
                 <button
                   v-if="deleteConfirmation.rendered"
@@ -443,9 +441,9 @@ function serverDetail(server) {
             </ul>
 
               <div class="models-detail">
-                <!-- The detail column's two pages (§4.5). Both tabs stay in the DOM
-                     and the strip is **reserved** whatever is selected, so choosing
-                     a model cannot push the first field down by a row. On the server
+                <!-- The detail column's two pages. Both tabs stay in the DOM and
+                     the strip is **reserved** whatever is selected, so choosing a
+                     model cannot push the first field down by a row. On the server
                      page they are hidden rather than removed: the section strip
                      above already reads `Servers`, so a `Settings` tab there would
                      repeat it — and removing the row is what would move the fields.
@@ -477,10 +475,10 @@ function serverDetail(server) {
                 </nav>
 
                 <!-- Both pages read and write **one** `state.modelDraft`, so the
-                     tab is presentation only: a keystroke made on either page is
-                     on the other the moment it is drawn, and switching writes
-                     nothing (§4.5). No API key appears on either: the credential
-                     is a server column and a model request never carries one (§2.1). -->
+                     tab is presentation only: a keystroke made on either page is on
+                     the other the moment it is drawn, and switching writes nothing.
+                     No API key appears on either: the credential is a server column
+                     and a model request never carries one. -->
                 <div
                   v-if="body === 'modelSettings'"
                   id="models-panel-settings"
@@ -488,11 +486,11 @@ function serverDetail(server) {
                   aria-labelledby="models-tab-settings"
                   class="models-page models-page--settings"
                 >
-                  <!-- One three-column grid for the whole page (§4.5): the name
-                       takes a column, the reasoning level the two that are left,
-                       and the six samplers fall into the same columns two rows
-                       down — so every field's left edge is one of three, and the
-                       vision tick sits at the row's right end. -->
+                  <!-- One three-column grid for the whole page: the name takes a
+                       column, the reasoning level the two that are left, and the
+                       six samplers fall into the same columns two rows down — so
+                       every field's left edge is one of three, and the vision tick
+                       sits at the row's right end. -->
                   <label class="models-field models-field--name">
                     Model name
                     <input
@@ -549,11 +547,11 @@ function serverDetail(server) {
                 </div>
 
                 <!-- The server page: its three fields, then *Fetch models* under
-                     the key it dials, then the listing that answer fills (§4.4).
-                     The verb sits **inside** the page rather than in the toolbar
-                     because what it answers is this page's body — which is also
-                     what makes its disabled state legible: it is disabled *about
-                     this server*, and the fields above it are the server. -->
+                     the key it dials, then the listing that answer fills. The verb
+                     sits **inside** the page rather than in the toolbar because
+                     what it answers is this page's body — which is also what makes
+                     its disabled state legible: it is disabled *about this
+                     server*, and the fields above it are the server. -->
                 <div
                   v-else-if="body === 'server'"
                   class="models-page models-page--server"
@@ -587,10 +585,10 @@ function serverDetail(server) {
 
                   <!-- The listing: a real table, `name` and `Add`, whose **own**
                        scroll area holds any number of names so the detail column
-                       gains no scrollbar of its own (§4.4, §6.4). A name the server
-                       already has keeps its `+` in the cell, inert with its reason:
-                       a column that answered differently per row would make the
-                       table's widths jump. -->
+                       gains no scrollbar of its own. A name the server already has
+                       keeps its `+` in the cell, inert with its reason: a column
+                       that answered differently per row would make the table's
+                       widths jump. -->
                   <div class="models-listing">
                     <table class="models-listing-table">
                       <thead>
@@ -632,13 +630,13 @@ function serverDetail(server) {
               </div>
           </section>
 
-          <!-- The MCP and LSP sections (§4.9): their `Save` left the footer for a
+          <!-- The MCP and LSP sections: their `Save` left the footer for a
                toolbar of the Servers tab's shape — heading at one end, the verb at
                the other — so the footer is **one shape for all three sections**:
                the band and `Close`. Their top-level lines (package not installed,
                the read's failure) moved to the band too; what stays beside a row
                is that row's own badge and its own error, because a band that
-               carries six connector errors is a list, not a message (§4.7). -->
+               carries six connector errors is a list, not a message. -->
           <section v-show="state.activeSection === 'mcp'" class="settings-hub-section">
             <div class="settings-section-toolbar">
               <h3 class="settings-section-title">MCP connectors</h3>
@@ -675,8 +673,8 @@ function serverDetail(server) {
               <p class="caption mcp-description">{{ connectorDetail(connector) }}</p>
               <p v-if="connector.error" class="caption alert-error">{{ connector.error }}</p>
             </div>
-            <!-- The tool-loop cap is not this section's knob any more (D9): it
-                 is a per-agent column, edited on that agent's tab. -->
+            <!-- The tool-loop cap is not this section's knob: it is a per-agent
+                 column, edited on that agent's tab. -->
           </section>
 
           <section v-show="state.activeSection === 'lsp'" class="settings-hub-section">
@@ -723,13 +721,13 @@ function serverDetail(server) {
         </div>
       </div>
 
-      <!-- **The dialog's one message band** (§4.7), in the shared footer shape:
-           the line fills the row left of `Close`, is always there, and carries
-           the text and the role `messageFor` answered with. Nothing else in the
-           dialog says anything, so no sentence can push a control out of place.
-           `Close` is the footer's only verb for all three sections (§4.9) — and
-           it is the card's only exit, so it also asks before discarding typed
-           work, which puts its question in this same line. -->
+      <!-- **The dialog's one message band**, in the shared footer shape: the line
+           fills the row left of `Close`, is always there, and carries the text and
+           the role `messageFor` answered with. Nothing else in the dialog says
+           anything, so no sentence can push a control out of place. `Close` is the
+           footer's only verb for all three sections — and it is the card's only
+           exit, so it also asks before discarding typed work, which puts its
+           question in this same line. -->
       <footer class="settings-actions">
         <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
         <!-- The one message the user can act on from here: the band renders it as

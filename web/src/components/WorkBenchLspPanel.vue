@@ -14,29 +14,26 @@ const { state, setChatLsp, restartLsp } = useChat()
 const { state: batch } = useBatch()
 const wizard = useConnectorWizard()
 
-// Status dot next to each switch: green when the language server serves its
-// tools, red on a startup/configuration error, gray otherwise (stopped,
-// disabled or still starting — a lazy server shows gray until its first
-// tool call spawns it). Reuses the chat-mcp classes: same visual row.
+// Status dot next to each switch: green when the server serves its tools, red on a
+// startup/configuration error, gray otherwise — a lazy server stays gray until its
+// first tool call spawns it.
 const DOT_CLASS = {
   running: 'chat-mcp-dot--green',
   error: 'chat-mcp-dot--red',
 }
 
 // Always on screen, like the MCP panel beside it: the two are the Chat left
-// column's fixed width, and a workspace that has not written its
-// `.nojae/lsp-settings.json` yet must not cost the reasoning timeline half of
-// it. An empty panel says where the declaration goes, and its restart button
-// is what picks up a file written after the boot scan.
+// column's fixed width, so a workspace that has not written its
+// `.nojae/lsp-settings.json` yet must not cost the reasoning timeline half of it.
+// Its restart button is what picks up a file written after the boot scan.
 const hasEntries = computed(() => lspHasEntries(state))
 // Same pair as the MCP panel: the batch flag covers the between-tasks window.
 const locked = computed(
   () => state.lsp.locked || state.phase !== 'idle' || batch.active,
 )
 
-// The same gate as the MCP panel, judged by the same function: an agent whose
-// `lsp_enable` is false gets no language-server schemas at all, so the switches
-// are shown inert with the reason rather than hidden.
+// The same gate as the MCP panel: an agent whose `lsp_enable` is false gets no
+// language-server schemas, so the switches are shown inert with the reason.
 const gatedByMode = computed(() => modeBlocksHub('lsp'))
 const switchesDisabled = computed(() => locked.value || gatedByMode.value)
 
@@ -56,11 +53,9 @@ function rowTitle(server) {
   return `Use ${server.label} tools in this conversation`
 }
 
-// Restarting respawns every language server from a fresh
-// .nojae/lsp-settings.json scan, so a hub thread blocked in a chat tool
-// call would be killed mid-call: the button is only usable on an idle
-// conversation, and stays busy until the awaited server-side restart comes
-// back.
+// Restarting respawns every server from a fresh .nojae/lsp-settings.json scan, so
+// a hub thread blocked in a chat tool call would be killed mid-call: the button is
+// only usable on an idle conversation, and stays busy until the restart returns.
 const canRestart = computed(
   () => state.phase === 'idle' && !state.lsp.restarting && !batch.active,
 )
@@ -70,9 +65,9 @@ const restartTitle = computed(() => {
   return 'Restart the LSP hub: respawn every server from .nojae/lsp-settings.json'
 })
 
-// The wizard's entry point — the same one gate verdict as the MCP panel's, read
-// for this family. Deliberately **not** `locked` / `gatedByMode` / `canRestart`:
-// those are the restart's rules, and preparation touches no hub (§10).
+// The wizard's entry point — the same gate verdict as the MCP panel's, read for
+// this family. Deliberately **not** `locked` / `gatedByMode` / `canRestart`: those
+// are the restart's rules, and preparation touches no hub.
 const setMeUp = computed(() => wizard.setMeUpSlot(FAMILY_LSP))
 
 // Opening the wizard on this panel's family and nothing else.
@@ -80,11 +75,9 @@ function openWizard() {
   wizard.open(FAMILY_LSP)
 }
 
-// The empty panel's one sentence: the two paths it already named — the seeded
-// template and the file the hub actually reads — and the switch that arms them,
-// plus the click this feature adds. Composed here so the template renders a value,
-// and built around the composable's own `SET_ME_UP_LABEL` so the sentence and the
-// button above it cannot drift.
+// The empty panel's one sentence: the seeded template and the file the hub reads,
+// plus the click that prepares one. Built around the composable's own
+// `SET_ME_UP_LABEL` so the sentence and the button above it cannot drift.
 const emptyLine = computed(
   () =>
     'No language server is switched on for this conversation — copy the seeded ' +
@@ -98,9 +91,8 @@ const emptyLine = computed(
   <aside class="chat-lsp-panel" aria-label="LSP language servers for this conversation">
     <div class="chat-hub-head">
       <p class="caption chat-mcp-title">LSP tools</p>
-      <!-- The wizard's entry point, left of the restart and in the same 1.5rem
-           box (the restart's own class): one line in the head, so the panel's
-           width, height and head layout are untouched. -->
+      <!-- The wizard's entry point, in the restart's own 1.5rem box: one line in
+           the head, so the panel's width, height and layout are untouched. -->
       <button
         class="icon-btn chat-hub-setup"
         type="button"
@@ -135,8 +127,8 @@ const emptyLine = computed(
     <p v-if="state.lsp.error" class="caption alert-error chat-hub-error" role="alert">
       {{ state.lsp.error }}
     </p>
-    <!-- The same rule as the MCP panel's: the composable's sentence, which keeps
-         both paths this line already named and now invites the click. -->
+    <!-- The same rule as the MCP panel's: the composable's sentence, naming both
+         paths and inviting the click. -->
     <p v-if="!hasEntries" class="caption chat-hub-empty">{{ emptyLine }}</p>
     <label
       v-for="server in state.lsp.servers"

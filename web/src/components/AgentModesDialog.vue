@@ -36,21 +36,21 @@ import { useAppShell } from '../composables/useAppShell'
 // It decides **nothing**. Every rule this card renders is a plain function from
 // `useAgentModes`: the slug, the byte counter, each toolbar slot's inertness and
 // the one word that is both its accessible name and its tooltip, the save
-// refusal, the card's **one message** (`messageFor`, D11), the creation form's
-// shape, the model line. The component only turns those answers into fields and
+// refusal, the card's **one message** (`messageFor`), the creation form's shape,
+// the model line. The component only turns those answers into fields and
 // buttons, so a rule cannot drift from the dialog that shows it — and no cap is
 // spelled here, because every number arrives in the payload's `caps`. No message
 // is assembled in the template, and the line renders text only.
 //
-// **The list is the selection, and the selection is the edit mode** (D2): a row
-// click shows that agent's form and the toolbar acts on it; there is no Edit
-// button and no mode to enter. Each agent's form is held per entry, so selecting
-// another row never discards what was typed in the one left behind.
+// **The list is the selection, and the selection is the edit mode**: a row click
+// shows that agent's form and the toolbar acts on it; there is no Edit button and
+// no mode to enter. Each agent's form is held per entry, so selecting another row
+// never discards what was typed in the one left behind.
 //
-// **A new agent is a form, not a row** (D4): `+` clears the selection, empties
-// the form through `creationFormFor` and focuses Label, and writes nothing. The
-// list keeps showing exactly what the store holds; the agent joins it only when
-// a save succeeds. Clicking a row ends that state by design, without asking.
+// **A new agent is a form, not a row**: `+` clears the selection, empties the
+// form through `creationFormFor` and focuses Label, and writes nothing. The list
+// keeps showing exactly what the store holds; the agent joins it only when a save
+// succeeds. Clicking a row ends that state by design, without asking.
 //
 // **`readonly` is data, never an id.** The fields of an app-owned agent render
 // disabled, but this file never compares an agent id: the flag the server
@@ -79,14 +79,14 @@ const { state: shell, loadServers, loadConfig } = useAppShell()
 const dialogEl = ref(null)
 const draft = ref(null)
 const activeTab = ref(null) // the shown section's key: a stored row's id, or NEW_TAB
-const creation = ref(null) // the form being typed for an agent the store does not hold (D4)
+const creation = ref(null) // the form being typed for an agent the store does not hold
 const pendingDelete = ref(null) // the entry whose Delete awaits its confirm
-const pendingClose = ref(false) // `Close` was asked while the card holds unsaved work (D8)
+const pendingClose = ref(false) // `Close` was asked while the card holds unsaved work
 
-//: The creation form's section key. It is a *section* key and never an agent id:
-//: a new agent has no id the client owns until the store answers for it (D4), and
-//: the id typed into the form is the slug of whatever is typed — which may well be
-//: the id of a row that already exists. So the key is spelled with a character the
+//: The creation form's section key. It is a *section* key and never an agent id: a
+//: new agent has no id the client owns until the store answers for it, and the id
+//: typed into the form is the slug of whatever is typed — which may well be the id
+//: of a row that already exists. So the key is spelled with a character the
 //: payload's id pattern cannot produce, and the two sections can never collide.
 const NEW_TAB = '#new'
 
@@ -98,15 +98,15 @@ const selectedEntry = computed(
   () => entries.value.find((entry) => entry.id === activeTab.value) ?? null,
 )
 //: Creation mode, read through the composable's verdict: a form is held that has
-//: no row (D4). It is the card's only reading of that state.
+//: no row. It is the card's only reading of that state.
 const creating = computed(() => creationActiveFor(creation.value))
 //: The entry every control acts on: the form being typed while there is one, the
-//: selected row otherwise. "Nothing selected" stays **two** states (§5): creation
-//: mode has this form for Save to write, a list that came back empty has nothing.
+//: selected row otherwise. "Nothing selected" stays **two** states: creation mode
+//: has this form for Save to write, a list that came back empty has nothing.
 const subject = computed(() => creation.value ?? selectedEntry.value)
 //: The sections to render: the store's rows, plus the creation form while one is
-//: held. A new agent is not an entry of the list until a save succeeds (D4), so
-//: the list above never gains a row for something that does not exist.
+//: held. A new agent is not an entry of the list until a save succeeds, so the
+//: list above never gains a row for something that does not exist.
 const formEntries = computed(() =>
   creation.value ? [...entries.value, creation.value] : entries.value,
 )
@@ -123,23 +123,23 @@ const slotContext = computed(() => ({
 }))
 
 //: The toolbar's slots, each one verdict: inert or not, and the single string that
-//: is both its accessible name and its tooltip (§6.16). The card renders answers —
-//: no verb's availability is spelled here (D1, §5's closing rule).
+//: is both its accessible name and its tooltip. The card renders answers — no
+//: verb's availability is spelled here.
 const addSlot = computed(() => addSlotFor(slotContext.value))
 const saveSlot = computed(() => saveSlotFor(subject.value, slotContext.value))
 
 //: **delete** — the toolbar's third slot, and the verb's subject is the card's
 //: subject: a stored, deletable row or nothing. The reason a disabled slot gives
 //: (nojae owns it / nothing is stored to delete / a write is in flight) is part of
-//: the same verdict, so the tooltip cannot disagree with the enablement (D1, §6.10)
-//: and this file never reads a flag of its own.
+//: the same verdict, so the tooltip cannot disagree with the enablement and this
+//: file never reads a flag of its own.
 const deleteSlot = computed(() => deleteSlotFor(subject.value, slotContext.value))
 
 //: The row a pending confirmation is about, and the pair's verdict. The pair is
-//: **absent from the DOM** until that verdict says `rendered` (§6.17) — not hidden,
-//: so it is neither focusable nor announced while it means nothing. Its two
-//: tooltips are the whole question and its two answers (Q7): no sentence is added
-//: anywhere, and a write in flight makes the pair inert rather than queueing it (§8).
+//: **absent from the DOM** until that verdict says `rendered` — not hidden, so it
+//: is neither focusable nor announced while it means nothing. Its two tooltips are
+//: the whole question and its two answers: no sentence is added anywhere, and a
+//: write in flight makes the pair inert rather than queueing it.
 const pendingEntry = computed(
   () => entries.value.find((entry) => entry.id === pendingDelete.value) ?? null,
 )
@@ -147,35 +147,35 @@ const deleteConfirmation = computed(() =>
   deleteConfirmationFor(pendingEntry.value, slotContext.value),
 )
 
-//: **Would closing lose something?** (D8) — the guard's only question, answered by
-//: the composable over every form the card holds plus creation mode. It is read
-//: once, when `Close` is asked, and it is *never* consulted by the save slot: the
-//: baseline exists for this question alone (Q2), which is why re-saving an untouched
-//: agent stays allowed.
+//: **Would closing lose something?** — the guard's only question, answered by the
+//: composable over every form the card holds plus creation mode. It is read once,
+//: when `Close` is asked, and it is *never* consulted by the save slot: the baseline
+//: exists for this question alone, which is why re-saving an untouched agent stays
+//: allowed.
 const unsavedWork = computed(() =>
   closeWouldLoseForDraft(draft.value, { creating: creating.value }),
 )
 
-//: The footer's close pair (D8): the same idiom as the delete pair, in the footer's
-//: **reserved** slot, and **absent from the DOM** until a close is being confirmed
-//: (§6.17). Its two tooltips are the two answers, and each glyph's tooltip is its
-//: accessible name — one value read as both, so they cannot drift (§6.16).
+//: The footer's close pair: the same idiom as the delete pair, in the footer's
+//: **reserved** slot, and **absent from the DOM** until a close is being confirmed.
+//: Its two tooltips are the two answers, and each glyph's tooltip is its accessible
+//: name — one value read as both, so they cannot drift.
 const closeConfirmation = computed(() => closeConfirmationFor(slotContext.value))
 
-//: The card's **one message** (D11): everything it has to say comes out of here,
-//: with the role that announces it. The line is always rendered, so an empty
-//: `text` is a slot holding nothing rather than a slot that is gone. The slot
-//: context goes in as well, because **the close guard's question** (D8) is one of
-//: the things the card has to say: the pair's two glyphs are its two answers, and
-//: this line is the question they answer, so a reader never has to infer from an
-//: ✕ and a ✓ that closing now would discard typing.
+//: The card's **one message**: everything it has to say comes out of here, with
+//: the role that announces it. The line is always rendered, so an empty `text` is a
+//: slot holding nothing rather than a slot that is gone. The slot context goes in
+//: as well, because **the close guard's question** is one of the things the card
+//: has to say: the pair's two glyphs are its two answers, and this line is the
+//: question they answer, so a reader never has to infer from an ✕ and a ✓ that
+//: closing now would discard typing.
 const message = computed(() =>
   messageFor(draft.value, subject.value, slotContext.value),
 )
 
 // Open/fetch/close, following the SettingsDialog pattern. Opening *is* the read:
-// agents are uncached on purpose (the store is the cache, D11), so a card that
-// has been open for ten minutes knows it.
+// agents are uncached on purpose (the store is the cache), so a card that has been
+// open for ten minutes knows it.
 //
 // `immediate` because the pencil mounts this card with `open` already true (the
 // composer holds the flag): a watch that only fires on a *change* would leave a
@@ -215,29 +215,29 @@ async function openList() {
 }
 
 //: Which section a form is rendered under: a stored row's own id, or the card's
-//: key for the creation form — because the id typed into that form is nobody's
-//: key until the store answers for it (D4), and it may well be the slug of a row
-//: that already exists.
+//: key for the creation form — because the id typed into that form is nobody's key
+//: until the store answers for it, and it may well be the slug of a row that
+//: already exists.
 function tabKeyFor(entry) {
   if (!entry) return null
   return entry === creation.value ? NEW_TAB : entry.id
 }
 
-// **Escape and a backdrop click count as `Close` in every respect** (D8), so they
-// take the same guard — otherwise they would be a silent bypass of it. The backdrop
+// **Escape and a backdrop click count as `Close` in every respect**, so they take
+// the same guard — otherwise they would be a silent bypass of it. The backdrop
 // therefore never calls `dialog.close()` itself: it asks, and only a guard that has
 // nothing to ask lets the card go.
 function onBackdropClick(event) {
   if (event.target === dialogEl.value) askClose()
 }
 
-// **Escape is `Close` in every respect** (D8), so it takes the same guard. The
+// **Escape is `Close` in every respect**, so it takes the same guard. The
 // `<dialog>`'s own Escape path is the cancelable `cancel` event, so it is always
 // cancelled here and routed through the same verb the button uses: with nothing
 // unsaved that closes the card, with unsaved work it asks. Leaving the native path
-// alone would be the silent bypass D8 names, and it is why the pencil's `@close`
-// can never be reached while a close confirmation is pending — nothing closes in
-// that state by any route.
+// alone would be that silent bypass, and it is why the pencil's `@close` can never
+// be reached while a close confirmation is pending — nothing closes in that state
+// by any route.
 function onEscape(event) {
   event?.preventDefault?.()
   askClose()
@@ -250,11 +250,11 @@ function onNativeClose() {
 }
 
 //: `Close` is the card's only way out and it writes nothing. **While the card holds
-//: unsaved work it asks first, in place** (D8): the delete confirmation's idiom
-//: arrives in the footer's reserved slot and its question in the message line
-//: (both `messageFor`'s, so nothing is spelled here), no dialog is nested, and
-//: `Close` does not move. A pending delete is **abandoned** here — nothing was
-//: written for it — and the guard answers on its own terms.
+//: unsaved work it asks first, in place**: the delete confirmation's idiom arrives
+//: in the footer's reserved slot and its question in the message line (both
+//: `messageFor`'s, so nothing is spelled here), no dialog is nested, and `Close`
+//: does not move. A pending delete is **abandoned** here — nothing was written for
+//: it — and the guard answers on its own terms.
 function askClose() {
   pendingDelete.value = null
   if (!unsavedWork.value) {
@@ -268,9 +268,9 @@ function askClose() {
 }
 
 //: `Keep editing`: hide the pair and change **nothing** else — not the selection,
-//: not the form, not a keystroke (§6.12's rule for the other pair). Focus goes
-//: back to the verb that asked, because the pair's own button is leaving the DOM
-//: and a keyboard user must not be dropped at the top of the page.
+//: not the form, not a keystroke. Focus goes back to the verb that asked, because
+//: the pair's own button is leaving the DOM and a keyboard user must not be dropped
+//: at the top of the page.
 async function dismissClose() {
   pendingClose.value = false
   await nextTick()
@@ -289,26 +289,26 @@ function closeCard() {
   emit('close')
 }
 
-//: Add (D4): the selection clears, the form empties through the composable's own
-//: shape, focus lands on Label, and **nothing is written**. The list gains no row
-//: — a new agent is not an entry until a save succeeds.
+//: Add: the selection clears, the form empties through the composable's own shape,
+//: focus lands on Label, and **nothing is written**. The list gains no row — a new
+//: agent is not an entry until a save succeeds.
 async function addAgent() {
   if (addSlot.value.disabled) return
   creation.value = creationFormFor(draft.value)
   // The shown section is the creation form's, which is **not** any row's key — so
-  // no row carries the selected mark, and that is the whole signal D4 asks for.
+  // no row carries the selected mark, and that is the whole signal.
   activeTab.value = NEW_TAB
   await focusSection()
 }
 
-//: Select a row (D2): that agent's form is shown, and the toolbar acts on it.
-//: Clicking any row ends creation mode **by design** (D4.7) — nothing was
-//: written, so nothing needs confirming, and the agent clicked is shown instead.
+//: Select a row: that agent's form is shown, and the toolbar acts on it. Clicking
+//: any row ends creation mode **by design** — nothing was written, so nothing needs
+//: confirming, and the agent clicked is shown instead.
 function selectEntry(entry) {
   creation.value = null
   activeTab.value = tabKeyFor(entry)
-  // A pending delete is **abandoned** by the selection moving (D7.6, §6.14): the
-  // destructive action never survives the row it was asked for changing its mark.
+  // A pending delete is **abandoned** by the selection moving: the destructive
+  // action never survives the row it was asked for changing its mark.
   pendingDelete.value = null
 }
 
@@ -350,9 +350,9 @@ function modelLine(entry) {
   return modelLineFor(entry, shell.servers)
 }
 
-//: Delete (D7): the toolbar's verb, asked by the click and answered by the pair at
-//: that toolbar's right end. The offer and its refusal reason are the composable's
-//: answer for the card's subject, so nothing here reads a flag or names an agent:
+//: Delete: the toolbar's verb, asked by the click and answered by the pair at that
+//: toolbar's right end. The offer and its refusal reason are the composable's answer
+//: for the card's subject, so nothing here reads a flag or names an agent:
 //: `readonly` and `deletable` are the whole vocabulary.
 async function askDelete() {
   if (deleteSlot.value.disabled) return
@@ -364,21 +364,21 @@ async function askDelete() {
   dialogEl.value?.querySelector('.agent-modes-cancel-delete')?.focus()
 }
 
-//: Cancel (D7.4, Q4): hide the pair and change **nothing** else. Nothing was
-//: written, so there is nothing to restore — the selection stays, the form stays,
-//: and everything typed in it stays (§6.12). Focus returns to the Delete verb,
-//: the one control that asked, rather than dropping to the page.
+//: Cancel: hide the pair and change **nothing** else. Nothing was written, so there
+//: is nothing to restore — the selection stays, the form stays, and everything typed
+//: in it stays. Focus returns to the Delete verb, the one control that asked, rather
+//: than dropping to the page.
 async function dismissDelete() {
   pendingDelete.value = null
   await nextTick()
   dialogEl.value?.querySelector('.agent-modes-delete')?.focus()
 }
 
-//: Confirm (D7.5): delete the selected agent, re-baseline on the whole answer the
-//: store sent back, and select the **successor** — the next row in the order the
-//: list had while the deleted row was still in it, else the previous one, else
-//: nothing. That ordering is `successorAfterDelete`'s rule and is read *before* the
-//: answer replaces the list, so the card derives no order of its own.
+//: Confirm: delete the selected agent, re-baseline on the whole answer the store
+//: sent back, and select the **successor** — the next row in the order the list had
+//: while the deleted row was still in it, else the previous one, else nothing. That
+//: ordering is `successorAfterDelete`'s rule and is read *before* the answer
+//: replaces the list, so the card derives no order of its own.
 async function confirmDelete() {
   const entry = pendingEntry.value
   if (!entry) return
@@ -392,10 +392,10 @@ async function confirmDelete() {
     await focusAfterDelete(false)
     return
   }
-  // Like a save (D6), the answer re-baselines the whole list without discarding
-  // what the user typed in the agents this delete did not touch: `writtenId` is
-  // null because no row here was written as a form — the deleted one is simply
-  // gone from `next.entries`.
+  // Like a save, the answer re-baselines the whole list without discarding what the
+  // user typed in the agents this delete did not touch: `writtenId` is null because
+  // no row here was written as a form — the deleted one is simply gone from
+  // `next.entries`.
   draft.value = rebaselinedDraft(next, held, null)
   // The successor by id in the re-baselined list — and when the list came back
   // empty there is no row to select, so the card holds no selection.
@@ -428,15 +428,15 @@ async function focusAfterDelete(preferTab) {
 // Save **one** agent — the subject, and only it: the form being typed when a new
 // agent is being created, the selected row otherwise. There is no "save all".
 //
-// A successful save does **not** close the card (D6): the answer is the whole new
-// list, so the card re-baselines on it, keeps the saved agent selected, and
-// leaves every other agent's typed edits exactly as they were. A new agent's row
-// appears in the list for the first time here, selected.
+// A successful save does **not** close the card: the answer is the whole new list,
+// so the card re-baselines on it, keeps the saved agent selected, and leaves every
+// other agent's typed edits exactly as they were. A new agent's row appears in the
+// list for the first time here, selected.
 //
 // An incomplete form is **refused here, not prevented**: the slot is live, the
-// click consults `saveRefusalFor`, and on a refusal nothing is posted. The
-// message line already says the sentence — it is derived from the form, so it
-// reads the same before the click and after it (D11).
+// click consults `saveRefusalFor`, and on a refusal nothing is posted. The message
+// line already says the sentence — it is derived from the form, so it reads the
+// same before the click and after it.
 async function save() {
   const entry = subject.value
   if (saveSlot.value.disabled) return
@@ -451,7 +451,7 @@ async function save() {
   // loses its typed state — every other agent keeps what the user typed in it.
   draft.value = rebaselinedDraft(next, held, savedId)
   // Keep the saved agent selected — for a new one, that is the first time it has
-  // a row at all (D4.6).
+  // a row at all.
   activeTab.value = tabKeyFor(
     entries.value.find((row) => row.id === savedId) ?? entries.value[0] ?? null,
   )
@@ -474,38 +474,38 @@ async function save() {
   >
     <article>
       <header>
-        <!-- D9: the title is `Agents` in **every** state — nothing selected,
-             creation mode, a confirmation pending — and the dialog's accessible
-             name follows it. It is never restyled into a word that describes what
-             the card is currently doing (D4.4), because wording that comes and
-             goes is a layout change. -->
+        <!-- The title is `Agents` in **every** state — nothing selected, creation
+             mode, a confirmation pending — and the dialog's accessible name
+             follows it. It is never restyled into a word that describes what the
+             card is doing, because wording that comes and goes is a layout
+             change. -->
         <h2 id="agent-modes-title" class="settings-title">Agents</h2>
       </header>
 
       <!-- The card renders its body even with no draft (a read that failed, or
            one still in flight): there is then nothing to edit, and the one
-           message line below is what the card says instead (D11). It is not
-           `v-if`'d away, because the line has to be there to say so. -->
+           message line below is what the card says instead. It is not `v-if`'d
+           away, because the line has to be there to say so. -->
       <form class="settings-form agent-modes-form" @submit.prevent>
         <div class="settings-body agent-modes-body">
           <!-- The body's four parts, placed in the grid by `theme.css`: the
                heading, the toolbar and the list down the left column, the form
-               spanning the toolbar's row and the list's (§3). -->
-          <!-- D4.4 / D9: the heading above the toolbar reads `Agents` in **every**
-               state — including creation mode — and never becomes a word that
-               describes what the card is doing. It is not the dialog's accessible
-               name (that follows the title above), so the two can say the same
-               thing without one naming the card twice. -->
+               spanning the toolbar's row and the list's. -->
+          <!-- The heading above the toolbar reads `Agents` in **every** state —
+               including creation mode — and never becomes a word that describes
+               what the card is doing. It is not the dialog's accessible name (that
+               follows the title above), so the two can say the same thing without
+               one naming the card twice. -->
           <h3 class="agent-modes-heading">Agents</h3>
 
-          <!-- **Five fixed-width slots**, not a flex row that grows (D1): add,
-               save, delete at the left, the confirmation pair's two at the right
-               end — just left of the form. Every slot keeps its width whether or
-               not it holds a button, so revealing a pair moves nothing and the
-               toolbar never changes height (D10): the delete verb is always in its
-               slot (disabled with its reason, never hidden), and the pair arrives in
-               slots whose width was already reserved, so the three verbs do not move
-               by a pixel when it does (§6.11). -->
+          <!-- **Five fixed-width slots**, not a flex row that grows: add, save,
+               delete at the left, the confirmation pair's two at the right end —
+               just left of the form. Every slot keeps its width whether or not it
+               holds a button, so revealing a pair moves nothing and the toolbar
+               never changes height: the delete verb is always in its slot (disabled
+               with its reason, never hidden), and the pair arrives in slots whose
+               width was already reserved, so the three verbs do not move by a pixel
+               when it does. -->
           <div class="agent-modes-toolbar" role="group" aria-label="Agent actions">
             <span class="agent-modes-slot">
               <button
@@ -561,12 +561,12 @@ async function save() {
               </button>
             </span>
             <span class="agent-modes-toolbar-space"></span>
-            <!-- The confirmation pair (D7): **not rendered at all** until a delete
-                 is being confirmed (§6.17), so it is neither focusable nor announced
-                 before it means something. The two glyphs and their tooltips are the
-                 whole question and its two answers (Q7) — no sentence, no agent
-                 label, no caption is added anywhere, because the toolbar's height is
-                 fixed and the pair's slots were already reserved (D10, §6.11). -->
+            <!-- The confirmation pair: **not rendered at all** until a delete is
+                 being confirmed, so it is neither focusable nor announced before it
+                 means something. The two glyphs and their tooltips are the whole
+                 question and its two answers — no sentence, no agent label, no
+                 caption is added anywhere, because the toolbar's height is fixed and
+                 the pair's slots were already reserved. -->
             <span class="agent-modes-slot">
               <button
                 v-if="deleteConfirmation.rendered"
@@ -624,11 +624,11 @@ async function save() {
           </nav>
 
           <!-- The right column: one form per agent, held per entry so switching
-               rows never discards what was typed (§6.18). It carries no caption
-               line and no per-field message (§3): everything the card has to say
-               is in the message line below (D11). The creation form is the last
-               of these sections and the only one shown while a new agent is being
-               typed — the list above gains no row for it (D4). -->
+               rows never discards what was typed. It carries no caption line and no
+               per-field message: everything the card has to say is in the message
+               line below. The creation form is the last of these sections and the
+               only one shown while a new agent is being typed — the list above
+               gains no row for it. -->
           <div class="settings-editor agent-modes-editor">
             <section
               v-for="entry in formEntries"
@@ -664,12 +664,12 @@ async function save() {
                 </label>
               </div>
 
-              <!-- The id: a field only while the agent is **new**, where the
-                   slug the Label generated can still be corrected. An existing
-                   row's id is immutable (a rename would orphan the sessions that
-                   name it) and names nothing the user acts on, so it is not
-                   shown — the tab is captioned by the Label, and the room is
-                   better spent on the fields that can be edited. -->
+              <!-- The id: a field only while the agent is **new**, where the slug
+                   the Label generated can still be corrected. An existing row's id
+                   is immutable (a rename would orphan the sessions that name it) and
+                   names nothing the user acts on, so it is not shown — the tab is
+                   captioned by the Label, and the room is better spent on the fields
+                   that can be edited. -->
               <label v-if="idEditableFor(entry)">
                 Id
                 <input
@@ -717,11 +717,10 @@ async function save() {
                 {{ personaByteCount(entry.personaText) }} / {{ draft.caps.maxPersonaBytes ?? '—' }} bytes
               </p>
 
-              <!-- The model: live for **every** agent, a `readonly` one
-                   included, because it is the one field of those rows the user
-                   owns. No "use the default" entry — there is no default (D5) —
-                   so the empty option is an explicit, legal choice with a
-                   visible cost. -->
+              <!-- The model: live for **every** agent, a `readonly` one included,
+                   because it is the one field of those rows the user owns. No "use
+                   the default" entry — there is no default — so the empty option is
+                   an explicit, legal choice with a visible cost. -->
               <label>
                 Model
                 <select v-model.number="entry.modelId" :disabled="editor.saving">
@@ -743,31 +742,29 @@ async function save() {
               </label>
               <p class="caption agent-modes-model-line">{{ modelLine(entry) }}</p>
 
-              <!-- The form holds **no verb**: Delete is the toolbar's (D7), and the
-                   in-place confirm and the refusal caption that used to sit here are
-                   gone with it — the refusal's wording survives in the slot's tooltip
-                   (D1), and a delete the store refuses is said in the message line
-                   (D11). The model line above is the last field of a section. -->
+              <!-- The form holds **no verb**: Delete is the toolbar's, and the
+                   refusal's wording survives in the slot's tooltip, while a delete
+                   the store refuses is said in the message line. The model line above
+                   is the last field of a section. -->
             </section>
           </div>
         </div>
 
         <footer class="settings-actions">
-          <!-- **The card's one message** (D11): always present, on the same band
-               as the buttons, its text and its role both `messageFor`'s answer.
-               Nothing else in the card says anything. It is also where the close
-               guard puts its question (D8) — the slot immediately before the
-               pair's two buttons, and the only one that can hold a sentence
-               without moving `Close`. -->
+          <!-- **The card's one message**: always present, on the same band as the
+               buttons, its text and its role both `messageFor`'s answer. Nothing
+               else in the card says anything. It is also where the close guard puts
+               its question — the slot immediately before the pair's two buttons, and
+               the only one that can hold a sentence without moving `Close`. -->
           <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
-          <!-- The footer's **reserved** confirmation slot (D8): always there and
-               always the pair's width, so `Close` never moves when the card asks a
-               question (D10). It holds the close pair and nothing else — the delete
-               pair belongs to the toolbar. Both buttons are **absent from the DOM**
-               until a close is pending (§6.17), so neither is focusable nor announced
-               while it means nothing, and the width they arrive in was already
-               reserved. The two glyphs reuse the delete pair's idiom and its colours,
-               so the card teaches the pair once (D8). -->
+          <!-- The footer's **reserved** confirmation slot: always there and always
+               the pair's width, so `Close` never moves when the card asks a question.
+               It holds the close pair and nothing else — the delete pair belongs to
+               the toolbar. Both buttons are **absent from the DOM** until a close is
+               pending, so neither is focusable nor announced while it means nothing,
+               and the width they arrive in was already reserved. The two glyphs reuse
+               the delete pair's idiom and its colours, so the card teaches the pair
+               once. -->
           <span class="agent-modes-footer-slot">
             <span class="agent-modes-slot">
               <button
@@ -805,11 +802,10 @@ async function save() {
               </button>
             </span>
           </span>
-          <!-- `Close` is the card's only exit and it writes nothing, exactly as the
-               footer's `Cancel` did — and `Save` is no longer its twin, because a
-               save is a write and not an exit (D6). It asks before discarding typed
-               work (D8), and Escape and a backdrop click are the same verb, so they
-               take the same guard rather than bypassing it. -->
+          <!-- `Close` is the card's only exit and it writes nothing, and `Save` is
+               no longer its twin because a save is a write and not an exit. It asks
+               before discarding typed work, and Escape and a backdrop click are the
+               same verb, so they take the same guard rather than bypassing it. -->
           <button class="secondary contrast agent-modes-close" type="button" @click="askClose">
             Close
           </button>

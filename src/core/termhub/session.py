@@ -1,35 +1,31 @@
 """One shell on one PTY: spawn, pump, resize, tear down.
 
-``TerminalSession`` is the core behind ``WS /api/terminal``. It knows
-nothing about WebSockets: like the chat core it takes an
-injected ``emit`` (an async callable publishing plain dicts) and is handed a
-``receive_frame`` callable that yields the next client frame. Everything else —
-the pty, the child, the escalation — is process work.
+``TerminalSession`` is the core behind ``WS /api/terminal``. It knows nothing
+about WebSockets: like the chat core it takes an injected ``emit`` (an async
+callable publishing plain dicts) and is handed a ``receive_frame`` callable that
+yields the next client frame. Everything else — the pty, the child, the
+escalation — is process work.
 
 Why a PTY rather than a pipe pair: xterm renders an ANSI stream, and only the
-kernel's terminal emulation gives colours, cursor movement, the alternate
-screen, line editing and Ctrl-C-as-signal. The server only relays bytes and
-updates the window size; which pseudo-terminal mechanism that is — if any —
-is the seam's answer in :mod:`termhub.drivers`, whose POSIX half is
-:mod:`termhub.pty_posix` and whose Windows half is :mod:`termhub.pty_conpty`
-(a ConPTY pseudo-console). The halves differ in one structural way the session
-branches on through the seam — :func:`termhub.drivers.pair_starts_the_child`:
-a kernel PTY hands over a slave fd for this class to spawn onto, a ConPTY *is*
-the child's stdio and starts the shell itself.
+kernel's terminal emulation gives colours, cursor movement, the alternate screen,
+line editing and Ctrl-C-as-signal. The server only relays bytes and updates the
+window size; which pseudo-terminal mechanism that is — if any — is the seam's
+answer in :mod:`termhub.drivers`, whose POSIX half is :mod:`termhub.pty_posix`
+and whose Windows half is :mod:`termhub.pty_conpty` (a ConPTY pseudo-console).
+The halves differ in one structural way the session branches on through the seam
+— :func:`termhub.drivers.pair_starts_the_child`: a kernel PTY hands over a slave
+fd for this class to spawn onto, a ConPTY *is* the child's stdio and starts the
+shell itself.
 
-The two rules inherited from AGENTS.md:
-
-* the shell's tree has one named boundary: on POSIX the shell leads its own
-  process group (``start_new_session=True``), which is what makes the group
-  signal reach its children; on Windows the session opens one **Job Object**
-  at spawn (:mod:`src.core.proctree_jobs`) which contains the shell, the
-  console helper the driver started beside it, and — by inheritance at
-  creation — everything those two spawn;
-* teardown asks the shared :mod:`src.core.proctree` entry point — the same
-  escalation shape both hubs use, in whichever platform half that entry point
-  dispatches to — on *every* exit path: client disconnect, ``kill`` frame,
-  shell exit, reader ``OSError``, app shutdown. One call, on both platforms,
-  guarded by nothing: there is no second kill path and no platform test here.
+The tree's one named boundary: on POSIX the shell leads its own process group
+(``start_new_session=True``), which is what makes the group signal reach its
+children; on Windows the session opens one **Job Object** at spawn
+(:mod:`src.core.proctree_jobs`) which contains the shell, the console helper the
+driver started beside it, and — by inheritance at creation — everything those
+two spawn. Teardown then asks the shared :mod:`src.core.proctree` entry point on
+*every* exit path — client disconnect, ``kill`` frame, shell exit, reader
+``OSError``, app shutdown — one call, on both platforms, guarded by nothing:
+there is no second kill path and no platform test here.
 """
 
 import asyncio
@@ -87,15 +83,14 @@ class TerminalSession:
         # The shell process. Normally the ``Popen`` this session spawned onto the
         # driver's slave; with a pair that starts its own child (the Windows
         # pseudo-console — see :func:`termhub.drivers.pair_starts_the_child`) the
-        # pair spawned it and answers back with what this class uses of a
-        # process: ``pid`` and ``wait()``.
+        # pair spawned it and answers back with what this class uses of a process:
+        # ``pid`` and ``wait()``.
         self.process: Optional[drivers.TerminalChild] = None
-        # The session's process-tree boundary on the platform that has no
-        # process groups: one Job Object, opened before anything spawns and
-        # containing the shell plus the console helper the driver started
-        # beside it (C-D5). Inert on POSIX — no handle, every ``assign``
-        # answers ``None`` — where the shell's own session is the scope, so
-        # the Linux path is exactly what it was.
+        # The session's process-tree boundary on the platform that has no process
+        # groups: one Job Object, opened before anything spawns and containing the
+        # shell plus the console helper the driver started beside it. Inert on
+        # POSIX — no handle, every ``assign`` answers ``None`` — where the shell's
+        # own session is the scope, so the Linux path is exactly what it was.
         self.job: Optional[proctree_jobs.ProcessJob] = None
         # The folder this session is **born in**, set once by :meth:`spawn` and
         # never moved afterwards: the child's ``cwd``, the ``open`` frame's
@@ -126,54 +121,51 @@ class TerminalSession:
 
         The order matters in two places. The window size is set *before* the
         spawn so the first prompt already wraps at the right width (on a ConPTY
-        that size is carried to the console's *creation* — C-D4's "set before
-        spawn maps exactly"), and the parent's copy of the slave is closed right
-        after it: while any process holds the slave open, a read of the master
-        never reports the shell's death, so a leftover duplicate would hang the
-        reader forever. A ConPTY has no slave, and its driver's ``close_slave``
-        is the named no-op that says so.
+        that size is carried to the console's *creation*), and the parent's copy
+        of the slave is closed right after it: while any process holds the slave
+        open, a read of the master never reports the shell's death, so a leftover
+        duplicate would hang the reader forever. A ConPTY has no slave, and its
+        driver's ``close_slave`` is the named no-op that says so.
 
-        With ``start_new_session=True`` the shell becomes a session leader with
-        no controlling terminal, and the ``slave`` it is given as its stdio is
-        the only terminal it can acquire — so it takes the PTY as its ctty and
-        job control (``^C``, job stop/resume, ``stty``) behaves exactly as in a
-        real terminal window. On Windows neither idea exists — the console *is*
-        the child's stdio and there is no group to signal — so the boundary is
-        the **job** opened here, *before* the spawn: containment is decided at
-        a process's creation, which is why the shell and the console helper
-        are assigned as soon as the driver reports them and no command can
-        reach the shell before they are (C-D5).
+        With ``start_new_session=True`` the shell becomes a session leader with no
+        controlling terminal, and the ``slave`` given as its stdio is the only
+        terminal it can acquire — so it takes the PTY as its ctty and job control
+        (``^C``, job stop/resume, ``stty``) behaves exactly as in a real terminal
+        window. On Windows neither idea exists — the console *is* the child's
+        stdio and there is no group to signal — so the boundary is the **job**
+        opened here, *before* the spawn: containment is decided at a process's
+        creation, which is why the shell and the console helper are assigned as
+        soon as the driver reports them and no command can reach the shell before
+        they are.
 
-        Where the shell starts is the workspace **in scope**, read once here:
-        the route entered that scope from the socket's own query string before
-        calling this, so a shell opened by a tab on folder A starts in A. This
-        is the only time the folder is read — the session then keeps what it
-        was born in, and nothing later (this tab re-pointing, another tab's
-        socket) moves it.
+        Where the shell starts is the workspace **in scope**, read once here: the
+        route entered that scope from the socket's own query string before calling
+        this, so a shell opened by a tab on folder A starts in A. This is the only
+        time the folder is read — the session then keeps what it was born in, and
+        nothing later (this tab re-pointing, another tab's socket) moves it.
         """
         driver_module = drivers.selected_driver()
         if driver_module is None:
             raise TerminalUnsupported(constants.NO_DRIVER_MESSAGE)
         # Which shell, and what it is handed: both are the platform's answer, in
-        # :mod:`termhub.shells` (C-D2 as amended). A runner with no usable shell
-        # raises the same ``TerminalUnsupported`` the driver absence does — one
-        # refusal shape, and its sentence names what was looked for.
+        # :mod:`termhub.shells`. A runner with no usable shell raises the same
+        # ``TerminalUnsupported`` the driver absence does — one refusal shape, and
+        # its sentence names what was looked for.
         shell = shells.select_shell()
         # **The folder this shell is born in**, read from the seam exactly once
-        # and then owned by the session for its whole life: it is the ``cwd``
-        # the child is spawned with, the ``open`` frame reports and
+        # and then owned by the session for its whole life: it is the ``cwd`` the
+        # child is spawned with, the ``open`` frame reports and
         # ``GET /api/terminal`` lists. Nothing later in the app may move it — a
         # tab re-pointing at another folder leaves this shell where it is, and
-        # only a **new** session (a fresh socket) starts somewhere else
-        # (spec §8: "a live shell keeps the folder it was born in").
+        # only a **new** session (a fresh socket) starts somewhere else.
         self.cwd = workspace.current_root()
         self.shell = shell[0]
         # The tree's boundary exists before anything is started, on every
-        # platform: where the platform has no jobs this object is inert and
-        # costs nothing (the shell's session is the scope there), and where it
-        # does, a process born later inherits the job its parent was already
-        # in — so opening it late would be a different guarantee, not a
-        # weaker one (see :mod:`src.core.proctree_jobs`).
+        # platform: where the platform has no jobs this object is inert and costs
+        # nothing (the shell's session is the scope there), and where it does, a
+        # process born later inherits the job its parent was already in — so
+        # opening it late would be a different guarantee, not a weaker one (see
+        # :mod:`src.core.proctree_jobs`).
         self.job = proctree_jobs.ProcessJob(f"terminal-{self.id}")
         driver = None
         try:
@@ -215,12 +207,11 @@ class TerminalSession:
     def _contain_spawned(self, driver: Any) -> None:
         """Put every process the spawn started into the session's job.
 
-        The shell is the **leader** — the pid the shared teardown entry point
-        is handed, and the key the job is looked up by. The console helper
-        beside it is the process C-D5 names as the one an implementer forgets;
-        it is a member, never a key. A pair that starts no helper (a kernel
-        PTY) reports no list, and on that platform the job is inert anyway —
-        the one call site stays one call site.
+        The shell is the **leader** — the pid the shared teardown entry point is
+        handed, and the key the job is looked up by. The console helper beside it
+        is the one an implementer forgets: a member, never a key. A pair that
+        starts no helper (a kernel PTY) reports no list, and on that platform the
+        job is inert anyway — the one call site stays one call site.
         """
         job = self.job
         if job is None:
@@ -256,11 +247,11 @@ class TerminalSession:
             self.pty.set_size(cols, rows)
 
     def terminal_size(self) -> Optional[tuple]:
-        """The window size the kernel has for this PTY, as ``(cols, rows)``.
+        """The window size the driver holds for this PTY, as ``(cols, rows)``.
 
-        The server-side answer to "what width does the driver think this
-        terminal has". The shell's own ``stty size`` is the client-side view
-        of the same number (what the resize test reads).
+        The server-side answer to "what width does the driver think this terminal
+        has"; the shell's own ``stty size`` is the client-side view of the same
+        number.
         """
         if self.pty is None:
             return None
@@ -275,12 +266,12 @@ class TerminalSession:
         """Stream PTY bytes until the shell is gone, then report its exit code.
 
         One ``emit`` per driver-read chunk (capped at ``PTY_READ_BYTES``) so a
-        ``cat`` of a big file is many frames rather than one giant message.
-        The driver read blocks, hence ``asyncio.to_thread``; it is unblocked by the
+        ``cat`` of a big file is many frames rather than one giant message. The
+        driver read blocks, hence ``asyncio.to_thread``; it is unblocked by the
         teardown, because once the shell and its children are gone the driver
         answers the far end as gone (POSIX: the master ``EIO``s; a ConPTY: the
-        pipe EOFs and the released console answers so at once — C-D3, and the
-        reason lives in the driver, not here).
+        pipe EOFs and the released console answers so at once — and the reason
+        lives in the driver, not here).
 
         A publish failure is the client leaving mid-stream: stop pumping and
         remember it, so the run loop ends on the same path as a disconnect
@@ -320,14 +311,14 @@ class TerminalSession:
         """Let the reader task end, then it is safe to close the master.
 
         The read runs in a worker thread (``asyncio.to_thread``) that a task
-        cancellation cannot interrupt, so closing the master under a still
-        blocked read would risk a fd-reuse race. The teardown's session kill has
-        already removed every holder of the slave, so the read returns ``EIO``
-        (confirmed against a real PTY) and the task resolves on its own; the
-        timeout only guards against a process that escaped the kill. On a
-        pseudo-console the same order holds for the same reason: the driver's
-        released console answers the far end as gone, so its read returns to the
-        thread without anything being cancelled.
+        cancellation cannot interrupt, so closing the master under a still blocked
+        read would risk a fd-reuse race. The teardown's session kill has already
+        removed every holder of the slave, so the read returns ``EIO`` (confirmed
+        against a real PTY) and the task resolves on its own; the timeout only
+        guards against a process that escaped the kill. On a pseudo-console the
+        same order holds for the same reason: the driver's released console answers
+        the far end as gone, so its read returns to the thread without anything
+        being cancelled.
         """
         task = self._reader_task
         if task is None or task.done():
@@ -335,8 +326,8 @@ class TerminalSession:
         try:
             await asyncio.wait_for(task, timeout=constants.STOP_GRACE_SECONDS + 1.0)
         except (asyncio.TimeoutError, TimeoutError):
-            # A slave holder survived the kill (a setsid'd daemon, the documented
-            # opt-out). Cancel the coroutine and leave the fd open: leaking one
+            # A slave holder survived the kill (a setsid'd daemon escapes the
+            # session). Cancel the coroutine and leave the fd open: leaking one
             # descriptor beats reading it as if it were the next session's.
             task.cancel()
         except Exception:
@@ -348,10 +339,10 @@ class TerminalSession:
         """Drive the session until the socket, the shell or a ``kill`` ends it.
 
         Returns why it ended: ``disconnect``, ``kill`` or ``shell-exit``. Every
-        exit path lands in :meth:`teardown`. The ``open`` frame (pid, cwd,
-        shell) is published before the pump starts, so the client always sees
-        it before any output — that is what lets it flush keystrokes typed
-        during the handshake against the right session.
+        exit path lands in :meth:`teardown`. The ``open`` frame (pid, cwd, shell)
+        is published before the pump starts, so the client always sees it before
+        any output — that is what lets it flush keystrokes typed during the
+        handshake against the right session.
         """
         try:
             await self._emit(
@@ -426,28 +417,27 @@ class TerminalSession:
         """Kill the process *tree* and release the terminal. Idempotent.
 
         Runs on every exit path, and it goes through the shared
-        ``proctree.kill_session_tree`` so a ``vim`` or a
-        ``python -m http.server`` started in the pane cannot outlive the tab.
-        The call is **unguarded and platform-neutral** (C-D5): the entry
-        point answers with the process **session** here (POSIX) or with the
-        **job** this session opened at spawn (Windows — the shell, the console
-        helper beside it, and every job bash backgrounded into them). The
-        order the POSIX path has always had — kill, drain the reader, release
-        the driver's end, release the job — is the order on both platforms.
+        ``proctree.kill_session_tree`` so a ``vim`` or a ``python -m http.server``
+        started in the pane cannot outlive the tab. The call is **unguarded and
+        platform-neutral**: the entry point answers with the process **session**
+        here (POSIX) or with the **job** this session opened at spawn (Windows —
+        the shell, the console helper beside it, and every job bash backgrounded
+        into them). The order the POSIX path has always had — kill, drain the
+        reader, release the driver's end, release the job — is the order on both
+        platforms.
         """
         if self._closed:
             return
         self._closed = True
         # A teardown must survive the cancellation that triggered it. When the
         # WebSocket handler task is cancelled (client gone, or app shutdown), a
-        # plain ``await`` in the kill below would re-raise CancelledError and
-        # abandon the SIGTERM→SIGKILL escalation mid-way — stranding a blocked
-        # ``process.wait`` thread. An interactive shell traps SIGTERM, so
-        # SIGKILL is the step that actually reaps it, which makes shielding the
-        # whole teardown (kill, drain, fd release) the only way its guarantees
-        # hold under cancel. C added a platform, and this stays as true there:
-        # the job's graceful step and its force step are what a cancel must not
-        # be allowed to abandon halfway.
+        # plain ``await`` in the kill below would re-raise CancelledError and abandon
+        # the SIGTERM→SIGKILL escalation mid-way — stranding a blocked
+        # ``process.wait`` thread. An interactive shell traps SIGTERM, so SIGKILL is
+        # the step that actually reaps it, which makes shielding the whole teardown
+        # (kill, drain, fd release) the only way its guarantees hold under cancel.
+        # The same holds on Windows: the job's graceful step and its force step are
+        # what a cancel must not be allowed to abandon halfway.
         with anyio.CancelScope(shield=True):
             pid = self.pid
             # The scope of the kill is the platform half's answer to one call:
@@ -462,9 +452,9 @@ class TerminalSession:
                 await proctree.kill_session_tree(
                     pid, self._reap_leader(), constants.STOP_GRACE_SECONDS
                 )
-            # Drain the reader (it unblocks with the far-end answer now the
-            # tree is gone) before touching the driver's end, so the worker
-            # thread never reads a closed/reused one.
+            # Drain the reader (it unblocks with the far-end answer now the tree
+            # is gone) before touching the driver's end, so the worker thread never
+            # reads a closed/reused one.
             await self._finish_pump()
             if self.pty is not None:
                 with suppress(OSError):
@@ -472,10 +462,9 @@ class TerminalSession:
                 self.pty = None
             # The job handle is released last and always: the job path of
             # ``kill_session_tree`` already closed it when it ran (close is
-            # idempotent), and this covers the paths where it did not — no
-            # pid, or a leader whose assignment failed so the entry point
-            # never found the job. Closing it is kill-on-close, the guarantee
-            # that outlives the escalation.
+            # idempotent), and this covers the paths where it did not — no pid, or a
+            # leader whose assignment failed so the entry point never found the job.
+            # Closing it is kill-on-close, the guarantee that outlives the escalation.
             self._release_job()
 
     def _reap_leader(self):

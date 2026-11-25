@@ -33,10 +33,9 @@ export function decodeSource(encoded) {
 
 const FAILED = Symbol('mermaid failed')
 
-// Cached per source, like hljs.js: completed fences are immutable while
-// streaming, so each rAF re-render reuses the rendered SVG instead of
-// re-parsing the diagram. Failures are cached too, so a broken fence does
-// not re-parse on every streamed frame.
+// Cached per source: completed fences are immutable while streaming, so each
+// rAF re-render reuses the rendered SVG instead of re-parsing the diagram.
+// Failures are cached too, so a broken fence does not re-parse every frame.
 async function renderDiagram(src) {
   const hit = cache.get(src)
   if (hit === FAILED) throw new Error('mermaid render failed')
@@ -46,9 +45,8 @@ async function renderDiagram(src) {
     const ok = await mermaid.parse(src, { suppressErrors: true })
     if (!ok) throw new Error('mermaid parse failed')
     const { svg } = await mermaid.render(`nojae-mermaid-${++idSeq}`, src)
-    // No re-sanitization here on purpose: DOMPurify's SVG profile drops
-    // foreignObject, which is where mermaid renders every label. The
-    // structure is mermaid's own code and securityLevel 'strict' already
+    // No re-sanitization on purpose: DOMPurify's SVG profile drops
+    // foreignObject, where mermaid renders every label, and 'strict' already
     // sanitizes user-controlled label text inside mermaid.
     if (cache.size > CACHE_LIMIT) cache.clear()
     cache.set(src, svg)
@@ -68,14 +66,14 @@ function fallbackToCode(block, src) {
   block.replaceChildren(pre)
 }
 
-// Replaces `.mermaid-block[data-src]` placeholders (emitted by
-// renderMarkdown when mermaid mode is on) with rendered SVGs. `isValid`
-// is checked after every await so renders superseded by a newer stream
-// re-render are dropped instead of touching replaced DOM nodes.
+// Replaces `.mermaid-block[data-src]` placeholders (emitted by renderMarkdown
+// when mermaid mode is on) with rendered SVGs. `isValid` is checked after
+// every await so a render superseded by a newer stream is dropped instead of
+// touching replaced DOM nodes.
 //
-// `ALWAYS_VALID` is a named const rather than an inline `() => true`
-// default: the const's inferred return type is `boolean`, so the option
-// stays a `() => boolean` for the boolean-returning predicates callers pass.
+// `ALWAYS_VALID` is a named const rather than an inline `() => true` default:
+// its inferred return type is `boolean`, which keeps the option a
+// `() => boolean` for the predicates callers pass.
 const ALWAYS_VALID = () => true
 
 export async function hydrateMermaid(rootEl, { isValid = ALWAYS_VALID } = {}) {

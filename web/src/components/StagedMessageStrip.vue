@@ -3,19 +3,16 @@ import { computed } from 'vue'
 import MarkdownStream from './MarkdownStream.vue'
 import { flushGateReason, useChat } from '../composables/useChat'
 
-// The strip: the user messages the composer has accepted but no turn has
-// carried yet, in flush order, drawn above the draft preview because they are
-// the next thing that will be sent. It reads useChat's input state and calls
-// its verbs; every rule about what a row may do — and whether it would be
-// accepted — is answered there, so this component spells none of its own.
+// The strip: user messages the composer accepted but no turn has carried yet,
+// in flush order. Every rule about what a row may do lives in the composable,
+// so this component spells none of its own.
 const emit = defineEmits(['preview'])
 
 const { state, chatBusy, removeStaged, pullBackStaged } = useChat()
 
-// One entry per staged message: the number it holds in flush order (a position,
-// not an identity — a removal renumbers the rest) and the verdict on whether the
-// request a flush would make survives carrying it. `flushGateReason` is the same
-// verdict the flush itself runs, so a row and a refused send can never disagree.
+// One entry per staged message: its position in flush order — a removal
+// renumbers the rest — and the verdict the flush itself would reach, so a row
+// and a refused send can never disagree.
 const rows = computed(() =>
   state.staged.map((row, index) => ({
     row,
@@ -24,9 +21,8 @@ const rows = computed(() =>
   })),
 )
 
-// The strip stays on screen while a reply streams or a batch owns the
-// conversation — it is read-only then, never hidden — so the two verbs say why
-// they are inert rather than disappearing.
+// The strip stays on screen, read-only, while a reply streams or a batch runs,
+// so the two verbs say why they are inert rather than disappearing.
 const locked = computed(() => chatBusy())
 const lockedTitle = 'Available when no reply is streaming and no batch runs'
 
@@ -40,8 +36,7 @@ function onPullBack(row) {
 </script>
 
 <template>
-  <!-- Nothing at all until the first stage: no box, no border, no reserved
-       space, so the panel and the composer are exactly what they were. -->
+  <!-- Nothing at all until the first stage: no box, no border, no reserved space. -->
   <section
     v-if="rows.length"
     class="chat-staged-strip"
@@ -93,8 +88,8 @@ function onPullBack(row) {
             </button>
           </div>
         </div>
-        <!-- One thumbnail per image, in the order it will travel in; each opens
-             the same full-size lightbox a sent turn's thumbnails open. -->
+        <!-- One thumbnail per image, in travel order; each opens the same
+             lightbox a sent turn's thumbnails open. -->
         <div v-if="entry.row.images?.length" class="chat-staged-thumbs">
           <button
             v-for="(image, index) in entry.row.images"
@@ -109,10 +104,9 @@ function onPullBack(row) {
           </button>
         </div>
         <MarkdownStream v-if="entry.row.html" :html="entry.row.html" />
-        <!-- The verdict's own sentence, not a second copy of it, and announced:
-             a flush is all-or-nothing, so a row that would arrive empty is the
-             reason nothing is sent. The glyph keeps the marking readable
-             without relying on its colour. -->
+        <!-- The verdict's own sentence, announced: a flush is all-or-nothing,
+             so a row that would arrive empty is why nothing is sent. The glyph
+             keeps the marking readable without relying on its colour. -->
         <p v-if="entry.refusal" class="error-line chat-staged-refusal" role="alert">
           <span aria-hidden="true">&#9888;</span>
           {{ entry.refusal }}

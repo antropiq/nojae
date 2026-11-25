@@ -1,43 +1,36 @@
 """nojae's own settings store: one SQLite file, and the only code that speaks SQL.
 
-``<install root>/nojae.db`` is where the app keeps what three per-workspace JSON
-files keep today — the model connection (``servers`` + ``models``), the agent
-personas (``agents``) and the prompt helpers (``prompt_helpers``). This module
-owns that file and **nothing else**: the path, the connection lifecycle, the
-schema and its version gate. Every other module asks this one for data — nobody
-else opens the file, nobody else writes SQL, and nothing outside this module can
-name a database to it: no public function takes a path (spec §4.1). :func:`boot`
-is the boot's one call — bring the store to the current schema level, then seed
-it — and it answers a state dict instead of raising, so an unusable store is a
-**named state** rather than a dead app. The read side and the write side are at
-the end of this module; the routes and the chat path still answer from the flat
-files they read today, and task 09 moves them here.
+``<install root>/nojae.db`` is where the app keeps the model connections
+(``servers`` + ``models``), the agent personas (``agents``) and the prompt
+helpers (``prompt_helpers``). This module owns that file and **nothing else**:
+the path, the connection lifecycle, the schema and its version gate. Every other
+module asks this one for data — nobody else opens the file, nobody else writes
+SQL, and no public function takes a path. :func:`boot` is the boot's one call —
+bring the store to the current schema level, then seed it — and it answers a
+state dict instead of raising, so an unusable store is a **named state** rather
+than a dead app.
 
 Why the connection looks the way it does:
 
-* **WAL journaling** — the app's shape is a request thread plus a chat worker
-  thread, and the worker reads the configuration while the request thread may be
-  saving it. Rollback journaling serialises that into ``database is locked``
-  errors under any real overlap; WAL lets the reader proceed.
-* **A busy timeout** — the other half of the concurrency story: the
-  writer-writer case, which is two browser tabs saving at once. A second writer
-  waits out the timeout instead of failing.
-* **One connection per thread** — a ``sqlite3`` handle is not for sharing, and
-  the app is threaded on purpose (the model call runs in a worker thread while
-  the request thread streams). So each thread that asks gets its own, and the
-  WAL rules above are what makes that safe rather than lucky.
-* **Read-write, never created by an open** — see :func:`connect`. The file
-  appearing is a decision, not a side effect: it is :func:`prepare` that creates
-  it, because the boot that creates the store is the boot that seeds it.
-* **Autocommit at the handle level** (``isolation_level=None``) — SQLite then
-  opens no transaction behind the caller's back, so a read takes no lock it does
-  not need and a write is exactly the ``BEGIN`` the caller asked for.
-* **No text-mode translation** — SQLite writes the bytes itself, so nothing in
-  this module opens the file with a text encoding or a newline mode. The lesson
-  the LSP seeder records about ``\n`` becoming ``\r\n`` on Windows applies to
-  every file the app writes, and a database file is the worst one to get wrong.
+* **WAL journaling** — the app is a request thread plus a chat worker thread, and
+  the worker reads the configuration while the request thread may be saving it;
+  rollback journaling serialises that into ``database is locked``.
+* **A busy timeout** — the other half: two browser tabs saving at once, and the
+  second writer waits rather than failing.
+* **One connection per thread** — a ``sqlite3`` handle is not for sharing, so
+  each thread that asks gets its own, and WAL is what makes that safe rather
+  than lucky.
+* **Read-write, never created by an open** — see :func:`connect`: it is
+  :func:`prepare` that creates the file, because the boot that creates the store
+  is the boot that seeds it.
+* **Autocommit at the handle level** (``isolation_level=None``) — SQLite opens no
+  transaction behind the caller's back, so a write is exactly the ``BEGIN`` the
+  caller asked for.
+* **No text-mode translation** — SQLite writes the bytes itself, so nothing here
+  opens the file with a text encoding or a newline mode; ``\n`` becoming
+  ``\r\n`` on Windows would corrupt it.
 
-The version gate (D6) is the other reason this module exists on its own:
+The version gate is the other reason this module exists on its own:
 ``PRAGMA user_version`` records the schema level, and boot either creates the
 schema at the current level, upgrades an older one, or **refuses to touch** a
 file whose level it does not understand. Silently reading a newer schema with
@@ -46,11 +39,11 @@ refusal naming the path and the level found — never a read, never a traceback.
 
 An unusable store is a *named state* too, which is why the failure type here is
 raised rather than swallowed: :class:`AppStoreError` carries the one sentence
-that names the path, and the boot that catches it (task 02) turns it into the
-app bar's notice and the chat refusal instead of taking the app down.
+that names the path, and the boot turns it into the app bar's notice and the
+chat refusal instead of taking the app down.
 
-Nothing here touches FastAPI, and nothing here reads a workspace: the store is
-install-scoped, so a working-location switch invalidates nothing in it (D11).
+Nothing here reaches the web layer or a workspace: the store is install-scoped,
+so a working-location switch invalidates nothing in it.
 """
 
 import copy
@@ -70,13 +63,12 @@ from src.config import PROJECT_ROOT, env_flag
 #: move the lookup — the repo's ``mcphub.constants`` convention.
 DB_FILENAME = "nojae.db"
 
-#: The env var that puts this process in **test mode** (D14): with it truthy the
-#: app never opens the install's own ``nojae.db``. It creates a temporary store
-#: instead and materialises the e2e suite's flat connection fixture into it as
-#: rows, so a suite run cannot read — and must not write — the developer's
-#: configured servers, agents and key. Read **per call** through
-#: ``config.env_flag``, the same ``1/true/yes/on`` rule as every other flag, so a
-#: test can flip it without reloading this module.
+#: The env var that puts this process in **test mode**: with it truthy the app
+#: never opens the install's own ``nojae.db``, creating a temporary store instead
+#: and materialising the e2e suite's flat connection fixture into it as rows, so a
+#: suite run cannot read — and must not write — the developer's configured
+#: servers, agents and key. Read **per call**, so a test can flip it without
+#: reloading this module.
 TEST_SETTINGS_KEY = "NOJAE_TEST_SETTINGS"
 
 #: The prefix of the throw-away install root test mode lives on. One directory
@@ -91,7 +83,7 @@ _test_root_lock = threading.Lock()
 
 #: The WAL sidecars SQLite creates beside it. They hold committed bytes and the
 #: write-ahead index, so they are part of the store: hidden from every file
-#: surface and gitignored with the file itself (D10).
+#: surface and gitignored with the file itself.
 WAL_SIDECAR_SUFFIXES: Tuple[str, ...] = ("-wal", "-shm")
 
 #: The schema level this app understands. ``PRAGMA user_version`` holds it.
@@ -105,9 +97,8 @@ SCHEMA_VERSION = 1
 #: milliseconds of work, so this is generous rather than slow.
 BUSY_TIMEOUT_MS = 5000
 
-#: The schema, in creation order, at :data:`SCHEMA_VERSION`. Verbatim from spec
-#: §4.2 — four tables and no key/value bag (D5), every column, default,
-#: ``UNIQUE``, ``REFERENCES`` and ``ON DELETE`` as the spec writes them.
+#: The schema, in creation order, at :data:`SCHEMA_VERSION`: four tables and no
+#: key/value bag.
 #:
 #: What each constraint is for, because each one is a rule the UI relies on:
 #:
@@ -119,7 +110,7 @@ BUSY_TIMEOUT_MS = 5000
 #:   server are meaningless, and an orphan row is one the dialog cannot render.
 #: * ``agents.model_id`` ``ON DELETE SET NULL`` — deleting a model must not
 #:   delete the persona; the agent becomes unrunnable until it is given another
-#:   model (D7), which is the narrower damage.
+#:   model, which is the narrower damage.
 #: * ``agents.id`` is the slug, not a surrogate — a chat payload and every saved
 #:   session file on disk carry that value today, so keeping it stable keeps
 #:   them resolvable.
@@ -130,7 +121,7 @@ BUSY_TIMEOUT_MS = 5000
 #:   different values, so these columns carry **no default**: a NOT NULL or a
 #:   ``DEFAULT 0`` would collapse the two.
 #: * ``prompt_helpers`` has no count constraint — the row count is the user's
-#:   business (§4.5).
+#:   business.
 SCHEMA_STATEMENTS: Tuple[str, ...] = (
     """
     CREATE TABLE servers (
@@ -191,13 +182,13 @@ SCHEMA_STATEMENTS: Tuple[str, ...] = (
 #:
 #: Every other level needs its own entry before :data:`SCHEMA_VERSION` may name
 #: it, and a level with no entry is **refused**: an upgrade path invented under
-#: time pressure is how rows are lost, and D6's whole point is that this app
-#: never guesses at a schema it does not know.
+#: time pressure is how rows are lost, so this app never guesses at a schema it
+#: does not know.
 UPGRADES: Dict[int, Tuple[str, ...]] = {0: ()}
 
 #: The four tables, in schema order — the store's whole vocabulary. The tests
-#: assert the file holds exactly these, and the accessors of task 03 answer from
-#: them. A fifth table would have to be added here, and D5 forbids one.
+#: assert the file holds exactly these, and the accessors answer from them. A
+#: fifth table would have to be added here.
 TABLE_NAMES: Tuple[str, ...] = (
     "servers",
     "models",
@@ -211,10 +202,9 @@ TABLE_NAMES: Tuple[str, ...] = (
 class AppStoreError(Exception):
     """The settings store cannot be opened, read or used at this level.
 
-    Carries the one sentence that names the path — the sentence task 02 turns
-    into the app bar's "the settings store is unusable" notice and task 03 into
-    the chat refusal, the same single-authority rule the workspace-settings
-    reader used to hold for the file this store replaces.
+    Carries the one sentence that names the path — the sentence the boot turns
+    into the app bar's "the settings store is unusable" notice and the chat
+    refusal.
 
     Raised rather than collected as a finding because every state it reports
     leaves the store with **no answer to give**: an unreadable file, a file that
@@ -229,7 +219,7 @@ class AppStoreError(Exception):
 def test_mode() -> bool:
     """Whether this process is the e2e suite's, and so must not touch the real store.
 
-    One process-level switch (D14), answered by ``config.env_flag`` — the same
+    One process-level switch, answered by ``config.env_flag`` — the same
     ``1/true/yes/on`` rule as ``NOJAE_DISABLE_MCP``. Read **per call**, never at
     import, so a test can flip it without reloading this module.
 
@@ -238,7 +228,7 @@ def test_mode() -> bool:
     suite's flat connection fixture into it as rows (:func:`materialise_test_fixture`).
     There is no fallback in either direction — with the switch on an absent or
     malformed fixture makes the suite **refuse to start** rather than reach the
-    developer's configured servers and key (AC-7).
+    developer's configured servers and key.
     """
     return env_flag(TEST_SETTINGS_KEY)
 
@@ -271,8 +261,8 @@ def database_path() -> Path:
     this app is built (``editorfs.constants.BACKUP_DIR`` and the log folder are
     the others): one ``Path`` join, so it is correct on Linux and Windows with no
     platform branch, no separator spelled, no drive assumption and no ``~``
-    expansion anywhere near it (§4.9). It is the install's only configuration
-    file — the ``.env`` beside it is gone, its keys are boot flags now.
+    expansion anywhere near it. It is the install's only configuration file — the
+    ``.env`` beside it is gone, its keys are boot flags now.
 
     A **function**, not a constant, so a test can move the whole store by
     patching :data:`PROJECT_ROOT` — which is what keeps the suite off the
@@ -280,9 +270,8 @@ def database_path() -> Path:
     the sentences, the sidecars) comes through here, so one patch moves all of
     them at once.
 
-    In **test mode** the root is :func:`test_root` instead (D14): the install's
-    own file is then not merely unlikely to be reached, it has no name here at
-    all.
+    In **test mode** the root is :func:`test_root` instead: the install's own
+    file is then not merely unlikely to be reached, it has no name here at all.
     """
     return _install_root() / DB_FILENAME
 
@@ -303,16 +292,14 @@ def _describe(path: Path) -> str:
 def connect() -> sqlite3.Connection:
     """Open the store, read-write, ready to use: WAL on, foreign keys on, busy timeout set.
 
-    Takes no path, and neither does any other public function here: §4.1's rule
-    is that nothing outside this module names a database, and a parameter that
-    "only tests use" is the seam that lets a caller read a store the install does
-    not own. A test moves the whole store by patching :data:`PROJECT_ROOT`.
+    Takes no path, and neither does any other public function here: a parameter
+    that "only tests use" is the seam that lets a caller read a store the install
+    does not own. A test moves the whole store by patching :data:`PROJECT_ROOT`.
 
-    Raises :class:`AppStoreError` naming the path when the file cannot be
-    opened. The file is **not created** here: ``uri`` mode ``rw`` fails on an
-    absent path, which is what keeps "the store did not exist" a fact the boot
-    can see and act on (it creates and seeds in one step) rather than something
-    a stray read leaves behind as an empty file.
+    Raises :class:`AppStoreError` naming the path when the file cannot be opened.
+    The file is **not created** here: ``uri`` mode ``rw`` fails on an absent path,
+    which keeps "the store did not exist" a fact the boot can act on rather than
+    something a stray read leaves behind as an empty file.
     """
     target = database_path()
     try:
@@ -341,18 +328,15 @@ def connect() -> sqlite3.Connection:
 def _configure(conn: sqlite3.Connection) -> None:
     """The per-connection settings every handle in this app carries.
 
-    ``journal_mode`` is persistent — it is a property of the *file*, not of the
-    handle — so setting it here is what makes a file this app created a WAL
-    file for every later connection, including one that forgot to ask. It is
-    checked rather than fired and forgotten: WAL is the reason a reader and a
-    writer coexist here, so a file system that would not take it (a network
-    share) is a store this app must not quietly run on with the rollback rules
-    that produce ``database is locked``.
+    ``journal_mode`` is a property of the *file*, so setting it here makes a file
+    this app created a WAL file for every later connection. It is checked rather
+    than fired and forgotten: WAL is why a reader and a writer coexist, so a file
+    system that would not take it (a network share) must not be run on quietly
+    with the rollback rules that produce ``database is locked``.
 
-    ``foreign_keys`` is the opposite: per-connection and off by default. The
-    cascades and the set-null the schema declares are only enforced while it is
-    on, so a handle that forgot would let an orphan model through — the state
-    §4.2 says is unreachable through the app.
+    ``foreign_keys`` is the opposite: per-connection and off by default. A handle
+    that forgot would let an orphan model through — a state the app itself cannot
+    produce.
     """
     mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
     if not mode or str(mode[0]).lower() != "wal":
@@ -368,15 +352,12 @@ def _uri(target: Path, mode: str) -> str:
 
     The URI is the authority here, not the path text: a ``?`` or a ``#`` in a
     folder name would otherwise become a query or a fragment and open something
-    else — or open the wrong file while the sentence reports the right one. So
-    the path is handed to :meth:`Path.as_uri`, which is the one function that
-    knows how this platform spells an absolute path as a URI (it percent-encodes,
-    and on Windows produces the ``file:///C:/...`` form SQLite documents). The
-    ``mode`` is what this module is asking for — ``rw`` so an open never creates,
-    ``ro`` so a read never touches — and it is appended after the encoded path.
+    else. So the path goes to :meth:`Path.as_uri`, which knows how this platform
+    spells an absolute path as a URI. The ``mode`` — ``rw`` so an open never
+    creates, ``ro`` so a read never touches — is appended after the encoded path.
 
-    A relative path has no URI form, and that is answered as the same named
-    state as any other unusable path rather than as a ``ValueError`` escaping the
+    A relative path has no URI form, and that is answered as the same named state
+    as any other unusable path rather than as a ``ValueError`` escaping the
     module.
     """
     try:
@@ -389,16 +370,16 @@ def _uri(target: Path, mode: str) -> str:
     return f"{uri}?mode={mode}"
 
 
-# -- the version gate (D6) -----------------------------------------------------
+# -- the version gate ----------------------------------------------------------
 
 def _user_version(conn: sqlite3.Connection, target: Path) -> int:
     """The schema level recorded in the file, or the store-level error.
 
     A file that is not a database answers here rather than at the first query:
     SQLite opens it happily and raises ``file is not a database`` on the first
-    statement, and this is the first statement. Naming the path is what makes
-    the difference between the two states (a lock, a foreign file, a truncated
-    store) visible to whoever reads the app bar.
+    statement, and this is the first statement. Naming the path is what makes the
+    difference between the two states (a lock, a foreign file, a truncated store)
+    visible to whoever reads the app bar.
     """
     try:
         row = conn.execute("PRAGMA user_version").fetchone()
@@ -415,12 +396,12 @@ def prepare() -> Dict[str, Any]:
 
     ``{"created": bool, "upgraded_from": Optional[int], "version": int,
     "path": str}`` — the facts the boot logs and the seeder needs. ``created``
-    is the one-shot gate for the prompt-helper rows (§4.3), so it answers "this
-    boot made the file", not "this boot wrote a schema into it";
-    ``upgraded_from`` is the level a file that was already there arrived at, or
-    ``None`` when it did not need moving.
+    is the one-shot gate for the prompt-helper rows, so it answers "this boot
+    made the file", not "this boot wrote a schema into it"; ``upgraded_from`` is
+    the level a file that was already there arrived at, or ``None`` when it did
+    not need moving.
 
-    The three branches are D6, in order:
+    The three branches, in order:
 
     * **no file** — create it, then lay the schema down at the current level.
     * **an older level** — migrate it, in one transaction.
@@ -468,16 +449,14 @@ def _exclusive_create(target: Path) -> bool:
     """Make the empty file, and answer whether **this** call made it.
 
     ``O_CREAT | O_EXCL`` is the same exclusive primitive every seed in this app
-    uses. Exclusive because two boots racing would otherwise both answer
-    ``created: True``, and the loser would seed the prompt-helper rows a second
-    time — the one thing §4.3 forbids. So the loser's ``FileExistsError`` is not
-    a failure: it is the answer "someone else made it", and the boot continues
-    against the file that won.
+    uses: two boots racing would otherwise both answer ``created: True``, and the
+    loser would seed the prompt-helper rows a second time. So the loser's
+    ``FileExistsError`` is not a failure: it is the answer "someone else made it",
+    and the boot continues against the file that won.
 
-    And exclusive rather than letting SQLite create it, because a file that is
-    not there but cannot be made (a directory holding that name, a read-only
-    install root, a folder that does not exist) is then answered by the operating
-    system's own sentence instead of by SQLite inventing a partial file.
+    Exclusive rather than letting SQLite create it, so a file that cannot be made
+    (a directory holding that name, a read-only install root) is answered by the
+    operating system's own sentence instead of by SQLite inventing a partial file.
     """
     try:
         handle = os.open(
@@ -506,8 +485,8 @@ def _migrate(conn: sqlite3.Connection, found: int, target: Path) -> None:
     cannot tell which steps still need to run.
 
     A level with no recorded step is refused rather than skipped: guessing which
-    columns a level this app has never seen added is the same mistake D6 refuses
-    on the other side of the current version.
+    columns a level this app has never seen added is the same mistake the gate
+    refuses on the other side of the current version.
     """
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -570,9 +549,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 def _create_if_not_exists(statement: str) -> str:
     """``CREATE TABLE x`` -> ``CREATE TABLE IF NOT EXISTS x``, nothing else changed.
 
-    Rewritten rather than written twice so the schema in
-    :data:`SCHEMA_STATEMENTS` stays the one text the spec's §4.2 is compared
-    against — two copies of a schema is how they stop agreeing.
+    Rewritten rather than written twice so :data:`SCHEMA_STATEMENTS` stays the
+    one copy of the schema — two copies is how they stop agreeing.
     """
     head, _, rest = statement.partition("CREATE TABLE")
     tail = rest.partition("(")
@@ -585,37 +563,36 @@ def _set_user_version(conn: sqlite3.Connection, level: int) -> None:
     conn.execute("PRAGMA user_version = %d" % int(level))
 
 
-# -- seeding (§4.3) -------------------------------------------------------------
+# -- seeding -------------------------------------------------------------------
 
-#: The tool-loop cap an **editable** built-in agent is seeded with (D9): the
-#: number the app has defaulted to until now, so a fresh install behaves exactly
-#: as it did. The per-agent column carries the same default in its DDL; naming it
-#: here is what lets the seeder say it rather than rely on the row being inserted
-#: with the column list that omits it.
+#: The tool-loop cap an **editable** built-in agent is seeded with: what the app
+#: has always defaulted to, so a fresh install behaves exactly as it did. The
+#: per-agent column carries the same default in its DDL; naming it here is what
+#: lets the seeder say it rather than rely on the column list omitting it.
 SEEDED_MAX_TOOL_ITERATION = 25
 
 #: The cap the **app-owned** agent is seeded with. It is not the number above: a
 #: lot-building turn writes a whole folder of task files through the file tools,
 #: so the cap a chat agent is content with would stop it mid-lot. That row is
 #: ``readonly``, so this is code's number rather than the user's — which is what
-#: lets the boot re-assert it on every column but ``model_id`` (D4).
+#: lets the boot re-assert it on every column but ``model_id``.
 SEEDED_RESERVED_MAX_TOOL_ITERATION = 500
 
 #: How many prompt-helper rows a **created** store starts with, and the colour
-#: they start in (§4.3): the nine empty gray bullets a first boot draws today,
-#: so the move is invisible. Both are named here rather than imported from
-#: :mod:`core.prompt_helpers`, which will read these rows through this module
-#: (task 07) — a store that imported its own reader is a cycle, and the two
-#: values are the store's own starting layout, not a rendering choice.
+#: they start in: the nine empty gray bullets a first boot draws. Both are named
+#: here rather than imported from :mod:`core.prompt_helpers`, which reads these
+#: rows through this module — a store that imported its own reader is a cycle,
+#: and the two values are the store's own starting layout, not a rendering
+#: choice.
 SEEDED_PROMPT_HELPER_COUNT = 9
 SEEDED_PROMPT_HELPER_COLOR = "#808080"
 
 #: Where the built-in agents' words live. Resolved **by name, per call**, for the
 #: reason :mod:`core.agent_modes` gives for the same choice: that module's
-#: content is validated by code that will read these rows (task 10), so a static
-#: import in either direction is a cycle. The personas, labels, hub flags and the
-#: generated lot-conventions block all stay there — the seeder *reads* them, it
-#: does not copy them, which is what keeps one definition of a persona.
+#: content is validated by code that reads these rows, so a static import in
+#: either direction is a cycle. The personas, labels, hub flags and the generated
+#: lot-conventions block all stay there — the seeder *reads* them, it does not
+#: copy them, which is what keeps one definition of a persona.
 AGENT_DEFAULTS_MODULE_NAME = "src.core.agent_modes_defaults"
 
 
@@ -624,9 +601,9 @@ def _agent_definitions() -> List[Dict[str, Any]]:
 
     Read from :data:`AGENT_DEFAULTS_MODULE_NAME`, in that module's own order —
     the three declared modes then the app-owned one — which is also the dropdown
-    order (§4.4: agents come back in insertion order, and the app-owned agent is
-    last). Nothing here names an agent id: ``readonly`` comes from the definition's
-    own flag, so the row says what the definition says.
+    order, since agents come back in insertion order. Nothing here names an agent
+    id: ``readonly`` comes from the definition's own flag, so the row says what
+    the definition says.
 
     The tool-loop cap follows the same ``readonly`` discriminator as every other
     column: the app-owned agent is seeded with
@@ -635,8 +612,8 @@ def _agent_definitions() -> List[Dict[str, Any]]:
 
     ``system_message`` is the whole text the agent is told, so the reserved mode's
     **generated** lot-conventions block rides in it. That is what lets the block
-    stay defined in one place: the row is a copy refreshed from code on every boot
-    (D4), never a second text someone has to remember to edit.
+    stay defined in one place: the row is a copy refreshed from code on every
+    boot, never a second text someone has to remember to edit.
     """
     defaults = importlib.import_module(AGENT_DEFAULTS_MODULE_NAME)
     modes = [*defaults.default_modes(), defaults.todo_builder_mode()]
@@ -672,21 +649,21 @@ def _seed(conn: sqlite3.Connection, created: bool) -> Dict[str, Any]:
     left alone entirely: it is either the user's own agent or a built-in whose
     persona they were allowed to edit, and a boot that overwrote it would undo
     work the app promised to keep. A ``readonly`` row gets every column except
-    ``model_id`` rewritten from code (D4), which is what makes re-seeding safe
-    rather than destructive: the only thing on that row the user owns is which
-    model it runs on. The decision reads the definition and not the stored flag,
-    because for that row code *is* the source of truth — a hand-corrupted
-    ``readonly = 0`` is re-asserted rather than obeyed.
+    ``model_id`` rewritten from code, which is what makes re-seeding safe rather
+    than destructive: the only thing on that row the user owns is which model it
+    runs on. The decision reads the definition and not the stored flag, because
+    for that row code *is* the source of truth — a hand-corrupted ``readonly = 0``
+    is re-asserted rather than obeyed.
 
     **Helpers: only when this boot made the store.** "Is the table empty" is not
     the question — a user who deleted every bullet made the table empty, and a
-    boot that refilled it would undo a delete the app promised to honour (D12).
-    The gate is :func:`prepare`'s ``created``, widened by :func:`boot` to cover a
+    boot that refilled it would undo a delete the app promised to honour. The
+    gate is :func:`prepare`'s ``created``, widened by :func:`boot` to cover a
     zero-byte file left between the exclusive create and the schema: that file
     holds no user data either, so it is still a first boot.
 
-    **Servers and models are never seeded** (§4.3): there is no example server,
-    no placeholder key and no placeholder URL, because a value that cannot be
+    **Servers and models are never seeded**: there is no example server, no
+    placeholder key and no placeholder URL, because a value that cannot be
     dialled must not be inserted in order to be dialled.
 
     One transaction, so a boot either has the built-ins or has the store as it
@@ -745,42 +722,40 @@ def _seed(conn: sqlite3.Connection, created: bool) -> Dict[str, Any]:
     }
 
 
-# -- the e2e suite's flat fixture, materialised into rows (D14, §4.6) -----------
+# -- the e2e suite's flat fixture, materialised into rows ------------------------
 #
 # With the test switch on, the app never opens the install's own ``nojae.db``:
 # :func:`database_path` answers a temporary root's file, and this section turns
-# the suite's hand-authored flat connection fixture into **rows** of it. Three
-# steps: the boot's own seeding (step 1), this section's one server and one model
-# (step 2), and pointing **every** agent row at that model (step 3) — the last of
-# which is what lets a task turn run at all under D5, since an agent with no
-# model refuses.
+# the suite's hand-authored flat connection fixture into **rows** of it — one
+# server, one model, and every agent row pointing at that model, which is what
+# lets a task turn run at all: an agent with no model refuses.
 #
-# Why materialise rather than special-case the resolution seam (D14): D5 made
-# "the agent has a model" the only way a turn can run, so a test-mode branch in
-# the seam — "in test mode, use the file's connection whatever the row says" —
-# would mean the suite exercises a resolution path production never takes, which
-# is the worst property a settings layer can have. Materialising keeps **one**
-# seam, and a test that wants an agent with no model clears that row's
-# ``model_id`` itself — the only way such a state is reachable here.
+# Why materialise rather than special-case the resolution seam: "the agent has a
+# model" is the only way a turn can run, so a test-mode branch in the seam — "in
+# test mode, use the file's connection whatever the row says" — would mean the
+# suite exercises a resolution path production never takes, which is the worst
+# property a settings layer can have. Materialising keeps **one** seam, and a
+# test that wants an agent with no model clears that row's ``model_id`` itself —
+# the only way such a state is reachable here.
 
 #: The e2e suite's own connection file: ``nojae-test-settings.json`` in the
 #: frontend's tests folder (:data:`TEST_SETTINGS_DIR` below the install root).
 #: Hand-authored, never seeded, never written by the app — and its member names
-#: are the **column names** (§4.6), because it is a store fixture rather than a
-#: UI payload.
+#: are the **column names**, because it is a store fixture rather than a UI
+#: payload.
 TEST_SETTINGS_FILENAME = "nojae-test-settings.json"
 
-#: The folder that file lives in, relative to the installation: the specs' own
-#: folder, beside the Playwright config that boots the server which reads it. Not
+#: The folder that file lives in, relative to the installation: the e2e specs'
+#: own folder, beside the Playwright config that boots the server reading it. Not
 #: the reserved ``.nojae`` folder — that one holds **a workspace's** policy, and
-#: this fixture is the installation's, so no tab's folder decides where it is.
+#: this fixture is the installation's.
 TEST_SETTINGS_DIR = ("web", "tests")
 
-#: The members the fixture may carry, each with the JSON type it must hold. This
-#: is the same strictness as the tables (§4.5): an unknown key or a wrong type is
-#: a **named failure**, never a silently-defaulted sampler — a green suite that
-#: measured a default is worse than a red one. The names are the schema's, so one
-#: vocabulary describes a connection everywhere (§4.2).
+#: The members the fixture may carry, each with the JSON type it must hold. Same
+#: strictness as the tables: an unknown key or a wrong type is a **named
+#: failure**, never a silently-defaulted sampler — a green suite that measured a
+#: default is worse than a red one. The names are the schema's, so one vocabulary
+#: describes a connection everywhere.
 TEST_SERVER_KEYS: Dict[str, type] = {"name": str, "url": str, "api_key": str}
 TEST_MODEL_KEYS: Dict[str, type] = {
     "name": str,
@@ -808,22 +783,18 @@ class TestFixtureError(Exception):
     """The e2e suite's connection fixture is missing or unusable.
 
     Raised out of :func:`materialise_test_fixture`, and the boot turns it into
-    the store's **unusable** state — so a missing or malformed fixture makes the
-    suite refuse rather than fall through to the developer's configured servers
-    and key ("no fallback in either direction", moved from the file to the store).
+    the store's **unusable** state: a suite without its own fixture must refuse
+    rather than fall through to the developer's configured servers and key.
     """
 
 
 def test_settings_path() -> Path:
     """Where the suite's connection fixture lives: ``<install>/web/tests/nojae-test-settings.json``.
 
-    The **installation**, not the workspace: the fixture is what the Playwright
-    harness next to it boots the server with, so no tab's folder — and no
-    developer's working location — decides where it is found. It is a *file*
-    rather than a row because the store must be able to start before it has any
-    rows (D14); everything else the store holds is the installation's (D11).
-
-    A **function** so a test can point the lookup elsewhere without rewriting the
+    The **installation**, not a workspace: no tab's folder — and no developer's
+    working location — decides where it is found. A *file* rather than a row
+    because the store must be able to start before it has any rows; a
+    **function** so a test can point the lookup elsewhere without rewriting the
     module.
     """
     return PROJECT_ROOT.joinpath(*TEST_SETTINGS_DIR, TEST_SETTINGS_FILENAME)
@@ -968,16 +939,15 @@ def _read_test_fixture(path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 def materialise_test_fixture(conn: sqlite3.Connection) -> Dict[str, int]:
     """Insert the fixture's server and model as rows and point every agent at it.
 
-    D14's steps 1 and 2 are the boot's (§4.6): the temporary database exists and
-    the built-ins are seeded before this runs, and what it adds is **one** server
-    row with **one** model row — the file never carries an id, because the harness
-    assigns both.
+    The temporary database exists and the built-ins are seeded before this runs;
+    what this adds is **one** server row with **one** model row — the file never
+    carries an id, because the harness assigns both.
 
-    Step 3 belongs here too: **every** agent row's ``model_id`` is set to that
-    model. D5 made "the agent has a model" the only way a turn can run, so a
-    suite whose agents were left null would exercise only the refusal. Doing it
-    in the row keeps the resolution seam free of a test-mode branch (D14); a test
-    that wants an unrunnable agent clears that row's ``model_id`` itself.
+    **Every** agent row's ``model_id`` is set to that model because "an agent has
+    a model" is the only way a turn can run, so a suite whose agents were left
+    null would exercise only the refusal. Doing it in the row keeps the
+    resolution seam free of a test-mode branch; a test that wants an unrunnable
+    agent clears that row's ``model_id`` itself.
 
     It runs inside the boot's own transaction, so a fixture that fails half way
     leaves the store as it was found rather than holding a server with no model.
@@ -1012,20 +982,18 @@ def materialise_test_fixture(conn: sqlite3.Connection) -> Dict[str, int]:
         ),
     )
     model_id = int(cursor.lastrowid or 0)
-    # D14 step 3: the fixture's model is the one every agent runs on. One
-    # statement, so a row cannot be left pointing at nothing by this step.
+    # The fixture's model is the one every agent runs on. One statement, so no
+    # row can be left pointing at nothing.
     conn.execute("UPDATE agents SET model_id = ?", (model_id,))
     return {"serverId": server_id, "modelId": model_id}
 
 
 #: What the last :func:`boot` learned, and the starting answer before one has
 #: run: this process has not opened the store, which is a state to name rather
-#: than an empty store to read. Module-level because the boot happens once and
-#: the readers are many, and it is the install's fact rather than a workspace's
-#: — so a working-location switch never touches it (D11).
+#: than an empty store to read. It is the install's fact rather than a
+#: workspace's, so a working-location switch never touches it.
 #:
-#: Replaced **wholesale** by :func:`boot`, never mutated in place, which is what
-#: lets :func:`store_state` hand out a shallow copy.
+#: Replaced **wholesale** by :func:`boot`, never mutated in place.
 _store_state: Dict[str, Any] = {
     "state": "unusable",
     "path": "",
@@ -1042,22 +1010,19 @@ _store_state: Dict[str, Any] = {
 def boot() -> Dict[str, Any]:
     """Open (or create) the store, bring it to the current level, seed it.
 
-    The order is §4.3's, and this is the boot's **one** call: :func:`prepare`
-    already refuses a file it does not understand, so seeding can never run
-    against a schema this app has not read.
+    This is the boot's **one** call: :func:`prepare` already refuses a file it
+    does not understand, so seeding can never run against a schema this app has
+    not read.
 
     ``{"state": "ok" | "unusable", "path": str, "sentence": Optional[str],
     "created": bool, "upgradedFrom": Optional[int], "version": Optional[int],
     "agents": {...}, "promptHelpers": int}``.
 
-    **It never raises.** Every seed in this app holds the same contract — a seed
-    that cannot happen is a note, never a boot failure — and the store has the
-    most to lose from breaking it: an unopenable, unwritable or too-new database
-    must leave the app serving, with the store reported as a **named state**.
-    ``sentence`` is that state: the one sentence naming the path, which task 03
-    exposes as the chat refusal and task 09 shows in the app bar. A caller that
-    had to catch an exception to find this out is a caller that would have taken
-    the boot down instead.
+    **It never raises** — a seed that cannot happen is a note, never a boot
+    failure, and the store has the most to lose from breaking that: an
+    unopenable, unwritable or too-new database must leave the app serving with
+    the store reported as a **named state**. ``sentence`` is that state, the one
+    sentence naming the path, which the chat refusal and the app bar both show.
 
     The unusable branch answers the same keys, with nothing written: ``created``
     false, ``version`` ``None``, and no rows claimed. That is the difference
@@ -1065,9 +1030,8 @@ def boot() -> Dict[str, Any]:
     the silent default this app refuses everywhere else.
 
     The answer is also **kept** (:func:`store_state`), because the boot is not
-    the only thing that needs to know: a later task answers the app bar and the
-    chat refusal from it, and a store that was unusable at boot is still
-    unusable on the request that asks.
+    the only thing that needs to know: a store that was unusable at boot is
+    still unusable on the request that asks.
 
     In **test mode** the same transaction also materialises the e2e suite's own
     connection fixture into rows (:func:`materialise_test_fixture`), and
@@ -1106,17 +1070,15 @@ def boot() -> Dict[str, Any]:
         conn = connect()
         conn.execute("BEGIN IMMEDIATE")
         seeded = _seed(conn, bool(prepared["created"] or was_empty_file))
-        # D14's first two steps, in the same transaction as the seed: the suite's
-        # own connection fixture becomes one server row and one model row of the
-        # temporary store.
+        # The suite's own connection fixture becomes one server row and one model
+        # row of the temporary store, inside the seed's transaction.
         fixture = materialise_test_fixture(conn) if test_mode() else None
         conn.execute("COMMIT")
     except TestFixtureError as exc:
-        # A missing or malformed fixture is the suite's own breakage, and it gets
-        # its own sentence naming the file — the generic "could not be seeded"
-        # below would say the store broke, which is the wrong thing to fix. It
-        # is still the unusable state, so the suite refuses to run rather than
-        # fall through to this machine's configured connection.
+        # A broken fixture is the suite's own breakage, so it gets a sentence
+        # naming the file — "could not be seeded" would point at the store. It is
+        # still the unusable state: the suite refuses rather than fall through to
+        # this machine's configured connection.
         if conn is not None:
             _rollback(conn)
         _store_state = {
@@ -1132,15 +1094,12 @@ def boot() -> Dict[str, Any]:
         }
         return _store_state
     except Exception as exc:  # noqa: BLE001 — the seed never takes the boot down
-        # Deliberately broad, and broader than the driver's errors: the seed step
-        # reads the built-in definitions from another module, so a failure there
-        # is this step's failure too, and the contract is that *nothing* in it
-        # reaches the lifespan. What it costs is honesty — the sentence says the
-        # seed did not land, which is the truth whatever raised it.
-        #
-        # The schema is there and the seed did not land: the next boot runs the
-        # same pass, which is why it is idempotent, so this is a note about a
-        # store with no built-in agents rather than a dead app.
+        # Deliberately broad, and broader than the driver's errors: the seed
+        # imports another module's definitions, so a failure there is this step's
+        # too, and the contract is that *nothing* reaches the lifespan. The
+        # sentence says the seed did not land, which is the truth whatever raised
+        # it — and the next boot runs the same idempotent pass, so the store is
+        # noted as missing its built-ins rather than the app being dead.
         if conn is not None:
             _rollback(conn)
         _store_state = {
@@ -1179,9 +1138,8 @@ def store_state() -> Dict[str, Any]:
     """The store's state as the last boot answered it — a copy, never the record.
 
     ``sentence`` is the one sentence naming the path when the state is
-    ``"unusable"``, and ``None`` when it is ``"ok"``. Task 03 turns it into the
-    chat refusal and task 09 into the app bar's notice, both through this one
-    answer, so no caller re-derives the rule from a ``try``/``except`` of its own.
+    ``"unusable"``, and ``None`` when it is ``"ok"``, so no caller re-derives the
+    rule from a ``try``/``except`` of its own.
 
     Deep-copied, because the answer nests: a shallow one would hand a caller the
     record's own ``agents`` dict, and a route that annotated its copy would be
@@ -1195,9 +1153,9 @@ def version_of() -> int:
 
     Part of the gate, not an accessor: it is the gate's own question, asked of a
     file this call must not touch. Read-only mode is what makes that provable —
-    which is the promise a refusal has to keep, since refusing is the one thing
-    a too-new file can be answered with. Raises :class:`AppStoreError` naming the
-    path when the file cannot be opened or is not a database.
+    refusing is the only answer a too-new file gets. Raises
+    :class:`AppStoreError` naming the path when the file cannot be opened or is
+    not a database.
     """
     target = database_path()
     try:
@@ -1228,11 +1186,10 @@ def connection() -> sqlite3.Connection:
 
     The handle is keyed on the path it was opened at, so a moved
     :data:`PROJECT_ROOT` — which is how a test moves the whole store — cannot
-    leave a thread answering from the file it used to be. That is the one way a
-    per-thread cache could outlive the thing it caches.
+    leave a thread answering from the file it used to be.
 
-    Raises :class:`AppStoreError` when the store cannot be opened; the caller
-    that turns that into a refusal is task 03's accessor.
+    Raises :class:`AppStoreError` when the store cannot be opened; the read and
+    write seams turn that into the refusal sentence.
     """
     target = database_path()
     cached: Optional[Tuple[str, sqlite3.Connection]] = getattr(
@@ -1251,8 +1208,7 @@ def close_thread_connection() -> None:
     """Drop this thread's handle, if it has one.
 
     For the threads the app starts and finishes (a chat worker, a batch lot):
-    their handle is theirs, and leaving it open past the thread would leave a
-    reader in the WAL's bookkeeping.
+    a handle left open past its thread leaves a reader in the WAL's bookkeeping.
     """
     cached: Optional[Tuple[str, sqlite3.Connection]] = getattr(
         _thread_state, "handle", None
@@ -1264,23 +1220,23 @@ def close_thread_connection() -> None:
             _thread_state.handle = None
 
 
-# -- the read side (spec §4.4) ---------------------------------------------------
+# -- the read side ------------------------------------------------------------
 #
 # Everything the rest of the app asks the store for, and the only code in the
-# repo that spells a ``SELECT``. The reads are **uncached** (D11): "the database
-# is the cache", so there is no per-root key here to invalidate and nothing a
-# working-location switch could leave stale.
+# repo that spells a ``SELECT``. The reads are **uncached**: the database is the
+# cache, so there is no per-root key here and nothing a working-location switch
+# could leave stale.
 #
-# Rows leave with the **browser's** names, not the columns': §4.2 puts the
-# ``snake_case`` → ``camelCase`` translation in this module and nowhere else,
-# because the same table copied into every route is a table that stops agreeing
-# with itself. The column lists below are therefore the module's whole
+# Rows leave with the **browser's** names, not the columns': the
+# ``snake_case`` → ``camelCase`` translation lives in this module and nowhere
+# else, because the same table copied into every route is a table that stops
+# agreeing with itself. The column lists below are therefore the module's whole
 # vocabulary, in schema order, and a row is the same dict whether it was read
 # alone or nested inside its server.
 
-#: The columns of each table, in schema order — and the reason no accessor
-#: spells a ``SELECT *``: a row then holds exactly the columns this module knows
-#: about, whatever a later schema level adds beside them.
+#: The columns of each table, in schema order, and the reason no accessor spells
+#: a ``SELECT *``: a row then holds exactly the columns this module knows about,
+#: whatever a later schema level adds beside them.
 _SERVER_COLUMNS: Tuple[str, ...] = ("id", "name", "url", "api_key")
 
 _MODEL_COLUMNS: Tuple[str, ...] = (
@@ -1334,22 +1290,20 @@ _AGENT_JSON: Dict[str, str] = {
     "model_id": "modelId",
 }
 
-#: The helpers' one renamed column. ``color`` rather than ``colorCode`` because
-#: that is the key the bullet row already renders today, and the move is meant
-#: to be invisible to the client.
+#: The helpers' one renamed column. ``color`` rather than ``colorCode`` so the
+#: move stays invisible to the bullet row the client already renders.
 _PROMPT_HELPER_JSON: Dict[str, str] = {"color_code": "color"}
 
 #: Columns that carry a JSON boolean rather than a number. SQLite stores them as
-#: integers, so the translation to ``True``/``False`` happens here once instead
-#: of as a ``v == 1`` in every surface that reads one.
+#: integers, so the translation happens here once instead of as a ``v == 1`` in
+#: every surface that reads one.
 _BOOLEAN_COLUMNS: frozenset[str] = frozenset(
     {"supports_vision", "mcp_enable", "lsp_enable", "readonly"}
 )
 
-#: The finding kind the read model reports a damaged row with. The modes payload
-#: the browser already renders knows a second kind, ``note``, for something odd
-#: that cost nothing; a row this reader cannot render always costs the agent, so
-#: only ``error`` is answered here.
+#: The finding kind the read model reports a damaged row with. The browser's
+#: modes payload also knows ``note``, for something odd that cost nothing; a row
+#: this reader cannot render always costs the agent, so only ``error`` is here.
 FINDING_ERROR = "error"
 
 
@@ -1389,7 +1343,7 @@ def _select(
     """The one ``SELECT`` builder in the repo.
 
     ``table`` and ``columns`` are never caller-supplied: every argument is a
-    constant above, which is what lets the statement be assembled without a
+    constant above, which is what lets the statement be assembled with no
     placeholder in sight. A **value** always goes through a ``?``.
     """
     clause = f" WHERE {where}" if where else ""
@@ -1402,11 +1356,10 @@ def _read(sql: str, params: Tuple[Any, ...] = ()) -> List[Tuple[Any, ...]]:
 
     Every accessor here goes through it, so the module answers **one** failure
     type for the read side: a driver error becomes :class:`AppStoreError` naming
-    the path, the same sentence an unopenable file gets. That matters for the
-    never-raises promise of :func:`resolve_agents`, which catches that one type:
-    a file that opens but has no schema (a boot killed between the create and the
-    migration) would otherwise escape as a raw ``OperationalError`` and take the
-    dropdown with it.
+    the path, the same sentence an unopenable file gets. :func:`resolve_agents`
+    keeps its never-raises promise by catching that one type: a file that opens
+    but has no schema (a boot killed between the create and the migration) would
+    otherwise escape as a raw ``OperationalError`` and take the dropdown with it.
     """
     target = database_path()
     try:
@@ -1436,23 +1389,23 @@ def model_row(model_id: Any) -> Optional[Dict[str, Any]]:
 
 
 def load_servers() -> List[Dict[str, Any]]:
-    """Every server with its models — the store's equivalent of the file reader.
+    """Every server with its models, as the browser's dicts.
 
     ``[{id, name, url, apiKey, models: [{id, serverId, name, sysPrompt, the six
     samplers, reasoning, supportsVision}]}]``, servers in insertion order and
     each server's models in theirs. The nesting is the shape the Settings dialog
-    renders (§5.1's master–detail), which is why the models arrive inside their
-    server rather than as a second list a route has to join.
+    renders, which is why the models arrive inside their server rather than as a
+    second list a route has to join.
 
-    The API key is in here: it is returned to the dialog that edits it, exactly
-    as today (§4.5). "Never to a connector, a log or a tool listing" is those
-    surfaces' rule, and this accessor is not one of them.
+    The API key is in here: it is returned to the dialog that edits it. "Never to
+    a connector, a log or a tool listing" is those surfaces' rule, and this
+    accessor is not one of them.
 
     Raises :class:`AppStoreError` naming the path when the store cannot be
     opened, which is deliberate for a plain read: an accessor that answered
     ``[]`` instead would make an unreadable store indistinguishable from one
-    with no servers — the silent empty state §4.3 refuses. The caller that has
-    something to say about it is :func:`src.config.agent_connection_refusal`.
+    with no servers — the silent empty state this app refuses. The caller that
+    has something to say about it is :func:`src.config.agent_connection_refusal`.
     """
     servers = [
         _record(_SERVER_COLUMNS, found, _SERVER_JSON)
@@ -1470,15 +1423,14 @@ def load_servers() -> List[Dict[str, Any]]:
 # -- the agents read model -------------------------------------------------------
 #
 # What ``agent_modes.resolve_modes()`` / ``resolve_mode()`` are, over the
-# ``agents`` table. The two guarantees that are about behaviour rather than
-# storage are kept: the read **never raises** (a damaged row is reported, the
-# dropdown still renders) and the app-owned agent stays **last**. The two changes
-# D5 makes are applied: there is no ``default`` key in the answer at all, and
-# :func:`resolve_agent` narrows to "an id in, a row or nothing out".
+# ``agents`` table. The guarantees that are about behaviour rather than storage
+# are kept: the read **never raises** (a damaged row is reported, the dropdown
+# still renders) and the app-owned agent stays **last**. There is no ``default``
+# key in the answer at all, and :func:`resolve_agent` is "an id in, a row or
+# nothing out".
 
-#: Where the app-owned agent ids come from. Resolved **by name, per call** for
-#: the reason :data:`AGENT_DEFAULTS_MODULE_NAME` gives: task 10 rewires that
-#: module to read these rows, so a static import in either direction is a cycle.
+#: Where the app-owned agent ids come from. Resolved **by name, per call**: that
+#: module reads these rows, so a static import in either direction is a cycle.
 AGENT_MODES_MODULE_NAME = "src.core.agent_modes"
 
 #: The ids the read model puts last, whatever the table's insertion order says —
@@ -1491,9 +1443,9 @@ def _reserved_agent_ids() -> Tuple[str, ...]:
     """The ids nojaé owns, which the read model puts last whatever the table says.
 
     A module that cannot be imported is a broken installation rather than a
-    damaged row, and the answer is the one every failure here gives: say nothing
-    extra, render what there is. Here that is the fallback tuple, so the
-    app-owned agent still lands last rather than wherever its row happens to be.
+    damaged row, so the answer is the one every failure here gives: say nothing
+    extra, render what there is — the fallback tuple keeps the app-owned agent
+    last.
     """
     try:
         module = importlib.import_module(AGENT_MODES_MODULE_NAME)
@@ -1521,9 +1473,8 @@ def _agent_problem(values: Mapping[str, Any]) -> Optional[str]:
     booleans: a damaged value has to be seen as what it is, or the check would
     be reading its own coercion back.
 
-    ``system_message`` is checked for its type only — an empty persona is the
-    documented "use the model's own prompt" (D8), so a blank string there is a
-    choice and not damage.
+    ``system_message`` is checked for its type only — an empty persona means "use
+    the model's own prompt", so a blank string there is a choice, not damage.
     """
     for column in ("id", "label"):
         value = values[column]
@@ -1552,15 +1503,15 @@ def resolve_agents() -> Dict[str, Any]:
     ``{"agents": [{id, label, maxToolIteration, mcpEnable, lspEnable,
     systemMessage, readonly, modelId, modelName}], "findings": [{kind,
     message}]}`` — and deliberately **no** ``default`` key: there is no
-    server-side default agent to report (D5), and a key that always answered
+    server-side default agent to report, and a key that always answered
     "nothing" would be read as meaningful by the composer and by the lot.
 
     ``modelName`` is the resolved model's name, or ``None``. With ``modelId`` it
     is the whole answer to "can this agent run at all", so the composer's warning
-    (§5.4) reads a field instead of re-deriving the rule from two tables. A
-    ``modelId`` that names no row is reported as a finding and answers
-    ``modelName: None`` — the agent is unrunnable, the same named state D7 gives
-    a model whose server row is missing.
+    reads a field instead of re-deriving the rule from two tables. A ``modelId``
+    that names no row is reported as a finding and answers ``modelName: None`` —
+    the agent is unrunnable, the same named state a model whose server row is
+    missing gets.
 
     **It never raises.** A row the reader cannot render is dropped as a unit and
     reported — the dropdown is the thing that has to stay usable, and a persona
@@ -1570,8 +1521,7 @@ def resolve_agents() -> Dict[str, Any]:
 
     Order is the table's insertion order (``rowid``) — the order the seeder wrote
     and the dialog creates in — with the app-owned agent moved last whatever the
-    table says. That is the modes read's rule, unchanged by the move; reordering
-    the dropdown is out of scope (§6).
+    table says. That is the modes read's rule, unchanged by the move.
     """
     findings: List[Dict[str, str]] = []
     try:
@@ -1627,13 +1577,12 @@ def resolve_agent(
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, str]]]:
     """One agent by id: an id in, a row or nothing out.
 
-    **A missing id resolves to nothing.** Today it means "the file's default",
-    and D5 deletes that answer: a turn with no ``agentMode`` is the 422 naming
-    the field, not a turn that runs as some agent the client never chose. So
-    ``None``/empty answers ``(None, findings)`` like any unresolvable id, and the
-    caller decides what it costs — the route answers 422, and the message
-    listing what *is* available is built from :func:`resolve_agents` exactly as
-    it is today.
+    **A missing id resolves to nothing** — there is no server-side default to
+    fall back to: a turn with no ``agentMode`` is the 422 naming the field, not
+    a turn that runs as some agent the client never chose. So ``None``/empty
+    answers ``(None, findings)`` like any unresolvable id, and the caller decides
+    what it costs — the route answers 422, and the message listing what *is*
+    available is built from :func:`resolve_agents`.
 
     The findings ride along, so a caller that reports the agent it used can say
     in the same breath that the store has problems.
@@ -1649,23 +1598,21 @@ def resolve_agent(
 
 
 def agent_max_tool_iteration(agent: Mapping[str, Any]) -> int:
-    """The resolved agent's tool-loop cap (D9) — the accessor that replaces
-    ``config.max_tool_iteration()``.
+    """The resolved agent's tool-loop cap, behind ``config.max_tool_iteration()``.
 
-    A **floor of 1 and no ceiling**, which is what today's reader already
-    enforces: the 500 found in a live settings file is a value someone typed,
-    not a limit the app imposed, and nothing here introduces an upper bound.
+    A **floor of 1 and no ceiling**: the 500 found in a live settings file is a
+    value someone typed, not a limit the app imposed.
 
     Still MCP's knob only: a round that used nothing but language-server tools
-    never advances the count, so LSP round-trips stay uncapped exactly as they
-    are today. And the number is the one the turn resolved **at its start** (D7)
-    — a save that lands mid-turn cannot move the cap the loop is running with.
+    never advances the count, so LSP round-trips stay uncapped. And the number is
+    the one the turn resolved **at its start** — a save that lands mid-turn
+    cannot move the cap the loop is running with.
     """
     raw = agent.get("maxToolIteration")
     if isinstance(raw, bool) or not isinstance(raw, int):
-        # A row that reached a caller has been checked by :func:`resolve_agents`,
-        # so this is a hand-built mapping. The seeded number is the honest
-        # answer, and the floor still applies to it.
+        # :func:`resolve_agents` checked every row that reached a caller, so this
+        # is a hand-built mapping: the seeded number is the honest answer, and
+        # the floor still applies to it.
         return SEEDED_MAX_TOOL_ITERATION
     return max(1, raw)
 
@@ -1673,18 +1620,17 @@ def agent_max_tool_iteration(agent: Mapping[str, Any]) -> int:
 # -- the prompt-helper rows ------------------------------------------------------
 
 def load_prompt_helpers() -> List[Dict[str, Any]]:
-    """Every helper row, in insertion order — the equivalent of the file reader.
+    """Every helper row, in insertion order.
 
-    ``[{id, color, content}]``. There is **no count rule** (§4.5): a row is a
-    bullet and the count is simply the count, so this answers no rows at all for
-    a user who deleted every one of them, and the bullet row renders nothing
-    until the first add. Today's "exactly nine or an error" existed because the
-    app was that file's only writer and a wrong count meant corruption; in a
-    table, adding and deleting are the normal operations.
+    ``[{id, color, content}]``. There is **no count rule**: a row is a bullet and
+    the count is simply the count, so a user who deleted every one of them has no
+    rows and the bullet row renders nothing. The old "exactly nine or an error"
+    existed because the app was one file's only writer and a wrong count meant
+    corruption; in a table, adding and deleting are the normal operations.
 
-    The ``id`` is in the answer because the writes below address a bullet by it
-    — "update one" and "delete" have no slot index to use once the count is the
-    user's business.
+    The ``id`` is in the answer because the writes below address a bullet by it —
+    "update one" and "delete" have no slot index once the count is the user's
+    business.
 
     Raises :class:`AppStoreError` like :func:`load_servers`: an unusable store
     is a named state, never nine empty bullets.
@@ -1697,7 +1643,7 @@ def load_prompt_helpers() -> List[Dict[str, Any]]:
     ]
 
 
-# -- the write side (spec §4.5) --------------------------------------------------
+# -- the write side -------------------------------------------------------------
 #
 # The store's own writes, and the only code in the repo that spells an ``INSERT``,
 # an ``UPDATE`` or a ``DELETE``. They are **accessors, not routes**: each answers
@@ -1709,19 +1655,19 @@ def load_prompt_helpers() -> List[Dict[str, Any]]:
 # A write takes the **values**, already validated. Validation strictness belongs
 # to the route that speaks to the browser (a colour that is not a hex triplet is
 # refused there, in a message naming the field), because "a database column does
-# not make a bad value less bad" (§4.5) is a rule about what reaches the user,
-# not about who last touched the row.
+# not make a bad value less bad" is a rule about what reaches the user, not about
+# who last touched the row.
 
-#: The one helper every destructive route calls first (D12): "a save backs up
-#: what it replaces", and for a table that means a copy of the whole file before
-#: a ``DELETE``. Lives here rather than in each route so one rule covers every
-#: destructive write of the store — the helper deletes of this task and the
-#: server, model and agent deletes of the tasks after it.
+#: The one helper every destructive route calls first: "a save backs up what it
+#: replaces", and for a table that means a copy of the whole file before a
+#: ``DELETE``. Lives here rather than in each route so one rule covers every
+#: destructive write of the store — helper, server, model and agent deletes
+#: alike.
 #:
 #: It reuses the Editor's own backup helper and therefore its folder, its digest
 #: naming and its retention sweep: two backup trees for one app is how one of
 #: them stops being looked at. The path it copies is :func:`database_path`, which
-#: the caller cannot name — §4.1's rule holds on the write side too.
+#: the caller cannot name — the derived-path rule holds on the write side too.
 #:
 #: Only the main file is copied, and that is only honest because the copy is
 #: taken **after** a checkpoint: under WAL the newest commits sit in ``-wal``, so
@@ -1733,15 +1679,14 @@ def backup_before_delete() -> Optional[str]:
     Answers the copy's path, or ``None`` when there was nothing to copy or the
     copy could not be made. ``None`` is not a failure the caller acts on: the
     rule is that a destructive write **keeps** a copy, and a store that cannot
-    be copied (a read-only install root) is the named state of §4.3, which the
-    next read reports — refusing the delete the user asked for would be a second
-    authority on a disk problem the app already names.
+    be copied (a read-only install root) is the named state the next read
+    reports — refusing the delete the user asked for would be a second authority
+    on a disk problem the app already names.
     """
-    # Imported here rather than at the top: this module's own import graph is
+    # Imported here rather than at the top: this module's import graph is
     # ``src.config`` and nothing else, and the Editor's write surface is a
-    # *tool* of the app rather than a layer under it. One function-level import
-    # keeps the store module readable as the store, and costs nothing — the
-    # module is already loaded by the time a route reaches a delete.
+    # *tool* of the app rather than a layer under it. The module is already
+    # loaded by the time a route reaches a delete, so it costs nothing.
     from src.core.editorfs import files as editorfs_files
 
     target = database_path()
@@ -1757,11 +1702,9 @@ def _checkpoint() -> None:
     """Fold ``-wal`` back into the main file, so a copy of it is a real snapshot.
 
     Private, and the module's only caller of :func:`connection` outside the read
-    and write seams — which is what :func:`_read` and :func:`_write` exist to
-    keep true. Its failure is deliberately **not** reported: a checkpoint that
-    cannot take the lock (another thread mid-read) leaves the store exactly as it
-    was, and a slightly older snapshot is worth more to a user than no snapshot,
-    because the delete they asked for still lands.
+    and write seams. Its failure is deliberately **not** reported: a checkpoint
+    that cannot take the lock leaves the store as it was, and a slightly older
+    snapshot is worth more than none, because the delete still lands.
     """
     try:
         connection().execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1774,16 +1717,16 @@ def _checkpoint() -> None:
 def _write(sql: str, params: Tuple[Any, ...] = ()) -> int:
     """Run one write statement in a transaction of its own.
 
-    The write side's twin of :func:`_read`, and it decides the same thing in the
-    same one place: a driver error becomes :class:`AppStoreError` naming the
-    path, so a route catches **one** type for the store however the statement
-    failed, and no raw ``sqlite3`` error escapes into a 500.
+    The write side's twin of :func:`_read`: a driver error becomes
+    :class:`AppStoreError` naming the path, so a route catches **one** type for
+    the store however the statement failed, and no raw ``sqlite3`` error escapes
+    into a 500.
 
     ``BEGIN IMMEDIATE`` rather than a bare statement: autocommit at the handle
     level means SQLite would otherwise open a deferred transaction, which takes
     the write lock only when it reaches the write — so two tabs saving at once
     could both read, both decide to write, and the loser would fail on the
-    statement instead of waiting out the busy timeout here.
+    statement instead of waiting out the busy timeout.
 
     Answers the statement's ``rowcount``, which is how a caller tells "updated"
     from "there was no such row" without a second query.
@@ -1811,11 +1754,11 @@ def _write(sql: str, params: Tuple[Any, ...] = ()) -> int:
 # on what the store now holds rather than on what it sent), and they raise
 # :class:`AppStoreError` rather than an HTTP status.
 #
-# **Duplicate names are the route's refusal, not these functions'.** "The app
-# refuses before the database does, in words" (§4.5) means the route compares
-# against :func:`load_servers` and answers a message naming the field; the
-# ``UNIQUE`` constraints stay the last line for the case two tabs save at once,
-# where the check passed and the statement did not.
+# **Duplicate names are the route's refusal, not these functions'.** The app
+# refuses before the database does, in words: the route compares against
+# :func:`load_servers` and answers a message naming the field, while the
+# ``UNIQUE`` constraints stay the last line for two tabs saving at once, where
+# the check passed and the statement did not.
 
 def add_server(name: str, url: str, api_key: str = "") -> List[Dict[str, Any]]:
     """Append one server and answer the whole list.
@@ -1838,8 +1781,8 @@ def update_server(
 
     Every column is written, so a cleared field clears: the dialog owns all three
     fields of a server, and a save that left an unnamed one behind would be a row
-    it cannot render. No copy is kept — an ``UPDATE`` replaces "a field the user
-    can retype" (D12).
+    it cannot render. No copy is kept — an ``UPDATE`` replaces a field the user
+    can retype.
     """
     changed = _write(
         "UPDATE servers SET name = ?, url = ?, api_key = ? WHERE id = ?",
@@ -1849,13 +1792,12 @@ def update_server(
 
 
 def delete_server(server_id: int) -> Optional[List[Dict[str, Any]]]:
-    """Remove one server **and its models**, keeping D12's copy of the store first.
+    """Remove one server **and its models**, keeping a copy of the store first.
 
-    The cascade is the schema's (``ON DELETE CASCADE``, §4.2), not code here — the
-    models under a deleted server are rows the dialog could not render, and the
-    agents that pointed at them are left with a null ``model_id`` by the same
-    one statement (``ON DELETE SET NULL``). That is why the copy is taken first:
-    one delete destroys more rows than the one the user named.
+    The cascade is the schema's (``ON DELETE CASCADE``, and ``ON DELETE SET
+    NULL`` for the agents that pointed at those models), not code here. That is
+    why the copy is taken first — one delete destroys more rows than the one the
+    user named.
 
     ``None`` for an id that names no row, and then nothing was destroyed and no
     copy was taken.
@@ -1892,7 +1834,7 @@ def add_model(
     The six samplers are **nullable columns**: a ``None`` here is a ``NULL`` in
     the row, which :meth:`EndpointsConfig.from_store` omits from the request
     body, while a ``0`` is kept. The two are different values and must not
-    converge (§4.2), which is why there is no default spelled for them.
+    converge, which is why there is no default spelled for them.
     """
     if server_row(server_id) is None:
         return None
@@ -1960,13 +1902,13 @@ def update_model(
 
 
 def delete_model(model_id: int) -> Optional[List[Dict[str, Any]]]:
-    """Remove one model, keeping D12's copy of the store first.
+    """Remove one model, keeping a copy of the store first.
 
     The agents pointing at it are **not** deleted: ``ON DELETE SET NULL`` leaves
     each one with a null ``model_id``, which is the narrower damage — the persona
     outlives the model it was tried with, and the agent becomes unrunnable until
-    it is given another (D7). The unassigned count in the dialog is what makes
-    that visible rather than silent (§5.1).
+    it is given another. The unassigned count in the dialog is what makes that
+    visible rather than silent.
     """
     if model_row(model_id) is None:
         return None
@@ -1975,7 +1917,7 @@ def delete_model(model_id: int) -> Optional[List[Dict[str, Any]]]:
     return load_servers()
 
 
-# -- agents, written (task 10) --------------------------------------------------
+# -- agents, written -------------------------------------------------------------
 #
 # The personas' table, written. Like the connection's writes these are accessors
 # rather than routes: they take values the route has already refused or accepted,
@@ -1996,7 +1938,7 @@ def delete_model(model_id: int) -> Optional[List[Dict[str, Any]]]:
 # model names are: the ``UNIQUE`` constraint is the last line for two tabs saving
 # at once, and the dialog's own mistake gets the dialog's own sentence.
 
-#: The one refusal sentence nojae's own agents answer a write with (D4). It is a
+#: The one refusal sentence nojae's own agents answer a write with. It is a
 #: property of the agent, not of the field someone tried to change, so it does
 #: not name one — and it is the *same* sentence wherever it is reached from: the
 #: update route, the delete route, and any future writer.
@@ -2007,9 +1949,9 @@ READONLY_AGENT_REFUSAL = (
 
 #: The refusal a **built-in** agent answers *deletion* with. It is a second
 #: sentence because the two rules cover different sets: only the app-owned agent
-#: is ``readonly`` (D4 — the other three are personas the user may edit), while
-#: every built-in is undeletable, because the seeder owns those ids and a
-#: dropdown that could lose `code` would turn the lot's pin into a mystery.
+#: is ``readonly`` (the other three are personas the user may edit), while every
+#: built-in is undeletable, because the seeder owns those ids and a dropdown
+#: that could lose `code` would turn the lot's pin into a mystery.
 BUILT_IN_AGENT_REFUSAL = (
     "This agent is one of nojae's own and cannot be deleted — you can edit it "
     "instead."
@@ -2034,10 +1976,9 @@ def built_in_agent_ids() -> Tuple[str, ...]:
     """The ids nojae seeds, read from the module that defines them.
 
     The one place "built-in" is decided, and it is the *definition* that decides
-    it — not a list retyped here and not a column: §4.2's schema has no
-    ``builtin`` flag, and D4 makes code the source of truth for which agents
-    nojae owns. Resolved by name for the reason
-    :data:`AGENT_DEFAULTS_MODULE_NAME` gives.
+    it — not a list retyped here and not a column: the schema has no ``builtin``
+    flag, and code is the source of truth for which agents nojae owns. Resolved
+    by name for the reason :data:`AGENT_DEFAULTS_MODULE_NAME` gives.
     """
     defaults = importlib.import_module(AGENT_DEFAULTS_MODULE_NAME)
     modes = [*defaults.default_modes(), defaults.todo_builder_mode()]
@@ -2050,7 +1991,7 @@ def _agent_row(agent_id: Any) -> Optional[Dict[str, Any]]:
     Goes through :func:`resolve_agents` rather than a bare ``SELECT`` so the row a
     write is judged against is the row the dialog is showing — same columns, same
     ``modelName``, same reserved ordering. The list is small and a write is rare,
-    so the second read costs nothing a cache would have earned (D11).
+    so the second read costs nothing a cache would have earned.
     """
     found, _findings = resolve_agent(agent_id)
     return found
@@ -2112,15 +2053,15 @@ def update_agent(
 
     Refuses a **``readonly``** agent outright — with :func:`readonly_refusal` —
     unless the only column asked for is ``model_id``, which is the one field of
-    such a row the user owns (D4). "Only the model" is decided by which keyword
-    arguments were supplied, not by which of them happen to equal the stored
-    value: a body that sends an unchanged label is still an edit of that label.
+    such a row the user owns. "Only the model" is decided by which keyword
+    arguments were supplied, not by which of them equal the stored value: a body
+    that sends an unchanged label is still an edit of that label.
 
     ``model_id=...`` (the default sentinel) means "leave it alone", so an update
     that does not mention the model cannot null it by accident; passing ``None``
-    explicitly clears the association, which is a legal save (§5.2's empty option).
+    explicitly clears the association, which is a legal save.
 
-    No copy is kept: an ``UPDATE`` replaces "a field the user can retype" (D12).
+    No copy is kept: an ``UPDATE`` replaces a field the user can retype.
     """
     row = _agent_row(agent_id)
     if row is None:
@@ -2157,9 +2098,9 @@ def update_agent(
 
 
 def delete_agent(agent_id: str) -> Optional[List[Dict[str, Any]]]:
-    """Remove one agent, keeping D12's copy of the store first.
+    """Remove one agent, keeping a copy of the store first.
 
-    Refuses a **built-in** agent (D4) — every agent nojae seeds, not only the
+    Refuses a **built-in** agent — every agent nojae seeds, not only the
     ``readonly`` one, because the seeder owns those ids and the dropdown a lot
     pins must not be able to lose `code`. The sentence is
     :func:`built_in_refusal`'s, so the route and any later writer answer it in one
@@ -2184,10 +2125,10 @@ def delete_agent(agent_id: str) -> Optional[List[Dict[str, Any]]]:
 def add_prompt_helper(color: str, content: str = "") -> List[Dict[str, Any]]:
     """Append one bullet and answer the whole list as the browser renders it.
 
-    An **append**, always: the row count is the user's business (§4.5), so there
-    is no slot to aim at and no free slot to fill. The new row's ``id`` is the
-    one SQLite assigns, which is why the answer is the read rather than the
-    values passed in.
+    An **append**, always: the row count is the user's business, so there is no
+    slot to aim at and no free slot to fill. The new row's ``id`` is the one
+    SQLite assigns, which is why the answer is the read rather than the values
+    passed in.
     """
     _write(
         "INSERT INTO prompt_helpers (color_code, content) VALUES (?, ?)",
@@ -2213,13 +2154,12 @@ def update_prompt_helper(
 
 
 def delete_prompt_helper(helper_id: int) -> Optional[List[Dict[str, Any]]]:
-    """Remove one bullet, keeping D12's copy of the store first.
+    """Remove one bullet, keeping a copy of the store first.
 
     Answers the whole list, or ``None`` when no row carried that id. The copy is
     taken **before** the ``DELETE`` and only for a row that exists: an UPDATE
-    needs none ("the row it replaces is a field the user can retype; a DELETE is
-    the one thing they cannot"), and a delete that deletes nothing destroys
-    nothing.
+    needs none, because the row it replaces is a field the user can retype, and a
+    delete that deletes nothing destroys nothing.
     """
     found = _read(
         _select("prompt_helpers", _PROMPT_HELPER_COLUMNS, "id = ?"), (helper_id,)

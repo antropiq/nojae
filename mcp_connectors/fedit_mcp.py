@@ -2,15 +2,14 @@
 """
 File Edit MCP Server - Edits files through unified diffs or SEARCH/REPLACE blocks.
 
-This server exposes tools that let an AI model modify an existing file by sending
-only the changed regions (a unified diff, or git-style SEARCH/REPLACE blocks)
-instead of rewriting the whole file, or of reaching for low-level shell tools such
-as ``sed``. Edits are validated against the file's actual content before anything
-is written: a mismatch fails loudly and leaves the file untouched, and every write
-keeps a numbered backup that ``revert_edit`` can restore.
+The tools let a model modify an existing file by sending only the changed regions
+(a unified diff, or git-style SEARCH/REPLACE blocks) instead of rewriting the
+whole file or reaching for shell tools such as ``sed``. An edit is validated
+against the file's actual content first: a mismatch fails loudly and leaves the
+file untouched, and every write keeps a numbered backup ``revert_edit`` restores.
 
-Edits are applied by a pure-Python unified-diff engine (stdlib only) -- this is
-*not* a wrapper around GNU ``patch``, so the accepted syntax is documented in
+Edits are applied by a pure-Python unified-diff engine (stdlib only), *not* a
+wrapper around GNU ``patch``, so the accepted syntax is documented in
 ``apply_edit``'s docstring rather than delegated to ``patch(1)``.
 
 Every tool -- reads included -- goes through one path policy before touching the
@@ -19,44 +18,40 @@ friends) are refused for reading as well as writing, since a secret pulled into
 the context window does as much damage as one that gets overwritten. The lists
 and their environment overrides are reported by ``edit_policy()``.
 
-Two regions are trusted outright, and the checks below only apply outside them:
+Two regions are trusted outright, and the deny-lists below only apply outside
+them:
 
-* the root directory (``--root-dir``) and everything under it -- that tree is
-  the operator's own workspace, so the *deny-lists* below do not apply inside
-  it, including to the connector's own sources;
+* the root directory (``--root-dir``) and everything under it -- the operator's
+  own workspace, including the connector's own sources;
 * scratch directories (``/tmp``, ``/var/tmp``; see ``ALLOW_PREFIXES``) --
   throwaway work, never the operator's secrets.
 
 Inside the root, one policy does apply: the workspace's own
-``<root>/.nojae/read-write-policy.json`` (pol-08). A folder its owner marked
-``ro`` is uneditable here exactly as it is in the Editor pane, and one marked
-``hidden`` is not readable either -- the same file, the same matcher and the
-same refusal sentence, read in this process. Narrowing the agent to what the
-human can see is the point; nothing is added anywhere.
+``<root>/.nojae/read-write-policy.json``. A folder its owner marked ``ro`` is
+uneditable here exactly as it is in the Editor pane, and one marked ``hidden``
+is not readable either -- the same file, the same matcher and the same refusal
+sentence, read in this process. Nothing is added anywhere.
 
 The two rule sources stay **separate lists** on purpose, and a reader tempted
 to merge them will break both. The deny-list answers "is this a
-credential store" and that question means the same thing in every tree, which
-is why it must keep guarding the paths *outside* the root where it is the only
-rule that speaks. The workspace policy answers "which parts of *this* project
-may change" -- a question the operator wrote down, and one the deny-list cannot
-ask. Note the resulting asymmetry rather than "fixing" it: an ordinary
-workspace ``.env`` is editable through this connector while the Editor pane
-cannot read it, because the pane's rule is level A (nojae regenerates its
+credential store", which means the same thing in every tree, and it is the only
+rule that speaks *outside* the root. The workspace policy answers "which parts
+of *this* project may change" -- a question the operator wrote down, and one the
+deny-list cannot ask. Note the resulting asymmetry rather than "fixing" it: an
+ordinary workspace ``.env`` is editable through this connector while the Editor
+pane cannot read it, because the pane's rule is level A (nojae regenerates its
 own ``.env`` from the settings template), which is a fact about the pane, not
 about an agent's edit. ``edit_policy()`` reports both halves.
 
 Both bypasses are decided on where a path *really* is (``realpath``), not on the
 spelling that reached it: one physical file therefore gets one verdict however it
-was addressed -- the same tree reached through a mount point and its alias
-behaves identically. A symlink cannot smuggle a protected file into a trusted
-prefix either, because the link's *target* is what is tested. Relative paths are
-anchored at the root.
+was addressed, and a symlink cannot smuggle a protected file into a trusted
+prefix because the link's *target* is what is tested. Relative paths are anchored
+at the root.
 
 Traversal is judged the same way: the path is normalised and every form of it is
 held to the deny rules, so ``..`` is refused for arriving somewhere protected
-rather than for being that token -- which keeps ``logs/x/../src/y.py`` (an
-ordinary in-root path) working.
+rather than for being that token -- which keeps ``logs/x/../src/y.py`` working.
 
 Usage:
     python -m mcp_connectors.fedit_mcp --root-dir /path/to/root              # default port 8946
@@ -89,12 +84,11 @@ except ImportError:  # run as a plain script path, as externals.json does
     import policy_shared  # type: ignore[no-redef]
 
 # Root directory the connector is scoped to; set by main() from --root-dir.
-# When None (e.g. module imported without main()), the full policy applies to
-# every path (legacy behaviour).
+# When None (a module imported without main()), the full policy applies to every
+# path.
 ROOT_DIR: Optional[Path] = None
 
-# Create MCP server instance
-# streamable_http_path="/mcp" is the default, which matches your requirement
+# streamable_http_path="/mcp" is the transport default
 server = MCPServer(
     name="fedit-mcp",
     instructions="A server that edits existing files in place, given only the parts that "
@@ -116,8 +110,8 @@ server = MCPServer(
 
 DEFAULT_PORT = 8946
 
-# Refuse to touch files larger than this (bytes). An agent editing a huge file
-# is almost certainly a mistake, and the diff would blow the context window.
+# Refuse to touch files larger than this (bytes): an agent editing a huge file is
+# a mistake, and the diff would blow the context window.
 MAX_FILE_BYTES = int(os.environ.get("FEDIT_MAX_BYTES", 2_000_000))
 
 # Hard cap on the size of a single edit payload.
@@ -145,14 +139,13 @@ BACKUP_PRUNE_DAYS = int(os.environ.get("FEDIT_BACKUP_PRUNE_DAYS", 30))
 # purpose: backups must not pollute a working tree or show up in ``git status``.
 BACKUP_DIR = Path(os.environ.get("FEDIT_BACKUP_DIR", "logs/fedit_backups"))
 
-# Prefixes that are trusted outright, like the root directory: scratch space is
-# where an agent puts throwaway work, so a path that stays inside one of these
-# (literally and after symlink resolution) skips the policy below too.
-# The protected-path lists live in ONE module shared with console_mcp. Keeping a
-# single copy is the point: while fedit refused ``~/.ssh`` and console ran
-# ``cat .env``, the careful policy here was bypassable through the sibling
-# connector enabled in the same session. These names are re-exported so
-# ``edit_policy()`` and the tests keep seeing them on this module.
+# Prefixes trusted outright, like the root directory: scratch space is where an
+# agent puts throwaway work, so a path inside one of these (literally and after
+# symlink resolution) skips the deny-lists too.
+# The protected-path lists live in ONE module shared with console_mcp: while
+# fedit refused ``~/.ssh`` and console ran ``cat .env``, the careful policy here
+# was bypassable through the sibling connector enabled in the same session.
+# Re-exported so ``edit_policy()`` and the tests keep seeing them here.
 ALLOW_PREFIXES: tuple[str, ...] = path_policy.ALLOW_PREFIXES
 DENY_PREFIXES: tuple[str, ...] = path_policy.DENY_PREFIXES
 DENY_PREFIXES_READ: tuple[str, ...] = path_policy.DENY_PREFIXES_READ
@@ -180,11 +173,10 @@ class FeditError(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# Text helpers: a file is modelled as lines + a trailing-newline flag, so that
-# "no newline at end of file" survives an edit round-trip. The terminator
-# *style* is part of that model too: splitting on ``str.splitlines()`` and
-# re-joining with "\n" would rewrite every CRLF file as LF (and turn a form
-# feed into a line break), which shows up as whole-file churn in ``git diff``.
+# Text helpers: a file is lines + a trailing-newline flag + the terminator style,
+# so "no newline at end of file" survives an edit and a CRLF file stays CRLF
+# (``str.splitlines()`` plus a "\n" join would rewrite it and show whole-file
+# churn in ``git diff``).
 # ---------------------------------------------------------------------------
 
 
@@ -250,11 +242,10 @@ def join_text(lines: Iterable[str], final_newline: bool,
 def binary_reason(payload: bytes) -> Optional[str]:
     """Why ``payload`` is a binary file, or None when it is not.
 
-    A NUL byte is what ``file(1)`` calls binary. It is the one property that
-    makes a file useless to *every* text tool, so it is refused everywhere --
-    showing such content as lines only invites the agent to copy a line that
-    cannot be copied back. The whole payload is checked, not just a leading
-    window: a NUL at offset 9000 breaks an edit just as surely.
+    A NUL byte is what ``file(1)`` calls binary, and it makes a file useless to
+    *every* text tool: showing such content as lines only invites the agent to
+    copy a line that cannot be copied back. The whole payload is checked, not a
+    leading window -- a NUL at offset 9000 breaks an edit just as surely.
     """
     nul = payload.find(b"\x00")
     if nul == -1:
@@ -265,11 +256,9 @@ def binary_reason(payload: bytes) -> Optional[str]:
 def undecodable_reason(payload: bytes) -> Optional[str]:
     """Why ``payload`` is not valid UTF-8, or None when it is.
 
-    Text in another encoding (Latin-1, UTF-16, Shift-JIS) is real text: it can
-    be displayed with the bad bytes replaced, it just cannot be rewritten,
-    because the edit engine's output would no longer round-trip those bytes.
-    Naming the byte and its offset is what makes the answer actionable instead
-    of a codec exception the model cannot act on.
+    Text in another encoding is real text: it can be displayed with the bad bytes
+    replaced, but not rewritten, because the output would no longer round-trip
+    those bytes. Naming the byte and its offset keeps the answer actionable.
     """
     try:
         payload.decode("utf-8")
@@ -296,9 +285,9 @@ def not_editable_message(resolved: Path, reason: str) -> str:
 def read_payload_for_edit(resolved: Path) -> str:
     """Read a file an edit is about to rewrite, refusing anything not text.
 
-    A NUL byte or an undecodable byte makes an edit unrecoverable: the reported
-    diff cannot be round-tripped, so the request is refused with the reason
-    rather than answered with a codec exception.
+    A NUL or undecodable byte makes an edit unrecoverable -- the reported diff
+    could not be round-tripped -- so the reason is named instead of a codec
+    exception.
     """
     payload = resolved.read_bytes()
     reason = not_editable_reason(payload)
@@ -311,8 +300,7 @@ def _terminator_warning(text: str) -> Optional[str]:
     """Warn when a file mixes terminator styles, which the write normalises.
 
     Matching is line-based, so a mixed file cannot be reproduced byte for byte;
-    the alternative (silently rewriting half its line endings) is worse, so the
-    normalisation is reported in the tool's warning list.
+    silently rewriting half its line endings would be worse.
     """
     styles = set(_LINE_END_RE.findall(text))
     if len(styles) <= 1:
@@ -346,11 +334,9 @@ class Hunk:
 def parse_unified_diff(diff_text: str) -> list[Hunk]:
     """Parse a unified diff into hunks. Raises FeditError on malformed input.
 
-    Tolerated on purpose (they are the usual LLM slips, and the body of a hunk
-    is what the matcher actually trusts): a hunk whose ``-l,s``/``+l,s`` counts
-    disagree with its body (counts are recomputed, a warning is recorded), and
-    ``--- / +++`` headers naming a different path than the tool argument (the
-    ``path`` argument stays authoritative, a warning is recorded).
+    Tolerated on purpose, with a warning: header counts disagreeing with the body
+    (they are recomputed -- the body is what the matcher trusts), and ``---`` /
+    ``+++`` headers naming a path other than the tool argument.
     """
     if not diff_text or not diff_text.strip():
         raise FeditError("The diff is empty.")
@@ -436,11 +422,9 @@ def parse_unified_diff(diff_text: str) -> list[Hunk]:
 def _trim_lines(hunk: Hunk, trim_leading: int, trim_trailing: int) -> list[tuple[str, str]]:
     """The hunk's line list with the given number of entries dropped per edge.
 
-    Fuzz ignores edge *context*, and one trimmed hunk line is one old line and
-    one new line, so trimming the line list once keeps the match and the
-    replacement in step. Trimming the two derived lists by index separately
-    would not: a hunk that adds or removes lines has differently sized old and
-    new sides, so the same index cuts different lines out of each.
+    Trimming the line list once keeps the match and the replacement in step;
+    trimming the two derived lists separately would not, because a hunk that adds
+    or removes lines has differently sized old and new sides.
     """
     if not (trim_leading or trim_trailing):
         return list(hunk.lines)
@@ -456,10 +440,9 @@ def _old_window(lines: list[tuple[str, str]]) -> list[str]:
 def _new_window(lines: list[tuple[str, str]]) -> list[str]:
     """What a (possibly trimmed) hunk writes.
 
-    This must be derived from the same trimmed hunk as :func:`_old_window`:
-    writing the hunk's whole new body over a trimmed match re-inserts the
-    ignored context as new text, duplicating it and adding lines the file
-    never had.
+    Derived from the same trimmed hunk as :func:`_old_window`: writing the whole
+    new body over a trimmed match re-inserts the ignored context as new text,
+    adding lines the file never had.
     """
     return [text for kind, text in lines if kind in " +"]
 
@@ -467,9 +450,9 @@ def _new_window(lines: list[tuple[str, str]]) -> list[str]:
 def _edge_context_runs(hunk: Hunk) -> tuple[int, int]:
     """How many lines fuzz may ignore at each edge, independently.
 
-    A ``-``/``+`` line is part of the change, so trimming past it would drop a
-    removal or an insertion; the run of context lines at each end bounds the
-    trim on that side, and the two sides are bounded by their own runs.
+    A ``-``/``+`` line is part of the change, so the run of context lines at each
+    end is the bound for that side: trimming past it would drop a removal or an
+    insertion.
     """
     kinds = [kind for kind, _ in hunk.lines]
     leading = 0
@@ -485,12 +468,9 @@ def _trim_levels(hunk: Hunk, max_fuzz: int) -> list[tuple[int, int]]:
     """The ``(leading, trailing)`` trims to try, least fuzz first.
 
     Like ``patch --fuzz``, level *k* ignores up to ``k`` context lines at each
-    end, and each end is bounded by the context it actually has: an edge that
-    ends in a ``-``/``+`` line has nothing to ignore there, so ignoring past
-    it would drop part of the change.
-
-    A level that would leave a hunk with old content nothing to match on is
-    dropped: an empty window matches every position, so such a hunk would land
+    end, each end bounded by the context it has: an edge ending in a ``-``/``+``
+    line has nothing to ignore there. A level leaving no old content to match on
+    is dropped -- an empty window matches every position, so the hunk would land
     at an arbitrary line rather than a repositioned one.
     """
     levels: list[tuple[int, int]] = [(0, 0)]
@@ -526,19 +506,15 @@ def apply_diff_to_text(before: str, diff_text: str, fuzz: Optional[int] = None,
                        creating: bool = False) -> tuple[str, list[str]]:
     """Apply a unified diff to ``before``, returning (new_text, warnings).
 
-    Each hunk must match exactly at its declared offset; failing that, and if
-    ``fuzz`` allows, the hunk is repositioned by matching its context elsewhere
-    in the file (``patch``-style fuzzing, edges trimmed first). The operation is
-    atomic: one unmatched hunk means nothing is changed anywhere.
+    Each hunk must match at its declared offset; failing that, and if ``fuzz``
+    allows, it is repositioned by matching its context elsewhere (``patch``-style
+    fuzzing, edges trimmed first). Atomic: one unmatched hunk changes nothing.
+    Fuzz is clamped to ``FUZZ_CEILING`` and never trims a hunk's context away
+    entirely, since an empty window matches every position.
 
-    Fuzz is clamped to ``FUZZ_CEILING``, and never trims a hunk's context away
-    entirely: an empty window matches every position in the file, so a hunk
-    trimmed that far is an edit dropped at an arbitrary line rather than a
-    repositioned one.
-
-    ``creating`` says the target has no bytes because the file does not exist
-    (as opposed to existing and being empty), so a failed hunk can say that
-    instead of sending the model off to re-read a file that is not there.
+    ``creating`` says the target does not exist (as opposed to being empty), so a
+    failed hunk can say that instead of sending the model to re-read a file that
+    is not there.
     """
     hunks = parse_unified_diff(diff_text)
     requested = MAX_FUZZ if fuzz is None else max(0, int(fuzz))
@@ -571,9 +547,9 @@ def apply_diff_to_text(before: str, diff_text: str, fuzz: Optional[int] = None,
                 continue
             new_lines = _new_window(trimmed)
             lines[found:found + len(window)] = new_lines
-            # Accumulate both effects of this hunk for the hunks that follow:
-            # where it actually landed versus where it was declared (GNU patch
-            # tracks the same), and how much it changed the file length.
+            # Both effects of this hunk for the hunks that follow: where it landed
+            # versus where it was declared (GNU patch tracks the same), and how
+            # much it changed the file length.
             offset += (found - target) + (len(new_lines) - len(window))
             # A hunk that declares no old content has nothing to match on, so
             # _locate only clamps its declared line into the file; that clamp is
@@ -611,14 +587,11 @@ def _hunk_failure(hunk: Hunk, lines: list[str],
                   clamped_note: str = "", creating: bool = False) -> str:
     """A correction-oriented error for a hunk that did not match.
 
-    ``clamped_note`` is non-empty when the caller had to reduce the requested
-    fuzz: "does not match anywhere, even with fuzzing" would be an invitation to
-    raise ``fuzz`` again, when the real reason it did not match is that the fuzz
-    asked for is above the ceiling and was not honoured.
+    ``clamped_note`` is non-empty when the requested fuzz was reduced, so the
+    answer must not invite the model to raise ``fuzz`` again.
 
-    ``creating`` names the one case where "re-read the file" is not a route
-    forward: the target does not exist, so there are no lines to copy verbatim,
-    and what the model needs is the creation shape -- a hunk that only adds.
+    ``creating`` names the case where "re-read the file" is not a route forward:
+    the target does not exist, so what the model needs is the creation shape.
     """
     window = [text for kind, text in hunk.lines if kind in " -"]
     start = max(0, hunk.old_start - 1)
@@ -682,9 +655,8 @@ def marker_lines(lines: list[str]) -> list[tuple[int, str]]:
 def marker_in_file_warning(before: str) -> Optional[str]:
     """Warn when the target file holds marker-looking lines SEARCH cannot quote.
 
-    The edit itself applied, so this is a warning rather than a refusal -- but
-    the next block that tries to copy one of those lines verbatim cannot
-    express it, and the agent should know that before it writes one.
+    The edit applied, so this is a warning rather than a refusal -- but a later
+    SEARCH block cannot quote such a line, and the agent should know that.
     """
     hits = [line.strip()[:20] for line in split_text(before)[0]
             if any(is_marker_line(line, marker) for marker in BLOCK_MARKERS)]
@@ -727,15 +699,11 @@ def parse_search_replace(edit_text: str) -> list[Block]:
     if raw and raw[-1] == "":
         raw.pop()
 
-    # Tokenise the whole payload, then check its shape before trusting any of
-    # it. A well-formed payload is a whole number of SEARCH / DIVIDER / REPLACE
-    # markers in that order; anything else means a body line was tokenised as a
-    # marker -- a git conflict's '=======', or a file documenting this very
-    # format. Applying such a payload used to be silently accepted, and the
-    # edit landed where nobody asked for: the divider inside the SEARCH text
-    # became the block's own divider and the rest of the body became a REPLACE.
-    # Refusing is the honest answer, and it names the format that does handle
-    # that content (see ``apply_edit``: a diff tokenises no markers).
+    # Tokenise the whole payload, then check its shape before trusting any of it:
+    # a whole number of SEARCH / DIVIDER / REPLACE markers in that order. Anything
+    # else means a body line was tokenised as a marker -- a git conflict's divider
+    # or a file documenting this format -- so the block boundaries are a guess and
+    # the payload is refused rather than applied somewhere nobody asked for.
     markers = marker_lines(raw)
     shape_error = payload_shape_error(markers)
     if shape_error:
@@ -755,11 +723,9 @@ def parse_search_replace(edit_text: str) -> list[Block]:
 def payload_shape_error(markers: list[tuple[int, str]]) -> Optional[str]:
     """Why a tokenised payload does not describe complete blocks, or None.
 
-    ``markers`` is what ``marker_lines`` found. A valid payload reads as
-    SEARCH, DIVIDER, REPLACE, SEARCH, DIVIDER, REPLACE ... Any deviation means
-    one marker-looking line belongs to the file's own text rather than to the
-    block structure -- so no block boundary in the payload is knowable, and an
-    edit built from them is a guess.
+    ``markers`` is what ``marker_lines`` found. A valid payload reads as SEARCH,
+    DIVIDER, REPLACE, SEARCH, ... Any deviation means a marker-looking line
+    belongs to the file's own text, so no block boundary is knowable.
     """
     cycle = (SEARCH_MARKER, DIVIDER_MARKER, REPLACE_MARKER)
     if not markers:
@@ -800,9 +766,8 @@ def apply_search_replace_to_text(before: str, edit_text: str,
     step: zero matches is a bad copy, several matches is an under-specified
     block. An empty SEARCH only makes sense for an empty (new) file.
 
-    ``creating`` says the target has no bytes because the file does not exist,
-    so a SEARCH that matches nothing can name the creation shape instead of
-    telling the model to re-read a file that is not there.
+    ``creating`` says the target does not exist, so a SEARCH that matches nothing
+    can name the creation shape instead of sending the model to re-read it.
     """
     blocks = parse_search_replace(edit_text)
     body, bom = strip_bom(before)
@@ -855,9 +820,8 @@ def _block_failure(block: Block, lines: list[str], creating: bool = False) -> st
             best, best_ratio = i, ratio
     near = lines[best:best + max(span, len(block.search))]
     closest = "\n".join(f"    | {line}" for line in near) or "    (empty)"
-    # "Re-read the file" is the wrong instruction when there is no file: it
-    # sends the model to read_file, which answers File not found, and the same
-    # edit comes back round again. Name the shape that does create one.
+    # "Re-read the file" is wrong when there is no file: read_file answers File
+    # not found and the same edit comes back round. Name the shape that creates one.
     creation_note = (
         f"  This file does not exist yet, so there is nothing to search for. To "
         f"create it, send one block with an empty SEARCH and the whole new "
@@ -894,8 +858,8 @@ def _opens_as_diff(edit_text: str) -> bool:
     """True when the payload opens with a ``--- a/x`` / ``+++ b/x`` header pair.
 
     That pair is written only by diff producers, so it outranks the marker
-    sniff: a diff that *quotes* '<<<<<<< SEARCH' as context -- which is what
-    editing this connector's own docstrings requires -- stays a diff.
+    sniff: a diff that *quotes* a SEARCH marker as context -- what editing this
+    connector's own docstrings requires -- stays a diff.
     """
     lines = [line for line in edit_text.split("\n") if line.strip()][:2]
     return (len(lines) == 2 and lines[0].startswith("--- ")
@@ -906,8 +870,8 @@ def resolve_format(fmt: str, edit_text: str) -> str:
     """Map a requested format to 'diff' or 'sr', sniffing when 'auto'.
 
     A payload that could be read as *both* is refused rather than guessed at:
-    handing it to the wrong engine produces a confusing parse error (or, in the
-    SEARCH/REPLACE case, an edit at the wrong place).
+    the wrong engine produces a confusing parse error, or an edit at the wrong
+    place.
     """
     key = _FORMAT_ALIASES.get((fmt or "auto").strip().lower().replace("-", "_"))
     if key is None:
@@ -921,10 +885,9 @@ def resolve_format(fmt: str, edit_text: str) -> str:
     looks_like_blocks = SEARCH_MARKER in edit_text
     looks_like_diff = HUNK_ANYWHERE_RE.search(edit_text) is not None
     if looks_like_blocks and looks_like_diff:
-        # A diff whose context quotes '<<<<<<< SEARCH' (documentation about this
-        # very connector) and a SEARCH/REPLACE body holding a '@@ ... @@' line
-        # both look like either format. Guessing here would send the payload to
-        # the engine that cannot parse it, so ask.
+        # A diff quoting a SEARCH marker (documentation about this connector) and
+        # a SEARCH/REPLACE body holding a hunk header both look like either
+        # format; guessing would pick the engine that cannot parse it, so ask.
         raise FeditError(
             "Ambiguous edit: the payload has both a '<<<<<<< SEARCH' marker and "
             "an '@@ -l,s +l,s @@' hunk header, so it could be either format. "
@@ -959,11 +922,11 @@ def _within_root(path: Path) -> bool:
 def _system_prefix_hit(path: Path) -> Optional[str]:
     """The system prefix ``path`` is addressed under, or None.
 
-    Used only to keep the *address* honest when the root bypass is decided on the
-    resolved target: reaching the workspace through a link planted in ``/etc``
-    still leaves an entry in a system tree, and that is not what --root-dir
-    agreed to. Name-based rules are deliberately not part of this -- they judge
-    what a file is, and ``realpath`` already settles that.
+    Keeps the *address* honest while the root bypass is decided on the resolved
+    target: reaching the workspace through a link planted in ``/etc`` still leaves
+    an entry in a system tree, which is not what --root-dir agreed to. Name-based
+    rules stay out of it -- they judge what a file is, and ``realpath`` settles
+    that.
     """
     return path_policy.prefix_hit(path.as_posix(), path_policy.DENY_PREFIXES)
 
@@ -971,17 +934,14 @@ def _system_prefix_hit(path: Path) -> Optional[str]:
 def _workspace_rel(real: Path) -> Optional[str]:
     """``real`` as a workspace-relative POSIX path, or None when outside the root.
 
-    The connector's root *is* the workspace (``externals.json`` passes
-    ``--root-dir ${NOJAE_PATH_LOCATION}``), so the workspace policy's rules
-    -- which are written relative to that folder -- are matched against this.
-    ``None`` (outside the root, or an unrooted server) means "the workspace policy
-    has nothing to say here", which is the documented domain split: outside the
-    root the connector deny-list is what speaks.
+    The connector's root *is* the workspace (``--root-dir`` names it), so the
+    workspace policy's rules -- written relative to that folder -- are matched
+    against this. ``None`` means the workspace policy has nothing to say, which is
+    the domain split: outside the root the connector deny-list speaks.
 
-    Judged on the **resolved** path, exactly like the root bypass is: one physical
-    file gets one verdict however it was addressed (mount point vs its alias), and
-    a link planted in the workspace cannot point at a ``ro`` folder elsewhere and
-    have it read as one here.
+    Judged on the **resolved** path, like the root bypass: one physical file gets
+    one verdict however it was addressed, and a link planted in the workspace
+    cannot point at a ``ro`` folder elsewhere and have it read as one here.
     """
     if ROOT_DIR is None:
         return None
@@ -996,19 +956,14 @@ def _workspace_rel(real: Path) -> Optional[str]:
 def _workspace_policy_reason(resolved: Path, *, for_write: bool) -> Optional[str]:
     """The workspace's own policy refusal for an in-root path, or None.
 
-    pol-08: a folder the user marked ``ro`` in
-    ``<root>/.nojae/read-write-policy.json`` is uneditable by an agent too, and a
-    folder marked ``hidden`` is not readable either -- the same answer the Editor
-    pane gives for the same path, from the same file and the same matcher
-    (``policy_file.workspace_policy_reason``).
+    A folder the user marked ``ro`` in ``<root>/.nojae/read-write-policy.json`` is
+    uneditable by an agent too, and one marked ``hidden`` is not readable either
+    -- the same answer the Editor pane gives, from the same file and the same
+    matcher (``policy_file.workspace_policy_reason``).
 
-    What this does NOT apply is level A, nojae's own rules about the files
-    it regenerates: those exist because the pane fights the settings dialog over
-    a generated file, which is not a property of an agent's edit. And the
-    connector's own deny-list stays where it was -- the name-based floor that
-    keeps a private key out of a context window -- because that floor guards a
-    different trust surface, outside the root, where it is the only rule that
-    means anything.
+    Level A -- nojae's own rules about the files it regenerates -- is deliberately
+    not applied here: such a rule exists because the pane fights the settings
+    dialog over a generated file, which is not a property of an agent's edit.
     """
     rel = _workspace_rel(resolved)
     if rel is None:
@@ -1022,8 +977,8 @@ def _workspace_policy_reason(resolved: Path, *, for_write: bool) -> Optional[str
 def _deny_reason(resolved: Path, *, for_write: bool) -> Optional[str]:
     """Explain why ``resolved`` is off-limits, or None if it is allowed.
 
-    Delegates to the shared module so console and fedit answer with the same
-    lists and the same wording.
+    Delegated to the shared module so console and fedit answer with the same lists
+    and the same wording.
     """
     return path_policy.deny_reason(resolved, for_write=for_write)
 
@@ -1032,26 +987,22 @@ def check_target_path(path: str, *, for_write: bool) -> Path:
     """Resolve one path and apply the policy for the requested operation.
 
     This is the single entry point every tool goes through, so a read can never
-    slip past a check that only the write path performed -- that asymmetry was
-    issue #1: the deny-lists guarded ``apply_edit`` while ``read_file`` happily
-    returned ``~/.git-credentials``.
+    slip past a check that only the write path performed: a deny-list guarding
+    ``apply_edit`` alone once left ``read_file`` returning ``~/.git-credentials``.
 
-    Root scoping: when the server runs with --root-dir, a path whose literal
-    and real (symlink-resolved) forms both stay inside that root bypasses the
-    *deny-lists* -- the root is the operator's workspace -- but not that
-    workspace's own policy (pol-08): ``<root>/.nojae/read-write-policy.json`` is
-    consulted for an in-root path, so a folder its owner marked ``ro`` or
-    ``hidden`` is refused here exactly as it is in the Editor tab. Everything
-    below only constrains paths outside the root. Relative paths anchor at the
-    root.
+    Root scoping: when the server runs with --root-dir, a path whose literal and
+    real (symlink-resolved) forms both stay inside that root bypasses the
+    *deny-lists* -- the root is the operator's workspace -- but not the
+    workspace's own policy, so a folder its owner marked ``ro`` or ``hidden`` is
+    refused here exactly as it is in the Editor tab. Everything below only
+    constrains paths outside the root. Relative paths anchor at the root.
 
     Traversal is judged where it *lands*, not on the token: the path is
     normalised (``abspath``) and fully resolved (``realpath``), and both forms
     are held to the deny rules -- so ``/tmp/../etc/shadow`` is refused because
     it *is* ``/etc/shadow``, while ``logs/probe/../../src/job.py`` is allowed
-    because normalising it stays inside the root. Checking the resolved target
-    as well as the normalised one is what stops a symlink from pointing the
-    connector at a store the path itself does not mention.
+    because normalising it stays inside the root. Both forms are checked so a
+    symlink cannot point the connector at a store the path never mentions.
     """
     if not path or not path.strip():
         raise FeditError("path is empty")
@@ -1062,14 +1013,12 @@ def check_target_path(path: str, *, for_write: bool) -> Path:
     absolute = Path(os.path.abspath(str(candidate)))
     real = absolute.resolve()
 
-    # The workspace's own policy, asked of the resolved target and *before* the
-    # root bypass is reached (pol-08): that file is the user's answer to "which
-    # parts of my project may change", and it constrains an agent exactly as it
-    # constrains the Editor pane. It is asked about ``real`` for the same reason
-    # the bypass is decided on it: one physical file, one verdict -- so a link
-    # planted in a system prefix cannot reach a hidden workspace folder through
-    # an address that never mentions it. It answers None for anything outside the
-    # root, which is where the deny-lists below speak instead.
+    # The workspace's own policy first, before the root bypass is reachable: it
+    # constrains an agent exactly as it constrains the Editor pane. Asked of
+    # ``real`` for the same reason the bypass is -- one physical file, one verdict
+    # -- so a link in a system prefix cannot reach a hidden workspace folder
+    # through an address that never mentions it. None outside the root, where the
+    # deny-lists below speak instead.
     reason = _workspace_policy_reason(real, for_write=for_write)
     if reason:
         action = "written" if for_write else "read"
@@ -1078,37 +1027,23 @@ def check_target_path(path: str, *, for_write: bool) -> Path:
             "Call edit_policy() to see the workspace policy."
         )
 
-    # Inside the root the policy is bypassed; the operator chose that tree.
-    # That decision is made on ``real`` -- where the file actually is -- and not
-    # on the spelling that reached it. Two names for one tree (the mount point
-    # ``/mnt/bigfoot/...`` and ``/home/vgr/...`` here) therefore get one verdict:
-    # a workspace file is not suddenly "a secrets/config file" because it was
-    # addressed through the other prefix. And a symlink cannot smuggle a store
-    # *into* the bypass, because the link's target is what is tested --
-    # ``logs/link -> /etc/shadow`` has a ``real`` outside the root and is judged
-    # by the full policy below.
-    # One exception: the *address* still has to be a sane one. A path that
-    # physically reaches the workspace by way of a link planted inside a system
-    # prefix (``/etc/x -> <root>/f``) is refused, because writing through it
-    # means the connector created/used an entry in a tree the operator never
-    # agreed to hand over. Name- and component-based rules are not applied this
+    # Inside the root the deny-lists are bypassed; the operator chose that tree.
+    # Decided on ``real`` -- where the file actually is -- not on the spelling
+    # that reached it: two names for one tree get one verdict, and a link cannot
+    # smuggle a store *into* the bypass because the link's target is what is
+    # tested. One exception: the *address* still has to be sane, so a path
+    # reaching the workspace through a link planted in a system prefix
+    # (``/etc/x -> <root>/f``) is refused. Name-based rules are not applied this
     # way -- they judge the file's content, which ``real`` already decides.
-    # Asymmetric by design, exactly as it was before: reading through such a
-    # link discloses nothing the operator does not already own, so it stays
-    # allowed (only the write is blocked), matching the rule that a link to a
-    # benign outside file is readable but never writable.
     if _within_root(real) and not _system_prefix_hit(absolute):
-        # The deny-lists are bypassed here -- the operator chose that tree. That
-        # bypass is what keeps an ordinary workspace ``.env`` editable through
-        # this connector while the Editor pane cannot read it: the pane's rule
-        # for it is **level A** (nojae regenerates its own ``.env`` from
-        # the settings template), a fact about the pane rather than about an
-        # agent's edit, and connectors do not consult level A.
+        # This bypass is what keeps an ordinary workspace ``.env`` editable here
+        # while the Editor pane cannot read it: the pane's rule for it is level A
+        # (nojae regenerates its own ``.env``), a fact about the pane rather than
+        # about an agent's edit. Connectors do not consult level A.
         return absolute
 
     action = "written" if for_write else "read"
 
-    # A path is judged both as given and as the file it really is.
     for label, target in (("the path", absolute), ("its real target", real)):
         reason = _deny_reason(target, for_write=for_write)
         if reason:
@@ -1188,12 +1123,10 @@ def backup_key(resolved: Path) -> str:
     """The digest that identifies *the file* a backup belongs to.
 
     Keyed on the symlink-resolved path, not the spelling used in the tool call:
-    the same tree here is reachable as ``/mnt/bigfoot/dev/...`` and
-    ``/home/vgr/dev/...``. Hashing the literal string gave those two spellings
-    separate chains, so an edit applied under one name left ``list_edits`` and
-    ``revert_edit`` answering "this file has not been edited by this server"
-    under the other -- which reads as "there is nothing to recover" and silently
-    destroys the recovery path.
+    hashing the literal string gave one tree two chains, so an edit applied under
+    one name left ``list_edits`` and ``revert_edit`` answering "this file has not
+    been edited by this server" under the other -- which reads as "there is
+    nothing to recover" and silently destroys the recovery path.
     """
     return hashlib.sha1(str(resolved.resolve()).encode("utf-8")).hexdigest()[:12]
 
@@ -1216,11 +1149,10 @@ def make_backup(resolved: Path) -> Path:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     destination = backup_path_for(resolved)
     shutil.copy2(resolved, destination)
-    # ``copy2`` carries the source's mtime over, which would make a backup of a
-    # long-untouched file be *born* past the age limit and swept seconds later.
-    # The sweep's clock is "how long has this edit been recoverable", so stamp
-    # the backup with the time of the edit. (The name already carries it; this
-    # just makes the filesystem agree.)
+    # ``copy2`` carries the source's mtime over, so a backup of a long-untouched
+    # file would be *born* past the age limit and swept seconds later. The sweep's
+    # clock is "how long has this edit been recoverable", so stamp the backup with
+    # the time of the edit.
     try:
         os.utime(destination, None)
     except OSError:
@@ -1239,19 +1171,17 @@ def prune_old_backups(*, older_than_days: int = BACKUP_PRUNE_DAYS,
                       now: Optional[float] = None) -> int:
     """Delete every backup older than ``older_than_days``. Returns how many went.
 
-    ``make_backup`` keeps ``BACKUP_KEEP`` copies *per file*, which is right but
-    incomplete: once a file is renamed or deleted, nothing ever collects the
-    backups that referred to it, so a long-lived workspace accumulates them for
-    ever (537 ``.orig`` files before this existed). Age is the only signal that
-    still works for a path that no longer exists, so the sweep is by age.
+    ``make_backup``'s ``BACKUP_KEEP`` copies *per file* cannot collect the backups
+    of a file that was renamed or deleted, so a long-lived workspace accumulates
+    them for ever. Age is the only signal that still works for a path that no
+    longer exists, hence the sweep is by age.
 
-    The consequence is stated rather than hidden: ``revert_edit`` reaches back
-    ``BACKUP_PRUNE_DAYS``, not for ever. That window is what ``edit_policy()``
-    reports, and it is far longer than any in-session undo -- older history
-    belongs in git, not in this directory.
+    The consequence, stated rather than hidden: ``revert_edit`` reaches back
+    ``BACKUP_PRUNE_DAYS``, not for ever -- older history belongs in git, not in
+    this directory.
 
-    Cheap by design (one directory scan) and called from the write path, so it
-    never raises: a backup that cannot be deleted is not worth failing an edit.
+    Called from the write path, so it never raises: a backup that cannot be
+    deleted is not worth failing an edit.
     """
     if older_than_days <= 0 or not BACKUP_DIR.is_dir():
         return 0
@@ -1275,13 +1205,12 @@ def write_atomic_bytes(resolved: Path, payload: bytes) -> None:
     """Write bytes via a temp file in the same directory, then rename over target.
 
     The target's permission bits are copied onto the temp before the rename:
-    ``mkstemp`` creates 0600, and ``os.replace`` makes *that* the file's new
-    mode, so without the ``chmod`` every edited file came out 0600 -- a 755
-    script lost its ``+x``, a 444 file silently became writable, and
-    ``git diff`` showed an unexplained mode change.
+    ``mkstemp`` creates 0600 and ``os.replace`` makes *that* the file's new mode,
+    so without the ``chmod`` a 755 script lost its ``+x`` and a 444 file silently
+    became writable.
 
-    Bytes, not text: a revert has to restore exactly what the backup holds,
-    whether or not those bytes decode as UTF-8.
+    Bytes, not text: a revert must restore exactly what the backup holds, whether
+    or not those bytes decode as UTF-8.
     """
     mode: Optional[int] = None
     try:
@@ -1337,9 +1266,8 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 400) -> str:
         resolved = check_read_path(path)
         size = resolved.stat().st_size
         if size > MAX_FILE_BYTES:
-            # The cap is right (an agent "editing" a vendored bundle is a
-            # mistake), but a bare refusal is a dead end: name the route that
-            # still works, since console has no size limit at all.
+            # A bare refusal is a dead end, so name the route that still works:
+            # console has no size limit at all.
             return (f"Error: {resolved} is {size} bytes, over the "
                     f"{MAX_FILE_BYTES} limit. Read or search a slice with "
                     f"console (no size cap): ``sed -n '{max(1, int(start_line))},"
@@ -1352,9 +1280,8 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 400) -> str:
     reason = binary_reason(payload)
     if reason:
         return f"Error: {not_editable_message(resolved, reason)}"
-    # Text in some other encoding is still worth showing: decode with the bad
-    # bytes replaced and say so, so the read is never mistaken for an
-    # authoritative copy (it is not something a SEARCH block can quote back).
+    # Text in another encoding is worth showing with the bad bytes replaced, said
+    # out loud so the read is never mistaken for something a SEARCH block can quote.
     lossy = undecodable_reason(payload) is not None
     text = payload.decode("utf-8", "replace") if lossy else payload.decode("utf-8")
 
@@ -1362,9 +1289,8 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 400) -> str:
     lines, final_newline, terminator = split_text(body)
     start = max(1, int(start_line))
     if not lines:
-        # An empty file is a readable file, not an unreadable one: answering
-        # "start_line 1 is past the end" sends the agent hunting for a
-        # permission problem instead of telling it the file is empty.
+        # An empty file is readable: "start_line 1 is past the end" would send the
+        # agent hunting for a permission problem instead.
         return f"File: {resolved}  lines 0-0 of 0  {size} bytes  EOF: NO final newline"
     if start > len(lines):
         return f"Error: start_line {start} is past the end of a {len(lines)}-line file"
@@ -1610,8 +1536,8 @@ def revert_edit(path: str) -> str:
                 f"than {BACKUP_PRUNE_DAYS} days is swept; see edit_policy()).")
 
     # A backup is a byte copy (``shutil.copy2``), so it is restored as bytes:
-    # decoding it first would make recovery impossible exactly when the file was
-    # not valid UTF-8 -- which is when a working revert matters most.
+    # decoding first would make recovery impossible exactly when the file was not
+    # valid UTF-8 -- which is when a working revert matters most.
     newest = backups[-1]
     try:
         restored = newest.read_bytes()
@@ -1660,8 +1586,8 @@ def make_diff(path_a: str, path_b: str, context: int = 3) -> str:
     # still get the honest answer.
     if payload_a == payload_b:
         return f"{a} and {b} are identical."
-    # A diff line is meant to be copied into an edit, so both sides have to be
-    # real UTF-8 text here -- unlike read_file, which may display a lossy view.
+    # A diff line is copied into an edit, so both sides must be real UTF-8 text
+    # here -- unlike read_file, which may display a lossy view.
     for item, payload in ((a, payload_a), (b, payload_b)):
         reason = not_editable_reason(payload)
         if reason:
@@ -1674,20 +1600,19 @@ def make_diff(path_a: str, path_b: str, context: int = 3) -> str:
 
 
 # How many patterns one mode may list in `edit_policy()`. The model acts on this
-# text, so its shape matters more than its completeness: a full dump of a
-# 40-rule file pushes the caps and the deny-lists out of the answer, and a
-# truncated list that *says* it is truncated still tells the agent where to ask.
+# text, so a full dump of a 40-rule file would push the caps and the deny-lists
+# out of the answer; a list that *says* it is truncated still tells it where to
+# ask.
 POLICY_PATTERNS_PER_MODE = 5
 
 
 def _workspace_policy_lines() -> str:
-    """The workspace policy block of `edit_policy()` -- what this connector enforces *in the root*.
+    """The workspace policy block of `edit_policy()`: what this connector
+    enforces in the root.
 
-    A tool that reports a policy it does not enforce is worse than one that
-    reports nothing, so this block is the rules the checks in
-    :func:`_workspace_policy_reason` actually applied, read through the same
-    loader, in the same words the Editor's own policy panel uses (pol-07): the
-    pattern verbatim grouped by mode.
+    A tool that reports a policy it does not enforce is worse than one reporting
+    nothing, so these are the rules :func:`_workspace_policy_reason` applied, read
+    through the same loader and spelled as the Editor's policy panel spells them.
     """
     if ROOT_DIR is None:
         return (
@@ -1698,9 +1623,9 @@ def _workspace_policy_lines() -> str:
     errors = [f for f in findings if f.kind == policy_shared.KIND_ERROR]
 
     if errors:
-        # pol-00 D4, connector edition: an unparseable file contributes no rules,
-        # so every write inside the root is refused until it loads -- and the
-        # agent has to be told that, or it reads "no rules" and keeps trying.
+        # An unparseable file contributes no rules, so every write inside the root
+        # is refused until it loads -- and the agent has to be told that, or it
+        # reads "no rules" and keeps trying.
         return (
             f"  policy file     : {path} (did not load)\n"
             f"                    {errors[0].message}\n"
@@ -1827,7 +1752,6 @@ def main():
     print(f"   Backup dir    : {BACKUP_DIR}", file=banner)
     print(f"   Max file size : {MAX_FILE_BYTES} bytes", file=banner)
 
-    # Run the server with the selected transport
     try:
         if args.transport == "stdio":
             server.run(transport="stdio")

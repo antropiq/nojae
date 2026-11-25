@@ -5,26 +5,23 @@ import { useBatch } from './useBatch'
 import { inferenceRunning } from '../lib/inference-state'
 
 // ---------------------------------------------------------------------------
-// The session meters: one elapsed clock and two counters (token rate, context
-// occupancy), plus one short caption stating the last turn's own span. One
-// source of truth, because the app can only ever have one
-// session at a time: the WorkBench reply or a batch turn, and a batch lot owns
-// the conversation across the gap between its turns. The Editor tab stays open
-// read-only while one runs. So the app bar can show a single clock and a single
-// pair of counters.
+// The session meters: one elapsed clock, two counters (token rate, context
+// occupancy) and one caption stating the last turn's own span. The app can only
+// ever have one session at a time — the WorkBench reply or a batch turn, and a
+// batch lot owns the conversation across the gap between its turns — so the app
+// bar shows a single clock and a single pair of counters.
 //
 // **The figures outlive the reply they describe.** A session continues as long
-// as the conversation does: the user asks again, and the meters must still
-// answer "how fast, how full, how long" about the turns already spent rather
-// than blanking every time an answer lands. So every computed here reads the
-// conversation's carried-over values (the clock's `spentMs`, the last measured
-// reply, the newest occupancy figure) and only the Restart button — `useChat`'s
-// reset() — clears them. `running` stays "an inference is in flight right now"
-// and is used for the clock's emphasis and the labels, never to hide a figure.
+// as the conversation does, so every computed here reads the conversation's
+// carried-over values (the clock's `spentMs`, the last measured reply, the newest
+// occupancy figure) rather than blanking when an answer lands; only the Restart
+// button — `useChat`'s reset() — clears them. `running` stays "an inference is in
+// flight right now" and is used for the clock's emphasis and the labels, never to
+// hide a figure.
 //
-// "Is anything running at all" is the shared inferenceRunning()
-// predicate — the one the tab glyph and the end-of-session chime read too — so
-// the meters, the ⚡/✨ title and the chime cannot disagree about a session.
+// "Is anything running at all" is the shared inferenceRunning() predicate — the
+// one the tab glyph and the end-of-session chime read too — so the meters, the
+// ⚡/✨ title and the chime cannot disagree about a session.
 //
 // Nothing here owns state: every computed reads the useChat / useAppShell /
 // useBatch singletons, which is what keeps the meters advancing while the user
@@ -33,18 +30,18 @@ import { inferenceRunning } from '../lib/inference-state'
 // ---------------------------------------------------------------------------
 
 const { state: chatState } = useChat()
-// Only for ``config``, the ``/api/config`` read the app shell holds: the
-// occupancy badge needs the context-window cap and nothing else, and that cap
-// arrives **per model** (D5) -- so it is read off the model in view.
+// Only for `config`, the `/api/config` read the app shell holds: the occupancy
+// badge needs the context-window cap, and that cap arrives **per model**, so it
+// is read off the model in view.
 const { state: shellState } = useAppShell()
 const { state: batchState } = useBatch()
 
 // 'chat' | null — which session is **live right now**; a batch lot counts as
-// 'chat', since its turns stream through useChat (and the lot keeps the answer
-// true across the gap between two task turns, where the chat phase is briefly
-// back to 'idle'). `null` means nothing is generating. It is an emphasis and
-// labelling answer only: the figures below keep describing the conversation's
-// finished turns, because the conversation is still the one they measured.
+// 'chat', since its turns stream through useChat (the lot keeps the answer true
+// across the gap between two task turns, where the chat phase is briefly back to
+// 'idle'). `null` means nothing is generating. Emphasis and labelling only: the
+// figures below keep describing the conversation's finished turns, because the
+// conversation is still the one they measured.
 const source = computed(() => {
   if (
     inferenceRunning({
@@ -66,17 +63,14 @@ const running = computed(() => source.value !== null)
 // `session.spentMs`, plus the open one counted from `session.startedAt` —
 // thinking and every tool round included, but **not the seconds a turn spent
 // waiting on a refused endpoint**: useChat's finish() banks `span − waited`
-// rather than the raw span, because a wait is neither inference nor thinking
-// and a 40-minute provider outage must not read as a 40-minute session
-// (spec §5.16). The open turn counts wall time until it banks, which is the
-// only honest live number: the wait it will spend is not known yet.
+// rather than the raw span, because a wait is neither inference nor thinking and
+// a 40-minute provider outage must not read as a 40-minute session. The open turn
+// counts wall time until it banks, since the wait it will spend is not known yet.
 //
-// `startedAt` is itself the "a turn is open" marker: startTurn() sets it and
-// only finish() (which banks the span) or reset() (which drops it) clears it.
-// So there is no need to ask `running` as well — and asking it would make the
-// digits drop for the instant between a `pause_ack` (phase back to idle) and
-// the stream closing, which is exactly the kind of flicker the clock should
-// never show.
+// `startedAt` is itself the "a turn is open" marker: startTurn() sets it and only
+// finish() (which banks the span) or reset() (which drops it) clears it. Asking
+// `running` as well would make the digits drop for the instant between a
+// `pause_ack` (phase back to idle) and the stream closing.
 function elapsedMs(now) {
   const session = chatState.session
   const spent = Math.max(session.spentMs || 0, 0)
@@ -94,20 +88,18 @@ function formatElapsed(ms) {
 
 // -- the turn span -----------------------------------------------------------
 
-// Spec §5.17's pair, in the app bar next to the clock: **why the bar and not a
-// caption on the reply card** — the conversation is where the clock already
-// answers "how long", the card already carries its own status captions
-// (cut-short, interrupted), and spec §5.13 keeps a wait out of the transcript;
-// the meters' neighbourhood is the only place the app has ever told the user how
-// long one turn took, and `waited` arrives with `took` on the same frame.
+// The app bar's turn-span pair, next to the clock: the conversation is where the
+// clock already answers "how long", the reply card carries its own status
+// captions (cut-short, interrupted), a wait appears nowhere in the transcript,
+// and the meters' neighbourhood is the only place the app tells the user how long
+// one turn took. `waited` arrives with `took` on the same frame.
 //
-// The newest reply that reported a span (`took`, off its `done` frame), the
-// same carried-over reading the rate badge uses: it holds between turns and is
-// cleared by reset() with the rest. A turn still streaming but past its `done`
-// frame counts too, so the figure does not flicker back to the previous turn
-// for the instant the stream spends closing. A turn that never got a `done`
-// frame (Stop, an abort, a dropped connection) reported no span, so it is
-// skipped rather than invented.
+// The newest reply that reported a span (`took`, off its `done` frame), the same
+// carried-over reading the rate badge uses: it holds between turns and is cleared
+// by reset() with the rest. A turn still streaming but past its `done` frame
+// counts too, so the figure does not flicker back to the previous turn while the
+// stream closes. A turn that never got a `done` frame (Stop, an abort, a dropped
+// connection) reported no span, so it is skipped rather than invented.
 function lastMeasuredSpan() {
   return (
     [...chatState.messages]
@@ -117,11 +109,10 @@ function lastMeasuredSpan() {
 }
 
 // `{ span, waited }` in seconds, `waited` always a number (a payload from an
-// older server, or a paused turn whose `pause_ack` carries no `waited`, reads
-// as no wait). `span` is the **whole request, waiting included** — the meaning
-// task 04 documented and kept: this is the figure that answers "this turn took
-// 41 minutes", and `waited` is what separates it from "took 1 minute and
-// waited 40".
+// older server, or a paused turn whose `pause_ack` carries no `waited`, reads as
+// no wait). `span` is the **whole request, waiting included** — the figure that
+// answers "this turn took 41 minutes" — and `waited` is what separates it from
+// "took 1 minute and waited 40".
 const turnSpan = computed(() => {
   const message = lastMeasuredSpan()
   if (!message) return null
@@ -129,11 +120,10 @@ const turnSpan = computed(() => {
 })
 
 // Terse wall-clock shape for a turn's figures: `8s`, `2m 02s`, `40m`, `1h 04m`.
-// The clock's own `formatElapsed` is `hh:mm:ss`, which is right for a running
-// total and too wide for a figure that sits beside it. Each unit is stated once
-// and a zero unit is left out, so a 40-minute wait reads `40m` rather than
-// `40m 00s`; the parts that are stated are padded, the way the clock's digits
-// are.
+// The clock's own `formatElapsed` is `hh:mm:ss`, right for a running total and too
+// wide for a figure beside it. Each unit is stated once and a zero unit left out,
+// so a 40-minute wait reads `40m` rather than `40m 00s`; the stated parts are
+// padded, the way the clock's digits are.
 function formatSpan(seconds) {
   const total = Math.max(0, Math.round(seconds))
   if (total < 60) return `${total}s`
@@ -146,10 +136,9 @@ function formatSpan(seconds) {
   return `${hours}h ${String(mins % 60).padStart(2, '0')}m`
 }
 
-// The pair as one short line: `turn 41m · 40m waited`. The wait segment only
-// appears when the turn actually waited — a line about a turn that waited
-// nothing has nothing to say about waiting — and the whole element is absent
-// when no turn has reported a span.
+// The pair as one short line: `turn 41m · 40m waited`. The wait segment appears
+// only when the turn actually waited, and the whole element is absent when no
+// turn has reported a span.
 const turnSpanText = computed(() => {
   const turn = turnSpan.value
   if (!turn) return ''
@@ -166,11 +155,11 @@ const turnSpanTitle = computed(() =>
 // -- token rate --------------------------------------------------------------
 
 // tokens / decode window. The server-side `decode` (cumulative generation
-// seconds across all tool rounds, tool execution and re-prefill gaps excluded)
-// is the preferred denominator; `took - ttft` only backs up payloads without it
-// (old servers — where there were no tool rounds, so the window is exact).
-// `waited` is in none of it: a wait has no chunk arrival and enters neither the
-// decode window nor the estimate, so the rate is the same figure waited or not.
+// seconds across all tool rounds, tool execution and re-prefill gaps excluded) is
+// the preferred denominator; `took - ttft` only backs up payloads without it (old
+// servers — no tool rounds there, so the window is exact). `waited` is in none of
+// it: a wait has no chunk arrival and enters neither the decode window nor the
+// estimate, so the rate is the same figure waited or not.
 function exactRate(message) {
   const secs = message.decode > 0 ? message.decode : message.took - message.ttft
   return secs > 0 ? message.tokens / secs : null
@@ -234,11 +223,11 @@ const contextWindow = computed(
 
 // Context-window occupancy: the LAST round's prompt + completion (exactly what
 // the server slots into its window — template, tool schemas and thinking-round
-// history included), never summed across rounds/turns. Fed by `done`,
-// refreshed between tool rounds by `usage`; the cap comes from /api/config
-// (meta.n_ctx). It is read from the newest reply that reported one, so it
-// survives the end of the turn — the window keeps holding that conversation
-// until the conversation is reset.
+// history included), never summed across rounds or turns. Fed by `done`, refreshed
+// between tool rounds by `usage`; the cap comes from /api/config (meta.n_ctx). It
+// is read from the newest reply that reported one, so it survives the end of the
+// turn — the window keeps holding that conversation until the conversation is
+// reset.
 const contextUsage = computed(() => {
   for (let i = chatState.messages.length - 1; i >= 0; i -= 1) {
     const message = chatState.messages[i]

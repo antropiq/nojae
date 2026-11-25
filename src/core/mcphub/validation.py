@@ -9,8 +9,8 @@ Environment references are expanded here as well (``expand_env``), by the
 two *discovery* modules right after parsing — that way a per-machine path
 or an API key can live in the environment instead of in these gitignored
 declarations, and the same file works on every checkout. Names the app
-computes itself (``${PROJECT_ROOT}``) are answered by the expansion too,
-from ``config.provided_env_values`` rather than from the environment.
+computes itself are answered from ``config.provided_env_values`` rather
+than from the environment.
 """
 
 import os
@@ -34,21 +34,17 @@ def expand_env(value: str) -> Tuple[str, List[str]]:
     ``${PROJECT_ROOT}``, the workspace ``${NOJAE_PATH_LOCATION}`` and the
     interpreter ``${NOJAE_PYTHON_ROOT}``) are answered by
     ``config.provided_env_values`` and by nothing else, and every other name
-    reads :data:`os.environ`, which carries what the OS and the invoking shell
-    genuinely own — so ``${HOME}`` and a project key like
+    reads :data:`os.environ` — so ``${HOME}`` and a project key like
     ``${CONTEXT7_API_KEY}`` are equally available.
 
     The owned names are not "app value, else environment": for them the
     environment is never consulted, **even when the app has no answer at this
     moment** (the location outside any workspace's scope, an embedding whose
-    ``sys.executable`` is empty). A fallback to the environment there would make
-    the invariant depend on the machine — the same ``${NOJAE_PYTHON_ROOT}``
-    resolving to this interpreter on one host and to a stale export on another —
-    which is the failure the name stopped being a ``.env`` key to prevent.
-    Returns the expanded text plus the names that resolved to nothing: an
-    unresolved reference is left written as-is rather than blanked out, so a typo
-    stays visible in the entry's validation note instead of quietly becoming an
-    empty path or an empty API key.
+    ``sys.executable`` is empty), because a fallback there would make the
+    invariant depend on the machine. Returns the expanded text plus the names
+    that resolved to nothing: an unresolved reference is left written as-is
+    rather than blanked out, so a typo stays visible in the entry's validation
+    note instead of quietly becoming an empty path or an empty API key.
     """
     missing: List[str] = []
     app_values = provided_env_values()

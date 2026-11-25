@@ -1,8 +1,8 @@
 """MCP tool/result objects -> the shapes the chat tool loop expects.
 
-Pure text-level conversion, no client and no I/O: the OpenAI function-calling
-definitions handed to the LLM client, and the plain-text rendering of a
-``CallToolResult`` fed back as the tool turn.
+Pure conversion, no client and no I/O: the OpenAI function-calling definitions
+handed to the LLM client, and the plain text of a ``CallToolResult`` fed back
+as the tool turn.
 """
 
 from typing import Any, Dict, List
@@ -23,10 +23,8 @@ def tools_to_openai_format(tools: List[Any]) -> List[Dict[str, Any]]:
     ]
 
 
-# One content block of a CallToolResult: normally a typed object, but a plain
-# dict carries the same fields when the result came back un-modelled.
 def _content_text(item: Any) -> str:
-    """The ``text`` field of one content block, whatever its shape."""
+    """The ``text`` field of one content block, typed object or plain dict."""
     if isinstance(item, dict):
         return str(item.get("text", ""))
     return str(getattr(item, "text", ""))

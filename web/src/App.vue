@@ -43,28 +43,22 @@ watch(
 )
 
 onMounted(async () => {
-  // The two **installation-scoped** reads go first and need no folder: the
-  // catalogue and the bullets are the install's, so they answer the same way in
-  // every workspace (spec §4.2) and a tab whose folder has gone away still gets
-  // them.
+  // The two **installation-scoped** reads go first and need no folder: a tab
+  // whose folder has gone away still gets them.
   loadConfig()
   usePromptHelpers().loadPromptHelpers()
-  // The **tab's own** folder, awaited before anything that asks about a
-  // workspace: the stored one if this tab has one, the installation folder
-  // otherwise (spec D4). The app bar's field shows it and every workspace-scoped
-  // request carries it; the address bar never does. A reload returns the tab to
-  // its folder, a new tab lands on the installation, and a folder that has gone
-  // away is reported rather than repaired.
+  // The **tab's own** folder: the stored one if this tab has one, the
+  // installation folder otherwise. A reload returns the tab to its folder, a new
+  // tab lands on the installation, and a folder that has gone away is reported
+  // rather than repaired.
   //
-  // Awaited rather than fired alongside the rest, because the hub reads below
-  // are workspace-scoped: issued first they would name no folder and answer
-  // about the interim default — the wrong connectors and language servers for a
-  // tab that remembered another folder.
+  // Awaited before the hub reads below, because those are workspace-scoped:
+  // issued first they would name no folder and answer about the interim default.
   await loadWorkspace()
-  // The WorkBench tab is mounted from the start (v-show), so its composer's
-  // mode dropdown and the tools dock must not wait for a tab click that may
-  // never come. The tab's own watch keeps them fresh on re-entry; this is the
-  // first fill.
+  // The WorkBench tab is mounted from the start (v-show), so its composer's mode
+  // dropdown and the tools dock must not wait for a tab click that may never
+  // come. The tab's own watch keeps them fresh on re-entry; this is the first
+  // fill.
   loadChatHubs()
 })
 </script>

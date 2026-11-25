@@ -8,32 +8,28 @@ import { useTerminal } from '../composables/useTerminal'
 // useTerminal.attach(); the emulator's base CSS rides this static import so it
 // still lands in the Editor chunk, not the entry one.
 import '@xterm/xterm/css/xterm.css'
-// Shell-prompt icons need a Nerd Font. This rides the same Editor chunk as the
-// xterm CSS above; its @font-face is unicode-range-gated, so the woff2 is only
-// fetched when a prompt glyph actually falls in those ranges.
+// Shell-prompt icons need a Nerd Font. Its @font-face is unicode-range-gated, so
+// the woff2 is only fetched when a prompt glyph actually falls in those ranges.
 import '../fonts/nerd-fonts.css'
 
 // The live xterm.js pane: an emulator mounted into the host div below, bridged
-// to `WS /api/terminal`. All the socket/PTY/state logic lives in useTerminal —
-// a singleton, so the shell survives the v-show tab switch and a remount of
-// this component never opens a second socket behind the user's back. This
-// component owns only the DOM lifecycle and the header.
+// to `WS /api/terminal`. All the socket/PTY/state logic lives in useTerminal — a
+// singleton, so the shell survives the v-show tab switch and a remount never
+// opens a second socket behind the user's back. This component owns only the DOM
+// lifecycle and the header.
 //
-// **A live shell keeps the folder it was born in**, and that is not a bug to
-// fix. The socket names this tab's workspace when it opens (spec §8: it has no
-// per-request body), and the server starts the shell there; pointing the tab at
-// another folder afterwards does not re-root, kill or relaunch the open shell —
-// the buffered tab you are looking at must not be torn down because the app bar
-// moved. What *does* follow the tab is the **next** shell: the New-session
-// button, or a reconnect after the socket dropped, starts in the folder the tab
-// holds at that moment. `cd` inside the pane remains the user's own business.
+// **A live shell keeps the folder it was born in**: the socket names this tab's
+// workspace when it opens, and pointing the tab elsewhere afterwards does not
+// re-root, kill or relaunch it — a buffered tab must not be torn down because
+// the app bar moved. What *does* follow the tab is the **next** shell: the
+// New-session button, or a reconnect after the socket dropped, starts in the
+// folder the tab holds at that moment. A `cd` inside the pane is the user's own
+// business.
 //
-// The mount trap, documented in useSplitter.js:112-120: the tab is v-show, so
-// the pane is in the DOM but has no layout while hidden — `fit()` on a
-// zero-height host computes 0 rows and xterm paints a blank grid. Handling:
-// a ResizeObserver on the host that fits whenever the host has size (and skips
-// while clientHeight === 0), which also covers entering the tab and the
-// splitter drag; the host regains size in every one of those cases.
+// The mount trap: the tab is v-show, so the pane is in the DOM but has no layout
+// while hidden — `fit()` on a zero-height host computes 0 rows and xterm paints
+// a blank grid. A ResizeObserver on the host that fits whenever it has size
+// covers entering the tab and the splitter drag, the cases where it regains one.
 const host = ref(null)
 const terminal = useTerminal()
 const state = terminal.state
@@ -41,16 +37,15 @@ const appShell = useAppShell()
 
 // The fold: the strip's head stays, because it carries the control that brings
 // the pane back; the body goes and EditorView shrinks the terminal's row to the
-// head's height, so the code pane above takes the room. Like the Chat tools
-// dock, the fold belongs to the layout owner — only it can answer to the pane's
-// height — hence the `collapsed` prop / `update:collapsed` pair rather than a
-// flag kept here.
+// head's height. The fold belongs to the layout owner — only it can answer to the
+// pane's height — hence the `collapsed` prop / `update:collapsed` pair rather than
+// a flag kept here.
 const props = defineProps({ collapsed: Boolean })
 const emit = defineEmits(['update:collapsed'])
 const expanded = computed(() => !props.collapsed)
 
-// The header meta, only while a session is live: pid + cwd from the `open`
-// frame, so a second tab or a lost session is diagnosable.
+// pid + cwd from the `open` frame, so a second tab or a lost session is
+// diagnosable.
 const meta = computed(() =>
   state.status === 'open' && state.pid
     ? ` · pid ${state.pid} · ${state.cwd}`
@@ -75,9 +70,8 @@ const STATUS_LABEL = {
 }
 const statusLabel = computed(() => STATUS_LABEL[state.status] ?? state.status)
 
-// The one caption shown when the pane is not running its shell — the reason a
-// session is not there (killed, exited, refused, closed), which is also the
-// cue that a manual New session is what brings one back.
+// The reason a session is not there (killed, exited, refused, closed), which is
+// also the cue that a manual New session brings one back.
 const banner = computed(() => (state.status === 'open' ? '' : state.message))
 
 // Kill only makes sense with a live socket; New makes sense any time the pane
@@ -86,10 +80,10 @@ const canKill = computed(() => state.status === 'open')
 const canNew = computed(() => state.status !== 'connecting')
 
 // A ResizeObserver on the host is the single layout driver: it fires when the
-// host gains size on mount, when the pane becomes visible again (v-show back
-// on), and on every splitter-drag frame — so fit + the debounced `resize`
-// frame ride one mechanism. (No separate "drag end" hook is needed: the drag
-// changes the host's box, which is exactly what the observer reports.)
+// host gains size on mount, when the pane becomes visible again (v-show back on),
+// and on every splitter-drag frame — so fit + the debounced `resize` frame ride
+// one mechanism. No "drag end" hook is needed: the drag changes the host's box,
+// which is what the observer reports.
 let observer = null
 onMounted(async () => {
   await nextTick()
@@ -101,9 +95,7 @@ onMounted(async () => {
 })
 
 // Entering the Editor tab is the explicit re-lay-out moment: a hidden terminal
-// kept streaming into its scrollback and only re-fits now. (The ResizeObserver
-// would also fire, but the activeTab watch makes the intent explicit and the
-// two collapse via the debounce / zero-size guards.)
+// kept streaming into its scrollback and only re-fits now.
 watch(
   () => appShell.state.activeTab,
   (tab) => {
@@ -164,9 +156,9 @@ onBeforeUnmount(() => {
       </button>
       <!-- The fold, right of the two session controls: it takes the body (and,
            through the layout owner, the pane's whole row) out of the flow, so
-           the code pane above gets the room. It lives in the head because the
-           head is what stays — a control that vanished with the thing it
-           restores would be unreachable. -->
+           the code pane above gets the room. It lives in the head because a
+           control that vanished with the thing it restores would be
+           unreachable. -->
       <button
         class="icon-btn editor-terminal-toggle"
         type="button"

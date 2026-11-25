@@ -1,18 +1,17 @@
 """The committed catalogue of well-known MCP connectors.
 
 ``mcp_connectors/catalog-mcp.json`` is the wizard's **only** source of a package
-name (§9): nothing under ``src`` knows one, so adding a connector is a data
-change and a review, never a new module. It sits beside
-``mcp-settings.default.json``, where the app's committed connector data already
-lives, and it is *catalogue*, never declaration — no hub reads this file, no
-process starts because of it, and nothing in it lands in a workspace.
+name: nothing under ``src`` knows one, so adding a connector is a data change
+and a review, never a new module. It sits beside ``mcp-settings.default.json``,
+where the app's committed connector data already lives, and it is *catalogue*,
+never declaration — no hub reads this file, no process starts because of it, and
+nothing in it lands in a workspace.
 
 The read mirrors the two declaration loaders (:mod:`mcphub.discovery`,
 :mod:`lsphub.discovery`) on purpose, because a user meets the same sentences:
 
 * the path is looked up through :mod:`mcphub.constants` **at call time**, so a
-  test redirects it by patching one attribute (the ``MCP_SETTINGS_TEMPLATE``
-  convention) and nothing is cached at import;
+  test redirects it by patching one attribute and nothing is cached at import;
 * it never raises — an unreadable or invalid file answers ``([], [one
   sentence])``, the same shape a damaged declaration answers with;
 * one shape-valid entry whose *member* group is unusable is skipped with a
@@ -30,8 +29,7 @@ becomes JSON in the user's file:
   guidance, never pasted as-is;
 * **relevance** — ``signals``: which projects it suits, for ordering only.
 
-The id keys the top-level object, exactly as it does in a declaration file, so
-the words a refusal uses here are the words the panel would later show.
+The id keys the top-level object, exactly as it does in a declaration file.
 
 ``member`` is checked with the hub's own shape primitives
 (:func:`mcphub.validation.argv_from_command`, :func:`~mcphub.validation.str_map`)
@@ -63,9 +61,9 @@ def load_catalogue(
     Entries keep the file's own order: the catalogue is a curated list, so the
     order a reviewer reads in the file is the order the panel offers.
 
-    ``path`` is the test's seam; production always reads
+    ``path`` is the test's seam; production reads
     :data:`mcphub.constants.MCP_CATALOGUE_PATH`, resolved *inside* this call so
-    the redirect is one attribute patch and never an import-time copy.
+    the redirect is one attribute patch.
     """
     source = Path(path) if path is not None else constants.MCP_CATALOGUE_PATH
     try:
@@ -99,8 +97,7 @@ def _entry(
     ``identity`` and ``member`` gate the entry: without a name there is nothing
     to show, and without a usable member there is no snippet to build.
     ``requirements`` and ``relevance`` are guidance, so a malformed one is a note
-    and an empty group — the entry still loads, because the user still gets the
-    member.
+    and an empty group — the entry still loads.
     """
     if not isinstance(entry_id, str) or not entry_id:
         notes.append(f"{prefix}: the id must be a non-empty string — skipped")

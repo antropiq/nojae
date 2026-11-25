@@ -6,20 +6,18 @@ model at all — together with the model that agent runs on and the cap its tool
 loop is bounded by. This module is the **read model** over those rows: it answers
 "which agents exist", "what does agent *X* say", and what the editor's form is
 allowed to write. It talks to no model, no route and no browser, and it writes no
-SQL — :mod:`src.core.appdb` owns the store (spec §4.1).
+SQL — :mod:`src.core.appdb` owns the store.
 
-Two guarantees survive the move from a per-workspace file to the table, and both
-are about behaviour rather than storage:
+Two guarantees are about behaviour rather than storage:
 
 * **it never raises.** A row the store cannot render is reported as a finding and
   the dropdown still renders — chat over a damaged store must keep working, and
-  the cost of a bad row is that agent, never the list (task 03's read model).
+  the cost of a bad row is that agent, never the list.
 * **the app-owned agent is last.** The reserved ids are rendered from code and
   sorted last whatever the table's insertion order says, so no row can reorder
   the dropdown out of the shape the app documents.
 
-Two answers changed with D5 (spec §3), because there is no server-side default
-agent any more:
+There is no server-side default agent, which shapes two answers:
 
 * the payload carries **no ``default`` key** — a key that always answered
   "nothing" would be read as meaningful by the composer and by the lot;
@@ -27,13 +25,12 @@ agent any more:
   no ``agentMode`` is the 422 naming the field, so a missing id resolves to
   nothing exactly like an unknown one.
 
-What is **not** here any more: the file, its per-root cache (D11), its seeder,
-its mtime token, its conflict guard and the findings-about-a-file machinery the
-modes editor used (eds-00). The app is the store's only writer, so that whole
-optimistic-concurrency layer went with the file (spec §4.7). The one thing this
-module still borrows from :mod:`core.agent_modes_defaults` is the fallback: a
-reserved agent whose row is missing is still rendered, from code, because no
-table and no hand-edit can remove the agent the lot contract pins.
+There is no modes file and no per-root cache either: the app is the store's only
+writer, so the optimistic-concurrency layer a hand-edited file needed went with
+it. The one thing this module still borrows from
+:mod:`core.agent_modes_defaults` is the fallback: a reserved agent whose row is
+missing is still rendered, from code, because no table and no hand-edit can
+remove the agent the lot contract pins.
 """
 
 import importlib
@@ -57,20 +54,18 @@ MAX_MODE_LABEL_CHARS = 40
 MAX_MODE_SYSTEM_MESSAGE_BYTES = 16 * 1024
 
 #: The **soft** prose budget a persona is written to, in lines. It is display,
-#: never a rule: the reader's verdict does not change because of it and a persona
-#: over it is still a valid row (the byte cap above is the hard one). It lives
-#: here because the modes editor's form shows a "remaining line cap" label under
-#: its textarea, and the number already exists as a literal in the prose test that
-#: keeps the seeded personas inside it — one home for both.
+#: never a rule: a persona over it is still a valid row, the byte cap above being
+#: the hard one. The modes editor's form shows it as a "remaining line cap" label,
+#: and the prose test bounds the seeded personas by it — one home for both.
 MAX_MODE_PERSONA_LINES = 16
 
-#: The tool-loop cap's floor (D9): the accepted range is 1 and up, with **no
-#: ceiling** — today's reader already enforced only the floor, so the 500 found in
-#: a live settings file was a value someone typed, not a limit the app imposed.
+#: The tool-loop cap's floor: the accepted range is 1 and up, with **no ceiling**,
+#: so a large number in a live store is a value someone typed, not a limit the app
+#: imposed. A negative cap would stop the loop before its first round.
 MIN_TOOL_ITERATION = 1
 
 #: Agents nojae owns: rendered from code and sorted last whatever the table says.
-#: A row for one cannot be deleted (D4), and only its ``model_id`` is the user's.
+#: A row for one cannot be deleted, and only its ``model_id`` is the user's.
 RESERVED_MODE_IDS: Tuple[str, ...] = ("todoBuilder",)
 
 #: The shape of an agent id. It is the table's primary key, the value of
@@ -111,10 +106,10 @@ class AgentMode:
 
     id: str
     label: str
-    system_message: str              # "" = fall back to the model's sys_prompt (D8)
+    system_message: str              # "" = fall back to the model's sys_prompt
     mcptools: bool
     lsptools: bool
-    readonly: bool = False           # True only for the app-owned agents (D4)
+    readonly: bool = False           # True only for the app-owned agents
     instructions: Tuple[str, ...] = ()  # generated blocks, already rendered
 
 
@@ -132,7 +127,7 @@ def _defaults() -> Any:
 
 
 def _reserved_modes() -> List[AgentMode]:
-    """The app-owned agents, rendered from code — appended last (D4)."""
+    """The app-owned agents, rendered from code — appended last."""
     return [_defaults().todo_builder_mode()]
 
 
@@ -181,9 +176,9 @@ def _label_problem(label: Any) -> Optional[str]:
 def _persona_problem(text: Any) -> Optional[str]:
     """Why ``system_message`` cannot be stored, or ``None`` when it can.
 
-    An **empty** persona is a value, not a problem: it is the documented "use the
-    model's own prompt" (D8). Only the byte cap refuses anything, and it is the
-    same cap the editor's form counts against.
+    An **empty** persona is a value, not a problem: it means "use the model's own
+    prompt". Only the byte cap refuses anything, and it is the same cap the
+    editor's form counts against.
     """
     if not isinstance(text, str):
         return f"system message must be a string, not {_kind_of(text)}"
@@ -200,9 +195,9 @@ def _persona_problem(text: Any) -> Optional[str]:
 def _tool_iteration_problem(value: Any) -> Optional[str]:
     """Why ``max_tool_iteration`` cannot be stored, or ``None`` when it can.
 
-    A **floor of 1 and no ceiling** (D9): the schema's ``INTEGER NOT NULL`` says
-    nothing about the range, and a negative cap would stop the loop before its
-    first round — a turn that can never call a tool is not a setting anyone means.
+    A **floor of 1 and no ceiling**: the schema's ``INTEGER NOT NULL`` says nothing
+    about the range, and a negative cap would stop the loop before its first round
+    — a turn that can never call a tool is not a setting anyone means.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         return f"max tool iterations must be an integer, not {_kind_of(value)}"
@@ -231,12 +226,10 @@ def caps() -> Dict[str, Any]:
 
 # -- the read model over the ``agents`` table -----------------------------------
 #
-# What this module is now. The store's own read (``appdb.resolve_agents``) answers
-# rows in the browser's vocabulary, with ``modelId``/``modelName`` and its own
-# findings; this half turns a row into the :class:`AgentMode` the prompt assembly
-# and the tool loop consume, merges the reserved ids from code, and keeps the two
-# behaviour guarantees. Splitting it this way is what lets one module own the SQL
-# and this one own the vocabulary.
+# The store's own read (``appdb.resolve_agents``) answers rows in the browser's
+# vocabulary, with its own findings; this half turns a row into the
+# :class:`AgentMode` the prompt assembly and the tool loop consume and merges the
+# reserved ids from code. One module owns the SQL, this one owns the vocabulary.
 
 def _mode_of_row(row: Dict[str, Any]) -> AgentMode:
     """One store row as the mode a chat turn runs as."""
@@ -273,7 +266,7 @@ def resolve_modes() -> Dict[str, Any]:
 
     ``{"modes": [AgentMode…], "findings": [ModeFinding…], "caps": {...}}`` — and
     deliberately **no** ``default`` key: there is no server-side default agent to
-    report (D5).
+    report.
 
     **It never raises.** A row the store cannot render is a finding and the rest
     of the list still renders — the dropdown is the thing that has to stay
@@ -282,11 +275,9 @@ def resolve_modes() -> Dict[str, Any]:
     the finding names the store's path.
 
     Order is the table's insertion order, with the app-owned agents moved last
-    whatever the table says: that is the rule the file's reader held, and
-    reordering the dropdown is out of scope (§6). A reserved agent's *row* is
-    read for its model association only; its persona, label and hub flags are the
-    code definition's (D4), so a hand-damaged row cannot change what the lot
-    contract pins.
+    whatever the table says. A reserved agent's *row* is read for its model
+    association only; its persona, label and hub flags are the code definition's,
+    so a hand-damaged row cannot change what the lot contract pins.
     """
     resolved = appdb.resolve_agents()
     modes: List[AgentMode] = []
@@ -296,7 +287,7 @@ def resolve_modes() -> Dict[str, Any]:
         seen.append(agent_id)
         modes.append(_reserved_mode_for(agent_id) or _mode_of_row(row))
     # The fallback: a reserved agent whose row is gone is still offered, because
-    # code — not a row, not a file — is where that agent is defined (D4).
+    # code — not a row — is where that agent is defined.
     for mode in _reserved_modes():
         if mode.id not in seen:
             modes.append(mode)
@@ -314,15 +305,13 @@ def resolve_mode(
 ) -> Tuple[Optional[AgentMode], List[ModeFinding]]:
     """One agent by id: an id in, a mode or nothing out.
 
-    **A missing id resolves to nothing.** It used to mean "the file's default",
-    and D5 deletes that answer: a turn with no ``agentMode`` is the 422 naming the
-    field, not a turn that runs as some agent the client never chose.
+    **A missing id resolves to nothing**: a turn with no ``agentMode`` is the 422
+    naming the field, not a turn that runs as some agent the client never chose.
 
     The caller decides what an unknown id costs: the chat route answers **422**
-    naming it, and the message listing what *is* available is built from
-    :func:`resolve_modes` exactly as it is today. ``None`` rather than an
-    exception because the caller is the SSE path, where an exception has already
-    lost the client's stream.
+    naming it, and lists what *is* available from :func:`resolve_modes`.
+    ``None`` rather than an exception because the caller is the SSE path, where an
+    exception has already lost the client's stream.
 
     The findings ride along, so a caller that reports the agent it used can say in
     the same breath that the store has problems.

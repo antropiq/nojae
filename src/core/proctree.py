@@ -1,11 +1,10 @@
 """Process-tree teardown, shared by the hubs and the terminal sessions, on
 either platform.
 
-AGENTS.md: *"Hub teardown kills process \\*trees\\*, not wrappers"*. The escalation
-is the same everywhere a child leads its own process group
-(``start_new_session=True``): SIGTERM the group, reap the leader, probe the
-group until the grace period expires, then SIGKILL the stragglers. The hubs and
-the terminal share this one implementation because two copies is how they drift.
+The escalation is the same everywhere a child leads its own process group
+(``start_new_session=True``): SIGTERM the group, reap the leader, probe until
+the grace period expires, then SIGKILL the stragglers. The hubs and the terminal
+share this one implementation because two copies is how they drift.
 
 The **mechanism** behind that escalation is platform-half, chosen by capability
 at each entry point, never by an ``if os.name`` inside the algorithm:
@@ -14,12 +13,11 @@ at each entry point, never by an ``if os.name`` inside the algorithm:
   ``killpg`` reaches every descendant because they all inherited the leader's
   group, and the probe reads ``/proc``.
 * **Windows** — :mod:`src.core.proctree_jobs`, a **Job Object** with
-  kill-on-close (roadmap §5: *"not a `killpg` shim"*). There is no group to
-  signal there (``start_new_session`` is silently ignored), so containment is
-  established at spawn time — the caller puts the child in a job — and the
-  teardown terminates the job, which reaches the grandchildren the same way.
-  Both entry points land in the job half there; the scope distinction below is
-  a POSIX one.
+  kill-on-close, never a ``killpg`` shim. There is no group to signal there
+  (``start_new_session`` is silently ignored), so containment is established at
+  spawn time — the caller puts the child in a job — and the teardown terminates
+  the job, which reaches the grandchildren the same way. Both entry points land
+  in the job half there; the scope distinction below is a POSIX one.
 
 The leader's pid *is* both the pgid and (with ``start_new_session=True``) the
 session id, which is why no ``getpgid()`` is used — and none could work here: it
@@ -36,16 +34,14 @@ half needs neither, because the job already names its members):
 * :func:`kill_session_tree` signals the whole **session**. An interactive shell
   runs with job control: every job it starts gets a process group of its own,
   all inside the shell's session, so a ``killpg`` on the shell's group reaches
-  the shell and nothing else. A terminal teardown that stopped there would let
-  a backgrounded ``python -m http.server`` outlive the tab — the exact ghost
-  this module exists to prevent. Its members are found by scanning ``/proc``
-  for the session id, so no syscall on the (possibly already reaped) leader is
-  needed.
+  the shell and nothing else — and a backgrounded ``python -m http.server``
+  would outlive the tab, the exact ghost this module prevents. Its members are
+  found by scanning ``/proc`` for the session id, so no syscall on the (possibly
+  already reaped) leader is needed.
 
 Callers differ only in how they wait for their own child, so that step is
-injected: each killer takes a coroutine that reaps the leader and returns by
-deadline — the same injected step on both halves, which is what keeps the two
-implementations honest to one contract.
+injected: the same coroutine that reaps the leader and returns by deadline on
+both halves, which keeps the two implementations honest to one contract.
 """
 
 import asyncio
@@ -123,13 +119,12 @@ async def kill_process_tree(
 def session_members(sid: int) -> List[int]:
     """Pids whose *session id* is ``sid``, this process excluded.
 
-    ``/proc/<pid>/stat`` field 6 is the session id, and a process only changes
-    it with ``setsid`` — which is exactly what ``start_new_session=True`` does —
-    so every member found descends from that session's leader. A job that
-    ``setsid``s out (a double-forking daemon) leaves the session and so opts out
-    by design, the same exception the group path documents. Zombies keep a
-    ``/proc`` entry, which is what makes the probe wait for them to be reaped
-    rather than declaring the tree gone while one still holds the terminal.
+    A process only changes its session with ``setsid`` — exactly what
+    ``start_new_session=True`` does — so every member found descends from that
+    session's leader. A daemon that ``setsid``s out leaves the session and opts
+    out by design. Zombies keep a ``/proc`` entry, which is what makes the probe
+    wait for them to be reaped rather than calling the tree gone while one still
+    holds the terminal.
     """
     members: List[int] = []
     sid_text = str(sid)
@@ -178,16 +173,14 @@ async def kill_session_tree(
 
     The session-scoped twin of :func:`kill_process_tree`, for leaders whose
     children run in process groups of their own (a job-controlling shell). The
-    probe reads ``/proc`` rather than ``killpg … 0`` because that tree outlives
-    its leader's *group* by construction: the members are exactly the other
-    groups. ``sid`` is the leader's pid (``start_new_session=True``).
+    probe reads ``/proc`` rather than ``killpg … 0`` because such a tree
+    outlives its leader's *group* by construction. ``sid`` is the leader's pid
+    (``start_new_session=True``).
 
-    On Windows the scope question does not arise: the session's job contains
-    the shell *and* the console helper beside it, and every job the shell
-    started is inside them by inheritance — that is the promise the session
-    scope makes here, moved to the caller's side of the seam (the session
-    creates the job at spawn). ``kill_session_tree`` and ``kill_process_tree``
-    answer the same way on that platform, and both land in the job half.
+    On Windows the scope question does not arise: the session's job contains the
+    shell *and* the console helper beside it, and every job the shell started is
+    inside them by inheritance. The session creates that job at spawn, so both
+    entry points land in the job half and answer the same way there.
     """
     if proctree_jobs.JOBS_SUPPORTED:
         await proctree_jobs.kill_job_tree(sid, reap_leader, grace_seconds)

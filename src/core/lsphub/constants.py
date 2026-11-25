@@ -1,17 +1,16 @@
 """Static configuration of the LSP hub: paths, timeouts, wire constants.
 
 The workspace's declaration file and the deny-list live here as *module
-attributes* on purpose (same idea as ``mcphub.constants``): the code that
-reads them resolves them through this module at call time, so pointing the
-hub at another declaration file (the tests do exactly this) is one patch of
+attributes* on purpose (same idea as ``mcphub.constants``): the code that reads
+them resolves them through this module at call time, so pointing the hub at
+another declaration file (the tests do exactly this) is one patch of
 ``lsphub.constants.LSP_SETTINGS_PATH`` instead of a hunt for every importer.
 
-The declaration itself lives in the workspace — like the MCP one, it
-describes *this* folder's servers, so ``lsp_settings_path()`` is built per
-call out of the active working location. The install-level example beside
-the deny-list (``lsp_connectors/lsp_servers.example.json``) is not read as a
-declaration any more: it is the committed source of the template the seed
-copies when a folder becomes the working location.
+The declaration itself lives in the workspace — like the MCP one, it describes
+*this* folder's servers, so ``lsp_settings_path()`` is built per call out of the
+active working location. The install-level example beside the deny-list
+(``lsp_connectors/lsp_servers.example.json``) is not read as a declaration: it
+is the committed source of the template the seed copies.
 """
 
 from pathlib import Path
@@ -19,7 +18,7 @@ from typing import Optional
 
 # The one reach-capability seam, re-exported through *this* module so both hubs
 # answer the question with the same function and a test forces it the same way
-# it redirects any other hub constant (win-07 / A-D4).
+# it redirects any other hub constant.
 from src.core.mcphub.process import guardrails_speak_here  # noqa: F401 — hub attr
 
 # The reserved folder's name comes from ``mcphub.constants`` (which takes it
@@ -32,33 +31,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LSP_CONNECTORS_DIR = PROJECT_ROOT / "lsp_connectors"
 LSP_LOGS_DIR = PROJECT_ROOT / "logs" / "lsp"
 
-# The workspace's language-server declaration, keyed by id, inside the
-# reserved folder at the working location: the one and only source of
-# language servers. The file may carry secrets in ``env`` and is therefore
-# gitignored (via ``.nojae/``); its ``env`` values are never returned by the
-# API. The ``enable`` toggles write back into it — the folder's "edited only
-# outside the app" rule bends for it the way it does for the MCP declaration
-# and the prompt-helper store.
+# The workspace's language-server declaration, keyed by id, inside the reserved
+# folder: the one and only source of language servers. The file may carry
+# secrets in ``env`` and is therefore gitignored (via ``.nojae/``); its ``env``
+# values are never returned by the API. The ``enable`` toggles write back into
+# it — the folder's "edited only outside the app" rule bends for it the way it
+# does for the MCP declaration.
 LSP_SETTINGS_FILENAME = "lsp-settings.json"
 
-# The template the seed leaves in the reserved folder when a folder becomes
-# the working location. Unlike MCP there is **no seeded declaration**: a
-# server's ``workspaceRoot`` and interpreter paths are per-machine, so the
-# app hands out this template and the operator writes the declaration from
-# it by hand. The hub never reads the template.
+# The template the seed leaves in the reserved folder when a folder becomes the
+# working location. Unlike MCP there is **no seeded declaration**: a server's
+# ``workspaceRoot`` and interpreter paths are per-machine, so the operator
+# writes the declaration from this template by hand. The hub never reads it.
 LSP_SETTINGS_TEMPLATE_FILENAME = "lsp-settings.template.json"
 
 # The committed install-level example, copied byte for byte into the seeded
 # template. Its ``${NAME}`` references resolve on every read
-# (``mcphub.validation.expand_env``), which is what keeps one file correct
-# on every machine and across every workspace switch.
+# (``mcphub.validation.expand_env``), which keeps one file correct on every
+# machine and across every workspace switch.
 LSP_SETTINGS_TEMPLATE = LSP_CONNECTORS_DIR / "lsp_servers.example.json"
 
-# **A pin, not the default.** When not ``None`` it wins over the computed
-# path below — the ``mcphub.constants.MCP_SETTINGS_PATH`` precedent: one
-# patchable override keeps the tests' one-attribute redirect without
-# re-introducing an import-time constant. Left at ``None``, the workspace's
-# own file answers.
+# **A pin, not the default.** When not ``None`` it wins over the computed path
+# below — the ``mcphub.constants.MCP_SETTINGS_PATH`` precedent: one patchable
+# override keeps the tests' one-attribute redirect without re-introducing an
+# import-time constant. Left at ``None``, the workspace's own file answers.
 LSP_SETTINGS_PATH: Optional[Path] = None
 
 
@@ -69,10 +65,8 @@ def lsp_settings_path() -> Path:
     filename, or a different workspace each move the lookup the same way. The
     root comes from the seam (:func:`src.core.workspace.current_root`), so a
     declaration read is always a read **of one workspace**, in that workspace's
-    scope — the mirror of ``mcphub.constants.mcp_settings_path``.
-
-    A read of an absent file is ``([], [])`` — an undeclared workspace
-    simply has no language servers until its declaration is written.
+    scope — the mirror of ``mcphub.constants.mcp_settings_path``. An undeclared
+    workspace simply has no language servers until its declaration is written.
     """
     if LSP_SETTINGS_PATH is not None:
         return LSP_SETTINGS_PATH
@@ -82,9 +76,9 @@ def lsp_settings_path() -> Path:
 # mcp_connectors/restricted-fqdn.txt). One absolute prefix per line.
 LSP_RESTRICTED_PATHS = LSP_CONNECTORS_DIR / "restricted-paths.txt"
 
-# Per-request and handshake timeouts. Language servers are chatty and slow
-# on cold start (tsserver indexes the whole project), so ``initialize`` gets
-# far more room than an ordinary request.
+# Per-request and handshake timeouts. Language servers are slow on cold start
+# (tsserver indexes the whole project), so ``initialize`` gets far more room
+# than an ordinary request.
 REQUEST_TIMEOUT = 20.0
 INIT_TIMEOUT = 60.0
 # Grace given to a language server between shutdown/exit and SIGTERM/SIGKILL.
@@ -132,30 +126,22 @@ TSSERVER_PROJECT_INFO = "_vue:projectInfo"
 PROJECT_CONFIG_NAMES = ("tsconfig.json", "jsconfig.json")
 
 # ``workspace/configuration`` sections the vscode-langservers-extracted family
-# (css/html/json) asks for, and then feeds straight into
+# (css/html/json) asks for, then feeds straight into
 # ``languageService.configure(settings[languageId])``. Those services treat the
-# answer as a settings object: ``vscode-css-languageservice`` builds
-# ``new LintConfigurationSettings(settings && settings.lint)``, and that
-# constructor's ``conf = {}`` default fires only for ``undefined`` — a ``null``
-# answer therefore reaches ``this.conf[setting.id]`` and throws
-# "Cannot read properties of null (reading 'validProperties')", which the server
-# swallows into a log line while publishing NO diagnostics at all. Answering
+# answer as a settings object whose ``conf = {}`` default fires only for
+# ``undefined``: a ``null`` answer reaches ``this.conf[setting.id]`` and throws,
+# which the server swallows while publishing NO diagnostics at all. Answering
 # ``{}`` for these sections lands each service on its own defaults.
 #
 # Dotted sections (Volar's ``html.customData``) are deliberately NOT here: a
 # consumer doing ``getConfiguration('html.customData') ?? []`` iterates the
 # answer, so ``{}`` is fatal there and only ``null`` is correct.
 #
-# ``js/ts`` is NOT here either, for the mirror-image reason. The html server's
-# embedded-JS mode does
-# ``settings?.['js/ts']?.implicitProjectConfig.strictNullChecks`` — the chain
-# stops at ``['js/ts']`` but the ``.implicitProjectConfig`` deref is NOT
-# optional-chained. ``{}`` is truthy, so it survives the two guards and then
-# ``undefined.strictNullChecks`` throws "Cannot read properties of undefined
-# (reading 'strictNullChecks')", which the server swallows while publishing NO
-# diagnostics for the whole document. ``null`` short-circuits the chain and
-# lands the host on its own default. Every other consumer of these sections
-# guards with ``settings && settings.X``, so only this one is load-bearing.
+# ``js/ts`` is NOT here either, mirror-image: the html server's embedded-JS mode
+# reads ``settings?.['js/ts']?.implicitProjectConfig.strictNullChecks``, and the
+# ``.implicitProjectConfig`` deref is NOT optional-chained — ``{}`` is truthy, so
+# it survives the guards and ``undefined.strictNullChecks`` throws, killing every
+# diagnostic for the document. ``null`` short-circuits the chain.
 OBJECT_SETTINGS_SECTIONS = frozenset(
     {
         "css", "scss", "sass", "less",
@@ -167,32 +153,22 @@ LSP_MISSING_HINT = (
     'The "pygls" package is not installed — run: pip install -e ".[lsp]"'
 )
 
-# win-07 / A-D4: every declared language server is a stdio child whose path
-# reach is bounded by ``restricted-paths.txt`` below plus the connector
-# deny-prefixes. Both lists speak both platforms' path forms (B1 for the
-# connector lists, B-D1 for this one, entries expanded from the environment at
-# read time), and the child's process *tree* — tsserver, Volar's workers — is
-# bounded on either platform too: the spawn puts it in a Job Object where there
-# are no process groups, and the teardown is the one shared entry point (B-D5,
-# ``proctree`` / ``proctree_jobs``). So the only thing left to refuse on is a
-# list that matches nothing: where no entry can name this filesystem's paths,
-# the app has a bound in words only and says so instead of claiming it
-# (lspfinal-04 — that seam's platform half is gone, because the job wiring
-# above is what replaced it). The wording is *the same string* as
-# ``mcphub.constants``' copy (a test asserts it): the two hubs refuse local
-# processes in one voice, and now for one reason.
-#
-# lspfinal-06 dropped the ``(see target B)`` pointer from the wording, in both
-# hubs together: the target it named is finished, so it pointed a reader at a
-# closed plan instead of at the thing to change. What the sentence says now is
-# the cause itself — a guardrail list with no entry in this filesystem's path
-# form — which is a file the operator edits.
+# Every declared language server is a stdio child whose path reach is bounded by
+# ``restricted-paths.txt`` below plus the connector deny-prefixes. Both lists
+# speak both platforms' path forms, expanded from the environment at read time,
+# and the child's process *tree* — tsserver, Volar's workers — is bounded on
+# either platform too: the spawn puts it in a Job Object where there are no
+# process groups, and the teardown is the one shared entry point (``proctree`` /
+# ``proctree_jobs``). So the only thing left to refuse on is a list that matches
+# nothing: the app then has a bound in words only and says so instead of
+# claiming it. The wording is *the same string* as ``mcphub.constants``' copy (a
+# test asserts it): the two hubs refuse local processes in one voice.
 LOCAL_REACH_REFUSAL = (
     "its reach cannot be bounded on this filesystem: no guardrail entry speaks "
     "this working location's path form"
 )
 
-# lspfinal-03 / B-D6: the sentences a declared command can end a start with.
+# The sentences a declared command can end a start with.
 #
 # A language server declared the way a POSIX user writes it — the extensionless
 # shim npm/volta put on PATH — is not an executable image on Windows: that file

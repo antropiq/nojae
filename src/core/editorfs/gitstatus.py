@@ -12,23 +12,22 @@ A third read-only query answers a different surface: :func:`ignored_paths` — t
 paths the workspace's ignore rules exclude, which the workspace search refuses to
 open or descend (see :mod:`editorfs.search`). It lives here because it is a git
 question and this module owns the one way this package asks git anything; a
-search that matched ignore patterns itself would be a second answer about the
-same path in a second implementation, which is what one-verdict policy exists to
-prevent.
+search matching ignore patterns itself would be a second answer about the same
+path, which is what one-verdict policy exists to prevent.
 
-Both are **read-only git queries**: nothing here stages, commits or checks out
-anything. The package's one writer is :func:`editorfs.files.write_file`, and a
-git query is not a route to it.
+All three are **read-only git queries**: nothing here stages, commits or checks
+out anything. The package's one writer is :func:`editorfs.files.write_file`, and
+a git query is not a route to it.
 
-Four rules the two endpoints share:
+Four rules the endpoints share:
 
 * **the same gate as the tree.** Every requested path goes through
-  :func:`~editorfs.policy.resolve_in_workspace`, and every path *git* reported
-  is re-filtered with the tree's one omission rule — a path whose verdict is
-  ``hidden``. Otherwise ``/api/fs/status`` would be a way to learn that a hidden
-  path holds a modified file the tree refuses to show. The consequence worth
-  knowing: an ``ro`` folder's dirty files **do** get their rows, because they are
-  visible in the tree — the marker and the row appear or disappear together.
+  :func:`~editorfs.policy.resolve_in_workspace`, and every path *git* reported is
+  re-filtered with the tree's one omission rule — a path whose verdict is
+  ``hidden``. Otherwise a status list would be a way to learn that a hidden path
+  holds a modified file the tree refuses to show. The consequence worth knowing:
+  an ``ro`` folder's dirty files **do** get their rows, because they are visible
+  in the tree — the marker and the row appear or disappear together.
 * **one definition of "unstaged"**: the *worktree* column of ``porcelain v1``
   is not clean. A tracked file modified, deleted, type-changed or unmerged, and
   an untracked file, are listed. A change that lives only in the index
@@ -68,10 +67,10 @@ def _git(args: List[str], cwd: str) -> subprocess.CompletedProcess:
     """Run one git command in ``cwd``, capturing bytes; a non-zero exit is the
     caller's to interpret, so this never raises for one.
 
-    ``GIT_OPTIONAL_LOCKS=0`` stops ``status`` from refreshing the index on
-    disk: this surface *reports* the working tree, it does not tidy it. Every
-    caller that parses paths passes ``-z``, which keeps names byte-exact — a
-    name with a space, a quote or a newline then needs no unquoting.
+    ``GIT_OPTIONAL_LOCKS=0`` stops ``status`` from refreshing the index on disk:
+    this surface *reports* the working tree, it does not tidy it. Every caller
+    that parses paths passes ``-z``, which keeps names byte-exact — a name with a
+    space, a quote or a newline then needs no unquoting.
     """
     env = dict(os.environ)
     env["GIT_OPTIONAL_LOCKS"] = "0"
@@ -116,10 +115,9 @@ def repo_info() -> Optional[Dict[str, str]]:
     if len(lines) < 3 or lines[2].strip() != "true":
         return None  # inside a .git dir, or a bare repo: no worktree to mark
     # ``realpath``, not git's own spelling: every absolute path this app reports
-    # is resolved (``policy.workspace_root``, the workspace payload), and git
-    # hands back the text of the environment it ran in — on Windows the drive
-    # letter can come back in either case. The compare against the workspace is
-    # case-folded by ``policy._is_within``; what reaches a payload is canonical.
+    # is resolved, and git hands back the text of the environment it ran in — on
+    # Windows the drive letter can come back in either case. What reaches a
+    # payload is canonical.
     return {
         "root": os.path.realpath(lines[0].strip()),
         "prefix": lines[1].strip().strip("/"),
@@ -166,11 +164,11 @@ def _records(raw: bytes) -> List[str]:
 def ignored_paths(scope: str = "") -> Optional[Set[str]]:
     """The workspace-relative names ``.gitignore`` excludes inside ``scope``.
 
-    Asked as ``git status --ignored=matching``, which is the one question
-    "what do this repository's ignore rules exclude?" answered by the program
-    that owns the answer — including its ``.git/info/exclude``, its
-    ``core.excludesFile``, the nested ``.gitignore`` files at any depth, and the
-    negation rules (``!pattern``) that re-admit a name inside an ignored folder.
+    Asked as ``git status --ignored=matching``, which is the one question "what
+    do this repository's ignore rules exclude?" answered by the program that owns
+    the answer — including its ``.git/info/exclude``, its ``core.excludesFile``,
+    the nested ``.gitignore`` files at any depth, and the negation rules
+    (``!pattern``) that re-admit a name inside an ignored folder.
 
     Three properties of that answer are why the search uses it instead of
     matching patterns itself:
@@ -185,14 +183,14 @@ def ignored_paths(scope: str = "") -> Optional[Set[str]]:
       (``*.pyc`` gives ``src/__pycache__/m.pyc``, and the folder above it is not
       named), which is why the caller checks a path *and its ancestors* against
       one set instead of preferring one shape.
-    * the names are repository-relative, so they go through the same
-      ``--show-prefix`` mapping every other answer here uses.
+
+    The names are repository-relative, so they go through the same
+    ``--show-prefix`` mapping every other answer here uses.
 
     ``None`` is the answer when git cannot be asked (no repository here, no git
     binary, a timeout, a broken index): the *absence of a filter*, not an error
     and not an empty set. A search's scope is already bounded by the workspace
-    policy, so this costs it pruning of caches and build output and nothing else
-    — see the module docstring for why a search must not fail over it.
+    policy, so this costs it pruning of caches and build output and nothing else.
     """
     try:
         repo = repo_info()
@@ -214,8 +212,7 @@ def ignored_paths(scope: str = "") -> Optional[Set[str]]:
         # No git binary, or a git that timed out: the same *absence of a filter*
         # as a folder that is not a repository. The status route answers 504 for
         # these because a missing marker would be a lie; a search has nothing to
-        # lie about — it falls back to scanning what the policy allows, which is
-        # what it did before this filter existed.
+        # lie about — it falls back to scanning what the policy allows.
         return None
     if proc.returncode != 0:
         return None
@@ -374,7 +371,7 @@ def _status_one(workspace: str, repo_path: str) -> Tuple[str, Optional[str]]:
     """``(kind, oldPath)`` for one repository-relative path, asked of git.
 
     The diff endpoint does not trust the marker the click came from — the tree
-    may be showing a status from before a commit or a ``git checkout`` — so the
+    may show a status from before a commit or a ``git checkout`` — so the
     answer's ``status`` is what git thinks *now*.
 
     The query is the whole work tree, the same one ``git_status`` runs, and the
@@ -398,12 +395,12 @@ def file_diff(rel: str) -> Dict[str, Any]:
     """The payload of ``GET /api/fs/diff``: the two sides of one file.
 
     ``original`` is the file **as of ``HEAD``** and ``modified`` the file on
-    disk, so the answer is "what has changed since the last commit" — which
-    also covers a file that was staged and then edited again. Returning the two
-    sides rather than a patch is what lets the editor compute and render the
-    diff itself (word-level, inline, collapsible) instead of the app parsing a
-    patch into a widget. A file not in ``HEAD`` (added, untracked) gets an empty
-    left side, and the UI does not offer the item for one at all.
+    disk, so the answer is "what has changed since the last commit" — which also
+    covers a file that was staged and then edited again. Returning the two sides
+    rather than a patch is what lets the editor compute and render the diff
+    itself instead of the app parsing a patch into a widget. A file not in
+    ``HEAD`` (added, untracked) gets an empty left side, and the UI does not
+    offer the item for one at all.
     """
     normalised, _resolved = resolve_in_workspace(rel)
     repo = repo_info()

@@ -24,67 +24,53 @@ const state = reactive({
   messages: [], // { role, raw, html, streaming, images } in conversation order
   phase: 'idle', // idle | waiting | reasoning | answering | reconnecting
   error: null,
-  // Composer draft mirrored as rendered markdown so WorkBenchView can preview the
-  // exact HTML that send() will attach to the user message (no re-parse).
+  // Composer draft mirrored as rendered markdown, so WorkBenchView previews the
+  // exact HTML send() attaches to the user message.
   draft: { raw: '', html: '', renderedRaw: '' },
-  // Images picked for the next message, in the order they were attached:
-  // `{ dataUrl, name, size }` entries. A message may carry several, and every
-  // read of this field answers about the whole list ("is there an image to
-  // send?" is "is the list non-empty?"), never about a single one.
+  // Images picked for the next message, in attachment order: `{ dataUrl, name,
+  // size }`. Every read answers about the whole list, never about a single one.
   pendingImages: [],
   // The strip: user messages the composer has accepted but no turn has carried
-  // yet, in flush order. Each row is what a user message is — `raw`, its
-  // rendered `html`, `streaming: false`, its own `images` — plus an `id`:
-  // rows are removed and pulled back by identity, because a position stops
-  // being a handle as soon as a row can be dropped. Composer input state, in
-  // the same order as the draft: never part of the conversation, so nothing
-  // that reads `messages` sees a row, and nothing here reaches a request.
+  // yet, in flush order. Each row is a user message plus an `id`, because rows
+  // are removed and pulled back by identity — a position stops being a handle as
+  // soon as a row can be dropped. Composer input state, never part of the
+  // conversation: nothing that reads `messages` sees a row.
   staged: [],
   // Chat session clock (consumed by useSessionStats, rendered by the app bar's
   // SessionClock): ms timestamp of when the running reply started, plus the
-  // milliseconds every reply of the conversation has already spent
-  // (`spentMs`). A turn's span is added to `spentMs` when it ends, is stopped
-  // or errors out — **less the seconds it spent waiting on a refused
-  // endpoint**: a wait is not inference and not thinking, so a 40-minute
-  // provider outage must not read as a 40-minute session (spec §5.16). The
-  // turn's own span keeps the wait, and useSessionStats shows it beside it
-  // (spec §5.17). Both are zeroed by reset() alone: that is the Restart
-  // button, the one gesture that starts the counters over.
+  // milliseconds every reply has already spent (`spentMs`). Both are zeroed by
+  // reset() alone — the Restart button. A turn's span is banked **less the
+  // seconds it spent waiting on a refused endpoint**: a wait is neither inference
+  // nor thinking, so a provider outage must not read as session time. The turn's
+  // own span keeps the wait, which is why it is shown beside the clock.
   // `agentMode` is the agent **this** turn was sent as, recorded when the
   // request is opened (null = no turn running). The app bar names the running
-  // model off it rather than off the composer's selection, because a mid-stream
-  // dropdown change reaches no turn in flight — the line would otherwise be able
-  // to name an agent the stream is not answering as.
+  // model off it, so a mid-stream dropdown change cannot make the line name an
+  // agent the stream is not answering as.
   session: { startedAt: 0, spentMs: 0, agentMode: null },
   // The reasoning panel's Live View (toggled in WorkBenchFocusGutter.vue): on
-  // lets the panel paint only what its box can hold, which is the default —
-  // the bounded panel is the cheap one, and the whole history is what the
-  // click gives back; off keeps every line of the thinking on screen. Panel
-  // render state only — the flows stay in `block.text`, so a save or a copy
-  // never loses bytes.
+  // paints only what the panel's box can hold, off keeps every line of the
+  // thinking. Panel render state only — the flows stay in `block.text`, so a save
+  // or a copy never loses bytes.
   liveView: true,
   // A pause request is armed but its `pause_ack` has not landed yet: the ⏸
   // button blinks and is disabled, and the composer stays shut (the ack is
   // what reopens it). Cleared by the ack, by finish(), and by reset().
   pausePending: false,
   // The endpoint refused the current round and the worker is waiting before it
-  // re-sends (spec §5.6): the four fields of the one `reconnecting` frame that
-  // announced it — `{ attempt, budget, waitSeconds, message }` — or **null**
-  // when no wait is in progress. It is a status line's content and nothing
-  // else: never a message, never a marker in the thread (spec §5.13).
+  // re-sends: the four fields of the `reconnecting` frame that announced it —
+  // `{ attempt, budget, waitSeconds, message }` — or **null** when no wait is in
+  // progress. Status line content and nothing else: never a message, never a
+  // marker in the thread.
   //
-  // One field, cleared in one place (`clearEndpointWait`): every arrival that
-  // means the endpoint answered again (a `token`, a `reasoning_delta`, a
-  // `reasoning` frame, a `tool_call`) and every terminal path (`done`, `error`,
-  // the `pause_ack`, and finish()'s fallback for an abort or a stream that
-  // ended between two waits), plus reset()'s own call — Restart does not wait
-  // for the abort it starts to settle, and a line must not survive it. So the
-  // line a frame drew can never outlive the wait it described, and there is no
-  // second copy of that rule to forget.
+  // One field, emptied by one function: every arrival that means the endpoint
+  // answered again and every terminal path calls it, plus reset() — Restart does
+  // not wait for the abort it starts to settle. So the line cannot outlive its
+  // wait, and there is no second copy of that rule to forget.
   endpointWait: null,
-  // Conversation-scoped MCP toggles (independent from the SettingsDialog):
-  // the Settings-activated connectors snapshotted on tab entry, each ON by
-  // default, frozen once the first message is accepted by the server.
+  // Conversation-scoped MCP toggles (independent from the SettingsDialog): the
+  // Settings-activated connectors snapshotted on tab entry, ON by default, frozen
+  // once the first message is accepted by the server.
   mcp: {
     connectors: [], // { id, label, status } — only connectors active in Settings
     enabled: {}, // id -> boolean (this conversation only, never persisted)
@@ -93,9 +79,9 @@ const state = reactive({
     restarting: false, // POST /api/mcp/restart in flight (button stays busy)
     error: null, // the route's sentence when it refused this workspace
   },
-  // Conversation-scoped LSP toggles — the exact MCP slice pattern, fed by
-  // GET /api/lsp instead. Shared `locked` flag semantics: the first accepted
-  // send freezes both panels until restart resets them.
+  // Conversation-scoped LSP toggles — the same slice as `mcp`, fed by GET
+  // /api/lsp. The first accepted send freezes both panels until restart resets
+  // them.
   lsp: {
     servers: [], // { id, label, status } — only language servers active in Settings
     enabled: {}, // id -> boolean (this conversation only, never persisted)
@@ -115,27 +101,22 @@ let draftTimer = null
 const reasoningBuffer = createReasoningBuffer()
 // Explicit Stop discards the partial reply; connection drops keep it.
 let userStopped = false
-// Pause's local fallback (when POST /api/chat/pause itself is unreachable)
-// also aborts the fetch, but must NOT discard: the whole point of Pause is
-// that the partial turn stays in the conversation. Distinguishes that abort
-// from Stop's.
+// Pause's local fallback also aborts the fetch, but must NOT discard: the partial
+// turn stays in the conversation. Distinguishes that abort from Stop's.
 let userPaused = false
 
 // Must mirror the backend ChatImageUrl validation (routes.py).
 export const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-// How many images one flush may carry, counted over everything that flush would
-// send: every staged message's images plus the composer's own. Images travel as
-// base64 in a POST body and nothing on the path bounds the aggregate, so this is
-// the bound that keeps one request small; the per-image size limit above stays
-// where it is. Checked as an image is added, never at flush time — the refusal
-// has to reach the user where they are attaching.
+// How many images one flush may carry, over every staged message's images plus
+// the composer's own. Nothing on the path bounds the aggregate base64 body, so
+// this is the bound that keeps one request small; checked as an image is added,
+// never at flush time, so the refusal reaches the user where they are attaching.
 export const MAX_FLUSH_IMAGES = 6
 
 // The images a flush would carry: every staged message's, in strip order, plus
-// the composer's own pending ones. The budget above bounds exactly this count,
-// so nothing else counts them a second way.
+// the composer's own. The budget above bounds exactly this count.
 function flushImageCount() {
   const staged = state.staged.reduce((total, row) => total + (row.images?.length ?? 0), 0)
   return state.pendingImages.length + staged
@@ -164,17 +145,16 @@ function setDraft(text) {
   }, 200)
 }
 
-// Composer textarea, registered by WorkBenchInput so draft insertions (memory
-// bullets) can focus it after appending.
+// Composer textarea, registered by WorkBenchInput so draft insertions can focus
+// it after appending.
 let draftInputEl = null
 
 function registerDraftInput(el) {
   draftInputEl = el ?? null
 }
 
-// Appends a memory bullet's text to the draft (never overwrites): joined to
-// the existing draft with a blank line when there is one. Goes through
-// setDraft, so the markdown preview updates on the usual debounce.
+// Appends a memory bullet's text to the draft, joined with a blank line: through
+// setDraft, so the preview updates on the usual debounce.
 function appendDraft(text) {
   const value = text ?? ''
   if (!value) return
@@ -198,9 +178,8 @@ function flushDraftHtml(trimmed) {
   return renderMarkdown(trimmed)
 }
 
-// Validates and reads a picked file into state.pendingImages (appending it to
-// the ones already attached, in attachment order). Returns false (with
-// state.error set) when rejected.
+// Validates a picked file and appends it to state.pendingImages. Returns false
+// with state.error set when rejected.
 function attachImage(file) {
   if (!file) return false
   state.error = null
@@ -212,9 +191,8 @@ function attachImage(file) {
     state.error = `Image too large (${humanFileSize(file.size)}, max ${humanFileSize(MAX_IMAGE_BYTES)}).`
     return false
   }
-  // The bound is on the request a flush would make, so it counts the strip's
-  // images too — and it is checked here, at the moment of attaching, because a
-  // refusal at flush time would arrive after the user had written everything.
+  // Checked at attaching, not at flush time: a refusal then would arrive after
+  // the user had written everything.
   const wouldBe = flushImageCount() + 1
   if (wouldBe > MAX_FLUSH_IMAGES) {
     state.error = `This image would make ${wouldBe} images in this message set; at most ${MAX_FLUSH_IMAGES} fit in one turn.`
@@ -235,8 +213,8 @@ function attachImage(file) {
   return true
 }
 
-// Drops one attached image by its position in the list; a position the list no
-// longer holds (a double click on the remove button) touches nothing.
+// Drops one attached image by its position; one the list no longer holds (a
+// double click) touches nothing.
 function removeImage(index) {
   if (index < 0 || index >= state.pendingImages.length) return
   state.pendingImages.splice(index, 1)
@@ -246,10 +224,8 @@ function clearImage() {
   state.pendingImages = []
 }
 
-// Strip rows are addressed by this rather than by their position: a row can be
-// removed or pulled back, and a position stops naming the same message the
-// moment one of those happens. Only ever increases, so two live rows cannot
-// share a name.
+// Strip rows are addressed by id, never by position: removing or pulling one
+// back moves the positions. Only increases, so two live rows cannot share a name.
 let stagedSeq = 0
 
 function stagedId() {
@@ -257,24 +233,21 @@ function stagedId() {
   return `staged-${stagedSeq}`
 }
 
-// Moves the composer's draft, with the composer's images, to the end of the
-// strip: same object shape and same rendering a sent turn has, so a staged row
-// and a sent turn are read the same way — but it is input state, so it is never
-// pushed to the conversation and it opens no stream (a stage is not a turn and
-// must not look like one). The order rows are appended in is the order a flush
-// sends them.
+// Moves the composer's draft and images to the end of the strip, in the shape a
+// sent turn has so both are read the same way — but it is input state: never
+// pushed to the conversation, and it opens no stream (a stage is not a turn). The
+// order rows are appended in is the order a flush sends them.
 //
-// Refused while a reply streams or a batch owns the conversation, and the
-// refusal is silent here: the affordance that would call this is disabled in
-// that window, so a stray keypress must not do anything at all.
+// Refused while a reply streams or a batch owns the conversation, silently: the
+// affordance calling this is disabled then, so a stray keypress does nothing.
 function stage() {
   if (chatBusy()) return false
   const trimmed = state.draft.raw.trim()
   const images = state.pendingImages.map((image) => ({ ...image }))
-  // Nothing to stage: no empty row, no error line.
+  // No empty row and no error line for nothing to stage.
   if (!trimmed && !images.length) return false
-  // The draft's HTML comes from the same path a send takes, so Enter arriving
-  // before the preview's debounce still stages the rendered draft.
+  // The same path a send takes, so Enter before the preview's debounce still
+  // stages rendered HTML.
   const html = trimmed ? flushDraftHtml(trimmed) : ''
   state.staged.push({
     id: stagedId(),
@@ -292,9 +265,8 @@ function stage() {
   return true
 }
 
-// Drops one staged row by its id; an id the strip no longer holds (a double
-// click on the remove button) touches nothing. Refused while the conversation
-// is busy, exactly as staging is: the strip is read-only then, never hidden.
+// Drops one staged row by its id; an id the strip no longer holds touches
+// nothing. Refused while busy, as staging is: the strip is read-only then.
 function removeStaged(id) {
   if (chatBusy()) return false
   const index = state.staged.findIndex((row) => row.id === id)
@@ -304,10 +276,8 @@ function removeStaged(id) {
 }
 
 // Moves one staged row back into the composer for editing: its text becomes the
-// draft and its images join the composer's pending list, in their own order
-// after the ones already there. This is the same images changing hands, so the
-// per-turn image budget cannot be exceeded by it and is deliberately not
-// re-checked. Refused while the conversation is busy, as every strip verb is.
+// draft, its images join the pending list. The image budget is deliberately not
+// re-checked — the same images changing hands. Refused while busy.
 function pullBackStaged(id) {
   if (chatBusy()) return false
   const index = state.staged.findIndex((row) => row.id === id)
@@ -321,15 +291,11 @@ function pullBackStaged(id) {
   return true
 }
 
-// The tab's folder moved: the strip goes with it. Staged text carries no path,
-// but a staged mockup and the intent behind it very well may, so the same rule
-// that forgets the Editor's open buffers applies here — and the loss is
-// *reported* rather than silently dropped. The report goes on the chat error
-// line above the composer: that is the app's alert line, it sits exactly where
-// the strip was, and it is visible whenever the WorkBench tab is — the Editor's
-// notices stack renders only on the other tab, where nobody would read it.
-// Nothing to lose moves silently, the way a folder switch with no unsaved buffer
-// says nothing at all.
+// The tab's folder moved: the strip goes with it, as the Editor's open buffers
+// do — but the loss is *reported* rather than silently dropped, on the chat error
+// line above the composer. That line sits where the strip was and is visible
+// whenever the WorkBench tab is, while the Editor's notices render on the other
+// tab. Nothing to lose moves silently.
 function discardStagedForReRoot({ workspace = '' } = {}) {
   const lost = state.staged.length
   if (!lost) return
@@ -341,24 +307,20 @@ function discardStagedForReRoot({ workspace = '' } = {}) {
 }
 
 // Everything a conversation needs freshly snapshotted: the agent-mode list and
-// both hub allowlists. The three are per-workspace and per-settings, so every
-// entry point into a conversation (boot, the WorkBench tab's watch, a restart)
-// calls this one function instead of picking a subset — which is what keeps the
-// mode dropdown from being the one thing that stayed stale.
+// both hub allowlists. Every entry point into a conversation (boot, the
+// WorkBench tab's watch, a restart) calls this one function rather than picking a
+// subset, which is what keeps one of the three from staying stale.
 export async function loadChatHubs() {
   loadAgentModes()
   await Promise.all([loadChatMcp(), loadChatLsp()])
 }
 
 // Snapshot the Settings-activated connectors for a new conversation. Never
-// touches a locked (already-started) conversation; on failure the panel
-// stays hidden and send() omits the mcpEnabled filter, so chat keeps
-// working with every activated connector — a failed load must not silently
-// disable connectors the user never got to toggle. Toggle choices survive
-// the refresh (restart, tab re-entry and MCP settings saves): previously
-// switched-off connectors come back off, freshly appearing ones default to
-// ON. Exported for useAppShell's saveMcp() so saving the MCP settings
-// refreshes the panel right away (no cycle: useChat imports useAppShell
+// touches a locked (already-started) one; on failure the panel stays hidden and
+// send() omits the mcpEnabled filter, so chat keeps working with every activated
+// connector rather than silently disabling ones the user never got to toggle.
+// Previous on/off choices survive the refresh, new connectors default to ON.
+// Exported for useAppShell's saveMcp() (no cycle: useChat imports useAppShell
 // nowhere).
 export async function loadChatMcp() {
   if (state.mcp.locked) return
@@ -367,8 +329,8 @@ export async function loadChatMcp() {
     const body = await res.json().catch(() => null)
     if (!res.ok) {
       // The route's own sentence, verbatim. A 429 is the pool refusing this
-      // workspace, so the app bar says the same thing (one sentence, two
-      // surfaces); a 422 is the folder itself, and the bar already named it.
+      // workspace, so the app bar says the same thing; a 422 is the folder
+      // itself, which the bar already named.
       state.mcp.error =
         typeof body?.detail === 'string' && body.detail
           ? body.detail
@@ -377,8 +339,8 @@ export async function loadChatMcp() {
       throw new Error(state.mcp.error)
     }
     state.mcp.error = null
-    // `built` is the visible-restart flag (spec §5.4 rule 23): the bar says the
-    // tools are coming back, and the next live answer clears it.
+    // `built` is the visible-restart flag: the bar says the tools are coming
+    // back, and the next live answer clears it.
     noteHubPayload(body)
     state.mcp.connectors = (body.connectors || [])
       .filter((connector) => connector.active)
@@ -398,11 +360,10 @@ export async function loadChatMcp() {
   }
 }
 
-// A running batch is the one caller-owned reason a conversation-scoped hub
-// change must be refused while `phase` is momentarily 'idle' (the window
-// between two task turns). The flag itself belongs to useBatch — this hook is
-// how it reaches the guards below without useChat importing useBatch: the
-// dependency direction stays acyclic (useBatch -> useChat, never the reverse).
+// A running batch is the one caller-owned reason a hub change must be refused
+// while `phase` is momentarily 'idle' (between two task turns). The flag belongs
+// to useBatch — injected here so the dependency stays acyclic (useBatch ->
+// useChat, never the reverse).
 let busyGuard = null
 
 export function registerChatBusyGuard(isBusy) {
@@ -414,10 +375,9 @@ function chatBusy() {
   return state.phase !== 'idle' || !!busyGuard?.()
 }
 
-// The Live View's switch (§3.2), owned here rather than by whichever component
-// draws the control: the flag is conversation state and the lock is this
-// composable's own busy rule, so a mode can never be switched mid-reply from a
-// second place that reads a different streaming flag.
+// The Live View's switch, owned here rather than by whichever component draws the
+// control: the flag is conversation state and the lock is this composable's own
+// busy rule, so it can never be switched mid-reply from a second place.
 function toggleLiveView() {
   if (chatBusy()) return
   state.liveView = !state.liveView
@@ -429,19 +389,17 @@ function setChatMcp(id, on) {
   state.mcp.enabled[id] = !!on
 }
 
-// Conversation-scoped twin of loadChatMcp, for the LSP language servers
-// (GET /api/lsp). Same rules: never touches a locked conversation, a failed
-// load hides the panel and send() omits the lspEnabled filter (chat keeps
-// working with every Settings-activated server), and previous on/off
-// choices survive the refresh. Exported for useAppShell's saveLsp().
+// Conversation-scoped twin of loadChatMcp, for the LSP servers (GET /api/lsp):
+// same rules, with send() omitting the lspEnabled filter on a failed load.
+// Exported for useAppShell's saveLsp().
 export async function loadChatLsp() {
   if (state.lsp.locked) return
   try {
     const res = await fetch(withWorkspace('/api/lsp'))
     const body = await res.json().catch(() => null)
     if (!res.ok) {
-      // Same rule as the MCP twin above: the server's sentence, and the bar's
-      // when the pool's ceiling is what refused the workspace.
+      // As in the MCP twin: the server's sentence, and the bar's when the pool's
+      // ceiling refused the workspace.
       state.lsp.error =
         typeof body?.detail === 'string' && body.detail
           ? body.detail
@@ -474,17 +432,14 @@ function setChatLsp(id, on) {
   state.lsp.enabled[id] = !!on
 }
 
-// Restart a hub: tear every session down and rebuild it from a fresh scan of
-// its declaration file, so a hand-edited
-// ``.nojae/mcp-settings.json``/``.nojae/lsp-settings.json``
-// (new entry, changed command, another ``workspaceRoot``) takes effect without
-// restarting the web app. Awaited by the server, so on return the statuses in
-// the refreshed snapshot are real. Errors never throw: they land in
-// ``state.error`` (the chat error line) and, for a failing entry, in its own
-// status — the panel still refreshes so the user sees which one broke.
-// The rows a panel currently shows (`connectors` for MCP, `servers` for LSP),
-// refreshed in place from a hub payload of the same shape the GET endpoints
-// return.
+// Restart a hub: tear every session down and rebuild it from a fresh scan of its
+// declaration file, so a hand-edited ``.nojae/mcp-settings.json`` or
+// ``.nojae/lsp-settings.json`` takes effect without restarting the web app.
+// Awaited by the server, so on return the refreshed statuses are real. Errors
+// never throw: they land in ``state.error`` and, for a failing entry, in its own
+// status — the panel still refreshes, so the user sees which one broke.
+//
+// The rows a panel currently shows, refreshed in place from a hub payload.
 function applyHubStatuses(kind, body) {
   const shown = kind === 'mcp' ? state.mcp.connectors : state.lsp.servers
   const fresh = kind === 'mcp' ? body?.connectors : body?.servers
@@ -505,18 +460,17 @@ async function restartHub(kind) {
     const body = await res.json().catch(() => null)
     if (!res.ok) {
       const sentence = body?.detail || `Restart failed (HTTP ${res.status})`
-      // The panel that asked shows the route's sentence, and the bar shows the
-      // pool's ceiling when that is what refused the workspace.
+      // The panel that asked shows the route's sentence; the bar shows the pool's
+      // ceiling when that refused the workspace.
       hub.error = sentence
       if (res.status === 429) reportPoolRefusal(sentence)
       state.error = sentence
     } else {
       state.error = null
       hub.error = null
-      // A started conversation has a locked (frozen) toggle set, so the
-      // loaders below would skip it and leave the status dots stale — and
-      // watching those dots turn green is the point of the button. The
-      // restart response already carries live statuses, so paint them.
+      // A locked conversation has a frozen toggle set, so the loaders below skip
+      // it and would leave the status dots stale — and watching those turn green
+      // is the point of the button. The response already carries live statuses.
       applyHubStatuses(kind, body)
     }
   } catch {
@@ -524,8 +478,7 @@ async function restartHub(kind) {
   } finally {
     hub.restarting = false
     // Re-snapshot either way: a refused restart leaves the hub untouched but
-    // still lets the panel refresh, and a successful one shows the new ids
-    // and statuses. A locked conversation keeps its frozen toggles.
+    // still refreshes the panel. A locked conversation keeps its frozen toggles.
     if (kind === 'mcp') loadChatMcp()
     else loadChatLsp()
   }
@@ -541,16 +494,16 @@ function scheduleMarkdownRender() {
   })
 }
 
-// Client-side mirror of the backend's estimate_completion_tokens() heuristic
-// (~4 chars/token): feeds the live tok/s badge and the abort fallbacks.
+// Client-side mirror of the backend's estimate heuristic (~4 chars/token): feeds
+// the live tok/s badge and the abort fallbacks.
 function estimateTokens(count) {
   return Math.ceil(Math.max(count, 0) / 4)
 }
 
-// Characters this reply generated and the client can actually see: answer text
-// (`raw`, minus the tool-line sentinels it only carries for rendering) plus
-// streamed thinking. Tool-call arguments never reach the client, so they are
-// only ever counted through the server's exact `usage` figures.
+// Characters this reply generated that the client can see: answer text (`raw`,
+// minus its rendering-only tool-line sentinels) plus streamed thinking.
+// Tool-call arguments never reach the client, so only the server's exact `usage`
+// figures count them.
 function generatedChars(message) {
   const answer = (message.raw ?? '').split(TOOL_LINE_MARKER).join('').length
   return answer + (message.reasoningChars ?? 0)
@@ -564,20 +517,18 @@ function estimateGeneratedTail(message) {
 }
 
 // Every generated chunk (answer text or thinking delta) opens/extends the
-// generation window, mirroring the backend (see stream_chat): thinking deltas
-// are generated tokens too, so a reasoning phase is neither free to the
-// numerator nor to the tok/s denominator — which is what keeps the speed badge
-// ticking while the model thinks instead of freezing it on the previous reply.
+// generation window: thinking deltas are generated tokens too, so a reasoning
+// phase counts to both the numerator and the tok/s denominator, keeping the
+// speed badge ticking instead of freezing it on the previous reply.
 function noteGenerated(assistant) {
   const now = Date.now()
   if (!assistant.windowStartAt) assistant.windowStartAt = now
   assistant.lastTokenAt = now
 }
 
-// Closes the open generation window so what follows it (tool execution, the
-// re-prefill of the next round) stays out of the measured seconds. Called on
-// `tool_call` / `usage` and when the reply ends; the next generated chunk
-// opens a fresh window.
+// Closes the open generation window so what follows it (tool execution, the next
+// round's prefill) stays out of the measured seconds. The next generated chunk
+// opens a fresh one.
 function closeGenerationWindow(assistant) {
   if (!assistant.windowStartAt) return
   assistant.generatedSeconds +=
@@ -585,9 +536,8 @@ function closeGenerationWindow(assistant) {
   assistant.windowStartAt = 0
 }
 
-// Seconds of generation measured client-side: every closed window plus the one
-// still open, ended at the last chunk seen — so an idle gap inside the stream
-// never inflates the live denominator.
+// Seconds of generation measured client-side: every closed window plus the open
+// one, ended at the last chunk seen, so an idle gap never inflates the rate.
 function measuredSeconds(message) {
   const open = message.windowStartAt
     ? Math.max((message.lastTokenAt || 0) - message.windowStartAt, 0) / 1000
@@ -595,14 +545,12 @@ function measuredSeconds(message) {
   return (message.generatedSeconds || 0) + open
 }
 
-// Live tok/s of a streaming reply, as `{ value, estimated }` or null.
-// Preferred basis: the server's cumulative exact figures from the last `usage`
-// frame (completion tokens — thinking and tool arguments included — over the
-// summed decode seconds), extended by whatever arrived since: those tokens are
-// char-estimated (flagging the result), and their seconds come from the
-// client-measured generation windows, so the tool loop's dead time stays out
-// of the rate. With no `usage` in the payload at all the whole reply is
-// measured client-side — answer text AND thinking over their own windows.
+// Live tok/s of a streaming reply, as `{ value, estimated }` or null. Preferred
+// basis: the server's exact cumulative figures from the last `usage` frame
+// (completion tokens over summed decode seconds), extended by what arrived since
+// — those tokens char-estimated (flagging the result) over the client-measured
+// windows, so the tool loop's dead time stays out of the rate. With no `usage`
+// frame the whole reply is measured client-side.
 export function liveTokenRate(message) {
   if (!message) return null
   const seconds = measuredSeconds(message)
@@ -621,12 +569,10 @@ export function liveTokenRate(message) {
   return { value: tokens / seconds, estimated: true }
 }
 
-// The text one message's copy chip puts on the clipboard: the reply as the
-// model wrote it, minus the tool-line sentinel `raw` carries only for rendering
-// (the same strip messagePayload() does, so a copy is what the model said, not
-// what the pane drew). Unlike the payload there is no interruption note: that
-// sentence exists to tell the *model* a fragment is unfinished, and a reader
-// copying a reply wants the reply.
+// The text one message's copy chip puts on the clipboard: the same strip
+// messagePayload() does, so a copy is what the model said, not what the pane
+// drew. No interruption note, unlike the payload: that sentence exists to tell
+// the *model* a fragment is unfinished, and a reader wants the reply.
 export function messageClipboardText(message) {
   if (!message) return ''
   return (message.raw ?? '').split(TOOL_LINE_MARKER).join('')
@@ -644,44 +590,39 @@ export function conversationMarkdown(messages) {
     .join('\n\n')
 }
 
-// Whether one user turn would be refused by the server if a flush carried it:
-// a sentence naming why, or null when it would be accepted.
+// Whether one user turn would be refused by the server if a flush carried it: a
+// sentence naming why, or null when it would be accepted.
 //
-// The server's rule is that a user turn carries text or an image, and a blank
-// user turn is refused as a whole *request* — which, for a flush, would discard
-// every other message that rode with it. So a flush validates every message it
-// is about to carry, and this is the one verdict that answers for one message.
+// A blank user turn is refused as a whole *request*, which for a flush would
+// discard every message riding with it, so each one is judged before the send.
 //
 // It judges the text as the server will see it: the incoming door strips
-// chat-template control-token runs from message text, so a message that looks
-// non-empty in the strip can arrive empty. The stripper used here is the
-// markdown module's — the seam that already says what such a run is — rather
-// than a second copy of the rule that could drift from it.
+// chat-template control-token runs, so a message that looks non-empty in the
+// strip can arrive empty. It asks the markdown module's stripper rather than
+// keeping a second copy of the rule that could drift from it.
 export function flushGateReason(message) {
   if ((message?.images ?? []).length) return null
   if (neutralizeControlTokenRuns(message?.raw ?? '').trim()) return null
   return 'This message would arrive empty, and the server rejects a blank user turn as a whole request.'
 }
 
-// "a", "a and b", "a, b and c" — for the sentence that names the rows a refused
-// flush is about, so it reads as prose whatever the strip holds.
+// "a", "a and b", "a, b and c" — so the sentence naming a refused flush's rows
+// reads as prose whatever the strip holds.
 function joinNames(names) {
   if (names.length <= 1) return names.join('')
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
-// OpenAI content shape for one message: plain string when text-only (the
-// backend and the LLM client keep the classic form), multimodal parts once an
-// image is attached (image-only messages omit the text part entirely).
+// OpenAI content shape for one message: a plain string when text-only,
+// multimodal parts once an image is attached (image-only ones omit the text part).
 function messagePayload(message) {
   const images = message.images ?? []
   // The rendering-only tool-line sentinel never reaches the model.
   let raw = message.raw.split(TOOL_LINE_MARKER).join('')
-  // A turn the user interrupted must not read to the model as a finished
-  // answer: the note is added here (payload-build time) so the bubble the user
-  // reads stays clean while the model sees where the fragment came from. The
-  // same serializer writes saved sessions, so a loaded fragment keeps the note
-  // — what does not survive a reload is the `paused` flag and its caption.
+  // A turn the user interrupted must not read to the model as a finished answer:
+  // the note is added here, at payload-build time, so the bubble the user reads
+  // stays clean. The same serializer writes saved sessions, so a loaded fragment
+  // keeps the note — but not the `paused` flag and its caption.
   if (message.paused) raw += '\n\n[interrupted by the user]'
   if (!images.length) return { role: message.role, content: raw }
   const parts = []
@@ -696,28 +637,24 @@ function messagePayload(message) {
 // Save / load a session as a JSON file (frontend only).
 //
 // The file is a thin envelope around the OpenAI user/assistant message list —
-// exactly the shape POST /api/chat accepts — so continuing a loaded
-// conversation is free: every send already re-posts state.messages mapped
-// through messagePayload(). A user turn with attached images keeps them as
-// standard OpenAI `image_url` parts, so the base64 data URL round-trips and the
-// next send re-posts it to the model. Tool-loop turns and the per-turn badges
-// are still never written (the browser only holds _preview-capped tool
-// summaries, so writing them back would be fabrication; the system prompt is
-// rebuilt server-side per send).
+// the shape the chat route accepts — so continuing a loaded conversation is free:
+// every send already re-posts state.messages through messagePayload(). Images
+// keep their standard `image_url` parts, so the base64 data URL round-trips.
+// Tool-loop turns and the per-turn badges are never written: the browser holds
+// only preview-capped tool summaries, so writing them back would be fabrication,
+// and the system prompt is rebuilt server-side per send.
 //
-// Each image part carries one nojae-only extra key, `name` (the original
-// file name, needed for the restored thumbnail's alt/title): the backend's
-// `ChatContentPart` uses extra="ignore", so that key is dropped on the way to
-// the model.
+// Each image part carries one nojae-only extra key, `name`, needed for the
+// restored thumbnail: the backend's content-part model ignores unknown keys, so
+// it is dropped on the way to the model.
 //
-// The one extra field an assistant turn may carry is `reasoning` — the streamed
-// thinking flows of that reply, one entry per reasoning block of the
-// WorkBenchToolPanel timeline (a tool_call frame splits one flow from the next
-// round's). It lives beside `content`, never inside it: thinking is not
-// conversation text, and putting it in `content` would change what the model
-// sees on the next send. It is panel render state only — send() builds its
-// history through messagePayload(), which reads `raw`/`images` alone, so a
-// restored flow can never reach the model.
+// The one extra field an assistant turn may carry is `reasoning` — that reply's
+// streamed thinking flows, one entry per reasoning block of the panel timeline (a
+// tool_call frame splits one flow from the next round's). It lives beside
+// `content`, never inside it: thinking is not conversation text, and putting it
+// in `content` would change what the model sees on the next send. Panel render
+// state only — messagePayload() reads `raw`/`images` alone, so a restored flow
+// can never reach the model.
 // ---------------------------------------------------------------------------
 
 export const SESSION_FILE_FORMAT = 'nojae-chat-session'
@@ -726,19 +663,18 @@ export const SESSION_FILE_FORMAT = 'nojae-chat-session'
 // agent mode in the envelope. Older files simply carry no image parts and no
 // `agentMode`, so the loader needs no version branch either way.
 export const SESSION_FILE_VERSION = 4
-// Stands in for a loaded image part whose data URL is unusable (a hand-edited
-// or truncated file), so an image-only turn keeps a non-empty content (an
-// empty one would 422 the next send).
+// Stands in for a loaded image part whose data URL is unusable (a hand-edited or
+// truncated file), so an image-only turn keeps a non-empty content — an empty one
+// would fail the next send.
 export const SESSION_IMAGE_PLACEHOLDER =
   '[image from the saved session could not be restored]'
 // Must mirror the backend ChatImageUrl validation (routes.py).
 const SESSION_IMAGE_DATA_URL =
   /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/
 
-// Thinking flows of one assistant reply, in panel order: every
-// `{ kind: 'reasoning' }` block of its timeline as one string, blank ones
-// dropped. Kept as a list (not joined) so the panel timeline can be rebuilt
-// with its original block boundaries — and so a v2 file stays readable by hand.
+// Thinking flows of one assistant reply, in panel order: every reasoning block of
+// its timeline as one string, blanks dropped. A list rather than one joined
+// string, so the panel timeline keeps its original block boundaries.
 function reasoningFlows(message) {
   return (message.blocks ?? [])
     .filter((block) => block.kind === 'reasoning')
@@ -750,9 +686,8 @@ export function conversationJson(messages) {
   const items = []
   for (const message of messages) {
     // The very serializer a live send uses, so the file holds exactly what the
-    // model was shown: text parts plus base64 `image_url` parts for an attached
-    // image. Each image part then gets its file `name` (see the block header),
-    // which the backend drops on its way to the model.
+    // model was shown. Each image part then gets its file `name` (see the block
+    // header), which the backend drops on its way to the model.
     const payload = messagePayload(message)
     const parts = typeof payload.content === 'string' ? [] : payload.content
     const hasText =
@@ -767,22 +702,19 @@ export function conversationJson(messages) {
       if (images[i]) part.name = images[i].name || 'image'
     })
     if (message.role === 'assistant') {
-      // Omitted entirely when the reply streamed no thinking, so files stay as
-      // small as v1 ones for non-reasoning models.
+      // Omitted entirely when the reply streamed no thinking, so files stay small.
       const flows = reasoningFlows(message)
       if (flows.length) payload.reasoning = flows
     }
     items.push(payload)
   }
-  // No `stats` block on purpose: tok/s and ctx badges are client-only render
-  // state, and the loader stays tolerant of a future version adding one back.
+  // No `stats` block on purpose: tok/s and ctx badges are client-only render state.
   //
-  // `agentMode` is the one piece of *conversation* state the envelope carries
-  // (am-07): the mode is not a message and never belongs in the list, but a
-  // saved thread was written by one persona, and re-opening it in another would
-  // change what its next turn means. Omitted when the mode list is not loaded
-  // (or never was): a file without the key is a v3 file's shape, and the loader
-  // then leaves the workspace's default alone.
+  // `agentMode` is the one piece of *conversation* state the envelope carries: the
+  // mode is not a message and never belongs in the list, but a saved thread was
+  // written by one persona, and re-opening it in another would change what its
+  // next turn means. Omitted when the mode list is not loaded, and the loader then
+  // leaves the workspace's default alone.
   const agentMode = agentModePayloadId()
   return {
     format: SESSION_FILE_FORMAT,
@@ -793,10 +725,10 @@ export function conversationJson(messages) {
 }
 
 // One loaded image part -> the client image shape `{ dataUrl, name, size }`, or
-// null when the part carries no usable data URL: the caller then inserts the
-// placeholder text instead, so the turn stays postable. A well-formed but
-// oversized image fails loudly instead — the backend would 422 the very same
-// payload on the next send, a far more confusing place to hit the error.
+// null when the data URL is unusable: the caller inserts the placeholder text
+// instead, so the turn stays postable. A well-formed but oversized image fails
+// loudly instead — the backend would reject the very same payload on the next
+// send, a far more confusing place to hit the error.
 function normalizeLoadedImage(part, index) {
   const url = part?.image_url?.url
   if (typeof url !== 'string') return null
@@ -821,13 +753,10 @@ function normalizeLoadedImage(part, index) {
   return { dataUrl: url, name, size: bytes }
 }
 
-// Content of one loaded turn, split into where the client keeps each part:
-// `{ text, images }` — text parts joined into `raw`, image parts restored as
-// `images` entries (an unusable one becomes the placeholder text). Image parts
-// are only ever restored onto user turns: save() never writes them elsewhere,
-// and messagePayload() would turn them into a multimodal `content` the backend
-// rejects for assistant turns ("assistant messages must use plain text
-// content"), so a hand-written file gets the placeholder instead.
+// Content of one loaded turn, split as the client keeps it: `{ text, images }`,
+// with text parts joined into `raw`. Image parts are only ever restored onto user
+// turns — the backend rejects multimodal assistant content — so a hand-written
+// file gets the placeholder there.
 function normalizeLoadedContent(content, role, index) {
   if (typeof content === 'string') return { text: content, images: [] }
   if (!Array.isArray(content)) return { text: '', images: [] }
@@ -845,11 +774,10 @@ function normalizeLoadedContent(content, role, index) {
   return { text: texts.join('\n'), images }
 }
 
-// Optional per-assistant-turn thinking flows of a loaded turn: a list of
-// strings (v2) — a lone string is accepted too, for hand-written files.
-// Returns [] when the key is absent (every v1 file) or empty; throws when the
-// key holds anything else, so a malformed file fails loudly instead of
-// restoring half a timeline.
+// Optional per-assistant-turn thinking flows of a loaded turn: a list of strings,
+// a lone string accepted too for hand-written files. Returns [] when the key is
+// absent or empty and throws when it holds anything else, so a malformed file
+// fails loudly instead of restoring half a timeline.
 function normalizeLoadedReasoning(reasoning, index) {
   if (reasoning === undefined || reasoning === null) return []
   const flows = typeof reasoning === 'string' ? [reasoning] : reasoning
@@ -871,13 +799,11 @@ function normalizeLoadedReasoning(reasoning, index) {
 }
 
 // Validates a session file's text and returns its turns as
-// `{ messages: [{ role, content, images, reasoning }], agentMode }` (`images`
-// being the restored `{ dataUrl, name, size }` entries of that turn, and
-// `agentMode` the mode id the envelope carried — null for a v3 file, a bare
-// array, or an envelope without that key). Throws with a precise
-// message: silently dropping a system/tool turn would change the
-// conversation's meaning, so an invalid file must fail loudly. Unknown extra
-// keys are ignored, and a bare `[{role, content}, ...]` array is accepted for
+// `{ messages: [{ role, content, images, reasoning }], agentMode }`, `agentMode`
+// being null for a bare array or an envelope without that key. Throws with a
+// precise message: silently dropping a system/tool turn would change the
+// conversation's meaning, so an invalid file must fail loudly. Unknown extra keys
+// are ignored, and a bare `[{role, content}, ...]` array is accepted for
 // hand-written files.
 export function parseSessionFile(text) {
   let parsed
@@ -900,10 +826,9 @@ export function parseSessionFile(text) {
       throw new Error('Not a chat session file: no "messages" list found.')
     }
     items = parsed.messages
-    // A mode id of the wrong shape is tolerated rather than fatal: this key is
-    // conversation state the parser has no opinion about, and the rule that
+    // A mode id of the wrong shape is tolerated rather than fatal: the rule that
     // judges it ("is this a mode the *current* workspace offers?") belongs to
-    // useAgentModes, where a v3 file with no key keeps the workspace default.
+    // useAgentModes, where a file with no key keeps the workspace default.
     if (typeof parsed.agentMode === 'string' && parsed.agentMode.trim()) {
       agentMode = parsed.agentMode.trim()
     }
@@ -929,8 +854,7 @@ export function parseSessionFile(text) {
     const { text: content, images } = normalizeLoadedContent(item.content, item.role, index)
     // A turn is usable when it has text or a restorable image.
     if (!content.trim() && !images.length) continue
-    // A user turn never carries thinking: the key is ignored there (unknown
-    // extra keys are tolerated by design).
+    // A user turn never carries thinking: the key is ignored there.
     const reasoning =
       item.role === 'assistant' ? normalizeLoadedReasoning(item.reasoning, index) : []
     messages.push({ role: item.role, content, images, reasoning })
@@ -954,25 +878,22 @@ function describeError(body, fallback) {
   return fallback
 }
 
-// Ends the wait's status line (see `state.endpointWait`). One function is the
-// whole clearing rule: every arrival that proves the endpoint answered again
-// and every terminal path calls this, so a line can never outlive the wait it
-// described and there is no second list of places to remember.
+// Ends the wait's status line. One function is the whole clearing rule: every
+// arrival that proves the endpoint answered again and every terminal path calls
+// it, so a line can never outlive the wait it described.
 function clearEndpointWait() {
   state.endpointWait = null
 }
 
-// The one line a wait says about itself, spec §5.6's shape:
+// The one line a wait says about itself:
 //
 //   Reconnecting 2/3 — the model endpoint answered HTTP 502 · retrying in 10s
 //
-// Built here rather than in the template (this project's rule: the decision is
-// a plain function, so a test can hold the composable to it). `Reconnecting` is
-// the **label** and the only place that word survives (spec §3, D6); the
-// sentence between the separators is the endpoint's own, passed through
-// verbatim and never re-worded (spec §9), and the line says no "network" and
-// calls nothing a reconnect. A missing figure reads 0 rather than hiding the
-// segment: the label is what tells the user the app is not stuck.
+// A plain function rather than template logic, so a test can hold the composable
+// to its shape. `Reconnecting` is the **label** and the only place that word
+// survives; the sentence between the separators is the endpoint's own, passed
+// through verbatim. A missing figure reads 0 rather than hiding the segment,
+// because the label is what tells the user the app is not stuck.
 export function endpointWaitLine(wait) {
   if (!wait) return ''
   const attempt = Number.isFinite(wait.attempt) ? wait.attempt : 0
@@ -986,15 +907,13 @@ function applyEvent(name, data, assistant) {
   switch (name) {
     case 'token': {
       // A token is the replayed round answering: the wait is over, so its line
-      // goes (spec §5.13 — it was a status line, never content).
+      // goes — it was a status line, never content.
       clearEndpointWait()
       if (state.phase !== 'answering') state.phase = 'answering'
-      // Tool-loop continuation: the first token after a tool_result opens a
-      // fresh line prefixed with the tool icon (sentinel replaced at render
-      // time by lib/markdown.js, after a blank line) so each post-tool
-      // message starts on its own line in WorkBenchView instead of running onto
-      // the previous round's text. Flag consumed once per tool round (the
-      // round's later tokens keep flowing on that icon line).
+      // Tool-loop continuation: the first token after a tool_result opens a fresh
+      // line prefixed with the tool icon (sentinel replaced at render time by
+      // lib/markdown.js) so each post-tool message starts on its own line instead
+      // of running onto the previous round's text. Consumed once per tool round.
       if (assistant.pendingStreamQuote) {
         assistant.pendingStreamQuote = false
         assistant.raw += assistant.raw ? `\n\n${TOOL_LINE_MARKER}` : TOOL_LINE_MARKER
@@ -1005,9 +924,8 @@ function applyEvent(name, data, assistant) {
       break
     }
     case 'done':
-      // Terminal frame: whatever it carries, no wait is in progress any more,
-      // so the wait's line goes with it (task 07 is what reads the frame's own
-      // `waited` figure; nothing here shows it).
+      // Terminal frame: whatever it carries, no wait is in progress any more, so
+      // the wait's line goes with it.
       clearEndpointWait()
       assistant.tokens = data.tokens ?? 0
       assistant.took = data.took ?? 0
@@ -1016,17 +934,15 @@ function applyEvent(name, data, assistant) {
       // tok/s denominator once tools ran (took - ttft would include tool
       // execution and inter-round gaps). 0 on payloads from an old server.
       assistant.decode = data.decode ?? 0
-      // Seconds this turn spent waiting on a refused endpoint, summed over
-      // every round's waits (task 04, spec §5.15). Defaulted to 0 for the same
-      // reason as `decode` above — an older server's payload has no such key,
-      // and it must read as "no wait" rather than as `undefined`: finish()
-      // subtracts it from the banked span and `undefined` would make that NaN.
-      // It is neither a decode window nor a token figure (spec §5.16/§5.17):
-      // it enters the session clock's exclusion and the per-turn caption only.
+      // Seconds this turn spent waiting on a refused endpoint, over every round's
+      // waits. Defaulted to 0 like `decode` above, because finish() subtracts it
+      // from the banked span and `undefined` would make that NaN. Neither a decode
+      // window nor a token figure: it enters the session clock's exclusion and the
+      // per-turn caption only.
       assistant.waited = data.waited ?? 0
       assistant.tokensEstimated = !!data.tokensEstimated
-      // Context occupancy of the FINAL round: the figure to compare against
-      // the server window: it never accumulates across rounds.
+      // Context occupancy of the FINAL round, to compare against the server
+      // window: it never accumulates across rounds.
       if (typeof data.contextTokens === 'number' && data.contextTokens > 0) {
         assistant.contextTokens = data.contextTokens
         assistant.contextEstimated = !!data.contextEstimated
@@ -1037,16 +953,12 @@ function applyEvent(name, data, assistant) {
       // Restart wiped the conversation while the pause was in flight): the turn
       // is closed, so this frame must not re-open it.
       if (!assistant.streaming) break
-      // Terminal frame of a user-interrupted reply. Its exact figures arrived
-      // as the `usage` frame just before it (the tool-loop sites reuse the
-      // pre-tool `usage`), so all that is left is the measurement bookkeeping:
-      // freeze the window, flag the fragment (caption + the payload note that
-      // tells the model this turn is unfinished) and reopen the composer —
-      // which is what hides Stop, shows Send and takes ⏸ out of the row.
+      // Terminal frame of a user-interrupted reply. Its exact figures arrived as
+      // the `usage` frame just before it, so all that is left is the measurement
+      // bookkeeping: freeze the window, flag the fragment and reopen the composer.
       closeGenerationWindow(assistant)
-      // The `usage` frame that precedes the ack holds the cumulative exact
-      // figures for everything generated (the round is never reported by any
-      // other frame), so they become the message's final numbers: finish()'s
+      // That `usage` frame holds the cumulative exact figures for everything
+      // generated, so they become the message's final numbers: finish()'s
       // char-based fallback would otherwise flag a server-reported count as
       // estimated, and the tok/s badge needs `decode` to stay exact.
       if (assistant.usageTokens > 0) {
@@ -1055,15 +967,13 @@ function applyEvent(name, data, assistant) {
         if (assistant.usageDecode > 0) assistant.decode = assistant.usageDecode
       }
       assistant.paused = true
-      // Paused before anything was generated (still prefilling): an empty
-      // assistant turn would sit in the thread and be re-posted, so it goes —
-      // the same guard the non-OK response path uses.
+      // Paused before anything was generated (still prefilling): an empty turn
+      // would sit in the thread and be re-posted, so it goes.
       if (!assistant.raw) {
         state.messages.splice(state.messages.indexOf(assistant), 1)
       }
       state.pausePending = false
-      // Terminal frame too: a pause cannot be armed across a wait, and the ack
-      // ends the turn the wait was inside (spec §5.8).
+      // Terminal frame too: the ack ends the turn the wait was inside.
       clearEndpointWait()
       state.phase = 'idle'
       break
@@ -1076,23 +986,21 @@ function applyEvent(name, data, assistant) {
         tool: data.tool ?? 'tool',
         server: data.server ?? '',
         preview: data.argsPreview ?? '',
-        // A call the model wrote as text instead of submitting it: the server
-        // never ran it, and the panel paints it as a bad tool call rather than
-        // as one of the connector's own (see `bad` in WorkBenchToolPanel).
+        // A call the model wrote as text instead of submitting it: the panel
+        // paints it as a bad tool call.
         bad: data.bad === true,
         state: 'running',
       })
-      // Same reactive object in the panel timeline, at its chronological
-      // slot: reasoning text flows around the badges, tool_result state
-      // flips still re-render the badge in place.
-      // The round's generation is over: close the client-side window so the
-      // tool execution (which can take tens of seconds) never enters the
-      // live tok/s denominator.
+      // The round's generation is over: close the client-side window so the tool
+      // execution (which can take tens of seconds) never enters the live tok/s
+      // denominator.
       closeGenerationWindow(assistant)
       // Draw buffered thinking before the badge: a delta still in the buffer
       // arrived before this call, so it must keep its earlier slot in the
       // timeline. One flush per tool round, not per chunk.
       reasoningBuffer.flush()
+      // The block carries that same reactive object, so a later tool_result state
+      // flip re-renders the badge in place.
       assistant.blocks.push({
         kind: 'tool',
         tool: assistant.tools[assistant.tools.length - 1],
@@ -1102,23 +1010,19 @@ function applyEvent(name, data, assistant) {
       if (data.maxIterations) assistant.mcpMax = data.maxIterations
       break
     case 'usage':
-      // Cumulative completion tokens (tool-call arguments included) and
-      // decode seconds as soon as a tool round has finished generating:
-      // keeps the side-panel badges live while the MCP tool loop is still
-      // running. usageRawLen snapshots the answer text already streamed so
-      // later estimates only count the characters generated after this
-      // exact baseline (never double-counted, never missed).
+      // Cumulative completion tokens (tool-call arguments included) and decode
+      // seconds, arriving as soon as a tool round finished generating: this keeps
+      // the side-panel badges live while the tool loop is still running.
       assistant.usageTokens = data.tokens ?? assistant.usageTokens
       assistant.usageDecode = data.decode ?? assistant.usageDecode
-      // Close the window opened by this round's chunks before snapshotting, so
-      // both baselines match the server's exact figures: what arrives after
-      // this frame is the only thing later estimates add on top (answer text
-      // AND thinking — never double-counted, never missed).
+      // Close this round's window before snapshotting, so both baselines match the
+      // server's exact figures: only what arrives after this frame is added by
+      // later estimates, never double-counted and never missed.
       closeGenerationWindow(assistant)
       assistant.usageGeneratedChars = generatedChars(assistant)
       assistant.usageGeneratedSeconds = measuredSeconds(assistant)
-      // Occupancy of the round that just ended: the tool loop refreshes the
-      // context badge between rounds, right when generation stops.
+      // Occupancy of the round that just ended: refreshed between rounds, right
+      // when generation stops.
       if (typeof data.contextTokens === 'number' && data.contextTokens > 0) {
         assistant.contextTokens = data.contextTokens
         assistant.contextEstimated = !!data.contextEstimated
@@ -1130,31 +1034,27 @@ function applyEvent(name, data, assistant) {
         tool.state = data.ok ? 'ok' : 'error'
         tool.resultPreview = data.preview ?? ''
       }
-      // Arm the tool-icon line prefix: the next round's first streamed token
-      // starts on a fresh line in WorkBenchView (see the 'token' case).
+      // Arm the tool-icon line prefix (see the 'token' case).
       assistant.pendingStreamQuote = true
       break
     }
     case 'reconnecting':
       // The endpoint refused this round and the worker is waiting before it
-      // re-sends (spec §5.6): a **progress** frame, not a terminal one, so the
-      // turn still closes on exactly one of `done` / `error` / `pause_ack` and
-      // only those (plus finish()'s fallback) may put the phase back to idle.
+      // re-sends: a **progress** frame, not a terminal one, so the turn still
+      // closes on exactly one of `done` / `error` / `pause_ack` (plus finish()'s
+      // fallback for an ending that reaches none).
       //
       // Unlike the `reasoning` case below, this one deliberately *can* leave
-      // `answering`, and that choice is the whole shape of the feature: a wait
-      // after a tool round follows an `answering` phase (round 1 answered with
-      // a call, round 2 is the one that was refused), so a phase that could not
-      // leave `answering` would never show at all. The honest rule is that a
-      // refused round genuinely is not answering any more — the failure landed
-      // before a byte of the reply existed, which is what makes the replay a
-      // replay (spec §2) — and the next round's first `token` opens
-      // `answering` again, exactly as it does after a tool round.
+      // `answering`: a wait after a tool round follows an `answering` phase, so a
+      // phase that could not leave it would never show. A refused round genuinely
+      // is not answering any more — the failure landed before a byte of the reply
+      // existed, which is what makes the replay a replay — and the next round's
+      // first `token` opens `answering` again.
       state.phase = 'reconnecting'
       // Keep the frame's four fields as the composer strip's status line. The
-      // endpoint's sentence is stored as it arrived — the UI quotes it and
-      // never re-words it (spec §9) — and nothing is written to the thread
-      // (spec §5.13): this is a status line, not content.
+      // endpoint's sentence is stored as it arrived — the UI quotes it and never
+      // re-words it — and nothing is written to the thread: a status line, not
+      // content.
       state.endpointWait = {
         attempt: data.attempt ?? 0,
         budget: data.budget ?? 0,
@@ -1165,13 +1065,10 @@ function applyEvent(name, data, assistant) {
     case 'reasoning':
       // The replayed round is thinking: the wait ended with this frame, and a
       // line still reading `Reconnecting` would say the opposite of what is
-      // happening — the confusion spec §5.11 rules out.
+      // happening.
       clearEndpointWait()
-      // Never downgrade to reasoning once answer text started. `reconnecting`
-      // is in the set because the wait is over the moment this frame arrives:
-      // the replayed round is thinking, and a pill still reading
-      // `Reconnecting` then would say the opposite of what is happening — the
-      // confusion spec §5.11 rules out.
+      // Never downgrade to reasoning once answer text started; `reconnecting` is in
+      // the set because the wait is over the moment this frame arrives.
       if (
         state.phase === 'waiting' ||
         state.phase === 'reasoning' ||
@@ -1184,33 +1081,29 @@ function applyEvent(name, data, assistant) {
       // Streamed thinking is an arrival too: the endpoint answered again, so
       // this round is no longer a wait.
       clearEndpointWait()
-      // Thinking text, streamed live. The text is buffered and lands in the
-      // panel timeline once per animation frame (see lib/reasoning-buffer):
-      // chunks arrive at a network-set rate, and each write into the reactive
-      // block re-cuts the panel's rows and re-runs its autoscroll.
+      // Thinking text, streamed live. Buffered into the panel timeline once per
+      // animation frame (see lib/reasoning-buffer): each write into the reactive
+      // block re-cuts the panel's rows and re-runs its autoscroll, which a chunk's
+      // network-set rate would trigger far too often.
       const text = data.text ?? ''
       if (!text) break
       reasoningBuffer.append(assistant.blocks, text)
-      // Thinking is generated text the client DOES see: it feeds the live
-      // tok/s numerator and keeps the measurement window open, so a long
-      // reasoning phase ticks the speed badge instead of freezing it.
-      // This counter stays synchronous on purpose — a `usage` frame snapshots
-      // an exact baseline out of it, so deferring it would count the buffered
-      // tail twice.
+      // Thinking is generated text the client DOES see: it feeds the live tok/s
+      // numerator and keeps the measurement window open. Synchronous on purpose —
+      // a `usage` frame snapshots its baseline out of it, so deferring would count
+      // the buffered tail twice.
       assistant.reasoningChars += text.length
       noteGenerated(assistant)
       break
     }
     case 'error':
-      // Terminal frame: the budget ran out (or the error was final), so the
-      // wait this line described is over — the failure is what the user reads
-      // now, on the error line above the composer.
+      // Terminal frame: the budget ran out (or the error was final), so the wait
+      // this line described is over — the failure is what the user reads now.
       clearEndpointWait()
       state.error = data.message || 'Chat request failed.'
-      // A server-cut reply keeps its partial text in the conversation (unlike
-      // an explicit Stop, which discards it) and that fragment is re-posted on
-      // the next send — so the message itself carries the marker, not just the
-      // transient error line.
+      // A server-cut reply keeps its partial text in the conversation (unlike an
+      // explicit Stop) and re-posts it on the next send, so the message itself
+      // carries the marker, not just the transient error line.
       if (data.truncated) assistant.truncated = true
       break
     default:
@@ -1235,17 +1128,15 @@ function processFrame(frame, assistant) {
 }
 
 function finish(assistant) {
-  // Nothing may read a timeline that is still missing its last chunks: session
-  // saving serializes these blocks, and it does not wait for a frame.
+  // Nothing may read a timeline still missing its last chunks: session saving
+  // serializes these blocks and does not wait for a frame.
   reasoningBuffer.flush()
   if (activeMessage)
     activeMessage.html = renderMarkdown(activeMessage.raw, { mermaid: true })
   activeMessage = null
-  // Stream ended without an exact usage report (stop/abort/error): keep the
-  // conversation totals stable — exact cumulative tokens from the last
-  // `usage` event (covers every completed tool round, reasoning and tool
-  // arguments included) plus the ~4 chars/token heuristic on the answer
-  // text AND thinking streamed since then, flagged as estimated.
+  // Stream ended without an exact usage report (stop/abort/error): exact
+  // cumulative tokens from the last `usage` frame plus the ~4 chars/token
+  // heuristic on what streamed since, flagged as estimated.
   if (!assistant.tokens) {
     const carried = assistant.usageTokens || 0
     const tail = estimateGeneratedTail(assistant)
@@ -1255,10 +1146,10 @@ function finish(assistant) {
     }
   }
   // Freeze the measurement window: a finished reply's live rate is never
-  // recomputed, and the badge falls back to the server's exact figures.
+  // recomputed.
   closeGenerationWindow(assistant)
-  // Stop/abort mid tool-execution: no tool_result will ever arrive, so never
-  // leave a badge stuck on the pulsing "running" state in the tool panel.
+  // Stop/abort mid tool-execution: no tool_result will arrive, so never leave a
+  // badge stuck on the pulsing "running" state.
   for (const tool of assistant.tools ?? []) {
     if (tool.state === 'running') tool.state = 'error'
   }
@@ -1266,21 +1157,17 @@ function finish(assistant) {
   state.phase = 'idle'
   // Bank this turn's span: the app bar's clock reads the conversation's total
   // time, so an ended reply stops ticking without losing what it counted. Only
-  // reset() zeroes it — the Restart button is what starts the counters over.
+  // reset() zeroes it.
   //
   // The banked span **excludes the seconds this turn waited on a refused
-  // endpoint** (`waited`, off the `done` frame): a wait is not inference and
-  // not thinking, so a 40-minute provider outage must not read as a
-  // 40-minute session (spec §5.16). The turn's own span keeps them and is
-  // shown beside the clock (useSessionStats' `turnSpanText`, spec §5.17) —
-  // this subtraction is why that separate figure has to exist.
+  // endpoint** (`waited`, off the `done` frame): a wait is neither inference nor
+  // thinking, so an outage must not read as session time. The turn's own span
+  // keeps them and is shown beside the clock, which is why that separate figure
+  // exists.
   //
-  // A turn that ended with no `done` frame (Stop, an abort, a dropped
-  // connection, a `pause_ack` — that frame carries no `waited`, task 04) banks
-  // its whole span with `waited` read as 0: the app cannot know what such a
-  // turn waited, and inventing a figure would be worse than the honest 0. This
-  // changes an amount, never *when* the amount moves — the flicker rule (only
-  // the terminal paths bank, and the restart clears) is untouched.
+  // A turn that ended with no `done` frame (Stop, an abort, a dropped connection,
+  // a `pause_ack`) banks its whole span with `waited` read as 0: the app cannot
+  // know what such a turn waited, and inventing a figure would be worse.
   if (state.session.startedAt > 0) {
     const span = Math.max(Date.now() - state.session.startedAt, 0)
     const waitedMs = (assistant.waited || 0) * 1000
@@ -1291,15 +1178,12 @@ function finish(assistant) {
   // line goes blank, rather than keeping the last model's name.
   state.session.agentMode = null
   controller = null
-  // A pause whose `pause_ack` never arrives (the server died mid-round, or the
-  // fallback abort ended the stream): the reply is over either way, so the ⏸
-  // must stop blinking. The per-message `paused` flag is left alone — it only
-  // drives a caption.
+  // A pause whose `pause_ack` never arrives: the reply is over either way, so the
+  // ⏸ must stop blinking. The per-message `paused` flag only drives a caption.
   state.pausePending = false
   // The local fallback for every ending that reached no terminal frame — Stop's
-  // abort, a dropped connection, a stream that closed between two waits: the
-  // turn is over, so a wait's line cannot survive it either. This is why a
-  // stream ending between waits leaves nothing on screen.
+  // abort, a dropped connection, a stream closed between two waits: the turn is
+  // over, so a wait's line cannot survive it either.
   clearEndpointWait()
 }
 
@@ -1327,11 +1211,8 @@ async function readStream(response, assistant) {
 // the group's **first** message, or -1 when the thread holds no user turn.
 //
 // A flush opens one turn carrying several user messages in a row, so the group is
-// what "my last message" means once a turn can carry more than one; adjacency also
-// gives the gesture a property worth having — after a reply the model left
-// unfinished, the run still holds every user turn that reply has not answered. A
-// saved session that happens to end with consecutive user turns is one group by
-// the same rule, which is defensible: they are all unanswered.
+// what "my last message" means; and after a reply the model left unfinished, the
+// run still holds every user turn that reply has not answered.
 export function lastUserGroupStart(messages) {
   const list = Array.isArray(messages) ? messages : []
   let end = -1
@@ -1347,28 +1228,28 @@ export function lastUserGroupStart(messages) {
   return start
 }
 
-// One streamed turn, end to end: push the user bubbles and the reply's, open
-// the SSE request and run finish() in its finally. Both entry points call it —
+// One streamed turn, end to end: push the user bubbles and the reply's, open the
+// SSE request and run finish() in its finally. Both entry points call it —
 // `send()` for an interactive flush, `sendBatchTurn()` for one batch task —
-// because the pause/truncation/measurement logic below has already been the
-// source of bugs once and must never be forked.
+// because the pause/truncation/measurement logic below must never be forked.
 //
 // `userMessages` is what this turn opens on: one message for a batch task or a
-// draft-only send, several for a flush (every staged message, then the draft),
-// which is still **one** turn — one request, one agent, one clock span.
+// draft-only send, several for a flush, which is still **one** turn — one
+// request, one agent, one clock span.
 //
-// `history` is the message list posted to the server and is the ONLY thing
-// that varies between the two entry points: an interactive send sends the whole
-// accumulated thread, a batch task sends its one instruction (B6 — the LLM
-// context is reset per task, while the displayed transcript keeps accumulating).
-// The client never sends a system message: `core/chat.py` stays the only place
-// one is created.
+// `history` is the message list posted to the server and the ONLY thing that
+// varies between the two entry points: an interactive send sends the whole
+// accumulated thread, a batch task sends its one instruction — the model context
+// is reset per task, while the displayed transcript keeps accumulating. The
+// client never sends a system message: `core/chat.py` stays the only place one is
+// created.
+//
 // `agentMode` (the last entry): the mode **this turn** runs in. An interactive
 // send passes the composer's selection; a batch task turn passes the runner's
-// pin (D13) — a lot is one job executed under one set of rules, and the
-// dropdown the user may be touching meanwhile is not part of it. `undefined`
-// means "ask the server for its default" (the pre-feature shape), which is also
-// what `useBatch` passes when its pin could not be resolved.
+// pin — a lot is one job executed under one set of rules, and the dropdown the
+// user may be touching meanwhile is not part of it. `undefined` means "ask the
+// server for its default", which is what `useBatch` passes when its pin could not
+// be resolved.
 async function startTurn({
   userMessages,
   history,
@@ -1377,13 +1258,12 @@ async function startTurn({
   workspace = undefined,
 }) {
   userStopped = false
-  // Fresh turn: a previous turn's pause must not survive into it (its
-  // fragment already carries its own `paused` flag, which is per message).
+  // Fresh turn: a previous turn's pause must not survive into it (its fragment
+  // already carries its own `paused` flag, which is per message).
   userPaused = false
   state.error = null
-  // One turn may open on several user messages — a flush carries the whole
-  // strip in one request — so they all go in, in order, before the reply's
-  // bubble: the thread holds exactly what the payload below carried.
+  // A flush carries the whole strip in one request, so every message goes in, in
+  // order, before the reply's bubble.
   for (const userMessage of userMessages) state.messages.push(userMessage)
   state.messages.push({
     role: 'assistant',
@@ -1399,8 +1279,7 @@ async function startTurn({
     took: 0,
     ttft: 0,
     tokensEstimated: false,
-    // Client-side generation timing (see noteGenerated/measuredSeconds):
-    // summed seconds of the closed windows, plus the open window's bounds.
+    // Client-side generation timing (see noteGenerated/measuredSeconds).
     generatedSeconds: 0,
     windowStartAt: 0,
     lastTokenAt: 0,
@@ -1412,18 +1291,18 @@ async function startTurn({
     usageGeneratedChars: 0, // generated chars at the last `usage` baseline
     usageGeneratedSeconds: 0, // client-measured seconds at that same baseline
     decode: 0, // cumulative decode seconds from the `done` event
-    // Seconds this turn waited on a refused endpoint, from the same `done`
-    // event: keeps the turn span (which includes them) tellable apart from the
-    // session total (which excludes them). 0 until the frame arrives.
+    // Seconds this turn waited on a refused endpoint, from the same `done` event:
+    // keeps the turn span (which includes them) tellable apart from the session
+    // total (which excludes them). 0 until the frame arrives.
     waited: 0,
     contextTokens: 0, // LAST round's prompt + completion = context occupancy
     contextEstimated: false, // occupancy figure involves a char estimate
-    // Set by a `truncated` error frame: the server ended the stream before
-    // the reply was finished, so this turn is a fragment (see applyEvent).
+    // Set by a `truncated` error frame: the server ended the stream before the
+    // reply was finished, so this turn is a fragment.
     truncated: false,
     // Set by the `pause_ack` frame: the user interrupted this turn, so its
-    // fragment is deliberately kept in the conversation and the payload says
-    // so (display state, like `truncated` — never written to session JSON).
+    // fragment is deliberately kept in the conversation and the payload says so
+    // (display state, like `truncated` — never written to session JSON).
     paused: false,
   })
   // Keep the reactive proxy so token mutations re-render.
@@ -1437,8 +1316,7 @@ async function startTurn({
     const payload = { messages: history }
     if (state.mcp.loaded) {
       // Conversation-scoped allowlist: only the toggles currently on may
-      // contribute tools (intersected with the Settings-activated ids
-      // server-side). Omitted when the snapshot failed to load.
+      // contribute tools. Omitted when the snapshot failed to load.
       payload.mcpEnabled = Object.keys(state.mcp.enabled).filter(
         (id) => state.mcp.enabled[id],
       )
@@ -1449,37 +1327,33 @@ async function startTurn({
         (id) => state.lsp.enabled[id],
       )
     }
-    // The agent mode for this turn (am-07). The composer refuses an interactive
-    // send before it reaches here when the list is not loaded (task 12), and a
-    // lot refuses at launch when its pin does not resolve, so a live turn always
-    // names the agent it runs as. `agentMode === undefined` still means "read the
-    // composer's selection" (the interactive shape); a resolved id (the batch
-    // runner's pin) is sent as it stands.
+    // The agent mode for this turn. The composer refuses an interactive send when
+    // the list is not loaded and a lot refuses at launch when its pin does not
+    // resolve, so a live turn always names the agent it runs as. `undefined` means
+    // "read the composer's selection"; a resolved batch pin is sent as it stands.
     const modeId = agentMode === undefined ? agentModePayloadId() : agentMode
     if (modeId) {
       payload.agentMode = modeId
     }
     // Recorded for the app bar's running line: the agent **this** request
-    // carries, not the composer's current selection. A lot's pin therefore
-    // reads correctly, and a dropdown moved mid-reply cannot make the line name
-    // an agent the stream is not answering as.
+    // carries, not the composer's current selection, so a lot's pin reads
+    // correctly and a dropdown moved mid-reply cannot misname the stream.
     state.session.agentMode = modeId ?? null
     if (batchContext) {
-      // The lot's big picture (batch mode): the server appends it to its own
-      // system message, so it rides on every task turn without ever becoming
-      // a visible bubble — which is what survives the per-task context reset.
+      // The lot's big picture: the server appends it to its own system message, so
+      // it rides on every task turn without ever becoming a visible bubble — which
+      // is what survives the per-task context reset.
       payload.batchContext = batchContext
     }
     // The turn is **about this tab's folder**: the field rides on the URL like
     // every other workspace-scoped request (a query parameter, never a body
-    // field — spec D9), so the server injects that folder's project
-    // instructions and roots that folder's tools. The body, the SSE and the
-    // cancellation-on-disconnect are untouched.
+    // field), so the server injects that folder's project instructions and roots
+    // that folder's tools.
     //
     // `workspace` names an **explicit** folder rather than the tab's current one:
     // a batch task turn passes its run's pin, so a tab that moves during the lot
-    // cannot re-root the task still being executed (spec §5.7 rule 33). Absent
-    // (`undefined`) means the interactive shape — the tab's own folder.
+    // cannot re-root the task still being executed. Absent (`undefined`) means the
+    // interactive shape — the tab's own folder.
     const chatUrl =
       workspace === undefined
         ? withWorkspace('/api/chat')
@@ -1499,10 +1373,9 @@ async function startTurn({
       finish(assistant)
       return
     }
-    // Accepted send: the conversation has started, so the MCP and LSP
-    // toggles freeze until the restart button resets them (sticky by
-    // design — edit-and-resend of the last message does not unlock them
-    // again).
+    // Accepted send: the conversation has started, so the MCP and LSP toggles
+    // freeze until the restart button resets them (sticky by design —
+    // edit-and-resend of the last message does not unlock them).
     state.mcp.locked = true
     state.lsp.locked = true
     await readStream(res, assistant)
@@ -1513,14 +1386,12 @@ async function startTurn({
     // Connection drop: keep whatever partial answer arrived; an explicit
     // Stop is handled in the finally block below.
   } finally {
-    // A paused reply keeps its fragment (Pause's whole point), except when
-    // nothing was generated: the fallback abort has no `pause_ack` to drop
-    // the empty turn, so it goes here.
+    // A paused reply keeps its fragment, except when nothing was generated: the
+    // fallback abort has no `pause_ack` to drop the empty turn, so it goes here.
     const discard = (userStopped && !userPaused) || (userPaused && !assistant.raw)
     if (discard) {
-      // Stop discards the partial reply entirely (including the empty
-      // placeholder and its MCP tool badges). The user message stays so it
-      // can be edited and re-sent; the server-side stream is aborted.
+      // Stop discards the partial reply entirely, tool badges included. The user
+      // message stays so it can be edited and re-sent.
       const index = state.messages.indexOf(assistant)
       if (index !== -1) state.messages.splice(index, 1)
     }
@@ -1529,25 +1400,21 @@ async function startTurn({
 }
 
 export function useChat() {
-  // A working location that is replaced takes the strip with it, through the
-  // same keyed registry the Editor's open buffers and the search results are
-  // forgotten through — this module never imports an Editor file composable, so
-  // the one-way dependency stays the registry's. Registered from the factory
-  // body, the shape every other holder uses: a re-registration replaces this
-  // key's entry instead of appending a second copy.
+  // A replaced working location takes the strip with it, through the same keyed
+  // registry the Editor's open buffers are forgotten through — this module never
+  // imports an Editor file composable, so the dependency stays one-way. A
+  // re-registration replaces this key's entry instead of appending a second copy.
   registerReRootHandler('chatStrip', discardStagedForReRoot)
 
   // The sending key flushes: every staged message, then the draft if it has
-  // content, become consecutive user turns of **one** turn. A draft-only send —
-  // an empty strip — is the send this always was, down to the payload.
+  // content, become consecutive user turns of **one** turn. A draft-only send is
+  // the send this always was, down to the payload.
   //
-  // Everything that can refuse runs first, and a refusal moves nothing: the
-  // draft, the strip and the composer's images all survive it, because a
-  // broken agent selection or a busy conversation must never eat a written
-  // brief. Validation is all-or-nothing for the same reason one step further
-  // along: the server rejects a request carrying a blank user turn, which would
-  // discard every message that rode with it, so each one is judged here first
-  // and a refused flush names its rows and sends nothing.
+  // Everything that can refuse runs first, and a refusal moves nothing: a broken
+  // agent selection or a busy conversation must never eat a written brief.
+  // Validation is all-or-nothing for the same reason — the server rejects a
+  // request carrying a blank user turn, which would discard every message that
+  // rode with it, so each one is judged here first.
   async function send() {
     const trimmed = state.draft.raw.trim()
     const pendingImages = state.pendingImages.slice()
@@ -1555,18 +1422,15 @@ export function useChat() {
     // Nothing staged and nothing typed: nothing to flush, so nothing moves.
     if ((!hasDraft && !state.staged.length) || chatBusy()) return
 
-    // An agent with no model — or a list the composer never read — cannot be
-    // sent to. The same answer paints the warning icon and disables Send, so a
-    // keyboard send, an Enter keypress and a hand-made call all stop here.
-    // Nothing has been posted or pushed, so the draft survives and no stream is
-    // left half-open. The server's 422 stays behind this for a stale tab.
+    // An agent with no model — or a list the composer never read — cannot be sent
+    // to. The same verdict paints the warning icon and disables Send. Nothing has
+    // been posted, so the draft survives and no stream is left half-open.
     if (selectedAgentGateReason()) return
 
-    // The flush's turns, in flush order: every staged row as it stands, then
-    // the draft if it has content (an empty draft is not invented as a turn of
-    // its own). The draft's HTML is filled in only once the flush is accepted:
-    // rendering it now would cancel the preview's debounce, and a refusal must
-    // leave the composer exactly as it found it.
+    // The flush's turns, in flush order: every staged row as it stands, then the
+    // draft if it has content. The draft's HTML is filled in only once the flush
+    // is accepted — rendering it now would cancel the preview's debounce, and a
+    // refusal must leave the composer as it found it.
     const userMessages = state.staged.map((row) => ({
       role: 'user',
       raw: row.raw,
@@ -1580,23 +1444,21 @@ export function useChat() {
           raw: trimmed,
           html: '',
           streaming: false,
-          // Every image the composer holds travels with this one message, in
+          // Every image the composer holds travels with this message, in
           // attachment order.
           images: pendingImages.map((image) => ({ ...image })),
         }
       : null
     if (draftMessage) userMessages.push(draftMessage)
 
-    // All-or-nothing: one message the server would refuse blocks the whole
-    // flush, so the good rows are not spent on a request that will not land.
-    // The strip names the offending rows off the same verdict; here it only has
-    // to say why nothing was sent.
+    // All-or-nothing: one message the server would refuse blocks the whole flush,
+    // so the good rows are not spent on a request that will not land.
     const refused = []
     userMessages.forEach((message, position) => {
       const reason = flushGateReason(message)
       if (!reason) return
-      // The row's number in flush order is what the strip shows and what a
-      // reader can point at; the draft, when it is the offender, is not a row.
+      // The row's number in flush order is what the strip shows; the draft, when
+      // it is the offender, is not a row.
       refused.push(
         position < state.staged.length
           ? `message ${position + 1} (${reason})`
@@ -1604,18 +1466,18 @@ export function useChat() {
       )
     })
     if (refused.length) {
-      // The chat error line is where a refused send is already announced: the
-      // strip marks the offending rows off the same verdict, and this says why
-      // the whole flush stopped. Nothing has moved.
+      // The chat error line is where a refused send is announced: the strip marks
+      // the offending rows off the same verdict, and this says why the flush
+      // stopped. Nothing has moved.
       state.error = `Nothing was sent: ${joinNames(refused)}.`
       return
     }
 
-    // Accepted: the strip and the composer empty as part of opening the turn,
-    // never before the gates. The MCP/LSP toggles lock where they always have —
-    // on the accepted request inside startTurn — so staging alone freezes
-    // nothing. The draft's HTML reuses what setDraft's preview already rendered;
-    // it re-renders only if the sending key beat the debounce.
+    // Accepted: the strip and the composer empty as part of opening the turn, never
+    // before the gates. The MCP/LSP toggles lock on the accepted request inside
+    // startTurn, so staging alone freezes nothing. The draft's HTML reuses what
+    // setDraft's preview rendered, re-rendering only if the sending key beat the
+    // debounce.
     if (draftMessage) draftMessage.html = trimmed ? flushDraftHtml(trimmed) : ''
     state.staged = []
     clearDraft()
@@ -1627,12 +1489,11 @@ export function useChat() {
     await startTurn({ userMessages, history })
   }
 
-  // Batch mode's entry point: one task instruction, one turn. Returns whether
-  // the turn was *started* (false on an empty instruction or a reply already
-  // streaming) — the batch loop needs that flag instead of awaiting a phase
-  // change that would never come. The payload deliberately carries this turn
+  // Batch mode's entry point: one task instruction, one turn. Returns whether the
+  // turn was *started* — the batch loop needs that flag instead of awaiting a
+  // phase change that would never come. The payload deliberately carries this turn
   // alone: `state.messages` is never used to build a batch request, so task N+1
-  // arrives with no trace of task N's transcript (B6).
+  // arrives with no trace of task N's transcript.
   function sendBatchTurn(
     text,
     { batchContext = null, agentMode = undefined, workspace = undefined } = {},
@@ -1657,73 +1518,61 @@ export function useChat() {
     return true
   }
 
-  // Ends the turn in flight, and nothing else: what the user staged is not part
-  // of that turn, so the strip is left exactly as it stands — same rows, same
-  // order, same images. The abort reaches the stream, never the composer's input
-  // state.
+  // Ends the turn in flight, and nothing else: what the user staged is not part of
+  // that turn, so the strip keeps its rows, order and images. The abort reaches the
+  // stream, never the composer's input state.
   function stop() {
     userStopped = true
     if (controller) controller.abort()
   }
 
-  // Non-destructive twin of stop(): the server closes the upstream stream at
-  // its next message boundary and terminates the reply with `pause_ack`, which
-  // keeps the partial turn in the conversation. One-way — the ack puts the app
-  // back to idle, and the user's next Send (their comment, riding on top of the
-  // interrupted turn) is the only way back into inference.
+  // Non-destructive twin of stop(): the server closes the upstream stream at its
+  // next message boundary and terminates the reply with `pause_ack`, which keeps
+  // the partial turn in the conversation. One-way — the ack puts the app back to
+  // idle, and the user's next Send is the only way back into inference.
   //
   // Like `stop()`, it ends a turn and leaves the strip alone: a staged message is
-  // the user's uncommitted input, not part of what is in flight, so neither this
-  // path, its local abort fallback below, nor the `finish()` that follows either
-  // one touches the composer's staged rows.
+  // uncommitted input, not part of what is in flight, so neither this path, its
+  // local abort fallback, nor the `finish()` that follows touches staged rows.
   async function pause() {
     // Blinking = waiting for the ack: not clickable, and nothing to pause once
     // the reply is over.
     if (state.phase === 'idle' || state.pausePending) return
     state.pausePending = true
     try {
-      // No body: there is exactly one pausable reply (the server keeps the
-      // single in-flight handle). The workspace field names **this tab's**
-      // reply — the slot becomes per workspace in task 04, and sending the
-      // field now means that task has no client-side work to do.
+      // No body: the server keeps the single in-flight handle. The workspace field
+      // names **this tab's** reply.
       await fetch(withWorkspace('/api/chat/pause'), { method: 'POST' })
     } catch {
-      // Endpoint unreachable: fall back to a local abort that keeps the
-      // fragment. The abort ends readStream, so finish() runs and clears
-      // pausePending.
+      // Endpoint unreachable: fall back to a local abort that keeps the fragment.
+      // The abort ends readStream, so finish() runs and clears pausePending.
       userPaused = true
-      // Flag the fragment here, since no `pause_ack` will ever do it: it gets
-      // the caption and, more importantly, the payload note that tells the
-      // model this turn is unfinished.
+      // Flag the fragment here, since no `pause_ack` will: it gets the caption and
+      // the payload note that tells the model this turn is unfinished.
       if (activeMessage) activeMessage.paused = true
       if (controller) controller.abort()
     }
   }
 
   // Puts the last unanswered group of user turns back into the strip: every turn
-  // of the run, in order, each with all of its images, and drops the whole run
-  // plus everything after it from the thread. **Not one message** — a flush opens
-  // a turn with several user turns in a row, and a gesture that returned one
-  // mockup out of four would be worse than doing nothing. The name is kept as it
-  // was because it is still the gesture the pencil draws (the last thing the user
-  // wrote); what it now returns is the run that thing was part of.
+  // of the run, in order, each with all of its images, and drops the whole run plus
+  // everything after it from the thread. **Not one message** — a flush opens a turn
+  // with several user turns in a row, so the name keeps naming the gesture the
+  // pencil draws while returning the run that thing was part of.
   //
-  // Splicing from the group's first message to the end takes a partial reply the
-  // model left after the last user turn with it — interrupted, truncated or still
-  // being written — which matches today's gesture and is right: the group is what
-  // is unanswered, so nothing after it was an answer to what is coming back.
+  // Splicing to the end takes a partial reply the model left after the last user
+  // turn with it — interrupted, truncated or still being written — which is right:
+  // the group is what is unanswered.
   //
   // The group joins the strip **in front of** anything already staged, because the
-  // strip is the flush order and these messages were written before whatever the
-  // user is staging now. The draft is deliberately untouched: it is the user's
-  // in-progress typing and nothing here asked for it. No request is made — this
-  // only moves text between the thread and the strip.
+  // strip is the flush order. The draft is deliberately untouched: it is the
+  // user's in-progress typing. No request is made.
   function editLast() {
     if (chatBusy()) return
     const start = lastUserGroupStart(state.messages)
     if (start === -1) return
     // Only the user turns of the run come back: a reply after the last of them is
-    // what is going away, not something to re-send.
+    // what is going away.
     const group = state.messages.slice(start).filter((message) => message.role === 'user')
     state.staged = [
       ...group.map((message) => ({
@@ -1743,18 +1592,17 @@ export function useChat() {
     state.error = null
   }
 
-  // Replaces the conversation with the turns of a parsed session file (see
-  // parseSessionFile). Returns `{ restored }`, or null when refused because a
-  // reply is streaming — the "must not be running" rule lives here, not only
-  // on the button, exactly as in editLast()/reset().
+  // Replaces the conversation with the turns of a parsed session file. Returns
+  // `{ restored }`, or null when refused because a reply is streaming — the
+  // "must not be running" rule lives here, not only on the button.
   function loadSession(parsed) {
     if (chatBusy()) return null
     const items = Array.isArray(parsed?.messages) ? parsed.messages : []
     if (!items.length) return { restored: 0 }
 
-    // Rebuild the rich shape the view and the side panel render: the common
-    // fields plus the assistant-only field set send() initialises, so the
-    // badges (which read `tokens` / `contextTokens`) never see `undefined`.
+    // Rebuild the rich shape the view and the side panel render: the common fields
+    // plus the assistant-only set startTurn() initialises, so the badges never see
+    // `undefined`.
     state.messages = items.map((item) => {
       const raw = item.content ?? ''
       const message = {
@@ -1763,15 +1611,12 @@ export function useChat() {
         html: renderMarkdown(raw, { mermaid: true }),
         streaming: false,
         // Images restored from the file (already `{ dataUrl, name, size }`), so
-        // every thumbnail renders again and the next send re-posts them all to
-        // the model — and editLast() carries every one of them back to the strip
-        // with the message it belongs to.
+        // every thumbnail renders and the next send re-posts them to the model.
         images: item.images ?? [],
       }
       if (item.role !== 'assistant') return message
-      // The loaded thinking flows become the reply's panel timeline: one
-      // `{ kind: 'reasoning' }` block per flow, in file order (tool badges are
-      // never saved, so nothing else belongs in `blocks`).
+      // The loaded thinking flows become the reply's panel timeline: one reasoning
+      // block per flow, in file order (tool badges are never saved).
       const blocks = (item.reasoning ?? []).map((text) => ({ kind: 'reasoning', text }))
       return Object.assign(message, {
         tools: [],
@@ -1799,10 +1644,9 @@ export function useChat() {
       })
     })
 
-    // A loaded conversation counts as started: the MCP/LSP toggles freeze as
-    // they would have after the first accepted send, and the loaders below
-    // must not re-snapshot over them (they ignore a locked conversation).
-    // No reset() here — it would wipe the messages just loaded.
+    // A loaded conversation counts as started: the toggles freeze as after a first
+    // accepted send, and the loaders below ignore a locked conversation. No reset()
+    // here — it would wipe the messages just loaded.
     if (state.messages.length) {
       state.mcp.locked = true
       state.lsp.locked = true
@@ -1810,71 +1654,62 @@ export function useChat() {
       loadChatMcp()
       loadChatLsp()
     }
-    // The agent the file was saved with (v4 envelope) is conversation state too,
-    // and it **wins over the tab's remembered choice**: the file describes
-    // the conversation, `sessionStorage` describes the tab, and the more
+    // The agent the file was saved with **wins over the tab's remembered choice**:
+    // the file describes the conversation, `sessionStorage` the tab, and the more
     // specific one answers a resume. useAgentModes judges it against the loaded
     // list — an unknown id falls back to the first agent with one notice line,
-    // never a silent swap of persona and never a refused load.
+    // never a silent swap of persona.
     applySessionAgentMode(parsed.agentMode)
     state.error = null
     state.pendingImages = []
-    // The strip belonged to the conversation this file just replaced: those rows
-    // were written on top of a thread that no longer exists, and loading is a
-    // replacement, not an addition. A staged message never travels in either
+    // The strip belonged to the conversation this file replaced: loading is a
+    // replacement, not an addition, and a staged message never travels in either
     // direction — `conversationJson()` renders the thread alone.
     state.staged = []
     // A loaded conversation replaces the one the meters measured, so they start
-    // from nothing: the file carries no timings (see the zeroed figures above),
-    // and keeping the previous conversation's total would credit these turns
-    // with time they never spent.
+    // from nothing: keeping the previous total would credit these turns with time
+    // they never spent.
     state.session.startedAt = 0
     state.session.spentMs = 0
     return { restored: state.messages.length }
   }
 
-  // `refetchHubs: false` is batch mode's between-task wipe: the conversation
-  // is wiped but the conversation-scoped MCP/LSP allowlist must NOT be re
-  // seeded, or a connector that appeared mid-lot would silently join the tool
-  // set of the remaining tasks. The toggles stay locked for the whole lot.
+  // `refetchHubs: false` is batch mode's between-task wipe: the conversation is
+  // wiped but the hub allowlist must NOT be re-seeded, or a connector that
+  // appeared mid-lot would silently join the remaining tasks' tool set.
   function reset({ refetchHubs = true } = {}) {
     if (controller) controller.abort()
     state.messages = []
     state.error = null
     state.pendingImages = []
-    // Restart is the one gesture that wipes everything, so the strip goes with
-    // the conversation: a queue that outlived it would be the only survivor of a
-    // thread nobody can see any more. Batch mode's between-task wipe reaches this
-    // same function and means the same thing. Silent on purpose — Restart already
-    // means wipe, so a discarded row needs no message of its own.
+    // Restart wipes everything, so the strip goes with the conversation: a queue
+    // that outlived it would be the only survivor of a thread nobody can see.
+    // Silent on purpose — Restart already means wipe.
     state.staged = []
-    // The conversation the meters described is gone, so they start over: this is
-    // the **only** place the clock and the counters go back to blank (Restart in
-    // the composer). Batch mode's between-task wipe reaches the same function,
-    // and that is intended: a task's LLM context is its own, so the next task
-    // must not open on its predecessor's occupancy or on its speed.
+    // The conversation the meters described is gone, so they start over: the
+    // **only** place the clock and the counters go back to blank. Batch mode's
+    // between-task wipe reaches this too, and that is intended: a task's model
+    // context is its own, so the next task must not open on its predecessor's
+    // occupancy or speed.
     state.session.startedAt = 0
     state.session.spentMs = 0
-    // A pause still in flight has no conversation to ack any more: clear the
-    // blinking flag (and the per-reply fallback flag) so no ⏸ survives on a
-    // conversation that no longer streams. The ack itself is a no-op then —
-    // `assistant.streaming` is already false (the guard in applyEvent).
+    // A pause still in flight has no conversation to ack: clear the blinking flag
+    // (and the per-reply fallback flag) so no ⏸ survives on a conversation that no
+    // longer streams.
     state.pausePending = false
-    // The abort above ends a turn that never reached a terminal frame, so the
-    // wait's status line needs the same sweep here: Restart during a wait would
-    // otherwise leave `Reconnecting 1/3` under a composer holding no turn.
+    // The abort above ends a turn that reached no terminal frame, so the wait's
+    // status line needs the same sweep: Restart during a wait would otherwise
+    // leave a stale line under a composer holding no turn.
     clearEndpointWait()
     userPaused = false
-    // The session-mode notice explained a conversation that no longer exists.
-    // It goes before the `refetchHubs` early return, because batch mode's
-    // between-task wipe resets without refetching and must clear it too.
+    // The session-mode notice explained a conversation that no longer exists, and
+    // it must be cleared before the `refetchHubs` early return too — batch mode's
+    // between-task wipe resets without refetching.
     clearAgentModeNotice()
     if (!refetchHubs) return
     // New conversation: MCP and LSP toggles unlock against freshly fetched
-    // snapshots, keeping the previous on/off choices (the loaders seed the
-    // new lists from them). The agent list is refreshed by the same call: a
-    // store edited while the lot ran (or while this tab sat idle) takes effect
-    // on the next conversation.
+    // snapshots, keeping the previous on/off choices. The agent list is refreshed
+    // by the same call, so a store edited mid-lot takes effect next time.
     state.mcp.locked = false
     state.lsp.locked = false
     loadChatHubs()
@@ -1883,9 +1718,8 @@ export function useChat() {
   return {
     state,
     send,
-    // The same busy rule the guards in this composable use: a control that has
-    // to lock while a reply streams reads this rather than watching `phase`, so
-    // it cannot disagree with a send being refused.
+    // The same busy rule the guards here use: a control that locks while a reply
+    // streams reads this rather than watching `phase`, so the two cannot disagree.
     chatBusy,
     // The one switch of the Live View, next to the rule that locks it — a
     // component that draws the control calls this and never moves the flag.
@@ -1897,18 +1731,17 @@ export function useChat() {
     setDraft,
     appendDraft,
     registerDraftInput,
-    // Back to the strip, all of the last unanswered group — see its comment: this
-    // is not a one-message undo, whatever the name still says.
+    // Back to the strip, all of the last unanswered group: not a one-message undo,
+    // whatever the name still says.
     editLast,
     loadSession,
     attachImage,
     removeImage,
     clearImage,
-    // The strip's verbs: stage the draft (or the Stage button / chord), drop one
-    // row, pull one back into the composer. All three refuse while the composer
-    // is shut, and the strip is read-only then rather than hidden. What a row
-    // says about itself comes from the `flushGateReason` export above, so the
-    // strip quotes the one verdict instead of deriving a second one.
+    // The strip's verbs: stage the draft, drop one row, pull one back into the
+    // composer. All three refuse while the composer is shut, and the strip is
+    // read-only then rather than hidden. What a row says about itself comes from
+    // `flushGateReason`, so the strip quotes one verdict.
     stage,
     removeStaged,
     pullBackStaged,
@@ -1918,8 +1751,8 @@ export function useChat() {
     loadChatLsp,
     setChatLsp,
     restartLsp: () => restartHub('lsp'),
-    // The three together (modes + both hubs), for the entry points that want a
-    // fresh conversation snapshot rather than one list.
+    // The three together (modes + both hubs), for entry points that want a fresh
+    // conversation snapshot rather than one list.
     loadChatHubs,
   }
 }

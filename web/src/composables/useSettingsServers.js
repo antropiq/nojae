@@ -19,9 +19,8 @@ import { CLOSE_QUESTION } from './useAgentModes'
 //: This is the settings dialog's half of the idiom the Agent-modes card settled
 //: on (`useAgentModes.js`): every enablement verdict, every tooltip and the
 //: dialog's **one** message are answered here, and `SettingsDialog.vue` renders
-//: the answers. The property that buys is the one the migration plan asks for
-//: (§7.12): no rule about what a control may do is written in the template, so a
-//: rule cannot drift from the button that shows it.
+//: the answers. No rule about what a control may do is written in the template,
+//: so a rule cannot drift from the button that shows it.
 //:
 //: Each slot answers the same two things — is it inert, and what does it say —
 //: in **one** string. That string is the button's accessible name when it is
@@ -42,7 +41,7 @@ const SERVER_NOT_SAVED_LABEL = 'Save the server before fetching its models.'
 
 //: The detail column's two pages. They are **pages of one form**, not two forms:
 //: both read and write the same `state.modelDraft`, so switching between them
-//: cannot lose a keystroke and cannot write anything (§4.5).
+//: cannot lose a keystroke and cannot write anything.
 export const DETAIL_SETTINGS = 'settings'
 export const DETAIL_PROMPT = 'prompt'
 
@@ -100,11 +99,11 @@ function slotContext({
   }
 }
 
-//: The row the toolbar acts on: the **page that is visible** is the scope
-//: (§4.3), so `Save` on the model page saves that model and `Save` on the server
-//: page saves that server. The labels never spell the scope — the page and the
-//: verb are always on screen together, which is the only thing that makes the
-//: short word honest.
+//: The row the toolbar acts on: the **page that is visible** is the scope, so
+//: `Save` on the model page saves that model and `Save` on the server page saves
+//: that server. The labels never spell the scope — the page and the verb are
+//: always on screen together, which is the only thing that makes the short word
+//: honest.
 export function addSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
@@ -122,7 +121,7 @@ export function addSlotFor(context = {}) {
 //: **save** — `Saving…` while a write is in flight, and inert for nothing else.
 //: A form that holds a problem does **not** disable it: the click is refused and
 //: the reason lands in the message band, because taking the button away hides the
-//: answer (§4.3).
+//: answer.
 export function saveSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (ctx.saving) return slotInert('Saving…')
@@ -153,10 +152,10 @@ export function deleteSlotFor(context = {}) {
 }
 
 //: The delete pair, and whether it is in the DOM at all: **absent**, not hidden,
-//: until a delete has been asked for (§4.8). Its two tooltips are the question
-//: and its two answers; the sentence naming what the delete takes with it is the
-//: band's, not the toolbar's, because a server delete loses its models and that
-//: copy is too long for a glyph.
+//: until a delete has been asked for. Its two tooltips are the question and its
+//: two answers; the sentence naming what the delete takes with it is the band's,
+//: not the toolbar's, because a server delete loses its models and that copy is
+//: too long for a glyph.
 export function deleteConfirmationFor(context = {}) {
   const ctx = slotContext(context)
   if (!ctx.confirming || ctx.page === null || !ctx.rowSaved) {
@@ -169,12 +168,11 @@ export function deleteConfirmationFor(context = {}) {
   }
 }
 
-//: **The footer's close pair** (the Agents card's D8, ported): the same idiom as
-//: the delete pair, in the footer's **reserved** slot, and **absent from the DOM**
-//: until a close is being confirmed — so it is neither focusable nor announced
-//: while it means nothing, and `Close` never moves when it arrives. Its two
-//: tooltips are the two answers, and each glyph's tooltip is its accessible name,
-//: so they cannot drift.
+//: **The footer's close pair**: the same idiom as the delete pair, in the
+//: footer's **reserved** slot, and **absent from the DOM** until a close is being
+//: confirmed — so it is neither focusable nor announced while it means nothing,
+//: and `Close` never moves when it arrives. Its two tooltips are the two answers,
+//: and each glyph's tooltip is its accessible name, so they cannot drift.
 //:
 //: Unlike the delete pair it is **never inert**: keeping editing and discarding
 //: are answers that can always be given, and a write that lands while the question
@@ -195,9 +193,9 @@ export function closeConfirmationFor(context = {}) {
 
 //: *Fetch models* lives under the API key field, not in the toolbar: what it
 //: answers is the body of that page, and a disabled button beside the field it
-//: is disabled *about* needs no tooltip to explain which row it means (§4.3).
-//: One gate covers listing and adding both — the server must have a row — which
-//: is why no `+` can ever be shown for an unsaved server (§4.4).
+//: is disabled *about* needs no tooltip to explain which row it means. One gate
+//: covers listing and adding both — the server must have a row — which is why no
+//: `+` can ever be shown for an unsaved server.
 export function fetchSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (ctx.listing) return slotInertText('Fetching…', 'Fetching…')
@@ -210,11 +208,11 @@ export function fetchSlotFor(context = {}) {
   return slotLiveText('Fetch models')
 }
 
-//: One fetched name's `+`. It is a **write** (§4.4), so it shares the
-//: write-in-flight guard rather than racing it, and a name the server already
-//: has is inert with its reason instead of clicking into a store refusal. It
-//: stays in its cell either way: a column that answers differently per row would
-//: make the table's widths jump.
+//: One fetched name's `+`. It is a **write**, so it shares the write-in-flight
+//: guard rather than racing it, and a name the server already has is inert with
+//: its reason instead of clicking into a store refusal. It stays in its cell
+//: either way: a column that answers differently per row would make the table's
+//: widths jump.
 export function addRowSlotFor({
   added = false,
   context = {},
@@ -229,7 +227,7 @@ export function addRowSlotFor({
 
 //: The listing's rows: the names the server answered with, each marked with
 //: whether that server already holds a model of the name. The comparison is
-//: against the tree the client already holds, so it costs no route (§4.4).
+//: against the tree the client already holds, so it costs no route.
 export function listingRowsFor(fetchedIds, server) {
   // The store strips names, while a server may list them with whitespace: the
   // comparison is on the trimmed text so a listed name the store already holds
@@ -247,11 +245,11 @@ export function listingRowsFor(fetchedIds, server) {
 //: The detail column's tab strip.
 //:
 //: Both tabs are always in the DOM and the strip is **reserved** whatever is
-//: selected, so choosing a model does not push the first field down by one row
-//: (§4.5). On the server page neither tab is *shown*: the section strip above
-//: already reads `Servers`, so a `Settings` tab there repeats the word directly
-//: over it. They are hidden rather than removed, which is what keeps the strip
-//: the same height in every state.
+//: selected, so choosing a model does not push the first field down by one row.
+//: On the server page neither tab is *shown*: the section strip above already
+//: reads `Servers`, so a `Settings` tab there repeats the word directly over it.
+//: They are hidden rather than removed, which is what keeps the strip the same
+//: height in every state.
 //: The page that is drawn is a reading of the tab *and* the page: only a model
 //: has a System prompt, so a tab left on `prompt` while a server is selected
 //: draws the server's fields rather than an empty textarea.
@@ -273,12 +271,11 @@ export function detailPageFor(page, tab) {
   return DETAIL_SETTINGS
 }
 
-//: Which page the column actually draws, from the same two readings. Three
-//: form answers plus `empty`, so the template holds no condition of its own
-//: about which form is on screen — and a server can never be drawn with a
-//: textarea where its fields should be (§4.5). `empty` is the column's own
-//: nothing-to-edit state, which is content of the column rather than one of the
-//: band's nine findings (§4.7).
+//: Which page the column actually draws, from the same two readings. Three form
+//: answers plus `empty`, so the template holds no condition of its own about
+//: which form is on screen — and a server can never be drawn with a textarea
+//: where its fields should be. `empty` is the column's own nothing-to-edit state,
+//: which is content of the column rather than one of the band's findings.
 export function detailBodyFor(page, tab) {
   if (page === 'model') {
     return tab === DETAIL_PROMPT ? 'modelPrompt' : 'modelSettings'
@@ -330,7 +327,7 @@ export function saveRefusalFor({ page = null, draft = null, caps = null } = {}) 
 }
 
 //: ---------------------------------------------------------------------------
-//: The dialog's **one** message (§4.7).
+//: The dialog's **one** message.
 //:
 //: Everything the dialog says comes out of the band at the bottom, chosen by
 //: this fixed priority and never by recency, so two truths never fight for the
@@ -400,9 +397,9 @@ export function messageFor({
   }
 
   // A delete awaiting its answer: the sentence is the store's own copy, put in
-  // the band by the verb that asked (§4.8). It outranks everything the read or a
-  // stale failure could say, because the question on screen is the one that
-  // needs answering.
+  // the band by the verb that asked. It outranks everything the read or a stale
+  // failure could say, because the question on screen is the one that needs
+  // answering.
   if (servers && deleteSentence) {
     return { text: deleteSentence, role: 'alert', action: null }
   }
@@ -460,7 +457,7 @@ export function messageFor({
 
   // The quietest thing the band ever says, and last for that reason: a listing
   // that came back empty is contextual help about the table on screen, and it
-  // must not out-rank a failure or the cross-store line (§9.1-2).
+  // must not out-rank a failure or the cross-store line.
   if (servers && page === 'server' && listingEmpty) {
     return { text: 'This server lists no models.', role: 'status', action: null }
   }
@@ -470,7 +467,8 @@ export function messageFor({
 
 //: The store-level question the dialog asks at the top of nothing any more: is
 //: the store usable, and does it hold at least one model? The unusable case is
-//: answered by priority 3 with the server's own words; this is the second half.
+//: answered by an earlier priority with the server's own words; this is the
+//: second half.
 function storeFindings({ storeState, config }) {
   if (!storeState || storeState.usable === false) return null
   if (!(config?.models ?? []).length) {
@@ -482,7 +480,7 @@ function storeFindings({ storeState, config }) {
 
 //: The MCP section's top-level lines only. A row's own badge and its own error
 //: stay beside the connector they describe: a band that carries six connector
-//: errors is a list, not a message (§4.7).
+//: errors is a list, not a message.
 function mcpTopLevelLine({ mcpInstalled, mcpError, mcpExternalsError }) {
   // A failed read is the fact, never "not installed": the flag is only known
   // after a read has answered.
@@ -508,10 +506,10 @@ function lspTopLevelLine({ lspInstalled, lspError, lspServersError }) {
 //: ---------------------------------------------------------------------------
 //: The MCP and LSP sections' one verb each.
 //:
-//: Their `Save` left the footer for a toolbar of the Servers tab's shape (§4.9),
-//: and a toolbar verb is a verdict like any other: the two sections share the
-//: band's message priority, so their enablement is answered here too rather than
-//: written as a condition beside the button.
+//: Their `Save` left the footer for a toolbar of the Servers tab's shape, and a
+//: toolbar verb is a verdict like any other: the two sections share the band's
+//: message priority, so their enablement is answered here too rather than written
+//: as a condition beside the button.
 //: ---------------------------------------------------------------------------
 
 export function mcpSaveSlotFor({
@@ -680,9 +678,9 @@ export function useSettingsServers() {
     return addRowSlotFor({ added: row.added, context: slotContextFor.value })
   }
 
-  //: The toolbar's `+`, scoped to the page that is visible (§4.3): a new server
-  //: from the server page or from no selection at all, a new model under the
-  //: selected server from the model page.
+  //: The toolbar's `+`, scoped to the page that is visible: a new server from the
+  //: server page or from no selection at all, a new model under the selected
+  //: server from the model page.
   function addRow() {
     if (addSlot.value.disabled) return
     if (page.value === 'model') shell.addModelRow()
@@ -691,7 +689,7 @@ export function useSettingsServers() {
 
   //: The toolbar's Save. A form that holds a problem is **not** a disabled
   //: button: the click is refused here and the reason is already in the band,
-  //: because `refusal` is derived from the draft the field is bound to (§4.3).
+  //: because `refusal` is derived from the draft the field is bound to.
   function saveRow() {
     if (saveSlot.value.disabled || refusal.value) return
     if (page.value === 'model') shell.saveModelDraft()
@@ -730,7 +728,7 @@ export function useSettingsServers() {
     return shell.confirmDeleteRow()
   }
 
-  //: The footer's `Close` and its two answers (the Agents card's D8, ported).
+  //: The footer's `Close` and its two answers.
   //: **Every route out of the dialog goes through `askClose`** — `Close`, Escape
   //: and a backdrop click are the same verb, so none of them can be a silent
   //: bypass of the guard. The answers are refused by nothing at all: keeping
@@ -789,7 +787,7 @@ function selectedServerOf(state) {
 
 //: The listing table's one line of its own: the server **was** listed and
 //: answered with nothing. Only the server page can show a listing, so only the
-//: server page can be empty — and "nothing asked yet" is not a finding (§9.1-2).
+//: server page can be empty — and "nothing asked yet" is not a finding.
 function listingEmptyFor(state) {
   if (!state.serverDraft || state.modelDraft) return false
   if (state.fetchedModelsLoading != null) return false

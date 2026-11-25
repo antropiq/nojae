@@ -1,86 +1,69 @@
 """The Windows driver behind the terminal's pty seam: a real pseudo-console.
 
-C-D1's seam, second half. :mod:`termhub.pty_posix` is a kernel PTY; this module
-is a Windows **pseudo-console** (ConPTY), through ``pywinpty`` — the dependency
-the ``windows`` extra carries (csl-04) and the layer Jupyter's and VS Code's
-terminals sit on. It answers exactly the surface csl-03's *Results* note names —
-open-with-size, spawn the shell on it, read bytes, write bytes, set size, get
-size, close, and *"is the far end gone?"* — and nothing wider: no policy, no
-frame, no WebSocket, and **no kill** (the session's teardown plus
-:mod:`src.core.proctree_jobs` own the process tree; csl-07 wires the job).
+:mod:`termhub.pty_posix` is a kernel PTY; this module is a Windows
+**pseudo-console** (ConPTY) through ``pywinpty`` — the dependency the ``windows``
+extra carries. It answers the seam's surface and nothing wider: no policy, no
+frame, no WebSocket and **no kill** (the session's teardown plus
+:mod:`src.core.proctree_jobs` own the process tree). Raw ConPTY through
+``ctypes``, a pipe pair (no ``isatty``, no resize — the pane would be a log
+viewer), a WSL bridge (the shell's filesystem would stop being the working
+location) and Git's bundled ``winpty.dll``/``winpty-agent.exe`` are what this
+deliberately is not.
 
-It is the accepted alternative from C-D1's table and nothing else: not raw
-ConPTY through ``ctypes`` (a console-host handshake re-implemented in a module
-whose failure mode is a hung terminal), not a pipe pair (no ``isatty``, no
-resize, no line discipline — the pane would be a log viewer), not a WSL bridge
-(the shell's filesystem would stop being the working location), and not Git's
-bundled ``winpty.dll``/``winpty-agent.exe``.
-
-Two members are this platform's answer for a pair that has no slave descriptor
-to hand a ``Popen`` — the pseudo-console *is* the child's stdio:
+Two members are this platform's answer for a pair with no slave descriptor to
+hand a ``Popen`` — the pseudo-console *is* the child's stdio:
 
 * :attr:`ConPty.starts_child` — the capability :mod:`termhub.drivers` and
-  ``session.spawn()`` branch on, so the POSIX half keeps its ``Popen`` exactly
-  as it is today. It is a property of the pair, never an ``os.name`` test.
-* :meth:`ConPty.spawn_shell` — start the shell on this console, answering with
-  the two things the session asks of a process (``pid``, ``wait``).
+  ``session.spawn()`` branch on, so the POSIX half keeps its ``Popen`` exactly as
+  it is. It is a property of the pair, never an ``os.name`` test.
+* :meth:`ConPty.spawn_shell` — start the shell on this console, answering with the
+  two things the session asks of a process (``pid``, ``wait``).
 
-The rules the session depends on, re-stated for this mechanism:
+The rules the session depends on:
 
-* **the size travels to the creation** — C-D4: *"the size is passed when the
-  pseudo-console is created (so 'set before spawn' maps exactly)"*.
-  :func:`open_pair` therefore creates nothing on its own; it records a size, and
-  the session's existing order (``set_size`` before the spawn) is what supplies
-  it. :meth:`ConPty.set_size` re-issues it on a live console and
-  :meth:`ConPty.get_size` answers the size it was created or reflowed with —
-  ``pywinpty`` exposes no read-back, so that is the driver's own record, and the
-  shell's ``stty size`` stays the client-side view of the same number.
+* **the size travels to the creation**: :func:`open_pair` creates nothing, it
+  records a size, and the session's order (``set_size`` before the spawn) is what
+  supplies it. ``pywinpty`` exposes no read-back, so :meth:`ConPty.get_size`
+  answers the driver's own record while the shell's ``stty size`` stays the
+  client-side view of the same number.
 * **bytes, never decoded text**, and never more than the caller asked for.
-  ``pywinpty`` answers *strings* of whatever length its agent likes (measured:
-  up to 16 384 characters in one read), so the driver chunks to ``max_bytes`` itself
-  and buffers the rest. The session's ``PTY_READ_BYTES`` framing and its
-  incremental UTF-8 decoder stay the only place bytes become text (C §7).
-* **the stream ends at an EOF, not an ``EIO``** — C-D3: *"A ConPTY pipe ends with
-  EOF (an empty read), not ``EIO``, and there is no slave fd to close. … the seam
-  exposes one predicate — 'is the far end gone?' — and ``pump()`` keeps its shape
-  while the reason moves into the driver."* So an empty read whose shell is gone
-  raises the seam's one :class:`termhub.pty_posix.FarEndGone`, and a driver
-  failure raises :class:`ConPtyError`, an ``OSError`` that is *not* that: the
-  session tells a stream that ended from a mechanism that broke. An EOF is not
-  proof the shell exited cleanly — :meth:`ConPty.child_exit_status` reports the
-  child's status separately, and the exit code the session reaps is the number
-  the pane is given.
-* **encoding is verified, not assumed** (C-D6). Measured on this machine with a
-  Git Bash child: ``echo café中文 ☃`` round-trips identically, because the
-  ConPTY buffer is UTF-16 and the agent frames its pipe as UTF-8 — no
-  ``chcp``/code-page step was needed, so the driver only converts at the
-  boundary, symmetrically (encode UTF-8 on read, decode it on write, both with
-  ``surrogateescape``). A child byte that is not valid text in its own locale is
-  repaired by the console before it reaches us (a lone ``\\xff`` arrives as
-  U+FFFD), which the session's ``errors="replace"`` decoder would do in any case.
+  ``pywinpty`` answers *strings* of whatever length its agent likes (measured: up
+  to 16 384 characters in one read), so the driver chunks to ``max_bytes`` itself
+  and buffers the rest; the session's ``PTY_READ_BYTES`` framing and its
+  incremental UTF-8 decoder stay the only place bytes become text. Encoding is
+  verified, not assumed: a Git Bash child round-trips ``echo café中文 ☃``
+  identically, because the console buffer is UTF-16 and the agent frames its pipe
+  as UTF-8, so no ``chcp``/code-page step is needed.
+* **the stream ends at an EOF, not an ``EIO``**, and there is no slave fd to
+  close. An empty read whose shell is gone raises the seam's one
+  :class:`termhub.pty_posix.FarEndGone`; a driver failure raises
+  :class:`ConPtyError`, an ``OSError`` that is *not* that, so the session can tell
+  a stream that ended from a mechanism that broke. An EOF is no proof the shell
+  exited cleanly — :meth:`ConPty.child_exit_status` reports the child's status
+  separately.
 * **every process the driver started is nameable** — :meth:`ConPty.started_pids`
-  gives the shell *and* the console helper beside it, which is C-D5's *"the one
-  an implementer will forget"* and what lets csl-07's job contain both.
-  ``pywinpty`` reports only the shell's pid, so the helper's is obtained by
-  enumerating this process's children around the creation (:func:`_child_processes`).
+  gives the shell *and* the console helper beside it, the one an implementer
+  forgets. ``pywinpty`` reports only the shell's pid, so the helper's is found by
+  enumerating this process's children around the creation
+  (:func:`_child_processes`).
 
 **How a read waits**: it never leaves a native call pending — the driver polls
-the agent's non-blocking read on an interval (:data:`READ_POLL_INTERVAL_SECONDS`,
-a patchable tunable; the same mode ``pywinpty``'s own reader thread uses). This
-is not a timeout in ``pump()`` and it adds no grace of its own: a blocking read
-inside a worker thread cannot be cancelled by anything the app owns (``pywinpty``
-documents it as interruptible only by killing the process), while a poll returns
-to its loop every few tens of milliseconds, so a teardown ends the pump instead
-of stranding a thread on a live child.
+the agent's non-blocking read on an interval
+(:data:`READ_POLL_INTERVAL_SECONDS`, a patchable tunable; the mode ``pywinpty``'s
+own reader thread uses). A blocking read in a worker thread cannot be cancelled
+by anything the app owns (``pywinpty`` documents it as interruptible only by
+killing the process), while a poll returns to its loop every few tens of
+milliseconds, so a teardown ends the pump instead of stranding a thread on a live
+child.
 
-The one honest platform difference, stated rather than papered over (C-D4): a
-POSIX program notifies *itself* on ``SIGWINCH``, a Windows console program is
-**reflowed by the console**, and a program that reads its size once at startup
-behaves differently on the two. ``^C`` is the input event it always was (C-D5):
-the byte goes into the console, which turns it into a ``CTRL_C_EVENT`` for the
-group — this driver special-cases nothing, and ``^Z``/job stop/resume are not
-promised. Nor is the shell a session leader here (``start_new_session`` has no
-Windows meaning): the job is the boundary instead.
+One honest platform difference: a POSIX program notifies *itself* on
+``SIGWINCH``, a Windows console program is **reflowed by the console**, so a
+program that reads its size once at startup behaves differently on the two.
+``^C`` is the input event it always was: the byte goes into the console, which
+turns it into a ``CTRL_C_EVENT`` for the group — this driver special-cases
+nothing, ``^Z``/job stop/resume are not promised, and the shell is no session
+leader here (``start_new_session`` has no Windows meaning): the job is the
+boundary instead.
 """
 
 import ctypes
@@ -102,7 +85,7 @@ else:
     # Linux install never resolves it. Importing this module must never be what
     # breaks the app, so a missing module or an unloadable DLL is recorded here and
     # answered by :func:`available` — the same shape as :mod:`termhub.pty_posix`'s
-    # runtime guard, and the reason csl-04's refusal is still what the pane shows.
+    # runtime guard.
     try:
         import winpty
     except (ImportError, OSError):  # pragma: no cover - dependency not installed
@@ -114,9 +97,7 @@ logger = logging.getLogger("nojae.terminal")
 def available() -> bool:
     """Is this driver runnable here? Probes the dependency, never the platform.
 
-    :mod:`termhub.drivers` asks this the same question it asks
-    :func:`termhub.pty_posix.available`, and the answer is what imported: the
-    pseudo-console exists exactly where ``winpty`` loaded.
+    The pseudo-console exists exactly where ``winpty`` loaded.
     """
     return winpty is not None
 
@@ -136,10 +117,9 @@ EXIT_POLL_INTERVAL_SECONDS = 0.05
 # The exe names the console helper can have. ``pywinpty`` starts the
 # pseudo-console's agent as a child of *this* process — ``OpenConsole.exe`` on
 # the ConPTY backend, ``winpty-agent.exe`` on the older one — and never reports
-# its pid, so :meth:`ConPty.started_pids` finds it by name among the children
-# that appeared while the console was created. Names rather than "anything new":
-# another component (a hub, a second terminal) that spawns in the same instant
-# must not be claimed as this session's helper.
+# its pid, so :meth:`ConPty.started_pids` finds it by name. Names rather than
+# "anything new": another component that spawns in the same instant must not be
+# claimed as this session's helper.
 CONSOLE_HELPER_NAMES: Tuple[str, ...] = ("openconsole.exe", "winpty-agent.exe")
 
 
@@ -151,8 +131,7 @@ class ConPtyError(OSError):
     ``pump()`` ends on either, but the session and the log can tell a stream that
     reached its end from a mechanism that broke. A failed spawn raises this too,
     which keeps ``session.spawn()`` on the ``OSError`` path the route already
-    renders as an ``error`` frame plus close code 4501 — C §3's *"if … the
-    pseudo-console cannot be created"* case, with the refusal's existing shape.
+    renders as an ``error`` frame plus close code 4501.
     """
 
 
@@ -160,9 +139,9 @@ def open_pair() -> "ConPty":
     """The seam's ``open_pair`` for Windows: a pair at the default size.
 
     Nothing native is created here, because a pseudo-console cannot be made
-    without its size (C-D4) and the session's ordering is ``set_size`` *then*
-    spawn: the size the session sets on the pair is the size the console is built
-    with, inside :meth:`ConPty.spawn_shell`.
+    without its size and the session's ordering is ``set_size`` *then* spawn: the
+    size the session sets on the pair is the size the console is built with,
+    inside :meth:`ConPty.spawn_shell`.
     """
     return ConPty(constants.DEFAULT_COLS, constants.DEFAULT_ROWS)
 
@@ -200,10 +179,10 @@ class ConPty:
         """Record the window size; reflow the console once it exists.
 
         Before :meth:`spawn_shell` this only moves the number the pseudo-console
-        will be **created** with — that is the whole of C-D4's "set before spawn"
-        on this mechanism. After it, it asks the console to resize (which reflows
-        its buffer); see the module docstring for how a Windows program learns
-        the new size, and for what is *not* promised.
+        will be **created** with — "set before spawn" is the whole of it on this
+        mechanism. After it, it asks the console to resize (which reflows its
+        buffer); see the module docstring for how a Windows program learns the new
+        size, and for what is *not* promised.
         """
         if cols <= 0 or rows <= 0:
             raise ValueError(f"the console size must be positive, got {cols}x{rows}")
@@ -237,11 +216,11 @@ class ConPty:
         The same argv and environment dict the POSIX branch would hand a
         ``Popen`` — framing them for the agent (a command line, a NUL-split env
         block) is this driver's business, not the session's. A failure raises
-        :class:`ConPtyError` (an ``OSError``, which keeps the session's existing
-        failure path — and the route's 4501 refusal — one shape for both
-        platforms), and a console that was created before the failure is released
-        here, so a half-started session never strands its helper: the session's
-        failure path calls :meth:`close_master` too, and that is idempotent.
+        :class:`ConPtyError`, which keeps the session's failure path — and the
+        route's 4501 refusal — one shape for both platforms, and a console created
+        before the failure is released here, so a half-started session never
+        strands its helper: the session's failure path calls :meth:`close_master`
+        too, and that is idempotent.
         """
         if winpty is None:  # pragma: no cover - the seam never selects this here
             raise ConPtyError(errno.ENODEV, "the pseudo-console dependency is not importable")
@@ -251,7 +230,7 @@ class ConPty:
         cmdline = subprocess.list2cmdline([str(part) for part in argv[1:]]) or None
         # The helper agent is born with the console, as a child of *this*
         # process, and the dependency never reports its pid — so the children
-        # that appear around the creation are caught and named (C-D5).
+        # that appear around the creation are caught and named.
         self._preexisting_helpers = self._helper_snapshot()
         try:
             pty = winpty.PTY(self._cols, self._rows)
@@ -287,14 +266,14 @@ class ConPty:
         self._shell_pid = int(pid)
         if not self._helper_pids:
             # Not fatal — the shell is still there — but a helper nobody can
-            # name is a process csl-07's job cannot contain, so it is said.
+            # name is a process the session's job cannot contain, so it is said.
             logger.warning("terminal: the console helper of this pseudo-console was not identified")
         return ConPTYChild(self, self._shell_pid)
 
     def started_pids(self) -> Tuple[int, ...]:
         """Every process this driver started — the shell, then the console helper.
 
-        csl-07's job contains exactly this list and everything they spawn;
+        The session's job contains exactly this list and everything they spawn;
         without the helper the pane's tree guarantee would be a wrapper kill.
         """
         pids = [] if self._shell_pid is None else [self._shell_pid]
@@ -335,9 +314,9 @@ class ConPty:
         """Plain bytes in, exactly as the session's framing hands them.
 
         The console takes characters, so this decodes UTF-8 — :meth:`read`'s
-        conversion reversed, ``surrogateescape`` both ways. Ctrl-C is byte 3
-        like any other byte: the console turns it into the input event it is
-        (C-D5); nothing here special-cases it.
+        conversion reversed, ``surrogateescape`` both ways. Ctrl-C is byte 3 like
+        any other byte: the console turns it into the input event it is, and
+        nothing here special-cases it.
         """
         pty = self._pty
         if pty is None:
@@ -351,7 +330,7 @@ class ConPty:
 
     @property
     def slave_fd(self) -> int:
-        """There is no slave on this mechanism — C-D3, asked of it anyway.
+        """There is no slave on this mechanism, asked of it anyway.
 
         Reaching this means a caller branched wrong; it fails loudly instead of
         handing out a made-up descriptor.
@@ -361,9 +340,9 @@ class ConPty:
     def close_slave(self) -> None:
         """The slave-close rule has no Windows counterpart: a named no-op.
 
-        *"while any process holds the slave open, a read of the master never
-        reports the shell's death"* — there is no slave to hold, and
-        ``session.spawn()``'s ``finally`` stays one shape for both halves.
+        There is no slave to hold, so a read of the master is never kept from
+        reporting the shell's death, and ``session.spawn()``'s ``finally`` stays
+        one shape for both halves.
         """
 
     def close_master(self) -> None:
@@ -373,15 +352,13 @@ class ConPty:
         reference to the native object go, which also unblocks a polling
         :meth:`read` (its next pass sees no console and answers the far-end
         predicate; measured at 2–17 ms for a read blocked on a silent live
-        console). Measured on this machine, the release also left both processes
-        it started gone — helper, shell, and a backgrounded child of the shell
-        that had been running under it. That is the dependency's and the
-        console's own
-        teardown, observed once, **not** a guarantee this driver holds: it makes
-        no kill call, and a promise about a tree is exactly the promise
-        :mod:`src.core.proctree_jobs` exists to make and csl-07 wires. Until
-        then, a session's processes have one named owner — this module reports
-        them, the teardown ends them.
+        console). The release was once observed to take the processes it started
+        down with it — helper, shell and a backgrounded child — but that is the
+        dependency's and the console's own teardown, **not** a guarantee this
+        driver holds: it makes no kill call, and a promise about a tree is exactly
+        the promise :mod:`src.core.proctree_jobs` exists to make. A session's
+        processes have one named owner — this module reports them, the teardown
+        ends them.
         """
         if self._closed:
             return
@@ -433,8 +410,8 @@ class ConPty:
         """One attempt at the agent's output; ``""`` when the console is idle.
 
         A failure while the shell still runs is a :class:`ConPtyError`, never a
-        silent idle: a mechanism that broke must not reach the pane as a clean
-        end of stream.
+        silent idle: a mechanism that broke must not reach the pane as a clean end
+        of stream.
         """
         pty = self._pty
         if pty is None:
@@ -452,11 +429,11 @@ class ConPty:
     def _far_end_gone(self) -> bool:
         """The seam's question — *"is the far end gone?"* — on this mechanism.
 
-        Either answer counts: the agent reports the end of the stream (measured:
-        it can lag the empty read by a moment after an ``exit``), or the shell
-        behind the console is no longer running. The second is the firm one, and
-        a released console answers gone at once — which is what unblocks the
-        pump when the session's teardown closes the master.
+        Either answer counts: the agent reports the end of the stream (measured: it
+        can lag the empty read by a moment after an ``exit``), or the shell behind
+        the console is no longer running. The second is the firm one, and a
+        released console answers gone at once — which is what unblocks the pump
+        when the session's teardown closes the master.
         """
         if self._eof_seen or self._pty is None:
             return True
@@ -494,8 +471,8 @@ class ConPTYChild:
     ``session.py`` uses ``pid`` and ``wait()`` of its child and nothing else, so
     this answers those — through the *pair's* probes, never a strong reference to
     the native console: holding one would keep the console (and its helper) alive
-    past :meth:`ConPty.close_master`. :meth:`exit_status` and :meth:`is_alive`
-    are the driver's separate report of the child, for when an EOF alone is not
+    past :meth:`ConPty.close_master`. :meth:`exit_status` and :meth:`is_alive` are
+    the driver's separate report of the child, for when an EOF alone is not
     evidence of how it left.
     """
 
@@ -524,11 +501,10 @@ class ConPTYChild:
         worker thread the session puts it in, and the caller bounds its own wait
         exactly as it bounds a ``Popen.wait``. If that bound cancels the task
         without stopping this thread, the poll still resolves: releasing the
-        console (which the teardown always does, after the drain) makes the
-        pair's liveness probe answer gone, so no thread outlives the session. A
-        child that left with no status recorded answers
-        :data:`EXIT_CODE_UNKNOWN`, a stated number rather than a 0 that would
-        read as a clean exit.
+        console (which the teardown always does, after the drain) makes the pair's
+        liveness probe answer gone, so no thread outlives the session. A child that
+        left with no status recorded answers :data:`EXIT_CODE_UNKNOWN`, a stated
+        number rather than a 0 that would read as a clean exit.
         """
         while self._pair.child_is_alive():
             time.sleep(EXIT_POLL_INTERVAL_SECONDS)
@@ -556,15 +532,15 @@ def _env_block(env: Mapping[str, str]) -> str:
 def _child_processes() -> List[Tuple[int, str]]:
     """``(pid, exe name lowercased)`` for every child of this process.
 
-    The only handle on the console helper: the dependency starts it as a child
-    of the app and reports no pid, and it is exactly the process an implementer
-    forgets (C-D5). The standard snapshot calls, in their wide forms (a name read
-    as bytes would not compare, and every call prototyped because ctypes' default
-    ``int`` return truncates a 64-bit handle — the ``proctree_jobs`` rule); empty
-    where the API is not there, which is a runner that never selects this driver.
+    The only handle on the console helper: the dependency starts it as a child of
+    the app and reports no pid. The standard snapshot calls, in their wide forms
+    (a name read as bytes would not compare, and every call prototyped because
+    ctypes' default ``int`` return truncates a 64-bit handle — the
+    ``proctree_jobs`` rule); empty where the API is not there, which is a runner
+    that never selects this driver.
 
-    Patchable as a whole, which is what makes the helper-capture rules testable
-    on any runner.
+    Patchable as a whole, which is what makes the helper-capture rules testable on
+    any runner.
     """
     api = _snapshot_calls()
     if api is None:  # pragma: no cover - non-Windows runner

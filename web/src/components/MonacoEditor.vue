@@ -1,37 +1,34 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-// The code pane's editor surface. Bundled with the Editor tab's lazy chunk
-// (App.vue's defineAsyncComponent), never with the entry chunk — Monaco and
-// its workers are heavy and the WorkBench tab is the default screen.
+// The code pane's editor surface, bundled with the Editor tab's lazy chunk —
+// Monaco and its workers are heavy and the WorkBench tab is the default screen.
 //
-// Two things about this component are load-bearing and easy to break:
+// Two things here are load-bearing and easy to break:
 //
 //   * Monaco owns the DOM inside `host`. It is created once and never
-//     re-created on a prop change: content swaps go through the *model*
+//     re-created on a prop change: a content swap goes through the model
 //     (`setValue`), the language through `setModelLanguage`. Re-creating the
 //     editor per file would throw away scroll position, view state and the
-//     worker session every click. A *buffer swap* is the one exception, and it
-//     is a model swap rather than an editor one — see the note above the
-//     `props.path` watcher.
+//     worker session every click. A *buffer swap* is a model swap, not an
+//     editor one — see the note above the `props.path` watcher.
 //   * Pico's bare-element rules must not reach Monaco's internals, which is
-//     what `monaco-pico.css` scopes out. Its import rides this file so it
-//     lands in the same chunk as the editor it protects.
+//     what `monaco-pico.css` scopes out; its import rides this file so it lands
+//     in the same chunk as the editor it protects.
 //
-// The problems this pane shows are Monaco's own validation decorations: the
-// marker surface below hands a set over, Monaco draws the squiggle and its
-// tooltip. Two checks are manual, because neither is visible to a jsdom suite
-// (a real Monaco needs a canvas): hover a marked range and the message appears,
+// The problems this pane shows are Monaco's own marker decorations: the marker
+// surface below hands a set over and Monaco draws it. Two checks are manual,
+// because neither is visible to a jsdom suite: a marked range shows its message,
 // and with the pane read-only — start a chat reply — the underline is still
-// there. The second is the regression this feature is most likely to suffer: at
-// Monaco's default, `renderValidationDecorations` hides every marker exactly
-// then (spec §2), which is why the option is set explicitly below.
+// there. The second is the regression this feature is most likely to suffer:
+// at Monaco's default, `renderValidationDecorations` hides every marker exactly
+// then, which is why the option is set explicitly below.
 //
 // A third surface sits beside them: Monaco's own JavaScript/TypeScript engine
-// also draws marks, and for a buffer a declared server answers for the two would
-// disagree about one file. That engine is silenced **per buffer**, and only while
-// a server claims the path — D5, and the section below says why it is per buffer
-// rather than per language.
+// draws marks too, and for a buffer a declared server answers for, the two would
+// disagree about one file. That engine is silenced **per buffer**, and only
+// while a server claims the path — the section below says why per buffer rather
+// than per language.
 import * as monaco from 'monaco-editor'
 import '../styles/monaco-pico.css'
 import {
@@ -85,15 +82,14 @@ const props = defineProps({
 // below), and only matters while not `readonly` — a read-only surface cannot
 // type. The pane routes this into the buffer record and the dirty flag.
 //
-// `quick-open` is the Ctrl+P chord (qop-07), claimed *inside* Monaco through
-// its command API: a window-level `keydown` cannot reliably beat Monaco's own
-// keybinding service, and the pane is exactly where the user is when the need
-// arises. The command is registered once at mount, beside the editor itself.
+// `quick-open` is the Ctrl+P chord, claimed *inside* Monaco through its command
+// API: a window-level `keydown` cannot reliably beat Monaco's own keybinding
+// service, and the pane is where the user is when the need arises.
 //
 // `definition` is a language server's answer to Ctrl+click / F12, as
 // `{path, line, column}` in the pane's own coordinates. This surface never
 // opens a buffer — the pane owns that — so a target in another file is handed
-// over rather than reached for here (spec §6).
+// over rather than reached for here.
 const emit = defineEmits(['content-change', 'quick-open', 'definition'])
 
 const host = ref(null)
@@ -132,8 +128,8 @@ let applyingExternal = false
 //
 // The pane owns *which* hit and when to ask; this surface owns how, and the
 // queue lives here because only this component knows when its model swap has
-// finished (search-08). A reveal cannot be applied at the moment of the row
-// click, for two independent reasons:
+// finished. A reveal cannot be applied at the moment of the row click, for two
+// independent reasons:
 //
 //   * the file may not be open yet, so there is no `editor` to move — the
 //     reveal waits for `onMounted` (drain at its end);
@@ -176,19 +172,18 @@ function revealPosition({ line, column } = {}) {
 // arrives from outside — the composable that decides *when* lives beside this
 // pane, not in it — and this surface applies it to the model that is on screen
 // at apply time. Nothing else marks a model, and no set is remembered here:
-// a buffer swap disposes the previous model and drops its marks with it
-// (spec §2, consequence 3), so this call must be made again for a buffer that
-// comes back rather than being cached against a model.
+// a buffer swap disposes the previous model and drops its marks with it, so
+// this call must be made again for a buffer that comes back rather than being
+// cached against a model.
 //
 // **Replacement is whole** — Monaco's own semantics for `setModelMarkers`: the
 // set handed over becomes the model's entire marker set for this owner, so an
 // empty set clears the buffer. That is what makes a fixed defect's underline
-// vanish, and merging is how a stale squiggle survives its fix (spec §6). There
-// is deliberately no diffing step here "to avoid flicker".
+// vanish; merging is how a stale squiggle survives its fix. There is
+// deliberately no diffing step here "to avoid flicker".
 //
-// The hover is Monaco's too: a marked range shows its tooltip with the marker's
-// message, positioned and keyboard-handled by Monaco. No handler, no tooltip
-// component and no second text source may be added for it (spec §2) — the
+// How a marked range renders is Monaco's: it positions and keyboard-handles
+// that itself. No handler and no second text source may be added for it — the
 // message is a plain string and Monaco escapes it like any other marker text.
 const MARKER_OWNER = 'nojae-editor'
 
@@ -201,16 +196,16 @@ function setMarkers(markers) {
   monaco.editor.setModelMarkers(model, MARKER_OWNER, Array.isArray(markers) ? markers : [])
 }
 
-// --- The built-in engine, silenced per buffer (D5) -------------------------
+// --- The built-in engine, silenced per buffer ------------------------------
 //
 // Monaco's own JavaScript/TypeScript engine draws marks too, and on a buffer a
 // declared server answers for the two engines would disagree about one file. The
 // built-in switch is **per language** — the TypeScript mode's diagnostics options
 // and the validation providers it registers — so flipping it would delete the
-// only marks a `.ts` buffer has when no declared server claims it, which is
-// precisely the case D5 protects. The rule here is therefore **per buffer**: the
-// built-in engine is silenced for the model on screen, and only that model, while
-// a declared server answers for that buffer's path.
+// only marks a `.ts` buffer has when no declared server claims it. The rule here
+// is therefore **per buffer**: the built-in engine is silenced for the model on
+// screen, and only that model, while a declared server answers for that buffer's
+// path.
 //
 // *Which server answers* is not decided here. It is the pane's server field's own
 // answer (`useEditorStatus` — `POST /api/lsp/query`'s `status` action, answered
@@ -221,17 +216,14 @@ function setMarkers(markers) {
 // is written here, and nothing is compressed to a boolean: the answer's reason is
 // still the bar's to show.
 //
-// The silencing is per **marker owner**, and that is the nearest thing to a
-// per-model override this build of Monaco offers: it publishes no model-side
+// The silencing is per **marker owner**, the nearest thing to a per-model
+// override this build of Monaco offers: it publishes no model-side
 // diagnostics-provider registration, so what a model's own validation *is* cannot
-// be overridden. What it does have is an owner-scoped marker channel, and the
-// built-in engine publishes its whole output for a model under that model's
-// language id as the owner (`typescript`, `javascript`). Dropping that entry for
-// **this model and no other** removes both halves at once — the syntax check and
-// the semantic one — so one file speaks with one voice, and a neighbouring `.ts`
-// buffer nothing claims keeps its marks. A buffer nothing claims is never
-// touched: with no claim the sweep is a no-op and the built-in engine repaints
-// exactly as it does today.
+// be overridden, but the built-in engine publishes its whole output for a model
+// under that model's language id as the owner (`typescript`, `javascript`).
+// Dropping that entry for **this model and no other** removes both halves at
+// once — the syntax check and the semantic one — so one file speaks with one
+// voice, and a neighbouring `.ts` buffer nothing claims keeps its marks.
 //
 // Restoring is the same rule's other half. The engine's own revalidation is
 // requested — its diagnostics options re-set to the value they already carry,
@@ -243,7 +235,7 @@ function setMarkers(markers) {
 // server's marks are ours (`MARKER_OWNER`) and this sweep only ever names the
 // built-in owners: the two are different channels.
 //
-// The listener that drives the fifth moment is this pane's own, kept beside the
+// The listener that drives the sweep is this pane's own, kept beside the
 // providers and disposed with them, so a remount leaves exactly one live set —
 // two would clear each other's model twice per publish.
 const BUILTIN_MARKER_OWNERS = Object.freeze(['typescript', 'javascript'])
@@ -261,7 +253,7 @@ function builtinDefaultsFor(languageId) {
 
 // The override for the *live* answer, read at the moment Monaco asks rather than
 // captured at mount. The decision is `lib/monaco-lsp.js`'s
-// `builtinValidationOverride` — one statement of D5's rule, reading the bar's own
+// `builtinValidationOverride` — one statement of the rule, reading the bar's own
 // keyed answer so the browser grows no second path→server rule — and this surface
 // only applies the verdict. Non-`null` is "suppress", and the override's two
 // halves come together: a file with a declared server speaks with one voice.
@@ -323,9 +315,8 @@ function builtinPublished(resources) {
 }
 
 // The imperative surfaces this component has: the search-hit reveal, the focus
-// return after a quick-open pick (qop-07 — `editor.focus()` puts the caret back
-// in the textarea, which a focus on the host div would not), and the marker set
-// above.
+// return after a quick-open pick (`editor.focus()` puts the caret back in the
+// textarea, which a focus on the host div would not), and the marker set above.
 function focus() {
   editor?.focus()
 }
@@ -349,10 +340,9 @@ defineExpose({ revealPosition, focus, setMarkers })
 // nobody asked for. The providers are registered against that scheme, so they
 // answer for this pane's models and nothing else.
 
-// The buffer's text, but only when the buffer is dirty (spec §4.5). A clean
-// buffer omits it and the hub reads the file — the common case stays cheap, and
-// a user who typed three lines and then Ctrl+clicked is answered about what is
-// on screen.
+// The buffer's text, but only when the buffer is dirty. A clean buffer omits it
+// and the hub reads the file — the common case stays cheap, and a user who typed
+// three lines and then Ctrl+clicked is answered about what is on screen.
 function bufferTextFor(path) {
   const record = files.recordFor(path)
   return record?.dirty ? record.text : undefined
@@ -361,7 +351,7 @@ function bufferTextFor(path) {
 // One question, one structured answer — or `null` for every quiet outcome: no
 // server, a cold server still starting, a policy refusal, an unreachable API.
 // A provider must never see a throw and the pane must never see a notice, so
-// the three non-`ok` statuses collapse to the same nothing here (spec §4.10).
+// every non-`ok` status collapses to the same nothing here.
 async function ask(action, path, position) {
   const answer = await lsp.query({
     action,
@@ -400,14 +390,13 @@ function pathOf(model) {
 
 // --- The Ctrl-hover link: is there a target under the pointer? -------------
 //
-// Monaco draws this indicator itself, and this pane cannot use that path: after
-// a provider answers, Monaco's own contribution asks the text-model service for
-// the **target** document, to show a preview of it in the link's tooltip. In a
-// standalone editor that service only answers for models that already exist, so
-// an ordinary answer here — a name defined in another file, or outside the
-// workspace entirely, which is what a server returns for an imported symbol —
-// throws `Model not found`, the decoration is never applied, and the user gets
-// no indicator at all. The underline therefore stays this pane's to paint.
+// Monaco's own indicator cannot be used here: after a provider answers, its
+// contribution asks the text-model service for the **target** document, to show
+// a preview of it. In a standalone editor that service only answers for models
+// that already exist, so an ordinary answer — a name defined in another file, or
+// outside the workspace entirely — throws `Model not found`, the decoration is
+// never applied, and the user gets no indicator at all. The underline therefore
+// stays this pane's to paint.
 //
 // It is painted from the answer the pane already holds, and the gesture is what
 // asks: Monaco calls a definition provider on Ctrl+hover and on Ctrl+click
@@ -478,8 +467,8 @@ const hoverProvider = {
     if (!path) return null
     const hover = wireHoverToMonaco(await ask('hover', path, monacoPositionToLsp(position)))
     if (!hover) return null
-    // HTML support **off** (spec §4.9): the server's markdown is escaped rather
-    // than interpreted. The app's rule is that all rendered HTML goes through
+    // HTML support **off**: the server's markdown is escaped rather than
+    // interpreted. The app's rule is that all rendered HTML goes through
     // `lib/markdown.js`; Monaco's hover is not app markup, so the rule is
     // honoured by configuration here — and this component renders nothing.
     return {
@@ -507,11 +496,11 @@ const referencesProvider = {
 //
 // An empty answer is a no-op: no throw, no notice, no visible change. F12 is
 // *our* command, so it simply does nothing — handing the keystroke back to
-// Monaco's own action would raise its "No definition found" message, which is
-// exactly the notice §4.10 forbids. Ctrl+click needs no such care: it is
-// Monaco's own gesture, so a `null` from our provider already lets it fall
-// through to whatever it would have done on its own — for TypeScript and
-// JavaScript, the built-in worker's definition, i.e. exactly today's behaviour.
+// Monaco's own action would raise its "No definition found" message, which is a
+// notice this pane never shows. Ctrl+click needs no such care: it is Monaco's
+// own gesture, so a `null` from our provider already lets it fall through to
+// whatever it would have done on its own — for TypeScript and JavaScript, the
+// built-in worker's definition, i.e. exactly today's behaviour.
 async function goToDefinition() {
   if (!editor || !model) return
   const path = pathOf(model)
@@ -600,14 +589,13 @@ onMounted(() => {
     readOnly: props.readonly,
     domReadOnly: props.readonly,
     ariaLabel: props.ariaLabel,
-    // The viewer shape: no sticky scroll — none of it is decoration, each of them
-    // costs width this pane does not have next to the tree and the terminal
-    // strip. The minimap is the exception worth paying that width for: it is how
-    // you scrub a long file, so it never autohides (an autohidden minimap is a
-    // slider you cannot grab) and its slider is shown always rather than only on
-    // hover. It draws colour blocks instead of glyphs — unreadable at this
-    // scale, and they cost render time. `maxColumn` is the width budget for this
-    // narrow pane.
+    // The viewer shape: no sticky scroll, which costs width this pane does not
+    // have next to the tree and the terminal strip. The minimap is the exception
+    // worth paying that width for: it is how you scrub a long file, so it never
+    // autohides (an autohidden minimap is a slider you cannot grab) and its
+    // slider is always shown rather than only on hover. It draws colour blocks
+    // instead of glyphs — unreadable at this scale, and they cost render time.
+    // `maxColumn` is the width budget for this narrow pane.
     minimap: {
       enabled: true,
       autohide: 'none',
@@ -618,7 +606,7 @@ onMounted(() => {
     stickyScroll: { enabled: false },
     // The lanes are where Monaco puts a problem that is off screen, so they are
     // on: "how bad is this file, and roughly where" is exactly the question a
-    // long file raises (D2). The gutter icon column stays off — a per-line icon
+    // long file raises. The gutter icon column stays off — a per-line icon
     // duplicates a mark already visible on the line itself and costs horizontal
     // space this pane cannot spare. Only the cursor mark is suppressed.
     overviewRulerLanes: 2,
@@ -631,8 +619,8 @@ onMounted(() => {
     // filter is literally "hide validation decorations when the editor is
     // read-only" — and this pane *is* read-only while a chat reply streams, i.e.
     // exactly when someone is reading code rather than editing it. Leave this at
-    // the default and every squiggle vanishes during a live reply (spec §2,
-    // consequence 2): the feature works in testing and fails in use.
+    // the default and every squiggle vanishes during a live reply: the feature
+    // works in testing and fails in use.
     renderValidationDecorations: 'on',
     folding: true,
     wordWrap: 'off',
@@ -672,11 +660,11 @@ onMounted(() => {
   // painted after the key is up, which is the indicator stuck on.
   window.addEventListener('keyup', onWindowKeyUp)
 
-  // The quick-open chord (qop-07): Ctrl+P inside the pane raises the dialog.
-  // Registered through the command API — the one path that beats Monaco's
-  // internal keybinding service — and `preventDefault` is implied: a command
-  // that runs has consumed the keystroke, so Print never fires while the pane
-  // holds focus. The pane routes the emit into the composable's `openDialog`.
+  // The quick-open chord: Ctrl+P inside the pane raises the dialog. Registered
+  // through the command API — the one path that beats Monaco's internal
+  // keybinding service — and `preventDefault` is implied: a command that runs has
+  // consumed the keystroke, so Print never fires while the pane holds focus. The
+  // pane routes the emit into the composable's `openDialog`.
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, () => emit('quick-open'))
 
   // F12, the keyboard half of "go to definition", registered the same way and
@@ -689,7 +677,7 @@ onMounted(() => {
   // answer for its models and nothing else. Each returns nothing for a quiet
   // answer, which is what lets Monaco fall through to whatever it would have
   // done on its own — for TypeScript and JavaScript, the built-in worker's
-  // definition, i.e. exactly today's behaviour (spec §4.10).
+  // definition, i.e. exactly today's behaviour.
   providerDisposables = [
     monaco.languages.registerDefinitionProvider(
       { scheme: EDITOR_URI_SCHEME },
@@ -726,8 +714,8 @@ onMounted(() => {
     },
   })
 
-  // The built-in engine's own publication is the fifth moment its answer can
-  // move: it repaints after every edit's debounce, so a suppressed model's set is
+  // The built-in engine's own publication is another moment its answer can move:
+  // it repaints after every edit's debounce, so a suppressed model's set is
   // dropped as it appears rather than polled for. Registered beside the others
   // and disposed with them.
   markersSubscription = monaco.editor.onDidChangeMarkers(builtinPublished)
@@ -820,7 +808,7 @@ watch(
     builtinSuppressed = false
     sweepBuiltinSuppression()
     // The four facts move with the buffer: the indentation, the line ending and
-    // the kind are the *new* model's, never the previous one's residue (§1.3).
+    // the kind are the *new* model's, never the previous one's residue.
     // `restoreViewState` moved the caret, so this report is the one that puts the
     // remembered line in the status bar.
     reportFacts(model)
@@ -852,8 +840,8 @@ watch(
 // builds the model's EOL from the text it is given (the majority of `\r\n` over
 // `\n`), so a CRLF file keeps CRLF, the caret's Enter inserts CRLF, and every
 // `getValue()` the pane saves back is written with that EOL. The server never
-// normalises (D5) — what the model says is what lands. The one thing that does
-// not survive is a file with *mixed* endings, which the model resolves to its
+// normalises — what the model says is what lands. The one thing that does not
+// survive is a file with *mixed* endings, which the model resolves to its
 // dominant form on load: the same normalising any editor with a single EOL per
 // buffer does, and a reason the save goes through the mtime guard rather than
 // trusting the buffer to be byte-identical.

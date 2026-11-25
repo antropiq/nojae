@@ -2,31 +2,24 @@
 
 ``<working location>/.nojae/mcp-settings.json`` is the one source of MCP
 connectors (see :mod:`mcphub.constants`). It joins the reserved folder's
-family — ``read-write-policy.json`` —
-and arrives by the same rule: **seeded by
-exclusive create when a folder is admitted as a workspace (today: at boot; from
-task 05, when the hub pool admits it), never overwritten**.
+family — ``read-write-policy.json`` — and arrives by the same rule: **seeded by
+exclusive create when a folder is admitted as a workspace, never overwritten**.
 
 The seeded bytes are the committed template
-(``mcp_connectors/mcp-settings.default.json``) copied verbatim. Nothing is
-substituted at seed time on purpose: its ``${NOJAE_PYTHON_ROOT}``,
-``${PROJECT_ROOT}`` and ``${NOJAE_PATH_LOCATION}`` references resolve
-on *every read* (:func:`mcphub.validation.expand_env`), so one seeded file
-stays correct after a workspace switch and on a different machine — and the
-template, which is what an operator reads to learn the format, is exactly
-what the workspace gets.
-The copy is made **as bytes** — read with ``read_bytes`` and written through a
-binary handle — because a text-mode write on Windows turns every ``\n`` of the
-template into ``\r\n``, and the copy would no longer be the template's bytes.
+(``mcp_connectors/mcp-settings.default.json``) copied verbatim: its
+``${NOJAE_PYTHON_ROOT}``, ``${PROJECT_ROOT}`` and ``${NOJAE_PATH_LOCATION}``
+references resolve on *every read* (:func:`mcphub.validation.expand_env`), so
+one seeded file stays correct after a workspace switch and on a different
+machine. The copy is made **as bytes** because a text-mode write on Windows
+turns every ``\n`` of the template into ``\r\n``, and the copy would no longer
+be the template's bytes.
 
 Unlike the policy and the modes there is **no cache to invalidate**: the hub
-re-scans the declaration file on every load, so the first read after the
-seed is the file itself.
+re-scans the declaration file on every load.
 
 The seeder lives in the hub package (the ``constants``/``discovery``/
-``manager`` mirror) for the reason ``core.prompt_helpers`` gives for the
-same choice: a seeder has to write exactly the bytes its loader reads, and
-this loader is the hub's own.
+``manager`` mirror) because a seeder has to write exactly the bytes its loader
+reads, and this loader is the hub's own.
 """
 
 import os
@@ -52,9 +45,8 @@ def _discard_seeded_file(path: str) -> None:
     """Remove a file this call created but could not finish writing.
 
     Absence is the state the loader reads as "no connectors declared"; a
-    half-written file would be a finding of its own about a mistake this
-    call made. The failure the caller reports is the write error, not this
-    cleanup's.
+    half-written file would be a finding of its own. The failure the caller
+    reports is the write error, not this cleanup's.
     """
     try:
         os.remove(path)
@@ -65,10 +57,9 @@ def _discard_seeded_file(path: str) -> None:
 def mcp_settings_file_path(root: str) -> str:
     """Where the declaration file goes under ``root`` — one level of the reserved folder.
 
-    ``constants.mcp_settings_path()`` is the *active* root (what the loader
-    reads); this takes the root explicitly, because the workspace switch seeds
-    the folder it is moving to before that folder is the workspace the rest of
-    the app sees (the seam's scope still names the old one).
+    ``constants.mcp_settings_path()`` is the *active* root; this takes the root
+    explicitly, because the workspace switch seeds the folder it is moving to
+    before that folder is the workspace the rest of the app sees.
     """
     return os.path.join(root, constants.POLICY_DIRNAME, constants.MCP_SETTINGS_FILENAME)
 
@@ -76,9 +67,9 @@ def mcp_settings_file_path(root: str) -> str:
 def default_mcp_settings_bytes() -> bytes:
     """The template's bytes, read fresh through the hub's ``constants``.
 
-    The one place that touches the template. Read at call time (no cache, no
-    copy at import) so a patched ``MCP_SETTINGS_TEMPLATE`` — the test that
-    pins a missing template — moves the lookup like every other hub path.
+    The one place that touches the template, read at call time (no cache, no
+    copy at import) so a patched ``MCP_SETTINGS_TEMPLATE`` moves the lookup like
+    every other hub path.
     """
     template = constants.MCP_SETTINGS_TEMPLATE
     return template.read_bytes()
@@ -91,13 +82,10 @@ def ensure_mcp_settings_file(root: str) -> Dict[str, Any]:
     disabled — survives every later seed byte for byte.
 
     Returns ``{"state": "created" | "existing" | "failed", "path": str,
-    "error": Optional[str]}``. The whole function is one ``try``/``except``:
-    a seed that cannot happen (read-only mount, a root owned by someone
-    else, no disk, missing template) is a **NOTE** for the UI, never a
-    reason to refuse opening a project. A workspace with no declaration file
-    still chats — it simply has no MCP connectors — and the file can be
-    written by hand afterwards, which is how every connector beyond the
-    seeded two arrives anyway.
+    "error": Optional[str]}``. The whole function is one ``try``/``except``: a
+    seed that cannot happen (read-only mount, a root owned by someone else, no
+    disk, missing template) is a **NOTE** for the UI, never a reason to refuse
+    opening a project — the workspace still chats, with no MCP connectors.
     """
     try:
         return _ensure_mcp_settings(root)
@@ -166,9 +154,8 @@ def mcp_settings_file_state(root: str) -> Dict[str, Any]:
     ``GET /api/workspace`` asks this instead of
     :func:`ensure_mcp_settings_file` — a workspace is read far more often than
     it is admitted, and a read that leaves a folder in someone's project is the
-    mistake the seeding rules forbid. ``absent`` is a normal answer here: a
-    workspace whose seed failed, or one that predates the file, simply has no
-    MCP connectors.
+    mistake the seeding rules forbid. ``absent`` is a normal answer here: the
+    workspace simply has no MCP connectors.
     """
     path = mcp_settings_file_path(root)
     try:

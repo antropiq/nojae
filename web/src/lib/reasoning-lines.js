@@ -1,18 +1,17 @@
 // The WorkBench reasoning panel shows streamed thinking as a chronology of
 // fixed-height rows. Browsers would re-wrap one big `pre-wrap` text node on
-// every chunk, so this module does the wrapping itself, in columns, and can do
-// it INCREMENTALLY: a row is final once the text past it has arrived, and only
+// every chunk, so this module does the wrapping itself, in columns, and
+// INCREMENTALLY: a row is final once the text past it has arrived, and only
 // the row currently being filled is ever re-derived.
 //
-// Column arithmetic (not pixels) is what makes that possible: the panel is
-// monospace, so one column has one advance width and a row has one fixed
+// Column arithmetic rather than pixels is what makes that possible: the panel
+// is monospace, so one column has one advance width and a row has one fixed
 // height — which is also what lets the panel scroll by arithmetic instead of
 // by measuring the DOM.
 //
-// Prefix-stability is the contract: cutting row k uses only the characters
-// between the start of row k and its own budget, so appending text to a flow
-// can never move a break that has already been made. A row the reader's eye is
-// on therefore stays put.
+// Prefix-stability is the contract: cutting a row uses only the characters
+// between its start and its own budget, so appending text to a flow never
+// moves a break already made, and a row the reader's eye is on stays put.
 
 // A tab advances to the next multiple of this many columns, matching the
 // `tab-size` the panel sets. Counting a tab as one character would drift the
@@ -23,16 +22,14 @@ export const TAB_WIDTH = 4
 // wrap loop (a first character wider than the budget would cut nothing).
 export const MIN_BUDGET = TAB_WIDTH
 
-// Per-flow resume state. Kept out of the reactive message state on purpose:
-// it is render cache, while `block.text` stays the single source of truth for
-// saving and reloading a session.
+// Per-flow resume state. Kept out of the reactive message state on purpose: it
+// is render cache, while `block.text` stays the single source of truth.
 export function createLineCache() {
   return { budget: 0, offset: 0, lines: [], provisional: false }
 }
 
 // Columns a character at column `col` occupies: 1, or for a tab the distance to
-// the next tab stop — the way `tab-size` lays them out, measured from the start
-// of the display row it is rendered in.
+// the next tab stop the way `tab-size` lays them out.
 function columnWidth(ch, col) {
   return ch === '\t' ? TAB_WIDTH - (col % TAB_WIDTH) : 1
 }
@@ -89,8 +86,8 @@ export function displayLines(text, cache, budget) {
     cache.lines.pop()
     cache.provisional = false
   }
-  // Defensive: if the flow ever shrinks, it was replaced rather than appended
-  // to, so nothing already cut still describes it — start over.
+  // Defensive: a flow that shrinks was replaced rather than appended to, so
+  // nothing already cut still describes it — start over.
   if (text.length < cache.offset) {
     cache.offset = 0
     cache.lines.length = 0
@@ -121,11 +118,10 @@ export function displayLines(text, cache, budget) {
     }
 
     if (newline === -1) {
-      // This was the flow's last source line and it is still streaming: the
-      // row that was just emitted can still grow, so remember where it began
-      // and re-derive it on the next call. Nothing else of this flow is left
-      // to cut, so the scan ends here — resuming at `rowStart` would re-run
-      // the same line forever.
+      // The flow's last source line is still streaming: the row just emitted
+      // can still grow, so remember where it began and re-derive it next call.
+      // The scan must end here — resuming at `rowStart` would re-run the same
+      // line forever.
       cache.offset = rowStart
       cache.provisional = true
       break

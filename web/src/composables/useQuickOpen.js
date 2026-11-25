@@ -3,34 +3,31 @@ import { reactive } from 'vue'
 import { registerReRootHandler, useWorkspaceTree } from './useWorkspaceTree'
 import { withWorkspace } from './useWorkspaceSession'
 
-// ---------------------------------------------------------------------------
 // Quick Open: the state behind the Editor tab's fuzzy file finder.
 //
 // One singleton, like every other screen's (the same reason `useWorkspaceSearch`
 // is one): the dialog visibility, the query, the fetched candidate list, the
 // fetch state and the selected index live *here*, not in the component, so
-// closing the `<dialog>` and re-opening it cannot lose the query — re-opening
-// shows the previous filter, which the user clears with one keystroke (§2.7).
+// closing the `<dialog>` and re-opening it cannot lose the query.
 //
-// The list is fetched **once per dialog open** and never mid-session (§2.3):
+// The list is fetched **once per dialog open** and never mid-session:
 // `openDialog()` asks `GET /api/fs/files` fresh every time — cheap, and it
 // keeps the list honest after renames, deletes and new files made since the
 // last open — then the per-keystroke filtering happens in the browser against
 // `list`. No request per keystroke, no debounce, no cancellation machinery:
 // one bounded walk per open is the whole server cost.
 //
-// `pick(path)` is §2.6 in order: publish the path as the tree's selection (the
-// existing `openFile` flow opens or focuses the buffer, and its existing
-// refused-open answers — binary, over the size cap, renamed/deleted since the
-// listing — are the pane's own words; no staleness machinery here), close the
-// dialog, then return focus to the Monaco pane through the one-way registry
-// below, because the composable must not import the pane and the pane must not
-// import this state twice.
+// `pick(path)` publishes the path as the tree's selection (the existing
+// `openFile` flow opens or focuses the buffer, and its existing refused-open
+// answers — binary, over the size cap, renamed/deleted since the listing — are
+// the pane's own words; no staleness machinery here), closes the dialog, then
+// returns focus to the Monaco pane through the one-way registry below, because
+// the composable must not import the pane and the pane must not import this
+// state twice.
 //
 // A *new working location* empties all of it through the same keyed
 // `registerReRootHandler` registry the buffers and the search results use:
-// paths relative to a root that no longer exists are a lie (§2.7).
-// ---------------------------------------------------------------------------
+// paths relative to a root that no longer exists are a lie.
 
 const state = reactive({
   open: false,
@@ -40,11 +37,11 @@ const state = reactive({
   list: [],
   // 'idle' | 'loading' | 'ready' | 'error'
   status: 'idle',
-  // Index into the *filtered* rows the dialog renders, not into `list` — the
+  // Index into the *filtered* rows the dialog renders, not into `list`: the
   // dialog owns the filtering, this only holds where the selection is.
   selected: 0,
-  // The payload's own `truncated` flag (§2.5): the footer line is the dialog's
-  // only reader, and it renders the flag rather than counting rows client-side.
+  // The payload's own `truncated` flag: the footer line is the dialog's only
+  // reader, and it renders the flag rather than counting rows client-side.
   truncated: false,
   // { status, detail } for the dialog's inline error line. `status: 0` means
   // the request never reached the server.
@@ -68,10 +65,10 @@ export function registerPaneFocus(handler) {
 export function useQuickOpen() {
   const tree = useWorkspaceTree()
 
-  // Open the dialog: fetch the candidate list fresh **every time** (§2.3),
-  // then show it. The previous list stays on screen while the fetch runs —
-  // clearing it would flash an empty dialog at the person re-opening — and a
-  // response that answers an older open is dropped by the generation token.
+  // Open the dialog: fetch the candidate list fresh **every time**, then show
+  // it. The previous list stays on screen while the fetch runs — clearing it
+  // would flash an empty dialog at the person re-opening — and a response that
+  // answers an older open is dropped by the generation token.
   async function openDialog() {
     state.open = true
     state.selected = 0
@@ -103,16 +100,16 @@ export function useQuickOpen() {
   }
 
   // Escape and the backdrop both end up here. The query and the list are kept:
-  // closing a popup is not a forget (§2.7).
+  // closing a popup is not a forget.
   function closeDialog() {
     state.open = false
   }
 
-  // §2.6, in order: publish the path as the tree's selection — the tree is
-  // lazy, so the entry is synthesised from the path exactly as the search's
-  // `openHit` does (`dir: false` routes it to "select a file", and `name` is
-  // real because `select()` copies it into `state.selected`) — then close and
-  // hand focus back to the pane.
+  // Publish the path as the tree's selection — the tree is lazy, so the entry
+  // is synthesised from the path exactly as the search's `openHit` does
+  // (`dir: false` routes it to "select a file", and `name` is real because
+  // `select()` copies it into `state.selected`) — then close and hand focus
+  // back to the pane.
   function pick(path) {
     if (!path) return
     const entry = tree.entryFor(path) ?? {

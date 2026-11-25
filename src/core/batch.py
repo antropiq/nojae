@@ -1,15 +1,13 @@
 """Batch mode: enumerate a ``todos/``-style lot of numbered task files.
 
-Core-only (no FastAPI, no browser concerns): this is the *whole* file surface
-batch mode has. It lists a folder -- names,
-sizes and the first heading -- and hands over the one body the client must be
-able to send (the ``NN == 0`` big picture, which ``core.chat`` injects into
-the system prompt). **Task bodies are never read here**: a task is named by
-its root-relative path and the model opens the file with the file-touching
+Core-only: this is the *whole* file surface batch mode has. It lists a folder --
+names, sizes and the first heading -- and hands over the one body the client must
+be able to send (the ``NN == 0`` big picture, which ``core.chat`` injects into
+the system prompt). **Task bodies are never read here**: a task is named by its
+root-relative path and the model opens the file with the file-touching
 connectors, which is what keeps batch mode free of any file-read route.
 
-Three locks bound the one path the caller controls, implemented here rather
-than delegated to the (not yet existing) editor code:
+Three locks bound the one path the caller controls:
 
 * no absolute path and no ``..`` component;
 * a ``realpath`` prefix check against the workspace in scope;
@@ -26,21 +24,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.config import PROJECT_ROOT
 from src.core import workspace as workspace_seam
 
-# The one containment rule of the path locks (A-D2.2, win-06), imported from
-# the Editor's gate rather than re-spelled here: this module already answers its
-# lot folder with the same three locks the tree uses, and a hand-built
-# prefix of the workspace root plus one separator was exact-text — it stopped
-# matching a folder whose spelling differs in case on a volume that folds case.
-# The fold comes from the workspace's own filesystem, the same probe the verdict
-# reads.
+# The one containment rule of the path locks, imported from the Editor's gate
+# rather than re-spelled here: a hand-built prefix of the workspace root plus one
+# separator was exact-text, and stopped matching a folder whose spelling differs
+# in case on a volume that folds case. The fold comes from the workspace's own
+# filesystem, the same probe the verdict reads.
 from src.core.editorfs import fscase
 from src.core.editorfs.policy import _is_within
 
-# ``path_norm`` (win-02) lives outside ``src`` so the two stdio connectors can
-# read it too (pol-08), so it is imported the way :func:`_path_policy` imports
-# the deny-list: the project root is not always on ``sys.path``. It is pure
-# text, so unlike that one it is bound here at import rather than re-resolved
-# per call -- no test patches it.
+# ``path_norm`` lives outside ``src`` so the two stdio connectors can read it too,
+# so it is imported the way :func:`_path_policy` imports the deny-list: the
+# project root is not always on ``sys.path``. It is pure text, so unlike that one
+# it is bound here at import rather than re-resolved per call -- no test patches
+# it.
 try:
     from mcp_connectors import path_norm
 except ImportError:  # pragma: no cover - depends on how the app is started
@@ -76,12 +72,11 @@ DONE_SUBFOLDER = "done"
 
 
 class BatchListingError(Exception):
-    """A listing request that must be refused, carrying its HTTP status.
+    """A listing request that must be refused, carrying the status to answer with.
 
     The status belongs to the core because the rules below *are* the endpoint's
     contract -- 404 for "folder missing" versus 422 for "not a folder / not
-    allowed" are two different user messages. ``routes`` only re-raises this as
-    an ``HTTPException``.
+    allowed" are two different user messages, which ``routes`` only re-raises.
     """
 
     def __init__(self, status_code: int, detail: str) -> None:
@@ -132,8 +127,8 @@ def skipped_reason(stem: str, prefix: str) -> str:
     """Why a prefix-matching stem is not a task (for the ``skipped`` list).
 
     Report, don't guess: the dialog explains every file that matched the
-    prefix but is not runnable, so ``Found tasks 8`` next to an explanation
-    line never reads as "the app lost a file".
+    prefix but is not runnable, so ``Found tasks 8`` next to an explanation line
+    never reads as "the app lost a file".
     """
     run = leading_digit_run(stem, prefix)
     if not run:
@@ -164,9 +159,8 @@ def entry_size(entry: os.DirEntry) -> int:
 def read_heading(path: Path) -> Optional[str]:
     """First ``# `` heading of ``path`` (marker stripped), None when none.
 
-    Reads only the head of the file and stops at the first heading: this is a
-    dialog label, not task content -- the number stays the authority, and a
-    dropped heading costs the run nothing.
+    Reads only the head of the file: this is a dialog label, not task content --
+    the number stays the authority, and a dropped heading costs the run nothing.
     """
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -184,9 +178,9 @@ def read_lot_text(path: Path, size: int) -> Tuple[Optional[str], Optional[str]]:
     """``(text, note)`` for the big-picture file; exactly one of them is set.
 
     Over :data:`MAX_BATCH_LOT_BYTES` the body is dropped and the note explains
-    why -- the lot stays runnable, it only loses the extra system-prompt
-    context, so this is reported rather than failing with a 422. An unreadable
-    file is reported the same way instead of killing the listing.
+    why -- the lot stays runnable, it only loses the extra system-prompt context,
+    so this is reported rather than failing with a 422. An unreadable file is
+    reported the same way instead of killing the listing.
     """
     if size > MAX_BATCH_LOT_BYTES:
         return None, (
@@ -203,10 +197,9 @@ def _path_policy():
     """The shared connector deny-list, imported the connectors' own way.
 
     ``mcp_connectors`` lives at the project root, outside the ``src`` package,
-    so it is importable as a package only when that root is on ``sys.path``;
-    the fallback mirrors what the connector modules do when launched as plain
-    script paths. The module is resolved at call time so a patch of
-    ``path_policy`` (the tests') is seen here too.
+    so it is importable as a package only when that root is on ``sys.path``. The
+    module is resolved at call time so a patch of ``path_policy`` (the tests') is
+    seen here too.
     """
     try:
         from mcp_connectors import path_policy
@@ -230,34 +223,31 @@ def resolve_lot_dir(raw: Optional[str]) -> Tuple[str, Path]:
     name that is absent a 404 ("create the folder") -- two different dialog
     messages.
 
-    The name is canonicalised by ``path_norm.canonical_rel`` before it is asked
-    of any of them, so the returned ``dir`` and every ``taskLocation`` built from
-    it are ``/``-joined workspace-relative text on every platform -- the form the
-    frontend's ``split('/')`` and the model's own tools both expect.
+    The name is canonicalised before it is asked of any of them, so the returned
+    ``dir`` and every ``taskLocation`` built from it are ``/``-joined
+    workspace-relative text on every platform -- the form the frontend's
+    ``split('/')`` and the model's own tools both expect.
     """
     text = (raw or "").strip() or DEFAULT_LOT_DIR
     # ``os.path.isabs`` is OS-relative and answers ``/etc`` *relative* on Windows,
-    # where it then escaped the workspace through ``join`` and was refused by the
-    # containment lock with the wrong sentence. ``path_norm.is_qualified`` is the
-    # shape answer every lock in the app shares (win-02): a leading separator, a
-    # UNC root or a drive spec never names a folder here, whatever the platform.
+    # where it then escaped the workspace through ``join``. ``path_norm.is_qualified``
+    # is the shape answer every lock in the app shares: a leading separator, a UNC
+    # root or a drive spec never names a folder here, whatever the platform.
     if path_norm.is_qualified(text) or text.startswith("~"):
         raise BatchListingError(
             422,
             f"Batch folder must be relative to the workspace: {raw} "
             f"(workspace {workspace_seam.current_root()})",
         )
-    # Both separators in, ``/`` out (win-04 / A-D1): a Windows user typing
-    # ``todos\drafts`` gets the same folder as ``todos/drafts``, and every
-    # ``taskLocation`` handed to the model stays ``/``-joined. ``os.path.normpath``
-    # could not do that -- on either platform it leaves a backslash alone, so
-    # ``todos\drafts`` was one strange *name* rather than a path, and
-    # ``a\..\..\b`` kept a traversal the check below could not see.
+    # Both separators in, ``/`` out: a Windows user typing ``todos\drafts`` gets
+    # the same folder as ``todos/drafts``, and every ``taskLocation`` handed to the
+    # model stays ``/``-joined. ``os.path.normpath`` could not do that -- on either
+    # platform it leaves a backslash alone, so ``a\..\..\b`` kept a traversal the
+    # check below could not see.
     normalised = path_norm.canonical_rel(text)
-    # The ``..`` check now reads the **normalised** text, which is the shape the
-    # lock is about: a traversal that cancels itself away (``a/../b`` -> ``b``)
-    # stays legal, and only a ``..`` that survives is refused -- the same
-    # property ``editorfs.policy.normalise_rel`` enforces.
+    # The ``..`` check reads the **normalised** text, which is the shape the lock
+    # is about: a traversal that cancels itself away (``a/../b`` -> ``b``) stays
+    # legal, and only a ``..`` that survives is refused.
     if ".." in path_norm.path_parts(normalised):
         raise BatchListingError(422, f"Batch folder must not contain '..': {raw}")
     if normalised in ("", ".", "..") or os.path.isabs(normalised):
@@ -299,9 +289,9 @@ def resolve_lot_dir(raw: Optional[str]) -> Tuple[str, Path]:
 def prefix_of(stem: str) -> str:
     """The prefix part of a lot file stem (``doc-01-x`` -> ``doc-``).
 
-    The text up to and including the **first** ``-``: the naming convention is
-    ``<prefix><NN>-<slug>.md``, so the first separator always ends the prefix
-    (a stem with no ``-`` at all has no prefix and is not a lot file).
+    The text up to and including the **first** ``-``, because the naming
+    convention is ``<prefix><NN>-<slug>.md``; a stem with no ``-`` at all has no
+    prefix and is not a lot file.
     """
     index = stem.find("-")
     return stem[: index + 1] if index != -1 else ""
@@ -312,11 +302,10 @@ def task_prefixes(raw_dir: Optional[str] = None) -> Dict[str, Any]:
 
     The dropdown's source: the batch dialog offers the prefixes the folder
     actually holds instead of asking the user to type one. Same folder locks as
-    :func:`task_lot` (:func:`resolve_lot_dir`, one non-recursive ``scandir``,
-    symlinks refused), and the same definition of "belongs to a lot": a ``.md``
-    file whose stem splits into a prefix matching :data:`PREFIX_PATTERN` and a
-    task number. So a prefix appears here exactly when listing it would give a
-    non-empty lot.
+    :func:`task_lot` (one non-recursive ``scandir``, symlinks refused), and the
+    same definition of "belongs to a lot": a ``.md`` file whose stem splits into
+    a prefix matching :data:`PREFIX_PATTERN` and a task number. So a prefix
+    appears here exactly when listing it would give a non-empty lot.
 
     A prefix whose only file is the ``NN == 0`` big picture is **not** offered
     -- there would be nothing to run. ``hasLot`` still reports whether that file
@@ -390,11 +379,11 @@ def task_lot(prefix: str, raw_dir: Optional[str] = None) -> Dict[str, Any]:
     with empty lists, because "no such folder" and "nothing here yet" are
     different things for the dialog to say.
 
-    ``lot.text`` is the only file *content* batch mode ever returns: the
-    client needs it to send the big picture (``ChatIn.batchContext``) while no
-    file-read route exists. Tasks carry ``taskLocation`` -- the exact string
-    interpolated into the per-task message -- so the frontend never assembles a
-    path from parts.
+    ``lot.text`` is the only file *content* batch mode ever returns: the client
+    needs it to send the big picture (``ChatIn.batchContext``) while no file-read
+    route exists. Tasks carry ``taskLocation`` -- the exact string interpolated
+    into the per-task message -- so the frontend never assembles a path from
+    parts.
     """
     if not prefix or not _PREFIX_RE.match(prefix):
         raise BatchListingError(
@@ -427,8 +416,7 @@ def task_lot(prefix: str, raw_dir: Optional[str] = None) -> Dict[str, Any]:
             continue
         # A symlink is a pointer somewhere else: following it would let a lot
         # folder read (and leak into the dialog) a file the folder does not
-        # actually hold. The model's own tools resolve paths the same bounded
-        # way, so refusing here costs nothing a run would otherwise get.
+        # actually hold. The model's own tools resolve paths the same bounded way.
         if entry.is_symlink():
             skipped.append(
                 {"name": name, "reason": "not a regular file (a symlink)"}

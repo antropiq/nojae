@@ -27,21 +27,18 @@ const DOT_CLASS = {
 // What comes and goes is its switch list — with nothing activated in Settings
 // the panel shows its own empty line instead of leaving a gap in the dock.
 const hasEntries = computed(() => mcpHasEntries(state))
-// Only Settings-launched connectors may ever appear here, so this is also the
-// sentence that says where to declare them.
-// The toggles freeze with the first accepted send anyway; the batch flag covers
-// the between-tasks window, so a lot really does run under one identical tool
-// set (useChat's own guard refuses the change too, so the rule lives in both
-// places it can be reached from).
+// The toggles freeze with the first accepted send; the batch flag covers the
+// between-tasks window, so a lot really does run under one identical tool set
+// (useChat's own guard refuses the change too, so the rule lives in both places
+// it can be reached from).
 const locked = computed(
   () => state.mcp.locked || state.phase !== 'idle' || batch.active,
 )
 
-// D4's coarsest switch: the active agent mode can switch the whole hub off. The
-// panel then renders **disabled with a reason** rather than disappearing — the
-// toggles stay real (Settings owns them) and a hidden control that reappears on
-// a mode change reads as a bug. `modeBlocksHub` is false when the mode list
-// never loaded, which is exactly the pre-feature rendering.
+// The active agent mode can switch the whole hub off. The panel then renders
+// **disabled with a reason** rather than disappearing — the toggles stay real
+// (Settings owns them) and a hidden control that reappears on a mode change
+// reads as a bug. `modeBlocksHub` is false when the mode list never loaded.
 const gatedByMode = computed(() => modeBlocksHub('mcp'))
 const switchesDisabled = computed(() => locked.value || gatedByMode.value)
 
@@ -62,9 +59,8 @@ function rowTitle(connector) {
 }
 
 // Restarting reconnects every connector from a fresh .nojae/mcp-settings.json
-// scan, so
-// a hub thread blocked in a chat tool call would be killed mid-call: the
-// button is only usable on an idle conversation, and stays busy until the
+// scan, so a hub thread blocked in a chat tool call would be killed mid-call:
+// the button is only usable on an idle conversation, and stays busy until the
 // awaited server-side restart comes back.
 const canRestart = computed(
   () => state.phase === 'idle' && !state.mcp.restarting && !batch.active,
@@ -77,12 +73,12 @@ const restartTitle = computed(() => {
 
 // The wizard's entry point. Its enablement is the composable's one gate verdict —
 // `{disabled, label}`, where the label is `Set me up!` when live and the app's
-// existing no-model sentence when not — so this panel adds no rule of its own.
+// no-model sentence when not — so this panel adds no rule of its own.
 //
 // Deliberately **not** `locked` / `gatedByMode` / `canRestart`: those are the
 // restart's rules. Preparing an entry touches no hub and no conversation, so it
 // stays live while a reply streams, while a batch runs, while the toggles are
-// locked and while the active mode switches this hub off (§10).
+// locked and while the active mode switches this hub off.
 const setMeUp = computed(() => wizard.setMeUpSlot(FAMILY_MCP))
 
 // Opening the wizard on **this** panel's family and nothing else: no toggle, no
@@ -92,11 +88,10 @@ function openWizard() {
   wizard.open(FAMILY_MCP)
 }
 
-// The empty panel's one sentence: the line it already carried — which declaration
-// file, and that the entry is switched on in Settings — plus the click this
-// feature adds. Composed here rather than in the template, so the template renders
-// a value and decides nothing, and built around the composable's own
-// `SET_ME_UP_LABEL`, so the sentence and the button beside it cannot drift.
+// The empty panel's one sentence: which declaration file, that the entry is
+// switched on in Settings, and the click the button above adds. Composed here so
+// the template renders a value and decides nothing, and built around the
+// composable's own `SET_ME_UP_LABEL` so the sentence and the button cannot drift.
 const emptyLine = computed(
   () =>
     'No MCP connector is available for this conversation — declare one in ' +
@@ -110,8 +105,8 @@ const emptyLine = computed(
     <div class="chat-hub-head">
       <p class="caption chat-mcp-title">MCP tools</p>
       <!-- The wizard's entry point, left of the restart and in the same 1.5rem
-           box: one line in the head, so the panel's width, height and head
-           layout are untouched. It opens this panel's family and nothing else. -->
+           box, so the head stays one line. It opens this panel's family and
+           nothing else. -->
       <button
         class="icon-btn chat-hub-setup"
         type="button"
@@ -142,13 +137,13 @@ const emptyLine = computed(
         </svg>
       </button>
     </div>
-    <!-- The route's refusal, verbatim: the ceiling's sentence is the same one
-         the app bar shows, and a panel that asked must not look merely empty. -->
+    <!-- The route's refusal, verbatim: a panel that asked must not look merely
+         empty. -->
     <p v-if="state.mcp.error" class="caption alert-error chat-hub-error" role="alert">
       {{ state.mcp.error }}
     </p>
-    <!-- The empty line inviting the click: the composable's sentence, which still
-         names the declaration file and now says what the button above does. -->
+    <!-- The empty line inviting the click: the composable's sentence, which names
+         the declaration file and says what the button above does. -->
     <p v-if="!hasEntries" class="caption chat-hub-empty">{{ emptyLine }}</p>
     <label
       v-for="connector in state.mcp.connectors"

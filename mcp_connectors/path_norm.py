@@ -1,4 +1,4 @@
-r"""What a path *text* is -- never whether it is allowed (win-02).
+r"""What a path *text* is -- never whether it is allowed.
 
 Three questions, answered the same way in every process and on every platform:
 how a caller's path text becomes the canonical form, whether that text is
@@ -8,28 +8,28 @@ its components are. Nothing here knows a mode, a rule list or a filesystem.
 Why it lives here rather than under ``src``: the two stdio connectors
 (``fedit_mcp``, ``console_mcp``) run as scripts launched by absolute path and
 cannot ``import src`` -- the wheel packages ``src`` only. It is the same reason
-:mod:`mcp_connectors.policy_glob` (pol-02) and :mod:`mcp_connectors.policy_shared`
-(pol-08) sit beside it: stdlib-only, no FastAPI, no ``src`` import. So do not
-tidy this into ``editorfs`` -- the connectors would lose the answer and start
-disagreeing with the Editor pane about what a path *is*, which is the disagreement
-this module exists to prevent.
+:mod:`mcp_connectors.policy_glob` and :mod:`mcp_connectors.policy_shared` sit
+beside it: stdlib-only, no FastAPI, no ``src`` import. So do not tidy this into
+``editorfs`` -- the connectors would lose the answer and start disagreeing with
+the Editor pane about what a path *is*, which is the disagreement this module
+exists to prevent.
 
 The three things a later contributor must not lose:
 
 * **The canonical form is ``/``-joined workspace-relative text on every
-  platform** (roadmap §9 rule 1). A backslash is accepted *only at the inbound
-  lock* (``editorfs.policy.normalise_rel``, win-03) and is **never emitted**: not
-  into a payload, the tree or the browser. So the Windows user
-  typing ``src\config.py`` and the Linux test writing ``src/config.py`` mean one
-  path, and one path string still means the same thing in a report from either box.
+  platform.** A backslash is accepted *only at the inbound lock*
+  (``editorfs.policy.normalise_rel``) and is **never emitted**: not into a
+  payload, the tree or the browser. So the Windows user typing
+  ``src\config.py`` and the Linux test writing ``src/config.py`` mean one path,
+  and one path string still means the same thing in a report from either box.
 * **This module answers what a path text is, never whether it is allowed.** The
-  verdict belongs to ``policy_modes.mode_for`` (pol-06, its one implementation)
-  and the locks to ``editorfs.policy``.
+  verdict belongs to ``policy_modes.mode_for`` and the locks to
+  ``editorfs.policy``.
 * **It is pure text, so it carries no platform branch**: no ``sys.platform``, no
   ``os.name``, no ``os.sep``, no ``os.path.normpath``, no ``pathlib`` path class.
   Only :func:`ntpath.splitdrive` is consulted, and only because it is a *text*
   function -- importable and correct on Linux too, which is what lets the Windows
-  shapes be tested on the Linux runner (roadmap §9 rule 2).
+  shapes be tested on the Linux runner.
 """
 
 import ntpath
@@ -67,8 +67,8 @@ def canonical_rel(text: str) -> str:
     * **Drop a ``..`` that escapes the start.** It survives as a leading
       component: ``a/../b`` is ``b``, but ``../a`` is ``../a`` and ``a/../../b``
       is ``../b``. That is the property ``editorfs.policy.normalise_rel`` relies
-      on (``policy.py:201``): a traversal that stays inside the workspace stays
-      legal, and only a surviving ``..`` is refused.
+      on: a traversal that stays inside the workspace stays legal, and only a
+      surviving ``..`` is refused.
     * **Touch whitespace.** The lock strips before calling.
 
     Idempotent, because a caller may hand it text that is already canonical
@@ -106,8 +106,7 @@ def canonical_rel(text: str) -> str:
 def is_qualified(text: str) -> bool:
     r"""True when ``text`` cannot be a workspace-relative path on **any** platform.
 
-    Each shape is a hole in ``os.path.isabs``, not a rule invented for Windows
-    (all verified on 3.13 with ``ntpath``):
+    Each shape is a hole in ``os.path.isabs``, not a rule invented for Windows:
 
     * **A leading slash or backslash** -- ``/etc/x``, ``\Users\vgr``. On Windows
       ``ntpath.isabs("/etc/x")`` is ``False``, so such a text is not refused as
@@ -139,8 +138,8 @@ def is_qualified(text: str) -> bool:
     component plus a colon is a drive spec on both platforms, so ``a:b`` is
     refused even though it is a legal POSIX filename -- a second widening of
     accepted input beyond the ``a\b`` one. No rule can refuse ``C:x`` without also
-    refusing ``a:b``; win-03 puts that in the lock's refusal message, and the test
-    here pins it in both directions.
+    refusing ``a:b``; the lock's refusal message says so, and the test here pins
+    it in both directions.
     """
     if text[:1] in _SEPARATORS:
         return True
@@ -165,7 +164,7 @@ def path_parts(text: str) -> tuple[str, ...]:
     write gate, the parent of a create, the ``.gitignore`` prune in the search, the
     batch lot folder and the matcher's own segment list agree **by construction**
     instead of by a coincidence of separator -- which is what silently degraded on
-    Windows (roadmap §2.2 and §2.4).
+    Windows.
 
     The contract is a *pre-normalised* input: callers pass what
     ``normalise_rel`` returned, so no leading separator and no surviving ``..``.

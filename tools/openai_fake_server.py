@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """An OpenAI-compatible stub model server, so a test suite needs no real model.
 
-The e2e suite pointed its fixture at a real endpoint, which made it depend on a
-server nobody owned: a reachable host and a hand-written model id had to exist
-before any spec could run, and every answer varied with that model's sampling.
-This script answers the two routes :mod:`src.core.llmkit` speaks and nothing
-else, so the suite is hermetic and a streamed reply has an exactly-known shape.
+It answers the two routes :mod:`src.core.llmkit` speaks and nothing else, so the
+e2e suite depends on no reachable host and a streamed reply has an exactly-known
+shape.
 
 Run it, then point a test connection's URL at it::
 
@@ -14,8 +12,8 @@ Run it, then point a test connection's URL at it::
 
 The ``/v1`` half of the URL is optional — :func:`llmkit.client._v1_base` appends
 it. The fixture's model name may be **anything**: the stub serves whichever name
-it is asked for and advertises ``--model`` at ``/v1/models``, so a harness that
-writes both sides of the pair never has to keep two spellings in step.
+it is asked for and advertises ``--model`` at ``/v1/models``, so the harness
+never has to keep two spellings in step.
 
 The surface (everything the app asks a model server for):
 
@@ -67,9 +65,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
 #: The answer a request gets when the caller asked for none. Fifty-odd words on
-#: purpose: split per word and paced by the chunk gap, it streams for a couple of
-#: seconds, which is long enough for a spec to catch a turn in flight (the two-tab
-#: spec closes a tab mid-reply) and short enough to cost a run nothing.
+#: purpose: paced by the chunk gap it streams for a couple of seconds, long enough
+#: for a spec to catch a turn in flight and cheap enough to cost a run nothing.
 DEFAULT_REPLY = (
     "A stub answers this test, so the answer is fixed and its shape is the point. "
     "It arrives in word-sized frames with a finish reason at the end and a usage "
@@ -118,9 +115,9 @@ class Handler(BaseHTTPRequestHandler):
     """The two routes, plus the silence a cancelled client leaves behind.
 
     HTTP/1.0 with one response per connection: the body is close-delimited, so a
-    streamed answer needs no chunked-encoding framing of its own — which is what
-    lets the reply be written as plain ``data:`` lines and the socket be the only
-    end-of-stream signal besides the sentinel.
+    streamed answer needs no chunked-encoding framing and the reply can be plain
+    ``data:`` lines, the socket being the only end-of-stream signal besides the
+    sentinel.
     """
 
     server_version = "nojae-fake-model/1.0"
@@ -133,16 +130,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         """One line per request, on ``--quiet``'s say-so, and never at a cost.
 
-        Both halves matter:
-
-        * ``--quiet`` silences this, not only the startup banner — a harness that
-          asked for quiet asked for it.
-        * The write is guarded because **a log line must never be able to fail a
-          request**. When stdout is a pipe whose reader has gone, a bare write
-          raises, and since the base class calls this from *inside* the request
-          handler, that exception lands after the status line and headers have
-          been sent: the client then sees a response with no body, which is the
-          most confusing failure this file could produce.
+        The write is guarded because **a log line must never be able to fail a
+        request**: with stdout a pipe whose reader has gone, a bare raise lands
+        after the status line and headers have been sent, and the client sees a
+        response with no body.
         """
         if self.config.quiet:
             return
@@ -150,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
             print(f"{self.address_string()} {fmt % args}", flush=True)
         except (OSError, ValueError):
             # A log line that cannot be written is not a reason to fail the
-            # request it describes. See the docstring above.
+            # request it describes.
             pass
 
     # --- routing -----------------------------------------------------------
@@ -192,9 +183,8 @@ class Handler(BaseHTTPRequestHandler):
         model = model_name(config, body)
 
         if config.first_token_delay > 0:
-            # What a real endpoint spends before its *first* byte — the wait the
-            # app's timeout deliberately leaves unbounded, and the one a
-            # time-to-first-token assertion needs to not be instant.
+            # What a real endpoint spends before its *first* byte, so a
+            # time-to-first-token assertion is not instant.
             time.sleep(config.first_token_delay)
 
         for word in config.frames:
@@ -205,8 +195,7 @@ class Handler(BaseHTTPRequestHandler):
             if config.chunk_gap > 0:
                 time.sleep(config.chunk_gap)
 
-        # The completion signal. Without it every answer looks cut short, which
-        # is the one thing a stub may not get wrong.
+        # The completion signal: without it every answer looks cut short.
         if not self._write_data(
             chunk_payload(chunk_id, model, finish_reason="stop")
         ):
@@ -262,11 +251,10 @@ class FakeModelServer(ThreadingHTTPServer):
     """The stub: threaded, and gone when its process is.
 
     Both flags are about *leaving*. ``daemon_threads`` lets the process exit while
-    a stream is mid-flight (Playwright kills this when the suite ends, often
-    during an answer nobody was waiting for any more), and ``block_on_close`` has
-    to be off for the same reason — the standard library joins handler threads in
-    ``server_close`` even when they are daemons, so a half-written answer would
-    hold up shutdown while the harness waited on it.
+    a stream is mid-flight (Playwright kills this when the suite ends), and
+    ``block_on_close`` must be off for the same reason — the standard library
+    joins handler threads in ``server_close`` even when they are daemons, so a
+    half-written answer would hold up shutdown.
     """
 
     daemon_threads = True
@@ -284,10 +272,9 @@ class FakeModelServer(ThreadingHTTPServer):
 def model_name(config: FakeServerConfig, body: Dict[str, Any]) -> str:
     """Whichever model the request asked for.
 
-    Serving the name it is *given* is what lets a fixture name its model anything
-    at all: the stub never refuses an id it has not been told about, so a
-    mis-typed name cannot look like an app bug — and cannot silently answer a
-    different model than the connection claims either, because there is only one.
+    Serving the name it is *given* lets a fixture name its model anything at all:
+    the stub never refuses an id it has not been told about, so a mis-typed name
+    cannot look like an app bug.
     """
     asked = body.get("model")
     return asked if isinstance(asked, str) and asked else config.model
@@ -316,9 +303,8 @@ def chunk_payload(
 def wants_usage(body: Dict[str, Any]) -> bool:
     """Whether the request asked for a usage block on its stream.
 
-    The seam always asks (``stream_options.include_usage``), but the stub answers
-    the request it was actually given, so a caller that did not ask is not handed
-    a frame it has to skip.
+    The seam always asks (``stream_options.include_usage``); a caller that did not
+    is not handed a frame it has to skip.
     """
     options = body.get("stream_options")
     return isinstance(options, dict) and bool(options.get("include_usage"))
@@ -383,9 +369,8 @@ def models_payload(config: FakeServerConfig) -> Dict[str, Any]:
 def usage(config: FakeServerConfig, body: Dict[str, Any]) -> Dict[str, int]:
     """The token block, counted in words and characters.
 
-    There is no tokenizer here, so the prompt side is the same ~4-chars-per-token
-    estimate the app itself falls back to when a server reports nothing. Honest
-    as an estimate, stable as a fixture: the numbers never move between runs.
+    There is no tokenizer here, so the prompt side is the app's own ~4-chars-per-
+    token fallback. Honest as an estimate, stable as a fixture.
     """
     prompt_chars = 0
     messages = body.get("messages")
@@ -405,14 +390,13 @@ def usage(config: FakeServerConfig, body: Dict[str, Any]) -> Dict[str, int]:
 def error_payload(message: str, status: int) -> Dict[str, Any]:
     """An OpenAI-shaped error — the shape ``llmkit._error_message`` reads first.
 
-    A body that is not this shape still reaches the UI, but as a truncated blob
-    instead of a sentence, so the stub spells it the way a real server would.
+    Any other shape reaches the UI as a truncated blob instead of a sentence.
     """
     return {"error": {"message": message, "type": "invalid_request_error", "code": status}}
 
 
-#: A per-response id. Nothing in the app reads it; a completion without one is
-#: merely odd, and monotonic ids make a captured log easy to read.
+#: A per-response id. Nothing in the app reads it; monotonic ids make a captured
+#: log easy to read.
 _ID_LOCK = threading.Lock()
 _ID_SEQ = 0
 

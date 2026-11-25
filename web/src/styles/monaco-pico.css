@@ -1,59 +1,39 @@
-/* Pico CSS vs. Monaco internals.
+/* Pico vs. Monaco internals: Pico styles bare element selectors with no class
+   to opt out of, so they also hit the DOM Monaco builds for itself — the
+   transparent `.inputarea` it sizes per keystroke to sit over the text it
+   proxies, the find widget's `<input>`s, its `role="button"` action labels.
+   Pico's padding, border and transition on those shift what Monaco measures
+   and lag the cursor behind the caret, so undo them inside the editor host and
+   let Monaco's own CSS style its own layout. Scoped to `.monaco-host`, the
+   element the editor is created on. `all: revert` is deliberately not used: it
+   would reset Monaco's own properties too, leaving bundle order to decide who
+   wins. */
 
-   Pico styles bare element selectors — `input`, `textarea`, `button`,
-   `[role=button]`, `ul`, `p`, `pre` — with no class to opt out of, so every
-   one of them also applies to the DOM Monaco builds for itself: the hidden
-   `.inputarea` that carries typing and IME, the `<input>`s of the find widget
-   and the suggest/details UI, the `<a role="button">` labels of its action
-   bars, the `<ul>`s of its lists.
-
-   That is not cosmetic. Pico gives the textarea `width: 100%`, a border, a
-   radius, padding and a background; Monaco positions and sizes that element
-   per keystroke to sit exactly over the text it is proxying, so a padding or
-   border shifts every character it measures and a `transition` makes the
-   cursor lag behind the caret. Pico's primary-button chrome on
-   `[role=button]` paints Monaco's toolbar labels as app buttons.
-
-   So: undo Pico's form/typography defaults inside the editor host, and let
-   Monaco's own CSS (which uses the same specificity but is authored against
-   its own layout) do the styling. Scoped to `.monaco-host`, which is the
-   element the editor is created on — nothing else on the page is affected.
-   `all: revert` is deliberately not used: it would reset Monaco's own
-   properties too, and these files' order in the bundle would decide who wins. */
-
-/* The two rules Pico applies to *every* element are the ones that bite a
-   measured layout: `background-repeat: no-repeat` on `*`, and the
-   inherited root font-family/size/line-height that Monaco's font measuring
-   assumes it owns. The font itself is set through Monaco's `fontFamily`
-   option instead, so the browser default here is not what is rendered. */
+/* The two Pico rules that hit *every* element and bite a measured layout:
+   `background-repeat: no-repeat` on `*`, and the inherited root
+   font-family/size/line-height. The font itself is set through Monaco's
+   `fontFamily` option, so the browser default here is not what is rendered. */
 .monaco-host * {
   background-repeat: initial;
   overflow-wrap: normal;
 }
 
-/* The find widget's buttons, back onto Monaco's own icon font.
-
-   The face and its rules are not the problem: the theme service injects
-   `.codicon[class*='codicon-'] { font: … codicon }` and its `@font-face` at
-   runtime, and the widget's toggles draw with it. What loses is that
-   shorthand — the find widget styles *its* buttons with a longer selector
-   (`.monaco-editor .find-widget .button`, 0,3,0), and an inherited `font`
-   shorthand resets `font-family` wholesale, so those buttons fall back to the
-   editor's UI font. A UI font has no glyph for a private-use code point, so the
-   button shows a small box instead of an arrow: the widget still works, it has
-   stopped saying what its buttons do. Only the family is restated, at the
-   widget's own specificity — its size, colour and hover rules are left in charge.
-   The face holds nothing but icons, so this asks for no glyph Monaco does not
-   already draw. */
+/* The find widget's buttons, back onto Monaco's own icon font. The theme
+   service injects the codicon face and a `font` shorthand on it, but the
+   widget's own button rule wins on specificity, and an inherited `font`
+   shorthand resets `font-family` wholesale: the buttons fall back to the UI
+   font, which has no glyph for their private-use code point, so they draw a
+   box instead of an arrow. Only the family is restated, at the widget's own
+   specificity, leaving its size and colours in charge; the face holds nothing
+   but icons, so no glyph is invented. */
 .monaco-editor .find-widget .button,
 .monaco-editor .find-widget .codicon-find-selection {
   font-family: codicon;
 }
 
-/* Text inputs: the `.inputarea`, the IME input, the find/replace and
-   goto-line `<input>`s, the suggest/details widgets. Reset the box, the
-   chrome and the transition — Monaco sizes these in device pixels and moves
-   them with inline styles. */
+/* Text inputs — the `.inputarea`, the IME input, the find/replace and
+   goto-line `<input>`s: reset box, chrome and transition, because Monaco
+   sizes these in device pixels and moves them with inline styles. */
 .monaco-host textarea,
 .monaco-host input {
   width: auto;
@@ -99,8 +79,7 @@
 
 /* Pico's typography leaks into Monaco's hover, suggestion and list DOM:
    paragraph bottoms, square list markers, `pre` margins and its own code
-   font. Monaco's rendered-markdown rules already handle the one list case it
-   ships, so the reset is what keeps hover content aligned. */
+   font. */
 .monaco-host p,
 .monaco-host pre,
 .monaco-host ul,

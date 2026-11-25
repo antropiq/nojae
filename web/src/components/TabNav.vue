@@ -6,8 +6,8 @@ import { useBatch } from '../composables/useBatch'
 const { state, setTab } = useAppShell()
 const { state: batch } = useBatch()
 
-// A running batch pins the app to WorkBench (B11): every other tab goes inert,
-// and setTab refuses the switch too, so a keyboard path cannot escape mid-lot.
+// A running batch pins the app to WorkBench: every other tab goes inert, and setTab
+// refuses the switch too, so a keyboard path cannot escape mid-lot.
 const disabled = computed(() => batch.active)
 const editorDisabled = computed(() => batch.active)
 const editorTitle = computed(() =>

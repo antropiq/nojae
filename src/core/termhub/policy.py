@@ -1,39 +1,31 @@
 """The one check a terminal upgrade has to pass: Origin.
 
-The pane is a *human* surface, but a WebSocket to ``127.0.0.1:8001`` is
-reachable by anything on the machine — a page in another tab, another local
-process — so the endpoint still validates what it accepts. This app has no
-CORS layer and no CSRF-style token, so the Origin check is the one cheap
+The pane is a *human* surface, but a WebSocket to a loopback port is reachable
+by anything on the machine — a page in another tab, another local process. The
+app has no CORS layer and no CSRF-style token, so this check is the one cheap
 defence against a random web page handing itself a shell.
 
-The rule is "the page must be local", not "the page must match the Host
-header", for two honest reasons:
+The rule is "the page must be local", not "the page must match the ``Host``
+header", for two reasons:
 
-* the dev proxy: the browser page is on Vite's origin, ``changeOrigin`` rewrites
-  ``Host`` to the API's but never the ``Origin``, so an origin==host comparison
-  would refuse the very connection the Vite dev workflow needs;
-* DNS rebinding: under ``evil.com → 127.0.0.1`` a *host-match* check agrees
-  (the browser sends ``Host: evil.com``), while a local-host check still
-  refuses — the stronger test for the threat this guards.
+* the dev proxy: the page is on Vite's origin, ``changeOrigin`` rewrites ``Host``
+  to the API's but never the ``Origin``, so an origin==host comparison would
+  refuse the very connection the dev workflow needs;
+* DNS rebinding: under ``evil.com → 127.0.0.1`` a *host-match* check agrees,
+  while a local-host check still refuses.
 
-The app listens on ``127.0.0.1`` only (uvicorn entry point), so every origin it
-can legitimately be opened from is a loopback one: the SPA on its own port, and
-the Vite dev server. A page served from a routable host is refused by name.
-Anything that is not a browser sends no ``Origin`` at all — a deliberately
-launched local client (``wscat``) — and is let through, which is also the
-honest line: this check guards the *browser* path, and no Origin rule can
-discriminate against another process on the same machine anyway (it could just
-open the socket).
+A page served from a routable host is refused by name. Anything that is not a
+browser sends no ``Origin`` at all — a deliberately launched local client — and
+is let through, which is the honest line: no Origin rule can discriminate
+against another process on the same machine anyway.
 
-Deliberately *not* here: a path from the client. The shell's ``cwd`` is
-the workspace in scope when the session was born
-(``src.core.workspace.current_root``) — and that scope was entered from the
-socket's own ``workspace`` query field, resolved by the one validator in
-:mod:`src.core.workspace`, so the folder *does* come from the client: as a named
-**workspace**, once, when the socket opens, never as a path in the frame stream.
-``cd`` inside the shell is the user's business, which is the point of a terminal,
-but there is nothing for the tree/editor policy to inject-guard on this surface.
-The routes that *do* take a path are gated by ``editorfs.policy`` instead.
+Deliberately *not* here: a path from the client. The shell's ``cwd`` is the
+workspace in scope when the session was born, entered from the socket's own
+``workspace`` query field and resolved by the one validator in
+:mod:`src.core.workspace`, so the folder comes from the client as a named
+**workspace** once, never as a path in the frame stream. ``cd`` inside the shell
+is the user's business; the routes that *do* take a path are gated by
+``editorfs.policy`` instead.
 """
 
 import ipaddress

@@ -3,21 +3,20 @@
 ``TerminalHub`` is the ``app.state.terminal`` singleton, mirroring what the two
 hubs are for their children: a long-lived registry the API reads (``GET
 /api/terminal``) and the ``lifespan`` shutdown stops. It holds no loop of its
-own — unlike the hubs, a terminal session is driven by the WebSocket coroutine
-that opened it, on the main event loop — so this is deliberately a thin owner:
-the cap decision, the id→session map, and ``stop_all``.
+own — a session is driven by the WebSocket coroutine that opened it, on the main
+event loop — so this is deliberately a thin owner: the cap decision, the
+id→session map, and ``stop_all``.
 
-The same visibility rule the hubs follow (AGENTS.md): *an orphan must be
-nameable*. ``list_sessions`` reports pid/cwd/started/bytes so a shell that
-somehow outlived its socket can be seen; ``stop_all`` kills any such session on
-shutdown, and every session also tears itself down when its socket ends, so the
-registry never accumulates on the normal path.
+*An orphan must be nameable*: ``list_sessions`` reports pid/cwd/started/bytes so
+a shell that somehow outlived its socket can be seen, and ``stop_all`` kills any
+such session on shutdown. Every session also tears itself down when its socket
+ends, so the registry never accumulates on the normal path.
 
-**One registry, one cap, every workspace** (spec §3.1: "the registry is shared").
-Sessions are not per workspace: two tabs on two folders are two sessions in this
-one map, each carrying the folder it was **born in**, so the listing answers two
-``cwd``s and the cap stays the app's. Nothing here is keyed by a folder, and
-there is no second registry to keep in step.
+**One registry, one cap, every workspace.** Sessions are not per workspace: two
+tabs on two folders are two sessions in this one map, each carrying the folder
+it was **born in**, so the listing answers two ``cwd``s and the cap stays the
+app's. Nothing here is keyed by a folder, and there is no second registry to
+keep in step.
 """
 
 import asyncio
@@ -38,7 +37,7 @@ class TerminalHub:
         self._sessions: Dict[str, TerminalSession] = {}
 
     def capacity(self) -> int:
-        """Read at call time so a patched cap is honoured (constants rule)."""
+        """Read at call time so a patched cap is honoured."""
         return constants.MAX_SESSIONS
 
     def count(self) -> int:
@@ -52,8 +51,8 @@ class TerminalHub:
 
         Raises :class:`SessionCapacity` when the app already runs the maximum
         number of shells, so the route can refuse the *upgrade* rather than
-        silently opening another process tree. The session is registered before
-        it spawns, so a spawn failure still lands in :meth:`drop`.
+        opening another process tree. The session is registered before it spawns,
+        so a spawn failure still lands in :meth:`drop`.
         """
         if self.is_full():
             raise SessionCapacity(
@@ -67,8 +66,8 @@ class TerminalHub:
     def drop(self, session_id: str) -> None:
         """Remove a finished session from the registry (does not kill it).
 
-        The route calls this after ``teardown``; the process is already gone by
-        then, so this only keeps ``list_sessions``/``is_full`` honest.
+        Called after ``teardown``, when the process is already gone, so it only
+        keeps ``list_sessions``/``is_full`` honest.
         """
         self._sessions.pop(session_id, None)
 
@@ -82,10 +81,10 @@ class TerminalHub:
     async def stop_all(self) -> None:
         """Tear down every session that outlived its socket. Idempotent.
 
-        A session already tearing down on its own path is safe to pass here
-        too: ``teardown`` is guarded, so the second call is a no-op. Each is
-        awaited through ``kill_session_tree``'s own grace, so the app exit pays
-        at most ``STOP_GRACE_SECONDS`` per stubborn shell, not per process.
+        A session already tearing down on its own path is safe here too:
+        ``teardown`` is guarded, so the second call is a no-op. Each is awaited
+        through ``kill_session_tree``'s own grace, so the app exit pays at most
+        ``STOP_GRACE_SECONDS`` per stubborn shell, not per process.
         """
         sessions = list(self._sessions.values())
         self._sessions.clear()

@@ -31,19 +31,15 @@ _log = logging.getLogger("nojae")
 def _boot_app_store() -> Dict[str, Any]:
     """Bring the app's own settings store up; never raise.
 
-    ``appdb.boot()`` is open-or-create → schema at the current level, upgrade, or
-    refuse → seed (§4.3), and it already answers a state dict instead of raising,
-    so this wrapper only guards the *unexpected* — the same contract the
-    workspace's reserved-folder seeds hold (``src/core/hubpool.py``), and the
-    reason it matters most here: a database this app could not open, write or
-    understand must not take the boot down with it. The
-    app starts, the store's state is kept where a later task can answer it
-    (:func:`src.core.appdb.store_state` — the app bar's notice and the chat
-    refusal are tasks 09 and 03), and the sentence naming the path goes to the
-    log so the failure is a named state rather than a silent empty store.
+    :func:`src.core.appdb.boot` already answers a state dict instead of raising,
+    so this wrapper only guards the *unexpected*: a database this app could not
+    open, write or understand must not take the boot down with it. The app
+    starts, the failure is recorded in :func:`src.core.appdb.store_state` (the
+    one place the store's state is answered from) and named in the log — a named
+    state, never a silent empty store.
 
     It runs **before** the workspace seeds because it is install-scoped: nothing
-    in it depends on, or is invalidated by, the working location (D11).
+    in it depends on, or is invalidated by, the working location.
     """
     try:
         result = appdb.boot()
@@ -69,48 +65,40 @@ def _boot_app_store() -> Dict[str, Any]:
 
 def create_app() -> FastAPI:
     """Build the FastAPI app: API routes first, static SPA fallback after."""
-    # There is no file to read here any more: what this app runs on comes from
-    # the command line that booted it (:func:`src.config.parse_boot_args`,
-    # recorded by :func:`run`) or from the module's defaults when nothing
-    # recorded anything. A process that never went through ``run`` — this
+    # What this app runs on comes from the command line that booted it
+    # (:func:`src.config.parse_boot_args`, recorded by :func:`run`) or from the
+    # module's defaults. A process that never went through ``run`` — this
     # module's import in a test, a ``uvicorn src.api.server:app`` dev server —
-    # therefore builds the same app on the documented defaults, which is why
-    # nothing here looks for a file at all.
+    # therefore builds the same app on the documented defaults, so there is no
+    # file to read here.
     #
-    # The debug switch is applied here because the switch's whole effect is
-    # process-wide logger state, and an app that is *created* is the moment that
-    # state should match what the run decided. Keeping it out of the module's
-    # import side effects means the tests build an app without touching the
-    # loggers of the whole process unless they ask for it; ``run`` re-applies it
-    # after parsing, which is what covers the console-script path.
+    # The debug switch is applied here because its whole effect is process-wide
+    # logger state, and an app that is *created* is the moment that state should
+    # match what the run decided. Keeping it out of the module's import side
+    # effects means tests build an app without touching the process's loggers
+    # unless they ask for it; ``run`` re-applies it after parsing.
     apply_llm_debug()
-    # The folder the boot lands on is the **installation**, which is the workspace
-    # a new tab starts on (spec D4). It is admitted to the pool like any other:
-    # seeded first (its reserved files must exist before the first scan of the
-    # declaration files, which is what ``${NOJAE_PATH_LOCATION}`` in both of them
-    # points at), then given its own two managers in the lifespan below. Nothing
-    # process-wide decides it any more — the interim location value is gone
-    # (clws-10) and the pool's admission is the one seeding moment.
+    # The folder the boot lands on is the **installation**, the workspace a new
+    # tab starts on. It is admitted to the pool like any other: seeded first
+    # (its reserved files must exist before the first scan of the declaration
+    # files, which is what ``${NOJAE_PATH_LOCATION}`` in both of them points at),
+    # then given its own two managers in the lifespan below. Nothing
+    # process-wide decides it — the pool's admission is the one seeding moment.
     boot_root = workspace_seam.installation()
     # One pool for the whole app, built here rather than in the lifespan because
-    # the boot seeding below belongs to this moment (see the note above) and is
-    # the pool's own function: **boot calls the pool, not a copy of the pool**.
-    # Every folder another tab names is admitted by ``acquire`` on its own
-    # request, which seeds it the same way — a read of a workspace never writes.
+    # the boot seeding below belongs to this moment and is the pool's own
+    # function: **boot calls the pool, not a copy of the pool**. Every folder
+    # another tab names is admitted by ``acquire`` on its own request.
     pool = HubPool()
     pool.boot_root = boot_root
-    # The four actions the boot has always performed at this point — the policy
-    # file, the MCP declaration, the LSP *template* (the declaration itself is
-    # hand-written and is still never seeded), and the trash sweep that keeps a
-    # folder nobody deletes into from rotting — are now one call, with the same
-    # contract: each is a note in the log, never a boot failure. An unseeded
-    # workspace simply has no level-B rules and no connectors yet.
+    # The boot's reserved-folder work — policy file, MCP declaration, the LSP
+    # *template* (the declaration itself is hand-written and is never seeded),
+    # and the trash sweep: each is a note in the log, never a boot failure. An
+    # unseeded workspace simply has no level-B rules and no connectors yet.
     #
-    # The agent modes are **not** seeded here any more (appdb-10): the personas
-    # are rows of the install's ``nojae.db``, which :func:`_boot_app_store`
-    # brings up and seeds in the lifespan below. Nothing about an agent depends
-    # on the working location, so there is nothing to leave in the folder a
-    # switch just moved to (D11).
+    # The agent modes are **not** seeded here: the personas are rows of the
+    # install's ``nojae.db``, which :func:`_boot_app_store` brings up in the
+    # lifespan below. Nothing about an agent depends on the working location.
     #
     # Seeding is idempotent (every create is exclusive), so the lifespan's
     # admission of the same folder costs nothing the second time — and the
@@ -121,11 +109,9 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # The app's own settings store comes up first: open-or-create, schema at
-        # the current level (or upgrade, or refuse), then seed (§4.3). It is
-        # install-scoped, so it has no ordering relationship with the workspace
-        # seeds above — nothing in them reads it and nothing in it reads the
-        # working location (D11).
+        # The app's own settings store comes up first. It is install-scoped, so
+        # it has no ordering relationship with the workspace seeds above —
+        # nothing in them reads it and nothing in it reads the working location.
         #
         # In the lifespan rather than beside those seeds, because ``create_app()``
         # runs at *import* time here (the module-level ``app`` below), and a store
@@ -136,12 +122,12 @@ def create_app() -> FastAPI:
         #
         # The answer is not kept on ``app.state``: ``appdb.store_state()`` is the
         # one place the store's state is recorded, so the app bar and the chat
-        # refusal of the tasks after this one cannot disagree with the boot.
+        # refusal cannot disagree with the boot.
         # The store is the install's, but in test mode its connection fixture is
         # a file at the **installation** folder's reserved subfolder — the one
-        # workspace the boot is about (spec D4). Entering that folder's scope is
-        # what lets the store's own workspace-scoped fixture lookup answer where
-        # the suite committed it, without giving any route a default folder.
+        # workspace the boot is about. Entering that folder's scope is what lets
+        # the store's own workspace-scoped fixture lookup answer where the suite
+        # committed it, without giving any route a default folder.
         with workspace_seam.scope(boot_root):
             _boot_app_store()
         # The pool is the app's long-lived singleton: it holds **one set of
@@ -151,23 +137,21 @@ def create_app() -> FastAPI:
         # internals in place).
         #
         # The boot workspace is admitted here — the same ``acquire`` any other
-        # folder goes through, so its connectors and language servers are
-        # declared, built and started exactly as a second tab's would be. The
-        # two env switches are honoured **per workspace** by the pool's own
-        # declaration readers: a hermetic test reaches no hub, on any folder.
-        # Entries with ``enable: false`` stay stopped until toggled on, and
-        # servers declared ``"lazy": true`` spawn on their first tool call.
+        # folder goes through. The two env switches are honoured **per
+        # workspace** by the pool's own declaration readers: a hermetic test
+        # reaches no hub, on any folder. Entries with ``enable: false`` stay
+        # stopped until toggled on, and servers declared ``"lazy": true`` spawn
+        # on their first tool call.
         admitted = await pool.acquire(boot_root)
         if admitted.refusal is not None:
             # Unreachable in practice (the boot folder was just admitted by this
             # same process), but the answer is a note, never a boot failure: the
             # app starts, and the first request about that folder says so.
             _log.warning("could not admit the boot workspace: %s", admitted.refusal)
-        # The veto (spec §4.4): the pool never lets go of a workspace this
-        # process is busy with. The answer belongs to the API — it is the one
-        # that knows which workspaces have a reply in flight — and is handed over
-        # as a plain ``root -> bool`` callable, so nothing under ``core`` reaches
-        # up here.
+        # The veto: the pool never lets go of a workspace this process is busy
+        # with. The answer belongs to the API — it is the one that knows which
+        # workspaces have a reply in flight — and is handed over as a plain
+        # ``root -> bool`` callable, so nothing under ``core`` reaches up here.
         pool.set_busy_predicate(api_routes.workspace_is_busy)
         # One reaper for every workspace, on the app's own loop: the idle rule
         # needs no thread per folder.
@@ -188,10 +172,9 @@ def create_app() -> FastAPI:
             await pool.stop_all()
 
     app = FastAPI(title="nojae", version="0.2.0", lifespan=lifespan)
-    # The pool is the only hub the app's state carries. The two interim
-    # process-wide hub names are gone (clws-06): a hub is bound to a folder at
-    # birth, so a process-wide name for "the" hub could only ever answer about
-    # one workspace, and every hub route now asks the pool for the request's own.
+    # The pool is the only hub the app's state carries: a hub is bound to a
+    # folder at birth, so a process-wide name for "the" hub could only ever
+    # answer about one workspace. Every hub route asks the pool for its own.
     app.state.hubpool = pool
     app.include_router(build_router())
 
@@ -199,13 +182,10 @@ def create_app() -> FastAPI:
     def health() -> dict:
         """Reachability probe, and what this process was booted with.
 
-        The ``env`` key this used to answer (``.env`` exists, yes/no) is gone
-        with the file. What replaced it is the honest successor of the same
-        question: an install that was configured by hand used to be readable
-        from its file, and a run configured by flags is readable from its
-        parsed command line — so this names the debug switch, the endpoint
-        wait's pair and the port, which is everything about the run that is not
-        in the settings store.
+        The boot flags are process state with no file behind them, so this is
+        the only place a run's debug switch, endpoint-wait pair and port —
+        everything about the run that is not in the settings store — are
+        readable.
         """
         return {
             "status": "ok",
@@ -226,17 +206,12 @@ def create_app() -> FastAPI:
 def run(argv: Optional[Sequence[str]] = None) -> None:
     """Console-script entry: parse this run's flags, then serve the API and UI.
 
-    The one place the command line becomes process state: :func:`parse_boot_args`
-    answers the flags (and refuses an unusable value *before* anything is
-    served), :func:`set_boot_flags` records them for every consumer to read at
-    call time, and only then is the app handed to the server. So the debug
-    switch that ``create_app()`` applies is the value this run was given, not the
-    module's default — and an unparseable flag exits with argparse's sentence
-    rather than booting an app nobody asked for.
+    The one place the command line becomes process state, and an unusable value
+    exits *before* anything is served — no app nobody asked for boots.
 
-    ``argv`` is a parameter for the same reason the parser's is: ``run`` is then
-    testable about a *given* command line instead of about whatever arguments
-    reached the process. It defaults to the process's own.
+    ``argv`` exists so ``run`` is testable about a *given* command line instead
+    of about whatever arguments reached the process. It defaults to the
+    process's own.
     """
     set_boot_flags(parse_boot_args(argv))
     flags = boot_flags()

@@ -1,60 +1,49 @@
 """The Windows half of the shared process-tree teardown: a Job Object.
 
-AGENTS.md: *"Teardown kills process \\*trees\\*, not wrappers"*. The POSIX half
-(:mod:`src.core.proctree`) does that with process **groups**, and on Windows
-there is no group to signal: CPython's Windows ``_execute_child`` takes
-``unused_start_new_session``, so a child spawned with ``start_new_session=True``
-leads nothing, and a kill aimed at the child the app spawned reaches that
-wrapper alone — every process it spawned of its own stays alive. This module is
-roadmap §5's decided replacement: *"the Windows equivalent is a Job Object with
-kill-on-close, not a ``killpg`` shim"*.
+The POSIX half (:mod:`src.core.proctree`) reaches a tree with process **groups**,
+and on Windows there is no group to signal: CPython's Windows ``_execute_child``
+takes ``unused_start_new_session``, so a child spawned with
+``start_new_session=True`` leads nothing, and a kill aimed at the child the app
+spawned reaches that wrapper alone — every process it spawned of its own stays
+alive. A Job Object with kill-on-close is the replacement.
 
 A job moves the boundary from a signal to a **handle**:
 
 * a process joins the job when it is spawned (:meth:`ProcessJob.assign`), and
   from then on every process it **creates** joins the same job by itself —
-  measured on this machine: assign the parent, then let it spawn a grandchild,
-  and the grandchild is a member nobody assigned. That is how a tree is reached
-  with no group, and it is why the boundary is a *spawn-time* one: containment
-  is decided when a process is created, so assigning a parent after its child
-  exists covers the parent only (also measured). A caller that opens its job at
-  the spawn has no such gap; one that assigns late cannot claim tree coverage;
+  that is why the boundary is a *spawn-time* one: containment is decided when a
+  process is created, so assigning a parent after its child exists covers the
+  parent only (both measured). A caller that opens its job at the spawn has no
+  such gap; one that assigns late cannot claim tree coverage;
 * the teardown terminates **the job**, so the grandchildren die with it;
 * kill-on-close ends the members when the app's last handle to the job closes,
-  so an app that exits without tearing down still takes its trees with it (also
-  measured: closing the handle of a job holding a live ``sleep`` killed it
-  immediately). The handle is therefore the guarantee *and* the thing that must
-  not leak: a ctypes handle is a plain integer, so nothing closes it for the
-  caller, and a caller that replaces a child (a hub restart) closes the old job
-  rather than dropping the reference.
+  so an app that exits without tearing down still takes its trees with it. The
+  handle is therefore the guarantee *and* the thing that must not leak: a ctypes
+  handle is a plain integer, so nothing closes it for the caller, and a caller
+  that replaces a child closes the old job rather than dropping the reference.
 
-The escalation shape is the one :mod:`src.core.proctree` documents and the POSIX
-half runs: a graceful step, the **injected** reap step bounded by a deadline,
-then probe the tree, then force — the whole thing inside the grace the caller
-named, with :data:`JOB_FORCE_DRAIN_SHARE` of it held back so the force step can
-be issued *and* verified rather than fired at the deadline. Two differences
-are stated rather than smoothed over:
+The escalation shape is the one :mod:`src.core.proctree` documents: a graceful
+step, the **injected** reap step bounded by a deadline, then probe the tree,
+then force — inside the grace the caller named, with
+:data:`JOB_FORCE_DRAIN_SHARE` of it held back so the force step can be issued
+*and* verified rather than fired at the deadline. Two differences:
 
 * **there is no advisory signal for a console process here.** The graceful step
-  is the caller's own protocol shutdown, which both hubs already perform *before*
-  asking for the teardown; inside the teardown the first step terminates the
-  leader **alone** — the same call today's Windows fallback makes — and the
-  grace window is the tree's chance to leave with it. What this module adds over
-  the fallback is the force step reaching the whole job.
+  is the caller's own protocol shutdown, which both hubs perform *before* asking
+  for the teardown; inside the teardown the first step terminates the leader
+  **alone**, and the grace window is the tree's chance to leave with it. The
+  force step is what reaches the whole job.
 * **a job has no unreaped state.** An exited member leaves
   :meth:`ProcessJob.members` at once, waited-for or not, so the job's verdict is
   "every member is dead" where the group probe's is "dead **and** reaped". The
-  caller's reap step still runs first, because it is what frees the caller's own
-  handle on its child.
+  caller's reap step still runs first: it frees the caller's own handle on its
+  child.
 
-``ctypes`` only — no new dependency (roadmap §8 scoped B-D5 as *"none
-(ctypes/Win32 for jobs)"*). The module imports on every platform, because
-``proctree`` imports both halves unconditionally: the *absence* of the mechanism
-is an answer (:func:`jobs_available`), never an ImportError. The primitives
-below (:func:`open_job`, :func:`assign_pid_to_job`, :func:`job_member_pids`,
-:func:`terminate_job`, :func:`terminate_process`, :func:`close_job_handle`) and
-the tunables are the seam a test patches to force either half on one runner
-(roadmap §9 rule 2).
+``ctypes`` only, no new dependency. The module imports on every platform,
+because ``proctree`` imports both halves unconditionally: the *absence* of the
+mechanism is an answer (:func:`jobs_available`), never an ImportError. The
+primitives below and the tunables are the seam a test patches to force either
+half on one runner.
 """
 
 import asyncio
@@ -88,8 +77,8 @@ JOB_TERMINATE_EXIT_CODE = 1
 JOB_FORCE_DRAIN_SHARE = 0.25
 
 # The dispatch seam: does this platform have the job mechanism at all? Named and
-# patchable, so a test on either runner forces the other half's branch (roadmap
-# §9 rule 2) without pretending to be that platform.
+# patchable, so a test on either runner forces the other half's branch without
+# pretending to be that platform.
 JOBS_SUPPORTED = os.name == "nt"
 
 # A reap-the-leader step, exactly as :mod:`src.core.proctree` states the
@@ -120,10 +109,9 @@ _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
-# The information classes, as verified on this machine: class 9 is
-# ``JOBOBJECT_EXTENDED_LIMIT_INFORMATION`` — the only one that carries
-# kill-on-close, and the ones around it answered ``ERROR_BAD_LENGTH`` — and
-# class 3 is ``JOBOBJECT_BASIC_PROCESS_ID_LIST``, the job's live members.
+# The information classes: class 9 is ``JOBOBJECT_EXTENDED_LIMIT_INFORMATION``,
+# the only one that carries kill-on-close (the ones around it answer
+# ``ERROR_BAD_LENGTH``), and class 3 is ``JOBOBJECT_BASIC_PROCESS_ID_LIST``.
 _EXTENDED_LIMIT_INFORMATION_CLASS = 9
 _PROCESS_ID_LIST_CLASS = 3
 
@@ -170,7 +158,7 @@ class _IoCounters(ctypes.Structure):
 class _ExtendedLimitInformation(ctypes.Structure):
     """``JOBOBJECT_EXTENDED_LIMIT_INFORMATION`` — the only class that carries
     kill-on-close. The length passed to the call comes from ``sizeof``, so the
-    runner's own pointer width is what the API sees (144 bytes measured here)."""
+    runner's own pointer width is what the API sees."""
 
     _fields_ = [
         ("BasicLimitInformation", _BasicLimitInformation),
@@ -186,11 +174,10 @@ class _ProcessIdList(ctypes.Structure):
     """``JOBOBJECT_BASIC_PROCESS_ID_LIST`` — the job's live members.
 
     The entries are ``ULONG_PTR`` (``c_size_t``): a 32-bit array would truncate
-    a pid on x64. The struct's array is a fixed capacity while the real reply is
-    variable-sized, so the capacity is what the call is told was offered; a job
-    holding more answers ``ERROR_MORE_DATA``, which the probe reads as "at least
-    this many members" rather than as an empty tree. Nothing the app starts (a
-    shell and its jobs, a language server and its workers) nears the capacity.
+    a pid on x64. The array is a fixed capacity while the real reply is
+    variable-sized, so the capacity is what the call is told was offered; a
+    crowded job answers ``ERROR_MORE_DATA``, which the probe reads as "at least
+    this many members" rather than as an empty tree.
     """
 
     _CAPACITY = 256
@@ -247,8 +234,7 @@ def _bind_job_calls() -> Optional[Dict[str, Any]]:
 
 # ``proctree`` imports this module on every platform, so the absence of the
 # mechanism has to be data, never an ImportError. Every primitive re-reads this
-# at call time, which makes it the seam a test patches to ask "what if the calls
-# were never bound?" — the one branch no non-Windows runner can reach by itself.
+# at call time, which makes it the seam a test patches to fake a missing binding.
 _api: Optional[Dict[str, Any]] = _bind_job_calls() if os.name == "nt" else None
 
 
@@ -301,9 +287,8 @@ def assign_pid_to_job(handle: Any, pid: int) -> bool:
     Called after the spawn, which is what lets a process the *driver* started
     (the terminal's shell, the console helper beside it) join a job the app
     opened: a process cannot be assigned before it exists. Descendants created
-    *after* this call need no call of their own — they inherit the job — but
-    descendants that already existed do, and are better never left behind:
-    containment is decided at creation (see the module docstring).
+    *after* this call need none of their own — they inherit the job — but the
+    ones that already existed are never contained (see the module docstring).
     """
     api = _api
     if api is None or not handle or pid <= 0:
@@ -334,12 +319,11 @@ def job_member_pids(handle: Any) -> Optional[Tuple[int, ...]]:
     """The job's live members, or ``None`` when the job could not be asked.
 
     An exited member leaves the list immediately, waited-for or not: a Windows
-    process has no unreaped state, the difference this half documents against
-    the group probe. ``ERROR_MORE_DATA`` means the tree has more members than
-    the buffer holds, and the reply fills exactly ``MaximumNumberOfProcessIds``
-    of them (measured: ``n`` still reports the *total*, larger than what was
-    written) — so the count is clamped by that, and the result is a non-empty
-    prefix: the probe keeps waiting rather than declaring a crowded tree drained.
+    process has no unreaped state. ``ERROR_MORE_DATA`` means the tree has more
+    members than the buffer holds, and the reply fills exactly
+    ``MaximumNumberOfProcessIds`` of them (the count still reports the *total*),
+    so the count is clamped by that and the result is a non-empty prefix: the
+    probe keeps waiting rather than declaring a crowded tree drained.
     """
     api = _api
     if api is None or not handle:
@@ -383,10 +367,9 @@ def terminate_process(pid: int, exit_code: int = JOB_TERMINATE_EXIT_CODE) -> boo
     """Terminate one process and nothing else — the job half's graceful step.
 
     A console process has no advisory signal, so the first phase of the
-    escalation is the same call today's Windows fallback already makes on its own
-    child. It deliberately leaves the rest of the tree alone: a member that
-    exits because its parent did gets the grace to do that, and one that does
-    not is what the force step exists for.
+    escalation ends the leader outright. It deliberately leaves the rest of the
+    tree alone: a member that exits because its parent did gets the grace to do
+    that, and one that does not is what the force step exists for.
     """
     api = _api
     if api is None or pid <= 0:
@@ -423,14 +406,13 @@ def process_is_gone(pid: Optional[int]) -> bool:
     Windows, so ``os.kill(pid, 0)`` there **kills** the process it meant to
     inspect. Nothing in this suite may use it as a probe.
 
-    * **Windows**: ``OpenProcess`` + ``GetExitCodeProcess`` — the answer the OS
-      gives, needing only the limited query right. A process the app has not
-      waited for still counts as gone once it has exited, because a Windows
-      process has no unreaped state.
+    * **Windows**: ``OpenProcess`` + ``GetExitCodeProcess``, needing only the
+      limited query right. An exited process counts as gone whether or not the
+      app waited for it, because a Windows process has no unreaped state.
     * **POSIX**: ``/proc/<pid>/stat``'s state, so a zombie counts as gone — it
       is dead, still holds a name, and signal 0 still answers "there". Where
-      there is no ``procfs``, signal 0 *is* the probe on this platform
-      (``EPERM`` means a process this user may not signal, so it is not gone).
+      there is no ``procfs``, signal 0 *is* the probe (``EPERM`` means a process
+      this user may not signal, so it is not gone).
     """
     if not pid or pid <= 0:
         return True
@@ -465,10 +447,9 @@ def process_is_gone(pid: Optional[int]) -> bool:
             return True
         except PermissionError:
             return False
-        # Signal 0 answered: the process is there. This is the branch a platform
-        # without procfs lives on -- macOS has no ``/proc``, so every liveness
-        # probe on it lands here, and a "gone" answer made a live child look dead
-        # to every teardown that consults it.
+        # Signal 0 answered: the process is there. macOS has no ``/proc``, so
+        # every liveness probe on it lands here, and a "gone" answer would make a
+        # live child look dead to every teardown that consults it.
         return False
     return state == "Z"
 
@@ -476,9 +457,8 @@ def process_is_gone(pid: Optional[int]) -> bool:
 # -- one job per child tree ---------------------------------------------------
 
 # The lookup the shared entry points use: a teardown is handed a *pid*, and the
-# job that contains it is found here. Keyed by the pid the caller registered with
-# ``assign(pid, leader=True)`` — the process the caller spawned itself, which is
-# the pid ``proctree``'s entry points are given.
+# job containing it is found here, keyed by the pid the caller registered with
+# ``assign(pid, leader=True)``.
 _JOBS_BY_LEADER: Dict[int, "ProcessJob"] = {}
 
 
@@ -495,11 +475,9 @@ class ProcessJob:
     Created **by the caller's side of the seam**, before the spawn: a process
     joins a job when it is created, so containment is decided by whoever starts
     the process, not by whoever later kills it. The caller keeps the object for
-    as long as its child lives — a hub singleton holds one per child, a terminal
-    session one per session — and this stays true across a hub restart, which
-    rebuilds a hub's internals without replacing the object the app holds: the
-    job belongs to the *child*, and :meth:`close` is what releases it when that
-    child is replaced.
+    as long as its child lives, and it survives a hub restart: the job belongs to
+    the *child*, and :meth:`close` is what releases it when that child is
+    replaced.
 
     Inert where the platform has no jobs: :attr:`available` is False and
     :meth:`assign` answers ``None``, so a spawn site can be written once for
@@ -541,10 +519,9 @@ class ProcessJob:
 
         Answers ``None`` where there is no job mechanism (the platform's answer,
         not a failure), ``True`` when the process is contained, and ``False``
-        when it is not — already-exited, or already in another job. The caller
-        keeps its process either way: a failed assignment costs the tree
-        guarantee, which the teardown then reports, and is not a reason to fail
-        a spawn.
+        when it is not — already exited, or not ours to assign. The caller keeps
+        its process either way: a failed assignment costs the tree guarantee,
+        which the teardown then reports, and is not a reason to fail a spawn.
         """
         if not jobs_available() or self._handle is None:
             return None
@@ -566,8 +543,7 @@ class ProcessJob:
 
         The teardown calls it. A caller that abandons a child **without** a
         teardown (a hub restart that replaces its session) must call it too: a
-        ctypes handle is a plain integer, so dropping the reference leaks it and
-        leaves the old tree's kill-on-close armed against a handle nobody has.
+        ctypes handle is a plain integer, so dropping the reference leaks it.
         """
         if self._closed:
             return
@@ -599,14 +575,13 @@ async def terminate_and_drain(
     and every descendant it inherited, dies — which is what ``killpg`` buys the
     POSIX half.
 
-    The force is asynchronous, so it gets a bounded drain of its own, and the
-    graceful phase stops short of the deadline by :data:`JOB_FORCE_DRAIN_SHARE`
-    of the grace so that drain has room inside the *same* deadline: the
-    teardown returns within ``grace_seconds`` whether or not it escalated, which
-    is what the terminal's *"at most STOP_GRACE_SECONDS per stubborn shell"*
-    sentence needs. ``close()`` at the end is the last guarantee — kill-on-close
-    puts a kill over whatever the terminate call had not finished taking — and a
-    tree still listed at the deadline is reported, not assumed gone.
+    The graceful phase stops short of the deadline by
+    :data:`JOB_FORCE_DRAIN_SHARE` of the grace, so the asynchronous force gets a
+    bounded drain inside the *same* deadline and the teardown returns within
+    ``grace_seconds`` whether or not it escalated. ``close()`` at the end is the
+    last guarantee — kill-on-close covers whatever the terminate call had not
+    finished taking — and a tree still listed at the deadline is reported, not
+    assumed gone.
     """
     loop = asyncio.get_event_loop()
     grace = JOB_GRACE_SECONDS if grace_seconds is None else grace_seconds
@@ -659,14 +634,12 @@ async def kill_job_tree(
     ``proctree.kill_process_tree``/``kill_session_tree`` are handed, so a caller
     changes nothing about how it asks. Both entry points land here on Windows:
     the group and the session are POSIX ideas, while the job's membership is
-    exactly the scope the session half promises (the shell, the console helper
-    beside it, and everything the shell started).
+    exactly the scope the session half promises.
 
     A child that was never put in a job has **no reachable tree** on this
-    platform — the group signal that would reach it does not exist — so the
-    leader alone is escalated and the missing containment is logged rather than
-    silently accepted. That is the leak the job exists to close, and a spawn
-    site that forgot the call has to be findable.
+    platform, so the leader alone is escalated and the missing containment is
+    logged rather than silently accepted: a spawn site that forgot the call has
+    to be findable.
     """
     job = job_for(pid)
     if job is not None:

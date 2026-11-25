@@ -1,10 +1,9 @@
 <script setup>
 import { useSessionSound } from '../composables/useSessionSound'
 
-// Speaker on / speaker muted: the audible twin of the ⚡/✨ tab glyph, so the
-// chime that answers "is it still generating?" is switchable from the same bar
-// the glyph is trusted in. Turning it back on plays the clip once — that click
-// is also the one moment the browser is guaranteed to let it through.
+// Speaker on / speaker muted: the audible twin of the tab glyph, switchable
+// from the same bar. Turning it back on plays the clip once — that click is
+// the one moment the browser is guaranteed to let it through.
 const { state, toggle } = useSessionSound()
 </script>
 

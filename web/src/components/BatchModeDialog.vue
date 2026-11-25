@@ -4,7 +4,7 @@ import { NO_BATCH_ITEMS_MESSAGE, useBatch } from '../composables/useBatch'
 
 // The lot-launch form. A thin view: every field it shows is useBatch state, and
 // the count caption is what the select-time fetch fills (the pattern
-// RegistrationMemoryDlg and SettingsDialog both follow — watch + showModal +
+// RegistrationMemoryDlg and SettingsDialog follow too: watch + showModal +
 // backdrop click + native-close sync).
 const {
   state,
@@ -41,8 +41,8 @@ function onNativeClose() {
   if (state.open) closeDialog({ reset: true })
 }
 
-// One hint per precondition the per-task instruction depends on, so a lot does
-// not fail on task 1 for a reason the dialog could have stated up front.
+// One hint per precondition the per-task instruction depends on, so a lot does not
+// fail on its first task for a reason the dialog could have stated up front.
 const doneFolderMissing = computed(
   () => !!state.listing && state.listing.doneFolder === false,
 )
@@ -59,7 +59,7 @@ const resolvedDir = computed(() => {
   return `${listing.workspace}/${listing.dir}`
 })
 
-// E13: only the 00 file matched, so there is nothing to run.
+// Only the big-picture file matched, so there is nothing to run.
 const onlyLotFile = computed(
   () => !!state.listing && state.listing.taskCount === 0 && !!state.listing.lot,
 )
@@ -67,8 +67,8 @@ const countHint = computed(() =>
   onlyLotFile.value ? ' — only the big-picture file matches' : '',
 )
 
-// A prefix is picked, never typed: the listing that feeds the count and the
-// Launch decision follows the selection.
+// A prefix is picked, never typed: the listing that feeds the count and the Launch
+// decision follows the selection.
 function onPrefixChange() {
   validate()
 }

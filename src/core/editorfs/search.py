@@ -21,15 +21,14 @@ What it promises (each rule mirrored by a test in ``tests/test_editorfs_search.p
   not inherit the tree's *listing* cap — that bounds one screenful of rows, not
   access — so a collapsed branch is walked in full.
 * **and that visible set is then narrowed by the repository's ignore rules.**
-  :func:`editorfs.gitstatus.ignored_paths` asks git (``status --ignored=matching``)
-  what this workspace excludes, and the walk prunes those names the same way it
-  prunes a ``hidden`` one: an ignored *folder* costs no ``scandir`` below it and
-  an ignored file is never opened. Two filters, in that order, and neither one is
-  the other's substitute — the policy says what this surface may see, the ignore
-  rules say what the project calls its own bytes. A path with no repository (or a
-  git that cannot be asked) simply has no ignore filter; the policy still bounds
-  the scan, so this costs pruning of caches and build output and never a refusal.
-  Ignored paths are counted nowhere either: they are not a cap the user can hit.
+  :func:`editorfs.gitstatus.ignored_paths` asks git what this workspace excludes,
+  and the walk prunes those names the same way it prunes a ``hidden`` one: an
+  ignored *folder* costs no ``scandir`` below it and an ignored file is never
+  opened. Two filters, in that order, and neither one is the other's substitute —
+  the policy says what this surface may see, the ignore rules say what the
+  project calls its own bytes. A path with no repository simply has no ignore
+  filter; the policy still bounds the scan, so this costs pruning of caches and
+  build output and never a refusal. Ignored paths are counted nowhere either.
 * the scope **root** goes through :func:`editorfs.policy.resolve_in_workspace`
   once: 422 for a path outside the workspace, 404 for one that is hidden or
   absent. A hidden *file* therefore cannot be searched by name even though no row
@@ -38,8 +37,7 @@ What it promises (each rule mirrored by a test in ``tests/test_editorfs_search.p
   working location looks like an ordinary row in the tree, but ``open()`` follows
   it, and the ``realpath`` lock only guards paths that pass through
   ``resolve_in_workspace`` — which a walk does not do per child. So the walk
-  reads only non-symlink regular files, silently and counted nowhere; clicking
-  that row still gets the read route's 422, unchanged.
+  reads only non-symlink regular files, silently and counted nowhere.
 * the caps **stop the supply and are reported, never raised**: over
   ``MAX_EDITOR_BYTES`` a file is skipped and counted in ``oversized`` (a file
   scope and a folder scope agree, so a big file is never a 413), and a file past
@@ -49,8 +47,8 @@ What it promises (each rule mirrored by a test in ``tests/test_editorfs_search.p
 * the walk's **order is the tree's order** (directories first, then files, each
   sorted by :func:`editorfs.tree._name_key`), so a truncated scan hands over the
   same first N files every run rather than whichever inode answered first.
-* text is decoded **strict** UTF-8 after the same NUL-in-``BINARY_SNIFF_BYTES``
-  sniff the read route uses; anything else is binary, skipped and counted.
+* text is decoded **strict** UTF-8 after the same NUL sniff the read route uses;
+  anything else is binary, skipped and counted.
 * **a query that is not a query costs no scan**: the pattern is compiled before
   the walk is asked, an invalid one answers 400 with ``re``'s own message (the
   user wrote it and needs the caret position back), and an empty one is refused
@@ -79,11 +77,11 @@ from .constants import path_norm, policy_shared as shared
 class ScanCounts:
     """What one scan knows about itself, accumulated as the caller consumes it.
 
-    A fixed small record with defaults (the shape ``mcp_connectors/policy_shared``
-    uses) rather than a dict, because the two halves of the scan write different
-    fields of it and a typo must be an ``AttributeError`` at once. The search's
-    payload folds these into ``filesScanned`` and ``skipped``; there is
-    deliberately no policy field, for the reason in the module docstring.
+    A fixed small record with defaults rather than a dict, because the two halves
+    of the scan write different fields of it and a typo must be an
+    ``AttributeError`` at once. The search's payload folds these into
+    ``filesScanned`` and ``skipped``; there is deliberately no policy field, for
+    the reason in the module docstring.
     """
 
     files_scanned: int = 0
@@ -105,10 +103,10 @@ def _ignored_hit(rel: str, names: Set[str]) -> bool:
     it.
 
     The cuts come from :func:`mcp_connectors.path_norm.path_parts` — the one
-    component-splitter the strict write gate, the matcher and the create's parent
-    also use (win-04), so no second notion of "component" exists to drift. The
-    ``names`` set is already ``/``-joined on every platform: ``gitstatus`` turns
-    git's own form into workspace-relative text, and that side is untouched.
+    component-splitter the write gate and the matcher also use, so there is no
+    second notion of "component" to drift. The ``names`` set is already
+    ``/``-joined on every platform: ``gitstatus`` turns git's own form into
+    workspace-relative text.
     """
     if not names:
         return False
@@ -122,11 +120,11 @@ def _ignored_hit(rel: str, names: Set[str]) -> bool:
 class SearchQueryError(Exception):
     """A query that cannot be run, carrying its HTTP status.
 
-    The shape of :class:`~src.core.editorfs.policy.WorkspacePathError` and of
-    :class:`core.batch.BatchListingError`: the status belongs to the core
-    because these rules *are* the endpoint's contract — 400 is "the pattern you
-    wrote is not a pattern", and :attr:`detail` is what the dialog shows inline
-    under the field. ``routes`` only re-raises this as an ``HTTPException``.
+    The shape of :class:`~src.core.editorfs.policy.WorkspacePathError`: the
+    status belongs to the core because these rules *are* the endpoint's contract
+    — 400 is "the pattern you wrote is not a pattern", and :attr:`detail` is what
+    the dialog shows inline under the field. ``routes`` only re-raises this as an
+    ``HTTPException``.
     """
 
     def __init__(self, status_code: int, detail: str) -> None:
@@ -147,8 +145,7 @@ def iter_scope_text(rel: str, *, counts: ScanCounts) -> Iterator[Tuple[str, str]
 
     Every cap here is reached as ``constants.MAX_…`` at call time, never bound
     into this module's namespace: a bound copy is invisible to the patch that
-    exercises it (the same reason ``tree.py`` reads
-    ``constants.MAX_TREE_ENTRIES_PER_DIR``).
+    exercises it.
     """
     normalised, resolved = resolve_in_workspace(rel)
     yield from iter_resolved_scope(normalised, resolved, counts=counts)
@@ -161,23 +158,23 @@ def iter_resolved_scope(
 
     Split out because a caller that needs the resolved root for an answer of its
     own — :func:`search_workspace` reports ``scope`` and ``isFile`` from it —
-    would otherwise ask the gate twice for one path: the same rules, the same
-    errors, and a second read of the deny-list file for nothing.
+    would otherwise ask the gate twice for one path, paying a second read of the
+    deny-list file for nothing.
     """
     ignored = gitstatus.ignored_paths(normalised) or set()
     if _ignored_hit(normalised, ignored):
         # The scope itself is one of the project's ignored names, so *every* file
         # in it is out of the supply. This answers an empty scan rather than the
         # 404 a hidden scope gets: an ignored folder is a row the tree shows, and
-        # "nothing matched here" is the truth about it, not an observation.
+        # "nothing matched here" is the truth about it.
         return
 
     if resolved.is_file():
         # A file scope: the same reader a walk would use for this path, and *not*
         # ``files.read_file`` — that raises 413 past ``MAX_EDITOR_BYTES``, which
         # would make one big file an error for a search instead of a skip. The
-        # path already passed the gate, so it is inside the workspace, is not
-        # hidden, and is a ``realpath``: no symlink is left to worry about here.
+        # path came through the gate, so it is a ``realpath`` inside the
+        # workspace: no symlink is left to worry about here.
         text = _Scanner(counts, ignored).from_resolved_path(resolved)
         if text is not None:
             yield (normalised, text)
@@ -195,7 +192,7 @@ class _Scanner:
 
     An object rather than free functions because ``MAX_SEARCH_BYTES`` is a
     *per-scan* total, so that number lives exactly as long as one scan and no
-    longer — it is not a field of the payload and must not leak between searches.
+    longer — it must not leak between searches.
     """
 
     def __init__(self, counts: ScanCounts, ignored: Set[str]) -> None:
@@ -213,30 +210,27 @@ class _Scanner:
             with os.scandir(folder) as scan:
                 entries: List[os.DirEntry] = list(scan)
         except OSError:
-            # Unreadable directory: end this branch rather than fail the search —
-            # the same answer ``tree._has_children`` gives for the same condition.
+            # Unreadable directory: end this branch rather than fail the search.
             return
 
         dirs: List[os.DirEntry] = []
         files: List[os.DirEntry] = []
         for scan_entry in entries:
             child_rel = tree._rel_of(rel, scan_entry.name)
-            # One verdict, and it is a *prune*, exactly the three lines of
-            # ``tree.list_dir``: a hidden folder is neither listed nor walked, so
-            # no snippet from inside it can reach the payload. Nothing is counted.
+            # One verdict, and it is a *prune*: a hidden folder is neither listed
+            # nor walked, so no snippet from inside it can reach the payload.
+            # Nothing is counted.
             if mode_for(child_rel).mode == shared.HIDDEN:
                 continue
-            # The second filter, applied the same way and for the same reason: a
-            # name the project's ignore rules exclude is not walked and not
-            # opened, so the scan never spends its byte budget on build output or
-            # caches. It is not a *policy* answer — an ignored folder is a row the
-            # tree shows — so the two stay separate checks, and neither one counts
-            # what it pruned.
+            # The second filter, applied the same way: an ignored name is not
+            # walked and not opened, so the byte budget is never spent on build
+            # output or caches. It is not a *policy* answer — an ignored folder is
+            # a row the tree shows — so the two stay separate checks, and neither
+            # one counts what it pruned.
             if _ignored_hit(child_rel, self.ignored):
                 continue
-            # ``follow_symlinks=False`` for the same reason the tree uses it: a
-            # link to a folder is a leaf here, so the walk cannot leave the
-            # workspace one hop at a time.
+            # ``follow_symlinks=False``: a link to a folder is a leaf here, so the
+            # walk cannot leave the workspace one hop at a time.
             if scan_entry.is_dir(follow_symlinks=False):
                 dirs.append(scan_entry)
             else:
@@ -244,7 +238,7 @@ class _Scanner:
 
         # ``tree._name_key`` reads the ``name`` of an entry dict, so it is handed
         # that one field. Re-deriving a key here would give the same tree two
-        # orderings, which is what the deterministic-cap rule exists to prevent.
+        # orderings, and the deterministic cap exists to prevent exactly that.
         dirs.sort(key=lambda entry: tree._name_key({"name": entry.name}))
         files.sort(key=lambda entry: tree._name_key({"name": entry.name}))
 
@@ -286,7 +280,7 @@ class _Scanner:
         The path came from :func:`resolve_in_workspace`, so it is already a
         ``realpath`` inside the workspace — which is why this side needs no
         symlink check: a link pointing out of the workspace was refused by the
-        gate (422) before anything here ran.
+        gate before anything here ran.
         """
         try:
             info = os.stat(path)
@@ -323,7 +317,7 @@ class _Scanner:
 
         self.bytes_read += len(raw)
         # Counted when the file is **opened**, not when it yields: a binary file
-        # cost the scan its read too, and the footer says how many were read.
+        # cost the scan its read too.
         self.counts.files_scanned += 1
         if self.counts.files_scanned >= constants.MAX_SEARCH_FILES:
             self.counts.files_cut = True
@@ -333,9 +327,9 @@ class _Scanner:
             return None
 
         # The same two answers as the read route's head-sniff and decode —
-        # deliberately *not* ``files._decode_utf8``: that function's tail-repair
-        # branch exists only because a read may be cut mid-character by the editor
-        # cap, and a scan never accepts a cut file, so strict is the equivalent.
+        # deliberately *not* ``files._decode_utf8``: its tail-repair branch exists
+        # only because a read may be cut mid-character by the editor cap, and a
+        # scan never accepts a cut file, so strict is the equivalent.
         if b"\0" in raw[: constants.BINARY_SNIFF_BYTES]:
             self.counts.binary += 1
             return None
@@ -356,8 +350,8 @@ def _compile(query: str, *, case_sensitive: bool, regex: bool) -> "re.Pattern[st
     ``+`` are needles rather than syntax — and the flags do the rest of the work:
     :data:`re.IGNORECASE` *is* "lower-case both sides", which is why there is no
     ``.lower()`` anywhere in this module. An empty query is refused with its own
-    sentence instead of matching every line, which would hand back the first 500
-    lines of the workspace and read like a bug.
+    sentence instead of matching every line, which would hand back the first page
+    of the workspace and read like a bug.
     """
     if not query:
         raise SearchQueryError(400, "Search query must not be empty")
@@ -367,7 +361,7 @@ def _compile(query: str, *, case_sensitive: bool, regex: bool) -> "re.Pattern[st
     except re.error as exc:
         # ``str(exc)`` is re's own message, caret position and all: the user
         # wrote this pattern, so it goes back verbatim rather than as a generic
-        # "invalid pattern" (spec 2.3).
+        # "invalid pattern".
         raise SearchQueryError(400, str(exc)) from exc
 
 
@@ -409,16 +403,16 @@ def _footer_note(
 ) -> str:
     """The one sentence about what the payload could not give — ``""`` when nothing.
 
-    Written here and **only** here, because the numbers are the caps in
-    ``constants`` and a frontend that composed the sentence would have to know
-    them (D8): the dialog renders this text verbatim. Fixed order, walk caps
-    first, because they bound *completeness* while the row cap bounds only what
-    is *listed*; then the counted skips, which are not truncation at all. The
-    closing clause appears only when a cap cut, so "3 files were too big" never
-    reads as "the search stopped early".
+    Written here and **only** here: the numbers are the caps in ``constants``, and
+    a frontend that composed the sentence would have to know them, so the dialog
+    renders this text verbatim. Fixed order, walk caps first, because they bound
+    *completeness* while the row cap bounds only what is *listed*; then the
+    counted skips, which are not truncation at all. The closing clause appears
+    only when a cap cut, so "3 files were too big" never reads as "the search
+    stopped early".
 
-    Cap values are read at call time from ``constants`` for the same reason the
-    scan reads them there: a patched cap must be the one the sentence names.
+    Cap values are read at call time from ``constants``, so a patched cap is the
+    one the sentence names.
     """
     parts: List[str] = []
     if files_cut:
@@ -453,15 +447,15 @@ def search_workspace(
     """Search the scope ``rel`` for ``query``: the whole payload, in one dict.
 
     The route hands it over unchanged, so the keys and their meanings are the
-    contract between this module and the dialog (spec 4): 1-based ``line`` and
-    ``column``, ``column`` being the **start of the match** so the caret lands on
-    what was searched for; ``matchCount`` counting every match, including rows
-    the cap dropped; ``skipped`` carrying exactly ``oversized`` and ``binary``,
-    never a policy count (D2/D4 — a count of a hidden name is an observation of
-    it, which is what hiding the row exists to prevent).
+    contract between this module and the dialog: 1-based ``line`` and ``column``,
+    ``column`` being the **start of the match** so the caret lands on what was
+    searched for; ``matchCount`` counting every match, including rows the cap
+    dropped; ``skipped`` carrying exactly ``oversized`` and ``binary``, never a
+    policy count (a count of a hidden name is an observation of it, which is what
+    hiding the row exists to prevent).
 
     The order of the body is the rule: **compile, then walk.** An invalid pattern
-    raises before a single file is opened, so a typo costs nothing (D5).
+    raises before a single file is opened, so a typo costs nothing.
     """
     pattern = _compile(query, case_sensitive=case_sensitive, regex=regex)
     normalised, resolved = resolve_in_workspace(rel)
@@ -477,7 +471,7 @@ def search_workspace(
         # Line by line, so ``line``/``column`` are what the model Monaco builds
         # from the same text — ``splitlines`` strips the terminator, which is why
         # a CRLF file's columns are not off by one. A needle containing a newline
-        # never matches, and that is v1's scope (spec 4 step 5).
+        # never matches.
         for line_no, line in enumerate(text.splitlines(), start=1):
             # ``finditer`` and not a ``while m := search(...)`` loop: a
             # zero-width pattern (``x*``) makes the manual one spin forever.

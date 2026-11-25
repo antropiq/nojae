@@ -1,17 +1,14 @@
 """Document sync and the LSP requests behind each tool action.
 
-These are the calls themselves — didOpen/didChange bookkeeping, then one
-request per catalogue action, its result handed to ``rendering`` for the
-text the model sees. They take the live session (and, for the pull-vs-push
-diagnostics choice, nothing else) and keep no state of their own; the
-manager owns the policy check that produced ``path`` and the loop the
-timeouts run on.
+didOpen/didChange bookkeeping, then one request per catalogue action, its
+result handed to ``rendering`` for the text the model sees. They keep no state
+of their own; the manager owns the policy check that produced ``path`` and the
+loop the timeouts run on.
 
-The document's text may come from the caller instead of the disk: the
-Editor's buffer is routinely dirtier than the file, and a question about
-what is on screen must be answered against what is on screen. ``None``
-means "read the file", so the tool path is unchanged; a given text is
-synced as a full-text change and never written back.
+The document's text may come from the caller instead of the disk: the Editor's
+buffer is routinely dirtier than the file, and a question about what is on
+screen must be answered against what is on screen. ``None`` means "read the
+file"; a given text is synced as a full-text change and never written back.
 """
 
 import asyncio
@@ -27,22 +24,20 @@ class DocumentSync(NamedTuple):
     """What one :func:`sync_document` did.
 
     ``uri`` and ``version`` are the document as the server now holds it.
-    ``text_version`` is the version the text the server holds was *sent* at,
-    which is ``version`` itself when this sync changed the text and an older
-    number when it did not.
+    ``text_version`` is the version the text the server holds was *sent* at —
+    ``version`` when this sync changed the text, an older number when it did
+    not.
 
     That second number is what ``editor.diagnostics_answer`` needs: an analysis
     published for a version below it describes text nobody is looking at any
     more, so it is not a verdict — while an unchanged re-ask keeps accepting
-    the payload already in the inbox, because that one describes exactly what
-    is open.
+    the payload already in the inbox, which describes exactly what is open.
     """
 
     uri: str
     version: int
-    #: The version the text now on the server was sent at. Equal to
-    #: ``version`` when this sync changed the text (a first open included);
-    #: lower when the text was already what the server held.
+    #: The version the text now on the server was sent at: equal to ``version``
+    #: when this sync changed the text, lower when it was already held.
     text_version: int
 
 
@@ -52,10 +47,9 @@ async def sync_document(
     """didOpen/didChange the document, answer what was sent.
 
     ``text`` is the caller's own content — the Editor's buffer — and ``None``
-    means "read the file". An empty string is a legitimate buffer (a file the
-    user has emptied), so the test is ``is None``, never truthiness. A given
-    text is capped here rather than upstream: it is not on disk, so the
-    manager's ``stat`` never saw it.
+    means "read the file". An empty string is a legitimate buffer, so the test
+    is ``is None``, never truthiness. A given text is capped here rather than
+    upstream: it is not on disk, so the manager's ``stat`` never saw it.
     """
     from lsprotocol import types as lsp
     from pygls import uris as lsp_uris
@@ -100,11 +94,9 @@ async def sync_document(
                 ],
             )
         )
-    # ``text_version`` is the version the text *now on the server* was sent at:
-    # this one when the sync changed the text, the previous one when it
-    # re-sent what was already there. A caller compares an inbox payload's
-    # version against it to tell "an analysis of this text" from "an analysis
-    # of text this sync replaced".
+    # The version the text *now on the server* was sent at, which a caller
+    # compares an inbox payload's version against to tell "an analysis of this
+    # text" from "an analysis of text this sync replaced".
     text_version = store.text_version(uri)
     assert text_version is not None  # just written above
     return DocumentSync(uri=uri, version=version, text_version=text_version)
@@ -146,8 +138,7 @@ async def fetch_diagnostics(session: ServerSession, root: Path, uri: str) -> str
     version = session.documents.version(uri)
     pushed = await session.inbox.wait(uri, version, DIAGNOSTICS_WAIT_SECONDS)
     if pushed is None:
-        # Nothing ever arrived for this document: an empty answer would be
-        # a lie, the server may simply still be indexing.
+        # An empty answer would be a lie: the server may still be indexing.
         return (
             "No diagnostics published by the server within "
             f"{DIAGNOSTICS_WAIT_SECONDS:.0f}s — the file may be clean, or "
