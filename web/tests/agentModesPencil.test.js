@@ -66,7 +66,10 @@ function jsonResponse(body, ok = true, status = 200) {
 }
 
 // `calls` records every route the composer touches, in order. `list: null` makes
-// the dropdown's own fetch fail — the case the pencil must survive.
+// the dropdown's own fetch fail — the case the pencil must survive. A write is
+// answered with the store's rows, because opening the card and typing into it is
+// allowed to reach the routes; what no test here does is expect the **pencil** to
+// post on its own.
 function stubRoutes({ list = modesBody(), calls = [] } = {}) {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     const key = String(url)
@@ -75,9 +78,7 @@ function stubRoutes({ list = modesBody(), calls = [] } = {}) {
       return list === null ? jsonResponse({}, false, 500) : jsonResponse(list)
     }
     if (key === '/api/servers') return jsonResponse(SERVERS_BODY)
-    if (key.startsWith('/api/agents/')) {
-      throw new Error('the pencil must not write on its own')
-    }
+    if (key.startsWith('/api/agents/')) return jsonResponse(list)
     throw new Error(`unexpected fetch: ${key}`)
   })
   return calls
@@ -253,12 +254,12 @@ describe('the pencil beside the mode dropdown', () => {
     expect(calls.filter((call) => call.key === '/api/agents')).toHaveLength(2)
   })
 
-  it('a close the card is asking about never reaches the pencil', async () => {
+  it('Escape is `Close` in every respect: it reaches the pencil and writes first', async () => {
     // The pencil owns the `open` flag and the card's `@close` is the only thing
-    // that clears it. While the close guard holds its question (D8) nothing closes
-    // at all — by button, by Escape or by the backdrop — so that handler is
-    // unreachable and the card stays mounted with its typing intact.
-    stubRoutes()
+    // that clears it. With auto-save there is no question to ask on the way out, so
+    // Escape — the `<dialog>`'s own path — is routed through the same verb the
+    // button uses: it writes what is still inside the debounce window and leaves.
+    const calls = stubRoutes()
     await loadAgentModes()
     const w = await mountComposer()
     await pencil(w).trigger('click')
@@ -273,18 +274,10 @@ describe('the pencil beside the mode dropdown', () => {
     dialog.dispatchEvent(new window.Event('cancel', { bubbles: true, cancelable: true }))
     await flushPromises()
 
-    // Still mounted, still open, still holding what was typed, and the guard is
-    // asking in the footer.
-    expect(document.querySelector('dialog.agent-modes-dialog')).toBe(dialog)
-    expect(dialog.open).toBe(true)
-    expect(dialog.querySelector('.agent-modes-keep-editing')).not.toBeNull()
-    expect(
-      dialog.querySelector('section[data-tab] input[type="text"]').value,
-    ).toBe('Typed and not saved')
-
-    // Answering `Discard and close` is what finally reaches the pencil.
-    dialog.querySelector('.agent-modes-discard-close').click()
-    await flushPromises()
+    // The native path was cancelled (so nothing closed behind the card's back), the
+    // keystroke was posted, and the pencil's handler ran: the card is gone.
+    expect(calls.filter((call) => call.method === 'POST').map((call) => call.key))
+      .toEqual(['/api/agents/save'])
     expect(document.querySelector('dialog.agent-modes-dialog')).toBeNull()
     w.unmount()
   })

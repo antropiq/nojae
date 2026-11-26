@@ -1,10 +1,10 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import {
+  AUTOSAVE_DELAY_MS,
   NO_MODEL_LABEL,
   addSlotFor,
-  closeConfirmationFor,
-  closeWouldLoseForDraft,
+  autoSaveTargetsFor,
   creationActiveFor,
   creationFormFor,
   deleteAgent,
@@ -19,25 +19,29 @@ import {
   modelLineFor,
   personaByteCount,
   rebaselinedDraft,
+  restoreTypedFields,
   saveAgent,
-  saveRefusalFor,
-  saveSlotFor,
   slugForDraft,
-  tabCaptionFor,
   successorAfterDelete,
+  tabCaptionFor,
+  typedSnapshot,
+  writeShapeFor,
   useAgentModes,
 } from '../composables/useAgentModes'
 import { useAppShell } from '../composables/useAppShell'
 
 // The agent-list editor: one card that edits the installation's `agents` rows
 // the way SettingsDialog edits the servers and models — a toolbar of verbs above
-// the list it acts on, one form per agent, the caps enforced on the way in.
+// the list it acts on, one form per agent, the caps enforced on the way in, and
+// **no Save**: a form is written as soon as it stops changing.
 //
 // It decides **nothing**. Every rule this card renders is a plain function from
 // `useAgentModes`: the slug, the byte counter, each toolbar slot's inertness and
 // the one word that is both its accessible name and its tooltip, the save
-// refusal, the card's **one message** (`messageFor`), the creation form's shape,
-// the model line. The component only turns those answers into fields and
+// refusal (which is also auto-save's gate: an incomplete form is never posted),
+// which forms a write is owed (`autoSaveTargetsFor`), the card's **one message**
+// (`messageFor`), the creation form's shape, the model line. The component only
+// turns those answers into fields and
 // buttons, so a rule cannot drift from the dialog that shows it — and no cap is
 // spelled here, because every number arrives in the payload's `caps`. No message
 // is assembled in the template, and the line renders text only.
@@ -49,8 +53,8 @@ import { useAppShell } from '../composables/useAppShell'
 //
 // **A new agent is a form, not a row**: `+` clears the selection, empties the
 // form through `creationFormFor` and focuses Label, and writes nothing. The list
-// keeps showing exactly what the store holds; the agent joins it only when a save
-// succeeds. Clicking a row ends that state by design, without asking.
+// keeps showing exactly what the store holds; the agent joins it as soon as the
+// completed form has been written. Clicking a row ends that state by design.
 //
 // **`readonly` is data, never an id.** The fields of an app-owned agent render
 // disabled, but this file never compares an agent id: the flag the server
@@ -81,7 +85,6 @@ const draft = ref(null)
 const activeTab = ref(null) // the shown section's key: a stored row's id, or NEW_TAB
 const creation = ref(null) // the form being typed for an agent the store does not hold
 const pendingDelete = ref(null) // the entry whose Delete awaits its confirm
-const pendingClose = ref(false) // `Close` was asked while the card holds unsaved work
 
 //: The creation form's section key. It is a *section* key and never an agent id: a
 //: new agent has no id the client owns until the store answers for it, and the id
@@ -102,37 +105,35 @@ const selectedEntry = computed(
 const creating = computed(() => creationActiveFor(creation.value))
 //: The entry every control acts on: the form being typed while there is one, the
 //: selected row otherwise. "Nothing selected" stays **two** states: creation mode
-//: has this form for Save to write, a list that came back empty has nothing.
+//: has this form for the band to speak about, a list that came back empty has none.
 const subject = computed(() => creation.value ?? selectedEntry.value)
 //: The sections to render: the store's rows, plus the creation form while one is
-//: held. A new agent is not an entry of the list until a save succeeds, so the
+//: held. A new agent is not an entry of the list until it has been written, so the
 //: list above never gains a row for something that does not exist.
 const formEntries = computed(() =>
   creation.value ? [...entries.value, creation.value] : entries.value,
 )
 const groups = computed(() => modelChoices(shell.servers))
 
-//: The one context every slot verdict reads, so the three verbs cannot disagree
-//: about the state they are rendered in.
+//: The one context every slot verdict reads, so the two verbs cannot disagree about
+//: the state they are rendered in.
 const slotContext = computed(() => ({
   loaded: loaded.value,
   creating: creating.value,
   saving: editor.saving,
   confirming: pendingDelete.value !== null,
-  closing: pendingClose.value,
 }))
 
 //: The toolbar's slots, each one verdict: inert or not, and the single string that
 //: is both its accessible name and its tooltip. The card renders answers — no
 //: verb's availability is spelled here.
 const addSlot = computed(() => addSlotFor(slotContext.value))
-const saveSlot = computed(() => saveSlotFor(subject.value, slotContext.value))
 
-//: **delete** — the toolbar's third slot, and the verb's subject is the card's
-//: subject: a stored, deletable row or nothing. The reason a disabled slot gives
-//: (nojae owns it / nothing is stored to delete / a write is in flight) is part of
-//: the same verdict, so the tooltip cannot disagree with the enablement and this
-//: file never reads a flag of its own.
+//: **delete** — the toolbar's second verb, and its subject is the card's subject: a
+//: stored, deletable row or nothing. The reason a disabled slot gives (nojae owns
+//: it / nothing is stored to delete / a write is in flight) is part of the same
+//: verdict, so the tooltip cannot disagree with the enablement and this file never
+//: reads a flag of its own.
 const deleteSlot = computed(() => deleteSlotFor(subject.value, slotContext.value))
 
 //: The row a pending confirmation is about, and the pair's verdict. The pair is
@@ -147,31 +148,10 @@ const deleteConfirmation = computed(() =>
   deleteConfirmationFor(pendingEntry.value, slotContext.value),
 )
 
-//: **Would closing lose something?** — the guard's only question, answered by the
-//: composable over every form the card holds plus creation mode. It is read once,
-//: when `Close` is asked, and it is *never* consulted by the save slot: the baseline
-//: exists for this question alone, which is why re-saving an untouched agent stays
-//: allowed.
-const unsavedWork = computed(() =>
-  closeWouldLoseForDraft(draft.value, { creating: creating.value }),
-)
-
-//: The footer's close pair: the same idiom as the delete pair, in the footer's
-//: **reserved** slot, and **absent from the DOM** until a close is being confirmed.
-//: Its two tooltips are the two answers, and each glyph's tooltip is its accessible
-//: name — one value read as both, so they cannot drift.
-const closeConfirmation = computed(() => closeConfirmationFor(slotContext.value))
-
 //: The card's **one message**: everything it has to say comes out of here, with
 //: the role that announces it. The line is always rendered, so an empty `text` is a
-//: slot holding nothing rather than a slot that is gone. The slot context goes in
-//: as well, because **the close guard's question** is one of the things the card
-//: has to say: the pair's two glyphs are its two answers, and this line is the
-//: question they answer, so a reader never has to infer from an ✕ and a ✓ that
-//: closing now would discard typing.
-const message = computed(() =>
-  messageFor(draft.value, subject.value, slotContext.value),
-)
+//: slot holding nothing rather than a slot that is gone.
+const message = computed(() => messageFor(draft.value, subject.value))
 
 // Open/fetch/close, following the SettingsDialog pattern. Opening *is* the read:
 // agents are uncached on purpose (the store is the cache), so a card that has been
@@ -199,7 +179,6 @@ watch(
 async function openList() {
   creation.value = null
   pendingDelete.value = null
-  pendingClose.value = false
   // The models the dropdown offers, from the connection store's own read. A
   // failure is not this card's to report: an empty catalogue simply means every
   // model option is the empty one. Re-read every time the card opens, because a
@@ -223,67 +202,35 @@ function tabKeyFor(entry) {
   return entry === creation.value ? NEW_TAB : entry.id
 }
 
-// **Escape and a backdrop click count as `Close` in every respect**, so they take
-// the same guard — otherwise they would be a silent bypass of it. The backdrop
-// therefore never calls `dialog.close()` itself: it asks, and only a guard that has
-// nothing to ask lets the card go.
+// **Escape and a backdrop click count as `Close` in every respect.** Nothing here
+// has to ask on the way out: a form is written as it stops changing, so the last
+// thing typed has already been posted — and `closeCard` flushes what is still
+// inside the debounce window, which covers a click made right after a keystroke.
 function onBackdropClick(event) {
-  if (event.target === dialogEl.value) askClose()
+  if (event.target === dialogEl.value) closeCard()
 }
 
-// **Escape is `Close` in every respect**, so it takes the same guard. The
-// `<dialog>`'s own Escape path is the cancelable `cancel` event, so it is always
-// cancelled here and routed through the same verb the button uses: with nothing
-// unsaved that closes the card, with unsaved work it asks. Leaving the native path
-// alone would be that silent bypass, and it is why the pencil's `@close` can never
-// be reached while a close confirmation is pending — nothing closes in that state
-// by any route.
+// The `<dialog>`'s own Escape path is the cancelable `cancel` event, so it is
+// cancelled here and routed through the same verb the button uses, which is the
+// verb that flushes.
 function onEscape(event) {
   event?.preventDefault?.()
-  askClose()
+  closeCard()
 }
 
-// The card going away, whichever way it went: the pencil owns the flag, so this
-// only tells it. A close the guard is asking about never gets here.
+// The card going away by any native route (an in-page form, a script): the pencil
+// owns the flag, and the flush rides along with it.
 function onNativeClose() {
-  if (props.open) emit('close')
+  if (props.open) closeCard()
 }
 
-//: `Close` is the card's only way out and it writes nothing. **While the card holds
-//: unsaved work it asks first, in place**: the delete confirmation's idiom arrives
-//: in the footer's reserved slot and its question in the message line (both
-//: `messageFor`'s, so nothing is spelled here), no dialog is nested, and `Close`
-//: does not move. A pending delete is **abandoned** here — nothing was written for
-//: it — and the guard answers on its own terms.
-function askClose() {
-  pendingDelete.value = null
-  if (!unsavedWork.value) {
-    closeCard()
-    return
-  }
-  pendingClose.value = true
-  // Focus lands on **`Keep editing`** — the safe answer — the same way the delete
-  // pair lands on its cancel, so a keyboard user is told what a pointer user reads.
-  nextTick(() => dialogEl.value?.querySelector('.agent-modes-keep-editing')?.focus())
-}
-
-//: `Keep editing`: hide the pair and change **nothing** else — not the selection,
-//: not the form, not a keystroke. Focus goes back to the verb that asked, because
-//: the pair's own button is leaving the DOM and a keyboard user must not be dropped
-//: at the top of the page.
-async function dismissClose() {
-  pendingClose.value = false
-  await nextTick()
-  dialogEl.value?.querySelector('.agent-modes-close')?.focus()
-}
-
-//: Leaving: `Discard and close` and an unguarded `Close` are the same act, and it
-//: writes **nothing** — it drops the in-memory forms only, resets no store row and
-//: posts no route. The card's own state goes with it, so a re-open reads the store
-//: afresh.
+//: Leaving: `Close` is the card's only exit and it asks nothing, because there is
+//: no longer any work leaving would lose — the flush below makes the write that is
+//: still inside the debounce window before the forms go away. The card's own state
+//: goes with it, so a re-open reads the store afresh.
 function closeCard() {
   pendingDelete.value = null
-  pendingClose.value = false
+  flushAutoSave()
   creation.value = null
   draft.value = null
   emit('close')
@@ -342,8 +289,12 @@ function problemsOn(entry) {
   return loaded.value ? entryProblems(draft.value, entry) : []
 }
 
+//: Which fields render disabled: the `readonly` half is the store's flag, and a
+//: write in flight is **not** one of them — auto-save posts without being asked, so
+//: locking the form on every keystroke pause would take the field away from a hand
+//: that is still typing. What is typed during a write is put back over its answer.
 function fieldsLocked(entry) {
-  return fieldsDisabledFor(entry) || editor.saving
+  return fieldsDisabledFor(entry)
 }
 
 function modelLine(entry) {
@@ -425,42 +376,141 @@ async function focusAfterDelete(preferTab) {
   dialog?.querySelector('.agent-modes-close')?.focus()
 }
 
-// Save **one** agent — the subject, and only it: the form being typed when a new
-// agent is being created, the selected row otherwise. There is no "save all".
-//
-// A successful save does **not** close the card: the answer is the whole new list,
-// so the card re-baselines on it, keeps the saved agent selected, and leaves every
-// other agent's typed edits exactly as they were. A new agent's row appears in the
-// list for the first time here, selected.
-//
-// An incomplete form is **refused here, not prevented**: the slot is live, the
-// click consults `saveRefusalFor`, and on a refusal nothing is posted. The message
-// line already says the sentence — it is derived from the form, so it reads the
-// same before the click and after it.
-async function save() {
-  const entry = subject.value
-  if (saveSlot.value.disabled) return
-  if (saveRefusalFor(draft.value, entry)) return
-  const wasCreation = creating.value
+//: Which set of forms a write belongs to. `Close` and a teardown drop them while the
+//: flush's bytes are still in flight, so an answer is applied only while the
+//: generation it was posted for is the current one: the write itself always goes
+//: out — that is the point of the flush — but a dead card's forms are not
+//: resurrected by it.
+let generation = 0
+
+//: **The auto-save.** A form is written when it stops changing, so the card has no
+//: `Save`: the entry is the record of what is typed, the baseline the record of
+//: what is stored, and a write is owed wherever the two disagree
+//: (`autoSaveTargetsFor`). Every owed form is written, not just the one on screen —
+//: the card holds one form per agent, and typing in a row the user has left behind
+//: is no less theirs.
+//:
+//: A form the store would refuse is **not** posted: its sentence goes to the band as
+//: it always did, and the next keystroke that completes it is what gets written.
+async function writeEntry(entry) {
+  const wasCreation = entry === creation.value
   const savedId = entry.id
+  const shape = writeShapeFor(entry)
+  // What the form holds at the moment its bytes are posted: the answer re-baselines
+  // that row to the store, and only what has moved on **since** this snapshot is
+  // typing no write carried yet.
+  const sentValues = typedSnapshot(entry)
   const held = draft.value
+  posted.set(entry, shape)
+  const writtenFor = generation
   const next = await saveAgent(entry)
-  if (!next) return // a refusal keeps the card open, its sentence in the line
+  // The answer still fed the composer's list (the singleton took it), but a card
+  // that has dropped its forms has nothing to re-baseline.
+  if (!next || writtenFor !== generation) return
   if (wasCreation) creation.value = null // the creation is over: it is a row now
-  // The answer re-baselines the list, and only the agent this write touched
-  // loses its typed state — every other agent keeps what the user typed in it.
+  // The answer re-baselines the list, and only the agent this write touched loses
+  // its typed state — every other agent keeps what was typed in it.
   draft.value = rebaselinedDraft(next, held, savedId)
-  // Keep the saved agent selected — for a new one, that is the first time it has
-  // a row at all.
-  activeTab.value = tabKeyFor(
-    entries.value.find((row) => row.id === savedId) ?? entries.value[0] ?? null,
-  )
-  // The save may have assigned or cleared this agent's model, which changes the
+  // The written row itself: a keystroke made while the write was in flight is put
+  // back over the answer, so no character is eaten — and because that moved value
+  // differs from its fresh baseline, it is owed the next write.
+  restoreTypedFields(entries.value.find((row) => row.id === savedId), entry, sentValues)
+  // A write never moves the selection: auto-save can land for a row the user has
+  // since left behind, and dragging them back to it would be the one thing a write
+  // of their own typing must not do. The exception is a new agent, whose form had
+  // no row to stay on — so its arrival is where the selection goes.
+  if (wasCreation) {
+    activeTab.value = tabKeyFor(entries.value.find((row) => row.id === savedId) ?? null)
+  }
+  // The write may have assigned or cleared this agent's model, which changes the
   // Settings band's cross-store count and, for a model added elsewhere, the
   // store-level "no model configured" line. Both are shell state read outside
   // this card, so refresh them now instead of leaving a stale sentence behind.
   await Promise.all([loadServers(), loadConfig()])
 }
+
+//: One write per shape of a form. A write the store answered without taking the
+//: bytes it was sent (a row it would not create) must not be posted again on the
+//: next tick — that would be a loop. A shape is remembered per posted form, so any
+//: further keystroke that changes it is owed a write again.
+const posted = new WeakMap()
+
+function nextOwedEntry() {
+  for (const entry of autoSaveTargetsFor(draft.value, creation.value)) {
+    if (posted.get(entry) === writeShapeFor(entry)) continue
+    return entry
+  }
+  return null
+}
+
+let autoSaveRunning = false
+
+async function runAutoSave() {
+  // A delete awaiting its answer, or a write from anywhere else: the store is not
+  // free to be told about these rows **right now**, and a delete that vanished
+  // because of a keystroke nobody confirmed is a question answered by the wrong
+  // hand. None of it is lost — the watch below re-runs once the blocker clears.
+  if (autoSaveRunning || editor.saving || pendingDelete.value) return
+  autoSaveRunning = true
+  try {
+    // One at a time: every write answers the whole list and re-baselines it, so two
+    // in flight would have the later answer overwrite the earlier one's merge.
+    for (let entry = nextOwedEntry(); entry; entry = nextOwedEntry()) {
+      if (pendingDelete.value) break
+      await writeEntry(entry)
+    }
+  } finally {
+    autoSaveRunning = false
+  }
+}
+
+let timer = null
+
+function scheduleAutoSave() {
+  if (timer) clearTimeout(timer)
+  timer = setTimeout(() => {
+    timer = null
+    runAutoSave()
+  }, AUTOSAVE_DELAY_MS)
+}
+
+function flushAutoSave() {
+  if (timer) {
+    clearTimeout(timer)
+    timer = null
+  }
+  return runAutoSave()
+}
+
+// Every form the card holds: `v-show` keeps them all in the DOM, so a keystroke in
+// a row the user has left behind is still a keystroke — and auto-save writes that
+// row too. The creation form is watched as well: it is not part of the draft until
+// the store answers for it.
+watch(
+  () => [draft.value?.entries, creation.value],
+  scheduleAutoSave,
+  { deep: true },
+)
+
+// A write that was owed but **blocked** — one still in flight, or a delete that had
+// to be answered first — is owed no less once the blocker clears, so clearing it
+// re-runs the schedule. Without this, a keystroke whose debounce fell inside an
+// earlier write's window would never be written at all.
+watch(
+  () => [editor.saving, pendingDelete.value !== null],
+  ([saving, confirming], [wasSaving, wasConfirming]) => {
+    if ((wasSaving && !saving) || (wasConfirming && !confirming)) scheduleAutoSave()
+  },
+)
+
+// A card torn down rather than closed (the pencil's `v-if`, a hot reload) is the
+// same gesture that must not lose a keystroke: the owed write is made before the
+// watches that make it go away.
+onScopeDispose(() => {
+  generation += 1
+  flushAutoSave()
+  if (timer) clearTimeout(timer)
+})
 </script>
 
 <template>
@@ -498,14 +548,15 @@ async function save() {
                one naming the card twice. -->
           <h3 class="agent-modes-heading">Agents</h3>
 
-          <!-- **Five fixed-width slots**, not a flex row that grows: add, save,
-               delete at the left, the confirmation pair's two at the right end —
-               just left of the form. Every slot keeps its width whether or not it
-               holds a button, so revealing a pair moves nothing and the toolbar
-               never changes height: the delete verb is always in its slot (disabled
-               with its reason, never hidden), and the pair arrives in slots whose
-               width was already reserved, so the three verbs do not move by a pixel
-               when it does. -->
+          <!-- **Four fixed-width slots**, not a flex row that grows: add and delete
+               at the left, the confirmation pair's two at the right end — just left
+               of the form. There is no `Save`: a form is written as it stops
+               changing, so the only verbs left are the ones that cannot be guessed
+               at. Every slot keeps its width whether or not it holds a button, so
+               revealing a pair moves nothing and the toolbar never changes height:
+               the delete verb is always in its slot (disabled with its reason, never
+               hidden), and the pair arrives in slots whose width was already
+               reserved, so the two verbs do not move by a pixel when it does. -->
           <div class="agent-modes-toolbar" role="group" aria-label="Agent actions">
             <span class="agent-modes-slot">
               <button
@@ -520,24 +571,6 @@ async function save() {
                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
                   stroke-linejoin="round" aria-hidden="true">
                   <path d="M12 5v14M5 12h14" />
-                </svg>
-              </button>
-            </span>
-            <span class="agent-modes-slot">
-              <button
-                class="icon-btn agent-modes-save"
-                type="button"
-                :disabled="saveSlot.disabled"
-                :aria-label="saveSlot.label"
-                :title="saveSlot.label"
-                @click="save"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                  stroke-linejoin="round" aria-hidden="true">
-                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-                  <path d="M17 21v-8H7v8" />
-                  <path d="M7 3v5h8" />
                 </svg>
               </button>
             </span>
@@ -723,7 +756,9 @@ async function save() {
                    an explicit, legal choice with a visible cost. -->
               <label>
                 Model
-                <select v-model.number="entry.modelId" :disabled="editor.saving">
+                <!-- Never disabled: it is the one field of a `readonly` row the user
+                     owns, and auto-save's writes must not interrupt a choice. -->
+                <select v-model.number="entry.modelId">
                   <option :value="null">{{ NO_MODEL_LABEL }}</option>
                   <optgroup
                     v-for="group in groups"
@@ -753,60 +788,13 @@ async function save() {
         <footer class="settings-actions">
           <!-- **The card's one message**: always present, on the same band as the
                buttons, its text and its role both `messageFor`'s answer. Nothing
-               else in the card says anything. It is also where the close guard puts
-               its question — the slot immediately before the pair's two buttons, and
-               the only one that can hold a sentence without moving `Close`. -->
+               else in the card says anything. -->
           <p class="agent-modes-message" :role="message.role">{{ message.text }}</p>
-          <!-- The footer's **reserved** confirmation slot: always there and always
-               the pair's width, so `Close` never moves when the card asks a question.
-               It holds the close pair and nothing else — the delete pair belongs to
-               the toolbar. Both buttons are **absent from the DOM** until a close is
-               pending, so neither is focusable nor announced while it means nothing,
-               and the width they arrive in was already reserved. The two glyphs reuse
-               the delete pair's idiom and its colours, so the card teaches the pair
-               once. -->
-          <span class="agent-modes-footer-slot">
-            <span class="agent-modes-slot">
-              <button
-                v-if="closeConfirmation.rendered"
-                class="icon-btn agent-modes-cancel agent-modes-keep-editing"
-                type="button"
-                :disabled="closeConfirmation.cancel.disabled"
-                :aria-label="closeConfirmation.cancel.label"
-                :title="closeConfirmation.cancel.label"
-                @click="dismissClose"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                  stroke-linejoin="round" aria-hidden="true">
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </button>
-            </span>
-            <span class="agent-modes-slot">
-              <button
-                v-if="closeConfirmation.rendered"
-                class="icon-btn agent-modes-confirm agent-modes-discard-close"
-                type="button"
-                :disabled="closeConfirmation.confirm.disabled"
-                :aria-label="closeConfirmation.confirm.label"
-                :title="closeConfirmation.confirm.label"
-                @click="closeCard"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                  stroke-linejoin="round" aria-hidden="true">
-                  <path d="M20 6 9 17l-5-5" />
-                </svg>
-              </button>
-            </span>
-          </span>
-          <!-- `Close` is the card's only exit and it writes nothing, and `Save` is
-               no longer its twin because a save is a write and not an exit. It asks
-               before discarding typed work, and Escape and a backdrop click are the
-               same verb, so they take the same guard rather than bypassing it. -->
-          <button class="secondary contrast agent-modes-close" type="button" @click="askClose">
+          <!-- `Close` is the card's only verb on this band and it writes nothing of
+               its own, because auto-save has written everything by the time it is
+               clicked — it only flushes what is still inside the debounce window.
+               Escape and a backdrop click are the same verb, so they flush too. -->
+          <button class="secondary contrast agent-modes-close" type="button" @click="closeCard">
             Close
           </button>
         </footer>

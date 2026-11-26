@@ -470,6 +470,17 @@ body {
   color: var(--pico-muted-color);
 }
 
+/* The tool-round panel of a reply: the narration that came between the calls,
+   kept in its own box so selecting or copying the answer below never takes it
+   along. Dimmed like the icons it carries, and separated from the answer by a
+   rule rather than by margin alone. */
+.chat-answer-steps {
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--bi-border);
+  color: var(--pico-muted-color);
+}
+
 .answer .mermaid-block {
   display: block;
   margin: 0.75rem 0;
@@ -1436,22 +1447,6 @@ body {
   margin: 0;
   font-size: 0.82rem;
   color: var(--pico-muted-color);
-}
-
-/* The footer's **reserved** confirmation slot: it keeps the pair's width whether
-   or not a pair is in it, so `Close` never moves when the card asks a question —
-   the same reason the toolbar's slots are fixed. Two slots and the gap between
-   them, exactly what the close pair occupies when it arrives. */
-.agent-modes-footer-slot {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--bi-space-1);
-  width: calc(36px + 36px + var(--bi-space-1));
-  /* The height is reserved too: an empty slot and a slot holding the pair are
-     one box, so `Close`'s vertical position never depends on the pair's
-     arrival. */
-  height: 36px;
 }
 
 /* The line's colour follows the role `messageFor` answered with, so the card

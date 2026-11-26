@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 
 import AgentModesDialog from '../src/components/AgentModesDialog.vue'
 import {
+  AUTOSAVE_DELAY_MS,
   NO_MODEL_LABEL,
   personaByteCount,
   useAgentModes,
@@ -20,7 +21,9 @@ import { useAppShell } from '../src/composables/useAppShell'
 // one row per agent the **store** holds, a `readonly` agent's fields disabled with
 // its model live, the model dropdown's empty option as an explicit choice, the
 // card's **one message line** (D11) saying everything it has to say, and what a
-// click does to the three routes.
+// **keystroke** does to the routes: there is no `Save` verb, so a form is written
+// when it stops changing (`settle()` below runs that pause), and every gesture
+// that drops a form flushes what is still inside the window.
 //
 // The fixtures mirror the real `GET /api/agents` payload (§4.4), so what renders
 // here is the server's data and not a paraphrase. `readonly` and `deletable` are
@@ -129,15 +132,55 @@ function jsonResponse(body, ok = true, status = 200) {
   return Promise.resolve({ ok, status, json: () => Promise.resolve(body) })
 }
 
-// Every agent route and the connection read. `calls` records the writes in
-// order, so "Create wrote nothing yet" is asserted rather than inferred.
-// `agents: null` makes the **read** fail, which is the case the one message line
-// exists for.
+//: Every agent route and the connection read. `calls` records the writes in
+//: order, so "wrote nothing yet" is asserted rather than inferred.
+//: `agents: null` makes the **read** fail, which is the case the one message line
+//: exists for.
+//:
+//: The store behind it **keeps what it is given**: a default write answer applies
+//: the posted bytes to the rows and answers with the whole list, the way the real
+//: route does. An answer that ignored the body would let a re-baseline bug — a
+//: written row showing what was sent instead of what is stored, or the same bytes
+//: posted forever — pass unnoticed. An entry in `saves` overrides that for one
+//: route.
 function stubRoutes({ agents = agentsBody(), saves = {}, calls = [] } = {}) {
+  const body = agents === null ? null : { findings: [], caps: CAPS, ...agents }
+  const rows = body ? body.agents.map((row) => ({ ...row })) : []
+  const listAnswer = () => jsonResponse({ ...body, agents: rows })
+
+  const applyWrite = (key, payload) => {
+    if (key === '/api/agents/delete') {
+      const at = rows.findIndex((row) => row.id === payload.id)
+      if (at !== -1) rows.splice(at, 1)
+      return
+    }
+    const row = rows.find((entry) => entry.id === payload.id)
+    if (key === '/api/agents/add') {
+      rows.push({
+        readonly: false,
+        deletable: true,
+        maxToolIteration: CAPS.minToolIteration,
+        modelId: null,
+        modelName: null,
+        systemMessage: '',
+        ...payload,
+      })
+      return
+    }
+    if (!row) return
+    Object.assign(row, payload)
+    // The store resolves the model's name; a client that showed its own guess
+    // instead of the answer would not be re-baselining.
+    if ('modelId' in payload) {
+      row.modelName =
+        payload.modelId == null ? null : `model-${payload.modelId}`
+    }
+  }
+
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     const key = String(url)
     if (key === '/api/agents') {
-      return agents === null ? jsonResponse({}, false, 500) : jsonResponse(agents)
+      return body === null ? jsonResponse({}, false, 500) : listAnswer()
     }
     if (key === '/api/servers') return jsonResponse(SERVERS)
     if (key === '/api/config') return jsonResponse({ models: [], store: { usable: true } })
@@ -151,7 +194,8 @@ function stubRoutes({ agents = agentsBody(), saves = {}, calls = [] } = {}) {
       if (typeof answer === 'function') return answer()
       if (Array.isArray(answer)) return answer.shift()
       if (answer !== undefined) return answer
-      return jsonResponse(agents)
+      applyWrite(key, JSON.parse(init.body))
+      return listAnswer()
     }
     throw new Error(`unexpected fetch: ${key}`)
   })
@@ -200,12 +244,6 @@ function tabButton(w, index) {
 
 function section(w, id) {
   return w.find(`section[data-tab="${id}"]`)
-}
-
-//: The toolbar's slots, by the hook each one carries. Their **accessible name**
-//: is the verdict's one string, which is also the tooltip (§6.16).
-function saveButton(w) {
-  return w.find('.agent-modes-save')
 }
 
 function addButton(w) {
@@ -280,21 +318,6 @@ function confirmDeleteButton(w) {
   return w.find('.agent-modes-confirm-delete')
 }
 
-//: The footer's close pair. Like the delete pair it has **no element at all** until
-//: a close is being confirmed (§6.17), so these wrappers are empty before the guard
-//: asks — which is itself what a case asserts.
-function footerSlot(w) {
-  return w.find('.agent-modes-footer-slot')
-}
-
-function keepEditingButton(w) {
-  return w.find('.agent-modes-keep-editing')
-}
-
-function discardCloseButton(w) {
-  return w.find('.agent-modes-discard-close')
-}
-
 //: Escape, as the browser delivers it: the `<dialog>`'s cancelable `cancel` event,
 //: which the card cancels and routes through the same verb the button uses.
 async function pressEscape(w) {
@@ -357,11 +380,11 @@ function box(el) {
 }
 
 //: The card's geometry, read off the mounted elements: the card's own box, the
-//: body's rows, the toolbar and its **five** slot boxes with the three verbs in
+//: body's rows, the toolbar and its **four** slot boxes with the two verbs in
 //: them, the list's placement, the form column's, and the footer band with its
-//: three children. The confirmation pair's two buttons are deliberately *not* in
+//: children. The confirmation pair's two buttons are deliberately *not* in
 //: here: their arrival is the thing that must move nothing, so the measurement
-//: compares the boxes they arrive **inside**, and the three verbs they must not
+//: compares the boxes they arrive **inside**, and the verbs they must not
 //: displace.
 function cardGeometry(w) {
   const slots = toolbarSlots(w)
@@ -371,7 +394,7 @@ function cardGeometry(w) {
     body: box(w.find('.agent-modes-body').element),
     toolbar: box(w.find('.agent-modes-toolbar').element),
     slotBoxes: slots.map((slot) => box(slot.element)),
-    verbBoxes: slots.slice(0, 3).map((slot) => box(slot.find('button').element)),
+    verbBoxes: slots.slice(0, 2).map((slot) => box(slot.find('button').element)),
     // Not a box: the count of buttons the toolbar holds, recorded so a case can
     // prove the pair really did arrive in one of the states it compared — an
     // equality between two states that both lacked it would be vacuous.
@@ -419,16 +442,32 @@ async function walkStates(w) {
   await record('the delete cancelled', async () => {
     await cancelDeleteButton(w).trigger('click')
   })
-  await record('a close confirmation pending', async () => {
-    await closeButton(w).trigger('click')
+  // Auto-save's own two states: a form whose write is owed (the band says nothing
+  // about it — typing is not an event), and one whose write has landed.
+  await record('a form owed a write', async () => {
+    await tabButton(w, 0).trigger('click')
+    await labelField(w, 'chat').setValue('Chat')
+    await personaField(w, 'chat').setValue('typed, not yet written')
   })
-  await record('the close refused', async () => {
-    await keepEditingButton(w).trigger('click')
+  await record('the write landed', async () => {
+    await settle()
   })
   return states
 }
 
+//: Let auto-save's pause run and the write it makes land. A case that types and
+//: then asserts a route was called settles first; one that asserts nothing was
+//: written never settles, which is how "not before the debounce has run" is read.
+async function settle() {
+  await vi.advanceTimersByTimeAsync(AUTOSAVE_DELAY_MS + 50)
+  await flushPromises()
+}
+
 beforeEach(() => {
+  // The card's auto-save is a timer, so every case runs on fake ones: nothing is
+  // written unless the case lets the pause pass (or closes the card, which
+  // flushes). A test that only reads the screen never advances them.
+  vi.useFakeTimers()
   Element.prototype.showModal = function showModal() {
     this.open = true
   }
@@ -443,6 +482,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   host?.remove()
   host = null
   themeStyles.splice(0).forEach((style) => style.remove())
@@ -677,36 +717,45 @@ describe('the model dropdown (§5.2)', () => {
     await modelSelect(w, 'chat').setValue('')
     await flushPromises()
 
-    // Selecting it is a legal save — the composer then refuses to send (task 12).
+    // Choosing it is legal, the quiet line says what it costs, and the composer
+    // then refuses to send (task 12). Nothing has been written yet: the pause has
+    // not run.
     expect(section(w, 'chat').find('.agent-modes-model-line').text()).toBe(NO_MODEL_LABEL)
-    expect(saveButton(w).element.disabled).toBe(false)
+    expect(calls).toEqual([])
 
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await settle()
+    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
     expect(calls[0].body.modelId).toBeNull()
     w.unmount()
   })
 })
 
 // The problems the form can hold are no longer printed under the field each one
-// names (D11): the card says them once, in its one message line, and the save
-// slot stays **live** so the click is how the user learns what is missing.
+// names (D11): the card says them once, in its one message line. With no `Save`
+// to click, the other half of the rule is that auto-save **never posts** a form
+// the store would refuse — the sentence is the answer, and the keystroke that
+// completes the form is what gets written.
 describe('the form-level problems (D11)', () => {
-  it('a problem is said in the one message line, and Save stays live', async () => {
-    stubRoutes()
+  it('a problem is said in the one message line, and its form is not posted', async () => {
+    const calls = stubRoutes()
     const w = await openDialog()
 
     await labelField(w, 'chat').setValue('')
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toContain('A label is required.')
     // Announced as a status, and it is the *only* thing the card says.
     expect(messageLine(w).attributes('role')).toBe('status')
     expect(w.findAll('[role="alert"]')).toHaveLength(0)
+    // The pause runs, and nothing goes out: a half-typed agent is not posted just
+    // to be answered with a 422.
+    await settle()
+    expect(calls).toEqual([])
 
-    await labelField(w, 'chat').setValue('Chat')
-    expect(saveButton(w).element.disabled).toBe(false)
-    // The line clears when its cause goes away.
+    // The keystroke that completes the form is what gets written.
+    await labelField(w, 'chat').setValue('Chatter')
     expect(messageText(w)).toBe('')
+    await settle()
+    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
+    expect(calls[0].body.label).toBe('Chatter')
     w.unmount()
   })
 
@@ -723,13 +772,14 @@ describe('the form-level problems (D11)', () => {
   })
 
   it('a duplicate label is refused in the line, and the mark lands on that tab', async () => {
-    stubRoutes()
+    const calls = stubRoutes()
     const w = await openDialog()
 
     await labelField(w, 'chat').setValue('Code')
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toContain('already labelled')
     expect(tabButton(w, 0).classes()).toContain('agent-modes-tab--broken')
+    await settle()
+    expect(calls).toEqual([])
     w.unmount()
   })
 
@@ -746,46 +796,46 @@ describe('the form-level problems (D11)', () => {
   })
 
   it('a persona over the byte cap is refused in the line, not under its field', async () => {
-    stubRoutes()
+    const calls = stubRoutes()
     const w = await openDialog()
     await tabButton(w, 2).trigger('click') // Architect
 
     await personaField(w, 'architect').setValue('x'.repeat(CAPS.maxPersonaBytes + 1))
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toContain('over the')
     expect(section(w, 'architect').findAll('.agent-modes-field-finding')).toHaveLength(0)
+    await settle()
+    expect(calls).toEqual([])
     w.unmount()
   })
 
   it('a cap below the floor is refused, and the number is the payload\'s', async () => {
-    stubRoutes()
+    const calls = stubRoutes()
     const w = await openDialog()
     await tabButton(w, 1).trigger('click') // Code
 
     const capInput = section(w, 'code').find('input[type="number"]')
     await capInput.setValue('0')
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toContain('at least 1')
+    await settle()
+    expect(calls).toEqual([])
 
     await capInput.setValue('500')
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toBe('')
+    await settle()
+    expect(calls[0].body.maxToolIteration).toBe(500)
     w.unmount()
   })
 
-  it('clearing Max tool iterations is said in the line, and the click posts nothing', async () => {
+  it('clearing Max tool iterations is said in the line, and nothing is posted', async () => {
     const calls = stubRoutes()
     const w = await openDialog()
     await tabButton(w, 1).trigger('click') // Code
 
     // `.number` leaves a cleared field as `''`, which used to read as "no value"
-    // and then serialise to 0 — a save the store refuses after the click.
+    // and then serialise to 0 — a save the store refuses after the fact.
     await section(w, 'code').find('input[type="number"]').setValue('')
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toContain('Max tool iterations')
-
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await settle()
     expect(calls).toEqual([])
     w.unmount()
   })
@@ -795,18 +845,17 @@ describe('the form-level problems (D11)', () => {
     const w = await openDialog()
 
     await labelField(w, 'chat').setValue('x'.repeat(CAPS.maxLabelChars + 1))
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(messageText(w)).toContain(`at most ${CAPS.maxLabelChars}`)
     expect(tabButton(w, 0).classes()).toContain('agent-modes-tab--broken')
-
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await settle()
     expect(calls).toEqual([])
 
-    // The cap itself is the payload's number: a label at it is fine.
+    // The cap itself is the payload's number: a label at it is fine, and written.
     await labelField(w, 'chat').setValue('x'.repeat(CAPS.maxLabelChars))
     expect(messageText(w)).toBe('')
     expect(tabButton(w, 0).classes()).not.toContain('agent-modes-tab--broken')
+    await settle()
+    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
     w.unmount()
   })
 })
@@ -842,8 +891,7 @@ describe('the one message line (D11)', () => {
     const first = await openDialog()
 
     await labelField(first, 'chat').setValue('Chatting')
-    await saveButton(first).trigger('click')
-    await flushPromises()
+    await settle()
     expect(messageText(first)).toContain('Could not reach the API')
     first.unmount()
 
@@ -992,8 +1040,8 @@ describe('creation mode (D4, D5)', () => {
     w.unmount()
   })
 
-  it('a new agent may be saved without a model, and the quiet line says it cannot run', async () => {
-    stubRoutes()
+  it('a new agent may be written without a model, and the quiet line says it cannot run', async () => {
+    const calls = stubRoutes()
     const w = await openDialog()
 
     await addButton(w).trigger('click')
@@ -1001,7 +1049,11 @@ describe('creation mode (D4, D5)', () => {
     await flushPromises()
 
     expect(creationSection(w).find('.agent-modes-model-line').text()).toBe(NO_MODEL_LABEL)
-    expect(saveButton(w).element.disabled).toBe(false)
+    // No model is a legal choice, so the completed form is owed a write — and it
+    // goes to the add route.
+    await settle()
+    expect(calls.map((call) => call.key)).toEqual(['/api/agents/add'])
+    expect(calls[0].body).toMatchObject({ id: 'reviewer', label: 'Reviewer', modelId: null })
     w.unmount()
   })
 
@@ -1093,10 +1145,9 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     expect(confirmDeleteButton(w).exists()).toBe(true)
     expect(tabButton(w, 4).classes()).toContain('active')
     expect(labelField(w, 'scribe').element.value).toBe('Scribe')
-    // While the confirmation is pending the three verbs are inert (D7.3): one
+    // While the confirmation is pending both verbs are inert (D7.3): one
     // destructive action is decided at a time. The card renders the verdicts.
     expect(addButton(w).element.disabled).toBe(true)
-    expect(saveButton(w).element.disabled).toBe(true)
     expect(deleteSlotButton(w).element.disabled).toBe(true)
     expect(addButton(w).attributes('title')).toContain('confirmation is pending')
     // Focus landed on **Cancel** — the safe answer (D7).
@@ -1126,7 +1177,7 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     await addButton(w2).trigger('click')
     await flushPromises()
     expect(deleteSlotButton(w2).element.disabled).toBe(true)
-    expect(deleteSlotButton(w2).attributes('title')).toContain('before it can be deleted')
+    expect(deleteSlotButton(w2).attributes('title')).toContain('not stored yet')
     w2.unmount()
 
     // A write in flight: the reason is the write, not the row.
@@ -1137,7 +1188,10 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     stubRoutes({ agents: withScribe(), saves: { '/api/agents/save': pending } })
     const w3 = await openDialog()
     await tabButton(w3, 4).trigger('click') // Scribe, a deletable row
-    await saveButton(w3).trigger('click')
+    // Typing is what starts the write: auto-save posts it when the form stops
+    // changing, and this route never answers.
+    await personaField(w3, 'scribe').setValue('being written')
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DELAY_MS + 50)
     await flushPromises()
 
     expect(deleteSlotButton(w3).element.disabled).toBe(true)
@@ -1153,9 +1207,9 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     const w = await openDialog()
     await tabButton(w, 4).trigger('click')
 
-    // Not merely invisible: the toolbar holds five slots and two of them hold
+    // Not merely invisible: the toolbar holds four slots and two of them hold
     // nothing, so the pair is neither focusable nor announced.
-    expect(toolbarSlots(w)).toHaveLength(5)
+    expect(toolbarSlots(w)).toHaveLength(4)
     expect(cancelDeleteButton(w).exists()).toBe(false)
     expect(confirmDeleteButton(w).exists()).toBe(false)
     // The toolbar says nothing in words: its slots hold glyphs only, and the
@@ -1165,13 +1219,13 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     await deleteSlotButton(w).trigger('click')
     await flushPromises()
 
-    // Exactly two slots gained a button, and the toolbar still holds five slots —
-    // so the three verbs kept the slots they were in and the height is the
+    // Exactly two slots gained a button, and the toolbar still holds four slots —
+    // so the two verbs kept the slots they were in and the height is the
     // toolbar's own, unchanged by content.
-    expect(toolbarSlots(w)).toHaveLength(5)
-    expect(toolbarSlots(w)[2].find('button').classes()).toContain('agent-modes-delete')
-    expect(toolbarSlots(w)[3].find('button').classes()).toContain('agent-modes-cancel-delete')
-    expect(toolbarSlots(w)[4].find('button').classes()).toContain('agent-modes-confirm-delete')
+    expect(toolbarSlots(w)).toHaveLength(4)
+    expect(toolbarSlots(w)[1].find('button').classes()).toContain('agent-modes-delete')
+    expect(toolbarSlots(w)[2].find('button').classes()).toContain('agent-modes-cancel-delete')
+    expect(toolbarSlots(w)[3].find('button').classes()).toContain('agent-modes-confirm-delete')
     // The pair's tooltips are the whole question and its two answers (Q7).
     expect(cancelDeleteButton(w).attributes('title')).toBe('Cancel delete')
     expect(confirmDeleteButton(w).attributes('title')).toBe('Confirm delete')
@@ -1182,18 +1236,18 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     w.unmount()
   })
 
-  it('revealing the pair moves nothing: the same five slot boxes, the same three verbs (§6.11)', async () => {
+  it('revealing the pair moves nothing: the same four slot boxes, the same two verbs (§6.11)', async () => {
     applyShippedTheme()
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
     await tabButton(w, 4).trigger('click')
 
-    // The DOM handed to the layout engine: the same five slot boxes, the same
-    // three verb buttons in them, in the same order, and the same **measured**
+    // The DOM handed to the layout engine: the same four slot boxes, the same
+    // two verb buttons in them, in the same order, and the same **measured**
     // box for each — a slot's size never depends on whether it holds a button.
     const before = cardGeometry(w)
     const slotsBefore = toolbarSlots(w).map((slot) => slot.element)
-    const verbsBefore = slotsBefore.slice(0, 3).map((slot) => slot.firstElementChild)
+    const verbsBefore = slotsBefore.slice(0, 2).map((slot) => slot.firstElementChild)
 
     await deleteSlotButton(w).trigger('click')
     await flushPromises()
@@ -1201,12 +1255,12 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     const after = cardGeometry(w)
     const slotsAfter = toolbarSlots(w).map((slot) => slot.element)
     expect(slotsAfter).toEqual(slotsBefore)
-    expect(slotsAfter.slice(0, 3).map((slot) => slot.firstElementChild)).toEqual(verbsBefore)
+    expect(slotsAfter.slice(0, 2).map((slot) => slot.firstElementChild)).toEqual(verbsBefore)
     expect(after.slotBoxes).toEqual(before.slotBoxes)
     expect(after.verbBoxes).toEqual(before.verbBoxes)
     expect(after.toolbar).toEqual(before.toolbar)
     // Measured, not read out of the stylesheet: the pair arrived in slots whose
-    // box the shipped theme declares, and the three verbs kept theirs.
+    // box the shipped theme declares, and the two verbs kept theirs.
     expect(after.slotBoxes.every((slot) => slot.width === '36px' && slot.flex === '0 0 36px')).toBe(true)
     w.unmount()
   })
@@ -1275,15 +1329,23 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
     await confirmDeleteButton(w).trigger('click')
     await flushPromises()
 
-    // Chat still holds what was typed in it — the delete was Scribe's alone.
+    // Chat still holds what was typed in it — the delete was Scribe's alone, and
+    // nothing has been written for Chat yet (the pause has not run).
     await tabButton(w, 0).trigger('click')
     expect(labelField(w, 'chat').element.value).toBe('Chatting')
     expect(personaField(w, 'chat').element.value).toBe('typed and not saved')
-    // ...and because its baseline is still the store's, the close guard can see
-    // the unsaved work instead of being made blind by the new rows.
+    // `Close` does not ask about it and does not lose it: the flush writes the row
+    // the delete left behind, then leaves.
+    const calls = vi.mocked(globalThis.fetch).mock.calls.filter(
+      (call) => call[1]?.method === 'POST',
+    )
+    expect(calls.map((call) => String(call[0]))).toEqual(['/api/agents/delete'])
+
     await closeButton(w).trigger('click')
     await flushPromises()
-    expect(keepEditingButton(w).exists()).toBe(true)
+    expect(vi.mocked(globalThis.fetch).mock.calls.filter((call) => call[1]?.method === 'POST').length)
+      .toBeGreaterThan(calls.length)
+    expect(w.emitted('close')).toBeTruthy()
     w.unmount()
   })
 
@@ -1321,13 +1383,13 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
 
     expect(tabs(w)).toEqual([])
     expect(w.findAll('.agent-modes-tab[aria-current="true"]')).toHaveLength(0)
-    // §5's last row: with an empty list the verbs are inert, each with its reason.
-    expect(saveButton(w).element.disabled).toBe(true)
-    expect(saveButton(w).attributes('title')).toContain('no agent selected')
+    // §5's last row: with an empty list the delete verb is inert with its reason,
+    // and add stays live — creating needs no existing row.
     expect(deleteSlotButton(w).element.disabled).toBe(true)
     // §6.10's "nothing selected" is its own reason — the delete verb has no row
     // to act on, which is not the same sentence as a row that cannot be deleted.
     expect(deleteSlotButton(w).attributes('title')).toContain('Select an agent')
+    expect(addButton(w).element.disabled).toBe(false)
     w.unmount()
   })
 
@@ -1369,11 +1431,25 @@ describe('delete, as a toolbar verb (D1, D7, §6.10–§6.14, §6.17)', () => {
   })
 })
 
-// A save is a **write, not an exit** (D6): the card stays open, the saved agent
-// stays selected, and the list re-baselines on the store's answer — which is also
-// how another agent's unsaved typing survives it (§6.18).
-describe('save (one agent, and the card stays open)', () => {
-  it('posts the selected agent to /api/agents/save, adopts the answer, and stays open', async () => {
+// There is no `Save` verb: a form is written when it **stops changing** (D6). The
+// card stays open through a write, the written agent stays selected, and the list
+// re-baselines on the store's answer — which is also how another agent's typing
+// survives it (§6.18).
+describe('auto-save (a form is written when it stops changing)', () => {
+  it('has no Save verb anywhere, in any state', async () => {
+    stubRoutes({ agents: withScribe() })
+    const w = await openDialog()
+
+    expect(w.find('.agent-modes-save').exists()).toBe(false)
+    expect(w.text()).not.toMatch(/\bSave\b/)
+    await addButton(w).trigger('click')
+    await flushPromises()
+    expect(w.find('.agent-modes-save').exists()).toBe(false)
+    expect(w.text()).not.toMatch(/\bSave\b/)
+    w.unmount()
+  })
+
+  it('posts the edited agent to /api/agents/save once the form stops changing, and stays open', async () => {
     const saved = agentsBody()
     saved.agents[1].label = 'Coder'
     const calls = stubRoutes({ saves: { '/api/agents/save': jsonResponse(saved) } })
@@ -1384,8 +1460,10 @@ describe('save (one agent, and the card stays open)', () => {
     await personaField(w, 'code').setValue('You edit files.\nNever guess.')
     const switches = section(w, 'code').findAll('input[role="switch"]')
     await switches[0].setValue(false)
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    // Nothing goes out while the hand is still typing.
+    expect(calls).toEqual([])
+
+    await settle()
 
     expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
     expect(calls[0].body).toMatchObject({
@@ -1399,31 +1477,50 @@ describe('save (one agent, and the card stays open)', () => {
     })
     // The answer re-baselines the card, so the caption follows the server's row.
     expect(tabs(w)).toContain('Coder')
-    // ...the saved agent is still the selected one, and the card is still open.
+    // ...the written agent is still the selected one, and the card is still open.
     expect(tabButton(w, 1).classes()).toContain('active')
     expect(w.find('dialog').element.open).toBe(true)
     expect(w.emitted('close')).toBeFalsy()
     w.unmount()
   })
 
-  it('a save of one agent leaves another agent\'s typed edits alone (§6.18)', async () => {
-    const saved = agentsBody()
-    const calls = stubRoutes({ saves: { '/api/agents/save': jsonResponse(saved) } })
+  it('writes one form per shape: the same bytes are never posted twice', async () => {
+    const calls = stubRoutes()
+    const w = await openDialog()
+    await tabButton(w, 1).trigger('click') // Code
+
+    await personaField(w, 'code').setValue('You edit files. Carefully.')
+    await settle()
+    expect(calls).toHaveLength(1)
+
+    // A pause with no keystroke re-runs the schedule and owes nothing: a write the
+    // store answered without taking (a row it would not create) must not loop.
+    await settle()
+    await settle()
+    expect(calls).toHaveLength(1)
+
+    // The next keystroke is a new shape, and is written again.
+    await personaField(w, 'code').setValue('You edit files. Carefully, then verify.')
+    await settle()
+    expect(calls).toHaveLength(2)
+    w.unmount()
+  })
+
+  it('writes every form the card holds, not only the one on screen (§6.18)', async () => {
+    const calls = stubRoutes()
     const w = await openDialog()
 
-    // Type into Chat, switch to Code and save *that*.
+    // Type into Chat, switch to Code and type there too.
     await labelField(w, 'chat').setValue('Chatting')
-    await personaField(w, 'chat').setValue('typed and not saved')
     await tabButton(w, 1).trigger('click') // Code
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await personaField(w, 'code').setValue('You edit files. Carefully.')
+    await settle()
 
-    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
-    expect(calls[0].body.id).toBe('code')
-    // Chat still holds what was typed in it — the write was Code's alone.
+    expect(calls.map((call) => call.body.id).sort()).toEqual(['chat', 'code'])
+    // Each write answers the whole list and re-baselines only the row it wrote: the
+    // other agent keeps what was typed in it.
     await tabButton(w, 0).trigger('click')
     expect(labelField(w, 'chat').element.value).toBe('Chatting')
-    expect(personaField(w, 'chat').element.value).toBe('typed and not saved')
     w.unmount()
   })
 
@@ -1447,14 +1544,13 @@ describe('save (one agent, and the card stays open)', () => {
     w.unmount()
   })
 
-  it('a readonly agent\'s Save sends its model and nothing else, and stays open', async () => {
+  it('a readonly agent\'s write sends its model and nothing else, and stays open', async () => {
     const calls = stubRoutes()
     const w = await openDialog()
     await tabButton(w, 3).trigger('click')
 
     await modelSelect(w, RESERVED_ID).setValue('2')
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await settle()
 
     expect(calls[0].key).toBe('/api/agents/save')
     expect(calls[0].body).toEqual({ id: RESERVED_ID, modelId: 2 })
@@ -1463,7 +1559,7 @@ describe('save (one agent, and the card stays open)', () => {
     w.unmount()
   })
 
-  it('a new agent is created from the empty form, its row appears selected, and the card stays open', async () => {
+  it('a new agent arrives from the completed form, its row appears selected, and the card stays open', async () => {
     const created = withScribe() // the store's answer holds the new row
     const calls = stubRoutes({ saves: { '/api/agents/add': jsonResponse(created) } })
     const w = await openDialog()
@@ -1472,12 +1568,12 @@ describe('save (one agent, and the card stays open)', () => {
     await creationLabelField(w).setValue('Scribe')
     await flushPromises()
 
-    // Nothing was written by adding, and the list gained no row for it.
+    // Nothing was written by adding, and the list gained no row for it — and the
+    // pause has not run yet either.
     expect(calls).toEqual([])
     expect(tabs(w)).toEqual(['Chat', 'Code', 'Architect', 'Reserved'])
 
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await settle()
 
     expect(calls[0].key).toBe('/api/agents/add')
     expect(calls[0].body.id).toBe('scribe')
@@ -1492,35 +1588,25 @@ describe('save (one agent, and the card stays open)', () => {
     w.unmount()
   })
 
-  it('an incomplete form leaves the slot live, and a click writes nothing', async () => {
+  it('an untouched agent is never written — the baseline is the gate', async () => {
     const calls = stubRoutes()
     const w = await openDialog()
 
-    await labelField(w, 'chat').setValue('')
-    expect(saveButton(w).element.disabled).toBe(false)
-
-    await saveButton(w).trigger('click')
-    await flushPromises()
-
-    // Nothing was posted, the card is still open, and the line holds exactly one
-    // message — the incomplete-form sentence, announced as a status (§6.6).
+    // Open, look around, touch nothing: the store already holds every form, so
+    // auto-save has nothing to post.
+    await tabButton(w, 1).trigger('click')
+    await settle()
     expect(calls).toEqual([])
-    expect(w.find('dialog').element.open).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
-    expect(messageLine(w).attributes('role')).toBe('status')
-    expect(messageText(w)).toContain('must be completed')
-    expect(messageText(w)).toContain('A label is required.')
     w.unmount()
   })
 
-  it('a refused save keeps the card open with the server\'s sentence in the line', async () => {
+  it('a refused write keeps the card open with the server\'s sentence in the line', async () => {
     const detail = 'label: an agent labelled \'Code\' already exists.'
     stubRoutes({ saves: { '/api/agents/save': jsonResponse({ detail }, false, 422) } })
     const w = await openDialog()
 
-    await labelField(w, 'chat').setValue('Chat')
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await labelField(w, 'chat').setValue('Chatter')
+    await settle()
 
     // The store's own words, verbatim, announced as an alert, and nowhere else
     // (§6.7: nothing at the top of the card, no field with its own message).
@@ -1528,12 +1614,12 @@ describe('save (one agent, and the card stays open)', () => {
     expect(messageLine(w).attributes('role')).toBe('alert')
     expect(w.findAll('[role="alert"]')).toHaveLength(1)
     expect(w.find('dialog').element.open).toBe(true)
-    // A refusal is not a save: the card stays open and closes nothing.
+    // A refusal is not a write that happened: the card stays open and closes nothing.
     expect(w.emitted('close')).toBeFalsy()
     w.unmount()
   })
 
-  it('a successful save empties a refusal', async () => {
+  it('the next keystroke after a refusal earns a new write, and its success empties the line', async () => {
     const saved = agentsBody()
     stubRoutes({
       agents: saved,
@@ -1546,115 +1632,53 @@ describe('save (one agent, and the card stays open)', () => {
     })
     const w = await openDialog()
 
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await labelField(w, 'chat').setValue('Chatter')
+    await settle()
     expect(messageText(w)).toBe('the store refused')
 
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    // The refused bytes are not posted again on their own: a refusal is said, and
+    // the next thing typed is what asks the store again.
+    await settle()
+    expect(messageText(w)).toBe('the store refused')
+
+    await labelField(w, 'chat').setValue('Chatter Two')
+    await settle()
     expect(messageText(w)).toBe('')
-    w.unmount()
-  })
-
-  it('`Close` is the footer\'s only button, it writes nothing, and there is no Save there', async () => {
-    const calls = stubRoutes()
-    const w = await openDialog()
-
-    const footer = w.find('footer.settings-actions')
-    expect(footer.findAll('button').map((node) => node.text())).toEqual(['Close'])
-    expect(footer.find('.agent-modes-save').exists()).toBe(false)
-
-    // Nothing was typed, so the guard has nothing to ask and `Close` leaves at once.
-    await closeButton(w).trigger('click')
-
-    expect(calls).toEqual([])
-    expect(w.emitted('close')).toBeTruthy()
-    w.unmount()
-  })
-
-  it('re-saving an untouched agent is still allowed — no dirty gate on the save slot (§6.9)', async () => {
-    const saved = agentsBody()
-    const calls = stubRoutes({ saves: { '/api/agents/save': jsonResponse(saved) } })
-    const w = await openDialog()
-
-    // The baseline says this row differs from nothing, so the guard would not ask —
-    // and that same baseline must **not** reach the save slot: there is no `Nothing
-    // to save` state, so an untouched agent may be written again.
-    expect(saveButton(w).element.disabled).toBe(false)
-    expect(saveButton(w).attributes('title')).toBe('Save agent')
-
-    await saveButton(w).trigger('click')
-    await flushPromises()
-
-    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
-    expect(w.find('dialog').element.open).toBe(true)
     w.unmount()
   })
 })
 
 // ---------------------------------------------------------------------------
-// The close guard (D8).
+// Nothing typed is left behind.
 //
-// `Close` is the card's only exit, so it must not silently discard typing: while
-// the card holds unsaved work it asks **in place**, in the footer's reserved slot,
-// with the delete pair's own idiom. Escape and a backdrop click are the same verb
-// and take the same guard — otherwise they are a silent bypass. The guard's only
-// input is the per-entry baseline (plus creation mode), and that baseline never
-// reaches the save slot (Q2).
+// `Close` is the card's only exit, and it asks nothing: auto-save has already
+// written what stopped changing, so the only thing leaving could drop is a
+// keystroke still inside the debounce window — and the close flushes that first.
+// Escape and a backdrop click are the same verb, so they flush too rather than
+// being a silent way out that loses typing.
 // ---------------------------------------------------------------------------
 
-describe('the close guard (D8, §6.15, §6.17)', () => {
-  it('with unsaved work, `Close` asks in the footer\'s reserved slot and writes nothing', async () => {
+describe('nothing typed is left behind by a gesture (§6.15)', () => {
+  it('`Close` inside the debounce window writes the keystroke and leaves', async () => {
     const calls = stubRoutes()
     const w = await openDialog()
     await labelField(w, 'chat').setValue('Chatting')
 
-    // Both buttons are **absent from the DOM** before the question is asked, and
-    // the slot they arrive in is already there (§6.17).
-    expect(keepEditingButton(w).exists()).toBe(false)
-    expect(discardCloseButton(w).exists()).toBe(false)
-    expect(footerSlot(w).exists()).toBe(true)
+    // Nothing has gone out yet: the pause has not run.
+    expect(calls).toEqual([])
 
     await closeButton(w).trigger('click')
     await flushPromises()
 
-    // The pair is in the footer's slot, and the card is still open with nothing
-    // written: the guard asked instead of leaving.
-    expect(keepEditingButton(w).exists()).toBe(true)
-    expect(discardCloseButton(w).exists()).toBe(true)
-    expect(footerSlot(w).element.contains(keepEditingButton(w).element)).toBe(true)
-    expect(footerSlot(w).element.contains(discardCloseButton(w).element)).toBe(true)
-    expect(w.find('dialog').element.open).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
-    expect(calls).toEqual([])
-    // The pair reuses the delete idiom's two answers, and each glyph's tooltip is
-    // its accessible name (§6.16).
-    expect(keepEditingButton(w).attributes('title')).toBe('Keep editing')
-    expect(keepEditingButton(w).attributes('aria-label')).toBe('Keep editing')
-    expect(discardCloseButton(w).attributes('title')).toBe('Discard and close')
-    expect(discardCloseButton(w).attributes('aria-label')).toBe('Discard and close')
-    // The pair's two glyphs name its two answers; the card's **one message line**
-    // (D11) names the question they answer, so nobody has to read a glyph twice to
-    // learn that closing now would discard typing. It is the footer's question, so
-    // the line — the slot immediately before the two buttons — is its home, and
-    // `messageFor` owns the wording, not the template.
-    expect(messageText(w)).toBe('There are unsaved changes. Close anyway?')
-    expect(messageLine(w).attributes('role')).toBe('status')
-    // It says nothing else: no nested dialog appeared, and no second copy of the
-    // question sits anywhere outside that line.
-    expect(w.findAll('.agent-modes-message')).toHaveLength(1)
-    // Focus landed on **`Keep editing`** — the safe answer.
-    expect(document.activeElement).toBe(keepEditingButton(w).element)
-    // And while it is pending the toolbar's three verbs are inert: one destructive
-    // decision at a time (§5's last row).
-    expect(addButton(w).element.disabled).toBe(true)
-    expect(saveButton(w).element.disabled).toBe(true)
-    expect(deleteSlotButton(w).element.disabled).toBe(true)
-    expect(addButton(w).attributes('title')).toContain('confirmation is pending')
+    // The flush wrote it, and the card left on the spot: there is no question
+    // left to ask, because leaving loses nothing.
+    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
+    expect(calls[0].body).toMatchObject({ id: 'chat', label: 'Chatting' })
+    expect(w.emitted('close')).toBeTruthy()
     w.unmount()
   })
 
-  it('with nothing unsaved, `Close` closes at once and the pair is never rendered', async () => {
+  it('with nothing owed, `Close` writes nothing and leaves at once', async () => {
     const calls = stubRoutes()
     const w = await openDialog()
 
@@ -1663,13 +1687,11 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
 
     expect(w.emitted('close')).toBeTruthy()
     expect(calls).toEqual([])
-    expect(keepEditingButton(w).exists()).toBe(false)
-    expect(discardCloseButton(w).exists()).toBe(false)
     w.unmount()
   })
 
-  it('a keystroke in a row the user left behind is still unsaved work', async () => {
-    stubRoutes()
+  it('a keystroke in a row the user left behind is written by the close too', async () => {
+    const calls = stubRoutes()
     const w = await openDialog()
     await labelField(w, 'chat').setValue('Chatting')
     await tabButton(w, 1).trigger('click') // away to Code, which is untouched
@@ -1677,116 +1699,53 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
     await closeButton(w).trigger('click')
     await flushPromises()
 
-    // The card holds one form per agent, so the guard asks about all of them —
-    // the common case (open, change nothing, close) is the only one that costs
-    // no extra click.
-    expect(keepEditingButton(w).exists()).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
+    // The card holds one form per agent, so the flush writes that row too.
+    expect(calls.map((call) => call.body.id)).toEqual(['chat'])
+    expect(w.emitted('close')).toBeTruthy()
     w.unmount()
   })
 
-  it('creation mode counts as unsaved work: nothing was ever written', async () => {
-    const calls = stubRoutes()
-    const w = await openDialog()
-    await addButton(w).trigger('click')
-    await flushPromises()
-
-    await closeButton(w).trigger('click')
-    await flushPromises()
-
-    expect(keepEditingButton(w).exists()).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
-    expect(calls).toEqual([])
-    w.unmount()
-  })
-
-  it('Escape and a backdrop click are `Close`, so they take the same guard', async () => {
+  it('Escape and a backdrop click are `Close`, so they flush as it does', async () => {
     // Escape: the `<dialog>`'s own close path is cancelled and routed through the
-    // same verb, so it cannot be a silent bypass of the guard.
+    // same verb, so it cannot be a silent way out that drops a keystroke.
     const calls = stubRoutes()
     const w = await openDialog()
     await labelField(w, 'chat').setValue('Chatting')
 
     const event = await pressEscape(w)
     expect(event.defaultPrevented).toBe(true)
-    expect(keepEditingButton(w).exists()).toBe(true)
-    expect(w.find('dialog').element.open).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
-    expect(calls).toEqual([])
-
-    // A backdrop click is the same gesture and the same answer.
-    await clickBackdrop(w)
-    expect(keepEditingButton(w).exists()).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
-    expect(calls).toEqual([])
-    w.unmount()
-  })
-
-  it('with nothing unsaved, Escape and a backdrop click still leave at once', async () => {
-    const calls = stubRoutes()
-    const w = await openDialog()
-
-    await pressEscape(w)
-    expect(keepEditingButton(w).exists()).toBe(false)
+    expect(calls.map((call) => call.key)).toEqual(['/api/agents/save'])
     expect(w.emitted('close')).toBeTruthy()
-    expect(calls).toEqual([])
-
-    const w2 = await openDialog()
-    await clickBackdrop(w2)
-    expect(w2.emitted('close')).toBeTruthy()
-    expect(keepEditingButton(w2).exists()).toBe(false)
     w.unmount()
+
+    // A backdrop click is the same gesture and the same flush.
+    const calls2 = stubRoutes()
+    const w2 = await openDialog()
+    await personaField(w2, 'code').setValue('typed')
+    await clickBackdrop(w2)
+    expect(calls2.map((call) => call.body.id)).toEqual(['code'])
+    expect(w2.emitted('close')).toBeTruthy()
     w2.unmount()
   })
 
-  it('a save re-baselines, so closing straight after it costs no extra click', async () => {
+  it('closing straight after a write costs nothing and posts nothing more', async () => {
     const saved = agentsBody()
     saved.agents[1].label = 'Coder'
-    stubRoutes({ saves: { '/api/agents/save': jsonResponse(saved) } })
+    const calls = stubRoutes({ saves: { '/api/agents/save': jsonResponse(saved) } })
     const w = await openDialog()
     await tabButton(w, 1).trigger('click') // Code
 
     await labelField(w, 'code').setValue('Coder')
-    await saveButton(w).trigger('click')
-    await flushPromises()
+    await settle()
+    expect(calls).toHaveLength(1)
 
-    // The write made the stored state the truth, so nothing would be lost — the
-    // guard's baseline is the store's answer, never what was sent.
+    // The write made the stored state the truth, so the close has nothing left to
+    // flush: it just leaves.
     await closeButton(w).trigger('click')
     await flushPromises()
 
-    expect(keepEditingButton(w).exists()).toBe(false)
+    expect(calls).toHaveLength(1)
     expect(w.emitted('close')).toBeTruthy()
-    w.unmount()
-  })
-
-  it('`Keep editing` hides the pair and changes **nothing** else', async () => {
-    const calls = stubRoutes()
-    const w = await openDialog()
-    await tabButton(w, 1).trigger('click') // Code
-    await personaField(w, 'code').setValue('typed and not saved')
-    await closeButton(w).trigger('click')
-    await flushPromises()
-
-    await keepEditingButton(w).trigger('click')
-    await flushPromises()
-
-    // The pair is gone and the card is back exactly where it was: same selection,
-    // same form, same typing, nothing written.
-    expect(keepEditingButton(w).exists()).toBe(false)
-    expect(discardCloseButton(w).exists()).toBe(false)
-    expect(w.find('dialog').element.open).toBe(true)
-    expect(w.emitted('close')).toBeFalsy()
-    expect(tabButton(w, 1).classes()).toContain('active')
-    expect(personaField(w, 'code').element.value).toBe('typed and not saved')
-    expect(calls).toEqual([])
-    // The question is the guard's, so it leaves with the guard: the line is empty
-    // again rather than still asking about a close that was refused.
-    expect(messageText(w)).toBe('')
-    // The verbs are live again, and the pencil's `@close` was never reached.
-    expect(saveButton(w).element.disabled).toBe(false)
-    // Focus went back to the verb that asked, not to `<body>`.
-    expect(document.activeElement).toBe(closeButton(w).element)
     w.unmount()
   })
 
@@ -1819,22 +1778,6 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
     w.unmount()
   })
 
-  it('`Discard and close` closes the card and posts nothing', async () => {
-    const calls = stubRoutes()
-    const w = await openDialog()
-    await labelField(w, 'chat').setValue('Chatting')
-    await closeButton(w).trigger('click')
-    await flushPromises()
-
-    await discardCloseButton(w).trigger('click')
-    await flushPromises()
-
-    // It drops the in-memory form only: no write, and no store row touched.
-    expect(w.emitted('close')).toBeTruthy()
-    expect(calls).toEqual([])
-    w.unmount()
-  })
-
   it('a pending delete is abandoned when `Close` is clicked, and nothing was written', async () => {
     const calls = stubRoutes({ agents: withScribe() })
     const w = await openDialog()
@@ -1846,95 +1789,71 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
     await closeButton(w).trigger('click')
     await flushPromises()
 
-    // The delete is gone — nothing was written for it — and the guard answered on
-    // its own terms: Scribe holds unsaved work? No, it was untouched, so the card
-    // leaves at once, with the delete abandoned.
+    // The delete is gone — nothing was written for it — and the card leaves at
+    // once: there is no question left to ask on the way out.
     expect(confirmDeleteButton(w).exists()).toBe(false)
     expect(cancelDeleteButton(w).exists()).toBe(false)
-    expect(keepEditingButton(w).exists()).toBe(false)
     expect(w.emitted('close')).toBeTruthy()
     expect(calls).toEqual([])
     w.unmount()
   })
 
-  it('a pending delete abandoned by `Close` still asks when there is unsaved work', async () => {
+  it('a pending delete holds auto-save back until it is answered', async () => {
     const calls = stubRoutes({ agents: withScribe() })
     const w = await openDialog()
     await tabButton(w, 4).trigger('click')
-    await personaField(w, 'scribe').setValue('typed and not saved')
+    await personaField(w, 'scribe').setValue('typed while asked')
     await deleteSlotButton(w).trigger('click')
     await flushPromises()
 
-    await closeButton(w).trigger('click')
-    await flushPromises()
-
-    // One destructive decision at a time: the delete pair is gone, the close pair
-    // is here, and neither has written anything.
-    expect(confirmDeleteButton(w).exists()).toBe(false)
-    expect(keepEditingButton(w).exists()).toBe(true)
+    // A keystroke cannot answer a destructive question: the write waits, and the
+    // typing is held rather than lost.
+    await settle()
     expect(calls).toEqual([])
+
+    // Answering it lets the owed write through.
+    await cancelDeleteButton(w).trigger('click')
+    await settle()
+    expect(calls.map((call) => call.body.id)).toEqual(['scribe'])
     w.unmount()
   })
 
-  it('the footer reserves the pair\'s slot: measured, `Close` does not move (§6.15, D10)', async () => {
+  it('the footer band holds the message and `Close`, measured (§6.15, D10)', async () => {
     // Measured, not read out of the stylesheet: the shipped theme is applied to the
     // document and the *resolved* style of the real mounted elements is asked, so a
-    // rule that let the pair's arrival change the band would show up here.
+    // rule that let a sentence resize the band — or a second verb grow into it —
+    // would show up here.
     const style = document.createElement('style')
     style.textContent = readFileSync(resolve('src/styles/theme.css'), 'utf8')
     document.head.appendChild(style)
     try {
       stubRoutes()
       const w = await openDialog()
-      await labelField(w, 'chat').setValue('Chatting')
 
       const band = () => [...w.find('footer.settings-actions').element.children]
       const measure = () => ({
-        // The band's elements, in order: the same three, whatever the slot holds.
+        // The band's elements, in order: the message line and the one verb.
         order: band().map((node) => node.className),
-        // The reserved slot: a box that does not depend on its content — its
-        // width *and* its height are declared, and its flex basis can neither
-        // grow nor shrink, so the pair's arrival cannot resize the band.
-        slotWidth: getComputedStyle(band()[1]).width,
-        slotHeight: getComputedStyle(band()[1]).height,
-        slotFlex: getComputedStyle(band()[1]).flex,
-        // `Close` is the band's last element, and its own box is untouched.
-        closeClass: band()[2].className,
-        closeFlex: getComputedStyle(band()[2]).flex,
+        // The message line stretches to the band instead of setting its height, so
+        // filling it moves nothing; `Close` takes its own width.
+        messageFlex: getComputedStyle(band()[0]).flex,
+        messageAlign: getComputedStyle(band()[0]).alignSelf,
+        closeFlex: getComputedStyle(band()[1]).flex,
       })
 
       const before = measure()
-      await closeButton(w).trigger('click')
-      await flushPromises()
+      await labelField(w, 'chat').setValue('')
+      expect(messageText(w)).toContain('must be completed')
       const after = measure()
 
       expect(after).toEqual(before)
-      // Not a vacuous comparison: the resolved values are the shipped rule's, so
-      // a change that let the slot's box depend on its content moves one of them.
-      expect(after.slotWidth).toBe('calc(36px + 36px + var(--bi-space-1))')
-      expect(after.slotHeight).toBe('36px')
-      expect(after.slotFlex).toBe('0 0 auto')
+      // Not a vacuous comparison: the resolved values are the shipped rule's.
+      expect(after.messageFlex).toBe('1 1 auto')
+      expect(after.messageAlign).toBe('stretch')
       expect(after.closeFlex).toBe('0 0 auto')
-      // The pair arrived **inside** the slot that was already there, in the
-      // toolbar's own fixed 36px boxes: the band gained no element.
-      expect(keepEditingButton(w).exists()).toBe(true)
-      expect(band()).toHaveLength(3)
-      for (const slot of footerSlot(w).findAll('.agent-modes-slot')) {
-        expect(getComputedStyle(slot.element).width).toBe('36px')
-        expect(getComputedStyle(slot.element).height).toBe('36px')
-        // And the glyph inside it keeps the icon button's box: the band's shared
-        // rule gives a *text* button `width: auto`, which would otherwise squeeze
-        // the pair's glyphs into something that is not the toolbar's idiom.
-        expect(getComputedStyle(slot.find('button').element).width).toBe('36px')
-      }
-      // And the pair reads as the delete pair's idiom: the safe answer in red, the
-      // confirming one in green, from the theme tokens (D8, D1).
-      expect(
-        getComputedStyle(keepEditingButton(w).find('svg').element).stroke,
-      ).toBe('var(--bi-danger)')
-      expect(
-        getComputedStyle(discardCloseButton(w).find('svg').element).stroke,
-      ).toBe('var(--bi-success)')
+      // The band gained no element for holding a sentence, and it holds no pair.
+      expect(band()).toHaveLength(2)
+      expect(w.find('footer').findAll('.agent-modes-slot')).toHaveLength(0)
       w.unmount()
     } finally {
       style.remove()
@@ -1945,7 +1864,7 @@ describe('the close guard (D8, §6.15, §6.17)', () => {
 // ---------------------------------------------------------------------------
 // The toolbar (D1, D2, D9).
 //
-// Five fixed-width slots over the list — three verbs at the left, the two
+// Four fixed-width slots over the list — the two verbs at the left, the two
 // confirmation slots at its right end. Each present slot is an icon button whose
 // **accessible name is its tooltip**, both read from the same verdict, and an
 // inert one always says why. The glyphs are the app's own inline SVGs: no icon
@@ -1994,20 +1913,19 @@ describe('the toolbar over the list (D1, D9)', () => {
     w.unmount()
   })
 
-  it('holds five fixed-width slots, three of them verbs', async () => {
+  it('holds four fixed-width slots, two of them verbs', async () => {
     stubRoutes()
     const w = await openDialog()
 
     const slots = toolbarSlots(w)
-    expect(slots).toHaveLength(5)
-    // The three verbs are always in the first three slots — delete disabled with
-    // its reason, never hidden (D1). The confirmation pair's two slots are empty
-    // until a confirmation is pending (§6.17) — absent, not hidden.
+    expect(slots).toHaveLength(4)
+    // The two verbs are always in the first two slots — delete disabled with its
+    // reason, never hidden (D1), and no `Save` among them. The confirmation pair's
+    // two slots are empty until a confirmation is pending (§6.17).
     expect(slots[0].find('button').classes()).toContain('agent-modes-add')
-    expect(slots[1].find('button').classes()).toContain('agent-modes-save')
-    expect(slots[2].find('button').classes()).toContain('agent-modes-delete')
+    expect(slots[1].find('button').classes()).toContain('agent-modes-delete')
+    expect(slots[2].find('button').exists()).toBe(false)
     expect(slots[3].find('button').exists()).toBe(false)
-    expect(slots[4].find('button').exists()).toBe(false)
     // Every slot keeps its width whether or not it holds a button (D10).
     for (const slot of slots) {
       expect(slot.classes()).toContain('agent-modes-slot')
@@ -2015,11 +1933,11 @@ describe('the toolbar over the list (D1, D9)', () => {
     w.unmount()
   })
 
-  it('the three verbs are house icon buttons: an inline glyph, named, no icon package', async () => {
+  it('the two verbs are house icon buttons: an inline glyph, named, no icon package', async () => {
     stubRoutes()
     const w = await openDialog()
 
-    for (const button of [addButton(w), saveButton(w), deleteSlotButton(w)]) {
+    for (const button of [addButton(w), deleteSlotButton(w)]) {
       expect(button.classes()).toContain('icon-btn')
       const glyph = button.find('svg')
       expect(glyph.exists()).toBe(true)
@@ -2028,22 +1946,20 @@ describe('the toolbar over the list (D1, D9)', () => {
       // §6.16: the accessible name and the tooltip are the same words.
       expect(button.attributes('aria-label')).toBe(button.attributes('title'))
     }
-    // No dependency was added for these five glyphs.
+    // No dependency was added for these glyphs.
     const manifest = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
     expect(Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }))
       .not.toContain('@iconify/vue')
     w.unmount()
   })
 
-  it('the three slots say their own names when they are live', async () => {
+  it('the two slots say their own names when they are live', async () => {
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
     await tabButton(w, 4).trigger('click') // Scribe: the deletable row
 
     expect(addButton(w).attributes('aria-label')).toBe('Add agent')
     expect(addButton(w).element.disabled).toBe(false)
-    expect(saveButton(w).attributes('aria-label')).toBe('Save agent')
-    expect(saveButton(w).element.disabled).toBe(false)
     expect(deleteSlotButton(w).attributes('aria-label')).toBe('Delete agent')
     expect(deleteSlotButton(w).element.disabled).toBe(false)
     w.unmount()
@@ -2053,8 +1969,8 @@ describe('the toolbar over the list (D1, D9)', () => {
     stubRoutes({ agents: null })
     const w = await openDialog()
 
-    // Nothing was read: all three verbs are inert, and each explains itself.
-    for (const button of [addButton(w), saveButton(w), deleteSlotButton(w)]) {
+    // Nothing was read: both verbs are inert, and each explains itself.
+    for (const button of [addButton(w), deleteSlotButton(w)]) {
       expect(button.element.disabled).toBe(true)
       expect(button.attributes('title')).toContain('not been read')
       expect(button.attributes('aria-label')).toBe(button.attributes('title'))
@@ -2062,43 +1978,42 @@ describe('the toolbar over the list (D1, D9)', () => {
     w.unmount()
   })
 
-  it('the save slot reads `Saving…` as its name **and** its tooltip together', async () => {
+  it('a write in flight says so in the band, not on a verb', async () => {
+    // With no `Save` slot there is no `Saving…` label to keep together: progress is
+    // the one message line's, and the verbs answer only for themselves.
     let release = null
     const pending = new Promise((resolve) => {
       release = resolve
     })
-    stubRoutes({ saves: { '/api/agents/save': pending } })
+    stubRoutes({ agents: withScribe(), saves: { '/api/agents/save': pending } })
     const w = await openDialog()
+    await tabButton(w, 4).trigger('click')
 
-    const clicked = saveButton(w).trigger('click')
+    await personaField(w, 'scribe').setValue('being written')
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DELAY_MS + 50)
     await flushPromises()
 
-    expect(saveButton(w).attributes('title')).toBe('Saving…')
-    expect(saveButton(w).attributes('aria-label')).toBe('Saving…')
-    expect(saveButton(w).element.disabled).toBe(true)
+    expect(messageText(w)).toBe('Saving…')
+    expect(addButton(w).element.disabled).toBe(true)
+    expect(addButton(w).attributes('title')).toContain('write is in flight')
 
     release(jsonResponse(agentsBody()))
-    await clicked
     await flushPromises()
-
-    // Both go back together when the write lands.
-    expect(saveButton(w).attributes('title')).toBe('Save agent')
-    expect(saveButton(w).attributes('aria-label')).toBe('Save agent')
+    expect(messageText(w)).toBe('')
     w.unmount()
   })
 
-  it('in creation mode save is live and the other two verbs are inert', async () => {
+  it('in creation mode both verbs are inert, each with its reason', async () => {
     stubRoutes()
     const w = await openDialog()
     await addButton(w).trigger('click')
     await flushPromises()
 
-    // §5's signature of creation mode: save is live, delete is not, and nothing
-    // is selected — and add is inert because a creation is already being typed.
-    expect(saveButton(w).element.disabled).toBe(false)
+    // §5's signature of creation mode: nothing is selected, add is inert because a
+    // creation is already being typed, and delete has no stored row to act on.
     expect(addButton(w).element.disabled).toBe(true)
     expect(deleteSlotButton(w).element.disabled).toBe(true)
-    expect(deleteSlotButton(w).attributes('title')).toContain('before it can be deleted')
+    expect(deleteSlotButton(w).attributes('title')).toContain('not stored yet')
     w.unmount()
   })
 
@@ -2133,19 +2048,13 @@ describe('the toolbar over the list (D1, D9)', () => {
 //: without re-spelling every reason the composable owns.
 const LIVE_SLOT_LABELS = {
   'agent-modes-add': 'Add agent',
-  'agent-modes-save': 'Save agent',
   'agent-modes-delete': 'Delete agent',
   'agent-modes-cancel-delete': 'Cancel delete',
   'agent-modes-confirm-delete': 'Confirm delete',
-  'agent-modes-keep-editing': 'Keep editing',
-  'agent-modes-discard-close': 'Discard and close',
 }
 
 function slotButtons(w) {
-  return [
-    ...toolbar(w).findAll('button'),
-    ...footerSlot(w).findAll('button'),
-  ]
+  return toolbar(w).findAll('button')
 }
 
 describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
@@ -2170,9 +2079,8 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
       expect(slot.height).toBe('36px')
       expect(slot.flex).toBe('0 0 36px')
     }
-    // The footer's three children: a message that stretches instead of growing,
-    // a reserved slot whose width *and* height are declared, and a `Close` that
-    // takes its own width and neither grows nor shrinks.
+    // The footer's two children: a message that stretches instead of growing, and
+    // a `Close` that takes its own width and neither grows nor shrinks.
     expect(geometry.message.flex).toBe('1 1 auto')
     expect(geometry.message.alignSelf).toBe('stretch')
     // §6.1's "one `Close` button on the right": the band is right-aligned and the
@@ -2180,14 +2088,11 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     // one button the band holds sits at its right end. This is the value that makes
     // that order a *position* rather than a DOM sequence.
     expect(geometry.footer.justifyContent).toBe('flex-end')
-    expect(geometry.footerChildren[1]).toContain('"width":"calc(36px + 36px + var(--bi-space-1))"')
-    expect(geometry.footerChildren[1]).toContain('"height":"36px"')
     expect(geometry.footerChildren[1]).toContain('"flex":"0 0 auto"')
-    expect(geometry.footerChildren[2]).toContain('"flex":"0 0 auto"')
     w.unmount()
   })
 
-  it('the first three slots, the toolbar, the list and the card hold still across every state in §5', async () => {
+  it('the two verb slots, the toolbar, the list and the card hold still across every state', async () => {
     applyShippedTheme()
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
@@ -2203,19 +2108,19 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
       'a stored agent selected again',
       'a delete confirmation pending',
       'the delete cancelled',
-      'a close confirmation pending',
-      'the close refused',
+      'a form owed a write',
+      'the write landed',
     ])
 
     const first = states[0].geometry
     for (const { label, geometry } of states) {
-      // The three verbs' slot boxes and the buttons inside them: their x is the
+      // The two verbs' slot boxes and the buttons inside them: their x is the
       // toolbar's start plus the slots before them, all of which are fixed, so an
       // identical box in every state is an identical position.
       expect(geometry.slotBoxes, `slots moved in: ${label}`).toEqual(first.slotBoxes)
       expect(geometry.verbBoxes, `verbs moved in: ${label}`).toEqual(first.verbBoxes)
       // The toolbar's height is its tallest child's, and its children are the
-      // five fixed slots and the flexible spacer — so it is 36px in every state,
+      // four fixed slots and the flexible spacer — so it is 36px in every state,
       // with and without the delete pair rendered.
       expect(geometry.toolbar, `the toolbar changed in: ${label}`).toEqual(first.toolbar)
       // The list's top edge is the heading's row plus the toolbar's row, so both
@@ -2225,9 +2130,9 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
       // The card keeps the size it has today, so switching selection never
       // resizes the dialog.
       expect(geometry.card, `the card resized in: ${label}`).toEqual(first.card)
-      // The footer band: its own box, its three children with their boxes, and
+      // The footer band: its own box, its children with their boxes, and
       // the message line inside it. These states include an empty line, a filled
-      // one, and each pair pending, so the band is measured against all of them.
+      // one, and a write landing, so the band is measured against all of them.
       expect(geometry.footer, `the footer band changed in: ${label}`).toEqual(first.footer)
       expect(geometry.footerChildren, `the band reflowed in: ${label}`).toEqual(
         first.footerChildren,
@@ -2236,14 +2141,11 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     }
 
     // The measurements are not between states that all lacked the pairs: the
-    // toolbar held three buttons, then five, then three again, and the footer's
-    // band held one button, then three. The boxes compared above were identical
+    // toolbar held two buttons, then four, then two again. The boxes compared above
+    // were identical
     // through all of it.
     expect(states.map((state) => state.geometry.toolbarButtons)).toEqual([
-      3, 3, 3, 3, 3, 3, 5, 3, 3, 3,
-    ])
-    expect(states.map((state) => state.geometry.footerButtons)).toEqual([
-      1, 1, 1, 1, 1, 1, 1, 1, 3, 1,
+      2, 2, 2, 2, 2, 2, 4, 2, 2, 2,
     ])
     w.unmount()
   })
@@ -2263,7 +2165,6 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     expect(idle).toEqual([
       'agent-modes-slot|36px|36px|0 0 36px|auto',
       'agent-modes-slot|36px|36px|0 0 36px|auto',
-      'agent-modes-slot|36px|36px|0 0 36px|auto',
       // The only flexible item: it gives way, so a slot's width is never
       // negotiated with anything and the pair's slots keep their place.
       'agent-modes-toolbar-space|auto|auto|1 1 auto|0px',
@@ -2274,13 +2175,13 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     await tabButton(w, 4).trigger('click')
     await deleteSlotButton(w).trigger('click')
     await flushPromises()
-    // The same six children, the same six boxes: the pair arrived *inside* two of
+    // The same five children, the same five boxes: the pair arrived *inside* two of
     // the slots that were already there.
     expect(shape()).toEqual(idle)
     w.unmount()
   })
 
-  it('`Close`, the footer band and the list hold still with an empty and a filled message, and with each pair pending', async () => {
+  it('`Close`, the footer band and the list hold still with an empty and a filled message, and with the delete pair pending', async () => {
     applyShippedTheme()
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
@@ -2292,7 +2193,7 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     expect(messageText(w)).toBe('')
     const empty = band()
 
-    // Filled message line: the same three children with the same boxes, because
+    // Filled message line: the same two children with the same boxes, because
     // the line stretches to the band instead of setting its height.
     await labelField(w, 'chat').setValue('')
     expect(messageText(w)).toContain('must be completed')
@@ -2308,13 +2209,12 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     await cancelDeleteButton(w).trigger('click')
     await flushPromises()
 
-    // A pending close confirmation: the pair arrives **inside** the slot that was
-    // already there, so `Close` keeps its box and the band gains no child.
-    await closeButton(w).trigger('click')
-    await flushPromises()
-    expect(keepEditingButton(w).exists()).toBe(true)
+    // A write landing: auto-save's own event, and the band — which holds only the
+    // message and `Close` — gains nothing and moves nothing.
+    await labelField(w, 'chat').setValue('Chat')
+    await settle()
     expect(band()).toEqual(empty)
-    expect(w.find('footer.settings-actions').element.children).toHaveLength(3)
+    expect(w.find('footer.settings-actions').element.children).toHaveLength(2)
 
     // And the list's top edge answers the same in every one of those states.
     expect(list()).toEqual(cardGeometry(w).list)
@@ -2325,7 +2225,7 @@ describe('the geometry sweep: nothing moves (§6.19, D10)', () => {
     // §5's first and last rows: a read that answered nothing, and a read that
     // answered an empty list. Neither can be reached from a mounted card, so
     // each is mounted on its own — and each still shows the same toolbar, the
-    // same five slots and the same footer band, because the card renders its
+    // same four slots and the same footer band, because the card renders its
     // body whatever the read answered (the message line is what changes).
     applyShippedTheme()
     stubRoutes({ agents: withScribe() })
@@ -2383,24 +2283,15 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     expect(confirmDeleteButton(w).exists()).toBe(true)
     await cancelDeleteButton(w).trigger('click')
     await flushPromises()
-    // The guard only asks when something would be lost, so the close pair's state
-    // has to be reached the way a user reaches it: with typing in the card.
-    await personaField(w, 'scribe').setValue('typed')
-    await flushPromises()
-    await closeButton(w).trigger('click')
-    await flushPromises()
-    sweep('a close confirmation pending')
-    expect(keepEditingButton(w).exists()).toBe(true)
-    expect(discardCloseButton(w).exists()).toBe(true)
 
-    // All seven spellings were reached, so no slot escaped the equality check.
+    // All four spellings were reached, so no slot escaped the equality check.
     expect([...new Set(checked)].sort()).toEqual(Object.keys(LIVE_SLOT_LABELS).sort())
     w.unmount()
   })
 
-  it('the save slot keeps name and tooltip together while the word is `Saving…`', async () => {
-    // The state an equality written only against the idle label would miss: the
-    // string is different there, and both places must carry it.
+  it('a write in flight leaves both verbs inert, each naming the write', async () => {
+    // The one state where a live verb's name is replaced by a reason that is not
+    // its own: auto-save started the write, so the verbs answer for the pause.
     let release = null
     const pending = new Promise((resolve) => {
       release = resolve
@@ -2411,13 +2302,11 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     // not the row's own flag.
     await tabButton(w, 4).trigger('click')
 
-    const clicked = saveButton(w).trigger('click')
+    await personaField(w, 'scribe').setValue('being written')
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DELAY_MS + 50)
     await flushPromises()
 
-    expect(saveButton(w).attributes('aria-label')).toBe(saveButton(w).attributes('title'))
-    expect(saveButton(w).attributes('title')).toBe('Saving…')
-    expect(saveButton(w).element.disabled).toBe(true)
-    // The other two verbs are inert for the same write, and each says so.
+    // Both verbs are inert for the same write, and each says so.
     for (const button of [addButton(w), deleteSlotButton(w)]) {
       expect(button.element.disabled).toBe(true)
       expect(button.attributes('aria-label')).toBe(button.attributes('title'))
@@ -2425,9 +2314,7 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     }
 
     release(jsonResponse(agentsBody()))
-    await clicked
     await flushPromises()
-    expect(saveButton(w).attributes('aria-label')).toBe(saveButton(w).attributes('title'))
     w.unmount()
   })
 
@@ -2459,11 +2346,6 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     sweep('a delete confirmation pending')
     await cancelDeleteButton(w).trigger('click')
     await flushPromises()
-    await personaField(w, 'scribe').setValue('typed')
-    await closeButton(w).trigger('click')
-    await flushPromises()
-    sweep('a close confirmation pending')
-    expect(keepEditingButton(w).exists()).toBe(true)
     w.unmount()
   })
 
@@ -2472,7 +2354,7 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     const w = await openDialog()
 
     const sweep = () => {
-      const glyphs = [...toolbar(w).element.querySelectorAll('svg'), ...footerSlot(w).element.querySelectorAll('svg')]
+      const glyphs = [...toolbar(w).element.querySelectorAll('svg')]
       expect(glyphs.length).toBeGreaterThan(0)
       for (const glyph of glyphs) {
         expect(glyph.getAttribute('aria-hidden')).toBe('true')
@@ -2486,19 +2368,13 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     await deleteSlotButton(w).trigger('click')
     await flushPromises()
     sweep()
-    expect(toolbar(w).element.querySelectorAll('svg')).toHaveLength(5)
+    expect(toolbar(w).element.querySelectorAll('svg')).toHaveLength(4)
     await cancelDeleteButton(w).trigger('click')
     await flushPromises()
-    await personaField(w, 'scribe').setValue('typed')
-    await flushPromises()
-    await closeButton(w).trigger('click')
-    await flushPromises()
-    sweep()
-    expect(footerSlot(w).element.querySelectorAll('svg')).toHaveLength(2)
     w.unmount()
   })
 
-  it('both confirmation pairs are absent from the DOM until their confirmation is pending (§6.17)', async () => {
+  it('the delete pair is absent from the DOM until its confirmation is pending (§6.17)', async () => {
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
 
@@ -2516,14 +2392,6 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     await flushPromises()
     expect(w.findAll('.agent-modes-cancel')).toHaveLength(0)
     expect(w.findAll('.agent-modes-confirm')).toHaveLength(0)
-
-    // The close pair's question needs something to lose, so the card holds typing
-    // before it is asked — and the pair is still absent until then.
-    await personaField(w, 'scribe').setValue('typed')
-    await closeButton(w).trigger('click')
-    await flushPromises()
-    expect(w.findAll('.agent-modes-cancel')).toHaveLength(1)
-    expect(w.findAll('.agent-modes-confirm')).toHaveLength(1)
     w.unmount()
   })
 
@@ -2545,7 +2413,7 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     const styled = [...new Set([...selectors.matchAll(/agent-modes[a-z0-9_-]*/g)].map((m) => m[0]))].sort()
 
     // Every state that renders something the others do not: a broken row, and
-    // each confirmation pair.
+    // the delete confirmation pair.
     stubRoutes({ agents: withScribe() })
     const w = await openDialog()
     await labelField(w, 'chat').setValue('')
@@ -2563,9 +2431,6 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
     harvest()
     await cancelDeleteButton(w).trigger('click')
     await flushPromises()
-    await closeButton(w).trigger('click')
-    await flushPromises()
-    harvest()
     w.unmount()
 
     for (const cls of styled) {
@@ -2582,11 +2447,8 @@ describe('the accessible names and the absent pairs (§6.16, §6.17)', () => {
       'agent-modes-close',
       'agent-modes-confirm-delete',
       'agent-modes-delete',
-      'agent-modes-discard-close',
       'agent-modes-form',
-      'agent-modes-keep-editing',
       'agent-modes-persona-count',
-      'agent-modes-save',
       'agent-modes-tab',
     ])
   })
@@ -2629,26 +2491,20 @@ describe('what this component is not allowed to be', () => {
     expect(text).toContain('messageFor')
   })
 
-  it('the close guard is the composable\'s answer, never a condition of its own (D3, D8)', () => {
+  it('auto-save asks the composable which forms to write — it derives none of its own (D3)', () => {
     const text = source()
-    // Both halves of the guard are verdicts: *would closing lose something*, and
-    // the pair's two labels. The card renders them and decides nothing — and the
-    // baseline is read nowhere else, which is what keeps it off the save path.
-    expect(text).toContain('closeWouldLoseForDraft')
-    expect(text).toContain('closeConfirmationFor')
+    // Which forms owe a write, what a form's shape is, and what the store would
+    // refuse are all the composable's answers; the card only schedules them.
+    expect(text).toContain('autoSaveTargetsFor')
+    expect(text).toContain('writeShapeFor')
     // The per-entry baseline is never read here: the card asks the verdict and
-    // never compares fields itself, which is what keeps it off the save path.
+    // never compares fields itself, which is what keeps one copy of the rule.
     expect(text).not.toMatch(/\.baseline/)
-    // The two pairs' labels come from one value each (name and tooltip cannot
-    // drift), so neither pair's wording is spelled in the **template**: a card
-    // that wrote its own sentence would own a second copy of the composable's.
+    // No close guard grew back: the footer holds one verb and no confirmation pair,
+    // and no unsaved-work question is spelled anywhere in the file.
     const template = /<template>[\s\S]*<\/template>/.exec(text)[0]
-    expect(template).not.toMatch(/Keep editing|Discard and close/)
     expect(template).not.toMatch(/Cancel delete|Confirm delete/)
-    // The pending-close state is the card's own, and the template reads only the
-    // verdict built from it: no verb's availability is spelled there.
-    expect(template).toMatch(/v-if="closeConfirmation\.rendered"/)
-    expect(template).not.toMatch(/v-if="pendingClose/)
+    expect(text).not.toMatch(/unsaved|Keep editing|Discard and close/i)
   })
 
   it('renders field text only — no raw v-html anywhere', () => {

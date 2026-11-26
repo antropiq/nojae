@@ -11,16 +11,15 @@ import {
   agentModesLoaded,
   agentWritePayload,
   applySessionAgentMode,
-  closeConfirmationFor,
-  closeWouldLoseFor,
-  closeWouldLoseForDraft,
+  autoSaveTargetsFor,
   createAgentDraft,
   creationActiveFor,
   creationFormFor,
   currentMode,
   deleteConfirmationFor,
-  deleteSlotFor,
   deleteOfferedFor,
+  deleteSlotFor,
+  entryDiffersFromBaseline,
   entryProblems,
   fetchAgentDraft,
   fieldsDisabledFor,
@@ -28,23 +27,23 @@ import {
   idEditableFor,
   idValidityProblem,
   loadAgentModes,
+  messageFor,
+  modelChoices,
+  modelLineFor,
   modelUnchangedFor,
   modeBlocksHub,
   modeHint,
   modeSelectDisabled,
   modeSelectTitle,
-  modelChoices,
-  messageFor,
-  modelLineFor,
   personaByteCount,
   personaOverByteCap,
   rebaselinedDraft,
   rememberedAgentId,
   rememberAgent,
   removeAgentFromDraft,
+  restoreTypedFields,
   saveAgent,
   saveRefusalFor,
-  saveSlotFor,
   selectedAgentCanRun,
   setAgentMode,
   slugForDraft,
@@ -52,8 +51,9 @@ import {
   successorAfterDelete,
   tabCaptionFor,
   toolIterationProblem,
+  typedSnapshot,
   useAgentModes,
-  writeBlockedFor,
+  writeShapeFor,
 } from '../src/composables/useAgentModes'
 import WorkBenchMcpPanel from '../src/components/WorkBenchMcpPanel.vue'
 import {
@@ -971,32 +971,52 @@ describe('the form-level problems (§5.2)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// The save slot's two answers, and the card's one message (D1, D11).
+// Auto-save's two answers, and the card's one message (D1, D11).
 //
-// The rework splits what used to be one verdict: *may the slot be clicked at
-// all* is `writeBlockedFor`, and *why did this click write nothing* is
-// `saveRefusalFor`. Keeping them apart is the decision (Q2), so they are judged
-// apart — a case that let the form's completeness back into the enablement would
-// be the rework undone.
+// With no `Save` verb there are two questions left to answer: *is a write owed
+// for this form* (`entryDiffersFromBaseline`, the baseline's only reader) and
+// *why must it not be posted yet* (`saveRefusalFor`). They stay apart — a form
+// that is owed nothing and a form that cannot be written are different truths,
+// and only the second one has a sentence for the band.
 // ---------------------------------------------------------------------------
 
-describe('writeBlockedFor: the save slot\'s enablement and nothing else (D1)', () => {
+describe('entryDiffersFromBaseline: which forms owe a write (D1)', () => {
   beforeEach(resetAll)
 
-  it('is inert only with nothing to act on, or a write in flight', () => {
+  it('is false for a freshly read entry, true after a keystroke', () => {
     const draft = draftOf()
-    expect(writeBlockedFor(draft.entries[0])).toBe(false)
-    expect(writeBlockedFor(null)).toBe(true)
-    expect(writeBlockedFor(draft.entries[0], { saving: true })).toBe(true)
+    expect(entryDiffersFromBaseline(draft.entries[0])).toBe(false)
+    draft.entries[0].label = 'Coder'
+    expect(entryDiffersFromBaseline(draft.entries[0])).toBe(true)
+    // ...and back to false when the keystroke is undone: the question is what the
+    // store does not hold, not whether a key was ever pressed.
+    draft.entries[0].label = 'Code'
+    expect(entryDiffersFromBaseline(draft.entries[0])).toBe(false)
+    // Every field the form holds, and nothing the store owns.
+    for (const field of ['maxToolIteration', 'mcpEnable', 'lspEnable', 'personaText', 'modelId']) {
+      const entry = draftOf().entries[0]
+      entry[field] = entry[field] === 'x' ? 'y' : 'x'
+      expect(entryDiffersFromBaseline(entry), field).toBe(true)
+    }
+    expect(entryDiffersFromBaseline(null)).toBe(false)
   })
 
-  it('an incomplete form does **not** disable it — that is the refusal\'s answer', () => {
+  it('a creation form always owes a write: nothing was ever stored for it', () => {
     const draft = draftOf()
-    draft.entries[0].label = ''
-    draft.entries[0].maxToolIteration = 0
-    expect(entryProblems(draft, draft.entries[0]).length).toBeGreaterThan(0)
-    expect(writeBlockedFor(draft.entries[0])).toBe(false)
-    expect(saveRefusalFor(draft, draft.entries[0])).toContain('must be completed')
+    expect(entryDiffersFromBaseline(creationFormFor(draft))).toBe(true)
+  })
+
+  it('an app-owned row owes one only when its model moves', () => {
+    const draft = draftOf()
+    const reserved = draft.entries[3]
+    expect(reserved.readonly).toBe(true)
+    expect(entryDiffersFromBaseline(reserved)).toBe(false)
+    // Every other column is nojae's: the route refuses it, so posting it would be
+    // a write that can only fail.
+    reserved.personaText = 'typed into a locked field'
+    expect(entryDiffersFromBaseline(reserved)).toBe(false)
+    reserved.modelId = 99
+    expect(entryDiffersFromBaseline(reserved)).toBe(true)
   })
 
   it('names what is missing, in one sentence', () => {
@@ -1031,8 +1051,9 @@ describe('deleteSlotFor: the delete verb always explains itself (D1)', () => {
     expect(deleteSlotFor(creationFormFor(draft))).toMatchObject({
       disabled: true,
     })
-    // The reason is the one that says nothing is stored to delete yet.
-    expect(deleteSlotFor(creationFormFor(draft)).label).toContain('before it can be deleted')
+    // The reason is the one that says nothing is stored to delete yet — never a
+    // `Save` that no longer exists.
+    expect(deleteSlotFor(creationFormFor(draft)).label).toContain('not stored yet')
     expect(deleteSlotFor(draft.entries[0], { saving: true })).toMatchObject({
       disabled: true,
     })
@@ -1047,178 +1068,100 @@ describe('deleteSlotFor: the delete verb always explains itself (D1)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// The toolbar's five slots (§5), the two confirmation pairs, the per-entry
-// baseline and the close verdict (D1, D5, D7, D8, D11).
+// The toolbar's two verbs and the delete confirmation pair (D1, D5, D7).
 //
-// Every row of §5's table is one case below, so a row that later loses its
-// answer fails here rather than in a template that had to invent one. These are
-// the verdicts task 03 wires into the toolbar; nothing the user sees changes
-// yet, which is exactly what "the component decides nothing" buys.
+// With auto-save there is no `Save` slot left to answer for: the only verbs are
+// the ones that cannot be guessed at. Each row of §5's table that survives the
+// removal is one case below, so a state that later loses its answer fails here
+// rather than in a template that had to invent one.
 // ---------------------------------------------------------------------------
 
-describe('the toolbar slots: every row of §5 answered (D1, D5)', () => {
+describe('the toolbar slots (D1, D5)', () => {
   beforeEach(resetAll)
 
   it('every slot is inert when nothing has been read', () => {
     const draft = draftOf()
     const gone = { loaded: false }
     expect(addSlotFor(gone).disabled).toBe(true)
-    expect(saveSlotFor(draft.entries[0], gone).disabled).toBe(true)
     expect(deleteSlotFor(draft.entries[0], gone).disabled).toBe(true)
     // And each says why, in the one value that is also its accessible name.
-    for (const slot of [
-      addSlotFor(gone),
-      saveSlotFor(draft.entries[0], gone),
-      deleteSlotFor(draft.entries[0], gone),
-    ]) {
+    for (const slot of [addSlotFor(gone), deleteSlotFor(draft.entries[0], gone)]) {
       expect(slot.label.length).toBeGreaterThan(0)
     }
   })
 
-  it('a stored agent selected, untouched: add live, save live, delete by its flag', () => {
+  it('a stored agent selected, untouched: add live, delete by its flag', () => {
     const draft = draftOf()
     expect(addSlotFor()).toEqual({ disabled: false, label: 'Add agent' })
-    expect(saveSlotFor(draft.entries[0])).toEqual({ disabled: false, label: 'Save agent' })
     // Delete is the row's flag's answer, and nothing else about this state.
     expect(deleteSlotFor(draft.entries[0])).toEqual({ disabled: false, label: 'Delete agent' })
     const scribe = { id: 'scribe', isNew: false, deletable: true }
     expect(deleteSlotFor(scribe)).toEqual({ disabled: false, label: 'Delete agent' })
   })
 
-  it('a stored agent selected, edited, no problems: all three still live', () => {
+  it('a stored agent selected, edited: both verbs still answer the same way', () => {
     const draft = draftOf()
     draft.entries[0].label = 'Coder'
     draft.entries[0].personaText = 'You edit files.'
     expect(addSlotFor().disabled).toBe(false)
-    expect(saveSlotFor(draft.entries[0])).toEqual({ disabled: false, label: 'Save agent' })
+    // Typing changes no verb: it schedules a write, and the toolbar says nothing
+    // about it — the band does.
     const scribe = { id: 'scribe', isNew: false, deletable: true }
     expect(deleteSlotFor(scribe).disabled).toBe(false)
   })
 
-  it('a form holding a problem keeps Save **live** — the click refuses instead (D11)', () => {
-    const draft = draftOf()
-    draft.entries[0].label = ''
-    draft.entries[0].maxToolIteration = 0
-    expect(entryProblems(draft, draft.entries[0]).length).toBeGreaterThan(0)
-    expect(saveSlotFor(draft.entries[0])).toEqual({ disabled: false, label: 'Save agent' })
-    // The refusal is a separate answer, for the message line.
-    expect(saveRefusalFor(draft, draft.entries[0])).toContain('must be completed')
-  })
-
-  it('the app-owned row: Save is inert until its model changes, live after', () => {
-    const draft = draftOf()
-    const reserved = draft.entries[3]
-    expect(reserved.readonly).toBe(true)
-    expect(writeBlockedFor(reserved)).toBe(true)
-    expect(saveSlotFor(reserved).disabled).toBe(true)
-    expect(saveSlotFor(reserved).label).toContain('model')
-    // The one field the user owns there: change it and the slot has something to
-    // offer. Judged off the row's flag and its baseline, never off an id.
-    expect(modelUnchangedFor(reserved)).toBe(true)
-    reserved.modelId = 99
-    expect(modelUnchangedFor(reserved)).toBe(false)
-    expect(writeBlockedFor(reserved)).toBe(false)
-    expect(saveSlotFor(reserved)).toEqual({ disabled: false, label: 'Save agent' })
-    // Add stays live there: the row being app-owned says nothing about creating.
-    expect(addSlotFor().disabled).toBe(false)
-    // And the delete slot still refuses it by its flag.
-    expect(deleteSlotFor(reserved).label).toContain('nojae owns')
-  })
-
-  it('the app-owned exception is **only** its model — no other field unlocks it', () => {
-    const draft = draftOf()
-    const reserved = draft.entries[3]
-    reserved.label = 'Something else'
-    reserved.personaText = 'typed into a locked field'
-    reserved.maxToolIteration = 99
-    expect(writeBlockedFor(reserved)).toBe(true)
-  })
-
-  it('"nothing selected" is two states: creation mode has a live Save, an empty list has none', () => {
+  it('"nothing selected" is two states: creation mode holds a form, an empty list holds none', () => {
     const draft = draftOf()
     const creation = creationFormFor(draft)
-    // creation mode: a form with no row
-    expect(saveSlotFor(creation, { creating: true })).toEqual({
-      disabled: false,
-      label: 'Save agent',
-    })
+    // creation mode: a form with no row — add is inert (one at a time) and delete
+    // has nothing stored to act on.
     expect(deleteSlotFor(creation, { creating: true }).disabled).toBe(true)
     expect(addSlotFor({ creating: true }).disabled).toBe(true)
     expect(addSlotFor({ creating: true }).label).toContain('Already adding')
+    // The empty form is not posted (its label is required); the completed one is
+    // owed its first write, which is what puts a row in the list.
+    expect(autoSaveTargetsFor(draft, creation)).toEqual([])
+    creation.label = 'Reviewer'
+    expect(autoSaveTargetsFor(draft, creation)).toEqual([creation])
+    // ...and the list itself gained no row for it.
+    expect(draft.entries).toHaveLength(4)
   })
 
-  it('the list came back empty: add is live, save is inert — there is no form to type into', () => {
+  it('the list came back empty: add is live, delete is inert — there is no row to act on', () => {
     // The other half of "nothing selected", which must never be collapsed with
-    // creation mode: this is a read that answered **nothing**, so there is no
-    // form for Save to write and no row for Delete to act on.
+    // creation mode: this is a read that answered **nothing**, so there is no row
+    // for Delete to act on and no form that owes anything.
     expect(addSlotFor({ loaded: true })).toEqual({ disabled: false, label: 'Add agent' })
-    expect(saveSlotFor(null, { loaded: true }).disabled).toBe(true)
-    expect(saveSlotFor(null, { loaded: true }).label).toContain('no agent selected')
     expect(deleteSlotFor(null, { loaded: true }).disabled).toBe(true)
+    expect(deleteSlotFor(null, { loaded: true }).label).toContain('Select an agent')
+    expect(autoSaveTargetsFor({ entries: [] }, null)).toEqual([])
   })
 
   it('a write in flight makes every verb inert', () => {
-    const draft = draftOf()
     const scribe = { id: 'scribe', isNew: false, deletable: true }
     const flying = { saving: true }
     expect(addSlotFor(flying).disabled).toBe(true)
-    expect(saveSlotFor(draft.entries[0], flying).disabled).toBe(true)
     expect(deleteSlotFor(scribe, flying).disabled).toBe(true)
     expect(deleteConfirmationFor(scribe, { ...flying, confirming: true }).cancel.disabled).toBe(true)
     expect(deleteConfirmationFor(scribe, { ...flying, confirming: true }).confirm.disabled).toBe(true)
   })
 
-  it('while a save is in flight the slot\'s name and its tooltip are both `Saving…`', () => {
-    const draft = draftOf()
-    // One value is read as both, so the pair cannot move apart: a case that let
-    // the name say `Save agent` while the tooltip said `Saving…` (or the other
-    // way) would fail here, which is the difference between an honest label and
-    // a screen reader disagreeing with a hover (§6.16).
-    const flying = saveSlotFor(draft.entries[0], { saving: true })
-    expect(flying).toEqual({ disabled: true, label: 'Saving…' })
-    expect(flying.label).toBe('Saving…')
-    // When the write lands, both go back together.
-    expect(saveSlotFor(draft.entries[0], { saving: false })).toEqual({
-      disabled: false,
-      label: 'Save agent',
-    })
-  })
-
-  it('a pending delete confirmation makes the three verbs inert and the pair live', () => {
-    const draft = draftOf()
+  it('a pending delete confirmation makes the two verbs inert and the pair live', () => {
     const scribe = { id: 'scribe', isNew: false, deletable: true }
     const pending = { confirming: true }
     expect(addSlotFor(pending).disabled).toBe(true)
-    expect(saveSlotFor(scribe, pending).disabled).toBe(true)
     expect(deleteSlotFor(scribe, pending).disabled).toBe(true)
     const pair = deleteConfirmationFor(scribe, pending)
     expect(pair.rendered).toBe(true)
     expect(pair.cancel).toEqual({ disabled: false, label: 'Cancel delete' })
     expect(pair.confirm).toEqual({ disabled: false, label: 'Confirm delete' })
   })
-
-  it('a pending close confirmation makes the three verbs inert, and the pair is never inert', () => {
-    const draft = draftOf()
-    const pending = { closing: true }
-    expect(addSlotFor(pending).disabled).toBe(true)
-    expect(saveSlotFor(draft.entries[0], pending).disabled).toBe(true)
-    expect(deleteSlotFor(draft.entries[0], pending).disabled).toBe(true)
-    const pair = closeConfirmationFor(pending)
-    expect(pair.rendered).toBe(true)
-    expect(pair.cancel).toEqual({ disabled: false, label: 'Keep editing' })
-    expect(pair.confirm).toEqual({ disabled: false, label: 'Discard and close' })
-    // The close pair has no `Saving…` state: both answers can always be given.
-    expect(closeConfirmationFor({ closing: true, saving: true })).toEqual(pair)
-    // ...and §5's row says the *delete* pair is not rendered here: a close is
-    // what the card is asking about, so the toolbar's right slots stay empty.
-    expect(deleteConfirmationFor(draft.entries[0], pending).rendered).toBe(false)
-  })
 })
 
-describe('the confirmation pairs are absent, not hidden (§6.17)', () => {
+describe('the delete confirmation pair is absent, not hidden (§6.17)', () => {
   beforeEach(resetAll)
 
-  it('the delete pair answers `rendered: false` until a delete is being confirmed', () => {
+  it('answers `rendered: false` until a delete is being confirmed', () => {
     const scribe = { id: 'scribe', isNew: false, deletable: true }
     expect(deleteConfirmationFor(scribe, {})).toEqual({
       rendered: false,
@@ -1228,11 +1171,6 @@ describe('the confirmation pairs are absent, not hidden (§6.17)', () => {
     expect(deleteConfirmationFor(scribe, { confirming: false }).rendered).toBe(false)
     // Nothing to confirm for a row that cannot be deleted, even if asked.
     expect(deleteConfirmationFor({ id: 'code', isNew: false, deletable: false }, { confirming: true }).rendered).toBe(false)
-  })
-
-  it('the close pair answers `rendered: false` until a close is being confirmed', () => {
-    expect(closeConfirmationFor({})).toEqual({ rendered: false, cancel: null, confirm: null })
-    expect(closeConfirmationFor({ closing: false }).rendered).toBe(false)
   })
 })
 
@@ -1273,7 +1211,6 @@ describe('the creation form (D4)', () => {
     expect(creation.readonly).toBe(false)
     expect(deleteOfferedFor(creation)).toBe(false)
     expect(deleteSlotFor(creation, { creating: true }).disabled).toBe(true)
-    expect(saveSlotFor(creation, { creating: true }).disabled).toBe(false)
   })
 
   it('the creation state is a verdict: a form held with no row', () => {
@@ -1314,7 +1251,7 @@ describe('successorAfterDelete: next, else previous, else nothing (D7.5)', () =>
   })
 })
 
-describe('the per-entry baseline, and closeWouldLoseFor (D8)', () => {
+describe('the per-entry baseline, and the writes auto-save owes', () => {
   beforeEach(resetAll)
 
   it('every entry carries the baseline the store answered with', () => {
@@ -1333,65 +1270,41 @@ describe('the per-entry baseline, and closeWouldLoseFor (D8)', () => {
     expect(written.entries[0].baseline).toEqual(draft.entries[0].baseline)
   })
 
-  it('is false for a freshly read entry, true after a keystroke, true in creation mode', () => {
+  it('the card-level reading lists every form that differs, not just one', () => {
     const draft = draftOf()
-    expect(closeWouldLoseFor(draft.entries[0])).toBe(false)
-    draft.entries[0].label = 'Coder'
-    expect(closeWouldLoseFor(draft.entries[0])).toBe(true)
-    // ...and back to false when the keystroke is undone: the question is whether
-    // closing loses something, not whether a key was ever pressed.
-    draft.entries[0].label = 'Code'
-    expect(closeWouldLoseFor(draft.entries[0])).toBe(false)
-    // Every field the form holds, and nothing the store owns.
-    for (const field of ['maxToolIteration', 'mcpEnable', 'lspEnable', 'personaText', 'modelId']) {
-      const entry = draftOf().entries[0]
-      entry[field] = entry[field] === 'x' ? 'y' : 'x'
-      expect(closeWouldLoseFor(entry), field).toBe(true)
-    }
-    expect(closeWouldLoseFor(null, { creating: true })).toBe(true)
-    expect(closeWouldLoseFor(creationFormFor(draft), { creating: true })).toBe(true)
-    expect(closeWouldLoseFor(null)).toBe(false)
-  })
-
-  it('the card-level reading asks every form the card holds, not just the selected one', () => {
-    const draft = draftOf()
-    // Nothing typed anywhere: closing loses nothing, so `Close` costs no click.
-    expect(closeWouldLoseForDraft(draft)).toBe(false)
-    // A keystroke in a row the user has since left behind is still work that
-    // leaving would throw away — the card holds one form per agent, so the guard
-    // asks about all of them and not just the selected one.
+    // Nothing typed anywhere: the store already holds every form, so nothing is owed.
+    expect(autoSaveTargetsFor(draft)).toEqual([])
+    // A keystroke in a row the user has since left behind is still their typing —
+    // the card holds one form per agent, so every one of them is asked.
     draft.entries[2].personaText = 'typed and not saved'
-    expect(closeWouldLoseForDraft(draft)).toBe(true)
-    // ...and back to false when the keystroke is undone.
+    expect(autoSaveTargetsFor(draft)).toEqual([draft.entries[2]])
+    // ...and nothing is owed once the keystroke is undone.
     draft.entries[2].personaText = ''
-    expect(closeWouldLoseForDraft(draft)).toBe(false)
-    // Creation mode is always unsaved work, with no entries to compare at all.
-    expect(closeWouldLoseForDraft(draft, { creating: true })).toBe(true)
-    expect(closeWouldLoseForDraft(null, { creating: true })).toBe(true)
-    // A card that read nothing has nothing to lose.
-    expect(closeWouldLoseForDraft(null)).toBe(false)
-    expect(closeWouldLoseForDraft({ entries: [] })).toBe(false)
+    expect(autoSaveTargetsFor(draft)).toEqual([])
+    // A card that read nothing has nothing to write.
+    expect(autoSaveTargetsFor(null)).toEqual([])
   })
 
-  it('the baseline is **never** consulted by a save verdict (Q2)', () => {
+  it('an incomplete form is owed nothing — its sentence goes to the band instead', () => {
     const draft = draftOf()
-    // An untouched, fully-stored agent: closing loses nothing, and re-saving it
-    // is still allowed — there is no `Nothing to save` state and no dirty gate.
-    expect(closeWouldLoseFor(draft.entries[0])).toBe(false)
-    expect(writeBlockedFor(draft.entries[0])).toBe(false)
-    expect(saveSlotFor(draft.entries[0])).toEqual({ disabled: false, label: 'Save agent' })
-    // And the reverse: an entry whose baseline says it differs is judged by
-    // nothing of the sort on the save path.
+    draft.entries[0].label = ''
+    expect(entryDiffersFromBaseline(draft.entries[0])).toBe(true)
+    // The two answers stay apart: the write is owed, and posting it now would only
+    // earn a 422 for what the band already says.
+    expect(saveRefusalFor(draft, draft.entries[0])).toContain('must be completed')
+    expect(autoSaveTargetsFor(draft)).toEqual([])
+    // The keystroke that completes the form is what gets written.
     draft.entries[0].label = 'Coder'
-    expect(closeWouldLoseFor(draft.entries[0])).toBe(true)
-    expect(writeBlockedFor(draft.entries[0])).toBe(false)
-    // The one row where the baseline does reach the save slot is the app-owned
-    // one, and only through its **model** — see `modelUnchangedFor`, which reads
-    // that field alone.
+    expect(autoSaveTargetsFor(draft)).toEqual([draft.entries[0]])
+  })
+
+  it('an app-owned row owes nothing while its model stands where the store left it', () => {
+    const draft = draftOf()
     const reserved = draft.entries[3]
-    reserved.personaText = 'not the model'
     expect(modelUnchangedFor(reserved)).toBe(true)
-    expect(writeBlockedFor(reserved)).toBe(true)
+    expect(autoSaveTargetsFor(draft)).toEqual([])
+    reserved.modelId = 99
+    expect(autoSaveTargetsFor(draft)).toEqual([reserved])
   })
 })
 
@@ -1442,10 +1355,11 @@ describe('rebaselinedDraft: a write re-baselines without discarding another agen
     held.entries[1].label = 'Chatting'
     const merged = rebaselinedDraft(createAgentDraft(modesBody()), held, 'code')
     // The typing survived, and the baseline is still the store's — which is what
-    // keeps the close guard's question honest after a save.
+    // keeps auto-save's question honest after a write: this row still differs, so
+    // it is still owed one.
     expect(merged.entries[1].label).toBe('Chatting')
     expect(merged.entries[1].baseline.label).toBe('Chat')
-    expect(closeWouldLoseFor(merged.entries[1])).toBe(true)
+    expect(entryDiffersFromBaseline(merged.entries[1])).toBe(true)
   })
 
   it('a row whose model was put back keeps the name of that model', () => {
@@ -1481,10 +1395,6 @@ describe('messageFor: the card\'s one message, by fixed priority (D11)', () => {
     editor.serverFindings = [{ kind: 'error', message: 'the store refused' }]
     editor.saving = true
     expect(messageFor(draft, draft.entries[0])).toEqual({ text: 'Saving…', role: 'status' })
-    // Including the close guard's question: with bytes moving, that is the one
-    // truth the user cannot yet act on, and the pair's tooltips already name the
-    // two answers that are live.
-    expect(messageFor(draft, draft.entries[0], { closing: true })).toEqual({ text: 'Saving…', role: 'status' })
   })
 
   it('a read in flight is progress too, and a write in flight outranks it', () => {
@@ -1496,26 +1406,20 @@ describe('messageFor: the card\'s one message, by fixed priority (D11)', () => {
     expect(messageFor(null, null)).toEqual({ text: 'Saving…', role: 'status' })
   })
 
-  it('the close guard asks in the one line, outranking every older truth (D8)', () => {
-    const CLOSE_QUESTION = 'There are unsaved changes. Close anyway?'
+  it('says the older truth with nothing asking: the line has no close question', () => {
+    // Auto-save leaves no unsaved work to ask about, so the guard's sentence is
+    // gone from the composable — and a card that holds a refusal, an incomplete
+    // form, a read failure and findings says the refusal, as its priority always
+    // did.
     const draft = draftOf()
-    // Every other truth the line could hold at once: a refusal, an incomplete
-    // form, a read failure and the read's findings. While the footer's pair is
-    // asking, the line answers the question the user is actually being asked.
     draft.entries[0].label = ''
     draft.findings = [{ kind: 'error', message: 'row x is odd' }]
     editor.readError = 'Could not read the agents (500).'
     editor.serverFindings = [{ kind: 'error', message: 'the store refused' }]
-    const asked = messageFor(draft, draft.entries[0], { closing: true })
-    expect(asked).toEqual({ text: CLOSE_QUESTION, role: 'status' })
-
-    // And it is the guard's own sentence: with no close being confirmed, the same
-    // state says its older truth exactly as it did before — and the card without a
-    // footer of its own passes no context at all and gets the same answer.
-    const notAsked = messageFor(draft, draft.entries[0], {})
-    expect(notAsked).toEqual({ text: 'the store refused', role: 'alert' })
-    expect(messageFor(draft, draft.entries[0], { closing: false })).toEqual(notAsked)
-    expect(messageFor(draft, draft.entries[0])).toEqual(notAsked)
+    expect(messageFor(draft, draft.entries[0])).toEqual({
+      text: 'the store refused',
+      role: 'alert',
+    })
   })
 
   it('a refusal from the store outranks the incomplete-form sentence', () => {

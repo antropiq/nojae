@@ -17,15 +17,16 @@ import { expect, test } from '@playwright/test'
 //     and an agent with a hub switched off turns that panel inert;
 //  2. the pencil opens the store editor, whose list is the store's rows in the
 //     store's order and whose toolbar is the only place its verbs live;
-//  3. `Add agent` enters creation mode and writes nothing; `Save agent` creates
-//     the row **and leaves the card open on it**, a second save edits it, and
+//  3. `Add agent` enters creation mode and writes nothing; a **completed** form
+//     writes itself once it stops changing (there is no `Save` verb) and the card
+//     **stays open on the new row**, a later edit writes itself too, and
 //     `Delete agent` + `Confirm delete` removes it again;
 //  4. a `readonly` agent shows its fields disabled with a live model dropdown,
 //     and refuses every other write **directly against its route** (AC-4).
 //
 // The card's controls are reached by their **accessible names** (`Add agent`,
-// `Save agent`, `Delete agent`, `Cancel delete`, `Confirm delete`, `Keep
-// editing`, `Discard and close`, `Close`) rather than by class: that vocabulary
+// `Delete agent`, `Cancel delete`, `Confirm delete`, `Close`) rather than by
+// class: that vocabulary
 // is what D1 guarantees, and a name query is what a reader would use. An inert
 // slot is queried by a fragment of its **reason**, because D1 makes the reason
 // its accessible name — so a disabled slot is never matched by its live name.
@@ -38,10 +39,11 @@ import { expect, test } from '@playwright/test'
 // LLM call is made. A created agent is deleted again — the store is shared by
 // the whole suite, and the spec must not leave rows behind.
 //
-// Two assertions here exist because the rework made them easy to regress (§9):
-// a `Save agent` click on an incomplete form writes nothing, leaves the card
-// open, and leaves **one** message in the line; and clicking `Add agent` then a
-// row discards the creation without a prompt, with **no row ever added** for it.
+// Two assertions here exist because auto-save makes them easy to regress: an
+// **incomplete** form is never posted just to be answered with a 422 — its
+// sentence stays in the card's one line and the card stays open; and clicking
+// `Add agent` then a row discards the creation without a prompt, with **no row
+// ever added** for it.
 
 // The label the create/edit test uses. `E2e ` is the prefix the teardown sweeps,
 // so a spec that fails between its own write and its own delete still leaves the
@@ -144,6 +146,11 @@ function messageLine(page) {
   return card(page).locator('.agent-modes-message')
 }
 
+// Longer than the card's auto-save pause (`AUTOSAVE_DELAY_MS` in
+// `useAgentModes.js`, 600 ms) plus a beat for the request to be issued: past it,
+// a form that was owed a write has made it.
+const DEBOUNCE_WAIT_MS = 1200
+
 //: Every POST the card makes, recorded so "writes nothing" is asserted rather
 //: than inferred from the store happening to look unchanged. The record is a
 //: **window**: `expectNone` checks it and opens the next one, and a step that
@@ -159,11 +166,13 @@ function trackWrites(page) {
     checkpoint: () => {
       paths = []
     },
-    // Polled, so a request that *was* issued has time to show up in the window.
+    // A **wait past the debounce**, then one check. `expect.poll` is no use here:
+    // it passes on its first look at an empty window, so the write that arrives a
+    // beat later — which is exactly what these assertions exist to catch — would
+    // slip through. The wait bounds the only way a form can still owe bytes.
     async expectNone(why) {
-      await expect
-        .poll(() => paths.length, { message: `${why} (${paths.join(', ')})`, timeout: 2000 })
-        .toBe(0)
+      await page.waitForTimeout(DEBOUNCE_WAIT_MS)
+      expect(paths, `${why} (${paths.join(', ')})`).toHaveLength(0)
       paths = []
     },
   }
@@ -187,17 +196,12 @@ async function openModesDialog(page) {
   await expect(card(page)).toBeVisible()
 }
 
-//: Leaving the card, which is now its **only** way out (D8): `Close`, and the
-//: guard's `Discard and close` when the card holds unsaved work. Both paths are
-//: read here, so a card that left **through** the guard — or that never asked —
-//: cannot pass unnoticed, and the old `Cancel` helper's guarantee (leaving writes
-//: nothing) is the same guarantee through the new exit.
+//: Leaving the card, which has **one** way out: `Close`. It asks nothing, because
+//: auto-save has written what stopped changing and the close itself flushes what
+//: is still inside the debounce window — so leaving loses nothing and there is no
+//: second answer to click through.
 async function closeModesDialog(page) {
   await slot(page, 'Close').click()
-  if (await slot(page, 'Discard and close').count()) {
-    await expect(slot(page, 'Keep editing')).toBeVisible()
-    await slot(page, 'Discard and close').click()
-  }
   await expect(card(page)).toHaveCount(0)
 }
 
@@ -436,13 +440,16 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     await expect(slot(page, 'Delete agent')).toHaveCount(0)
     await expect(inertSlot(page, 'nojae owns this agent')).toBeVisible()
     await expect(inertSlot(page, 'nojae owns this agent')).toBeDisabled()
-    // And save has nothing to offer until the one field the user owns changes
-    // (§5's exception, which is about that row's model and nothing else).
-    await expect(slot(page, 'Save agent')).toHaveCount(0)
-    await expect(inertSlot(page, 'has not changed')).toBeVisible()
-    await expect(inertSlot(page, 'has not changed')).toBeDisabled()
+    // And there is no `Save` verb anywhere for it: with auto-save the only verbs
+    // are the ones that cannot be guessed at. What replaces the old "save has
+    // nothing to offer" check is the write itself — an untouched row owes nothing,
+    // so leaving the card posts nothing (§5's exception now lives in the rule that
+    // a `readonly` row differs from the store only when its model moves).
+    await expect(card(page)).not.toContainText(/\bSave\b/)
 
+    const writes = trackWrites(page)
     await closeModesDialog(page)
+    await writes.expectNone('an untouched app-owned agent owes no write')
 
     // AC-4's route half: a write that is not the model association is refused
     // with the one sentence, so the rule does not depend on the dialog.
@@ -514,23 +521,27 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     }
 
     const toolbar = card(page).getByRole('group', { name: 'Agent actions' })
-    await expectCircles(toolbar.locator('.agent-modes-slot button'), 3)
+    await expectCircles(toolbar.locator('.agent-modes-slot button'), 2)
 
-    // The footer's pair is the same idiom in the same fixed slots, so it is
-    // measured too — reached by typing and asking `Close`, which writes nothing.
-    await visibleSection(page).getByLabel('Label').fill('Circle Check')
-    await slot(page, 'Close').click()
-    await expect(slot(page, 'Keep editing')).toBeVisible()
-    await expectCircles(card(page).locator('.agent-modes-footer-slot .agent-modes-slot button'), 2)
-    await slot(page, 'Keep editing').click()
+    // The delete pair is the same idiom in the same fixed slots, so it is measured
+    // too — asked of a deletable row, and answered with `Cancel delete` so nothing
+    // is written. A deletable row is made by completing a creation form and letting
+    // auto-save write it. The footer holds no pair any more: `Close` is its only
+    // button and it is a text button, not a glyph.
+    await slot(page, 'Add agent').click()
+    await visibleSection(page).getByLabel('Label').fill('E2e Circle Check')
+    await expect(modeTab(page, 'E2e Circle Check')).toBeVisible()
+    await slot(page, 'Delete agent').click()
+    await expectCircles(toolbar.locator('.agent-modes-slot button'), 4)
+    await slot(page, 'Cancel delete').click()
     await closeModesDialog(page)
   })
 
-  // The toolbar's three verbs, in order, over the list they act on: `Add agent`
-  // enters creation mode and writes nothing, `Save agent` writes the one subject
-  // and **leaves the card open on it** (D6), and `Delete agent` asks its pair
-  // before the route is touched. The card's only exit is `Close`, which writes
-  // nothing and asks first when the card holds typing (D8).
+  // The toolbar's two verbs, over the list they act on: `Add agent` enters creation
+  // mode and writes nothing, a completed form **writes itself** once it stops
+  // changing and leaves the card open on the new row (D6), and `Delete agent` asks
+  // its pair before the route is touched. The card's only exit is `Close`, which
+  // flushes what is still inside the debounce window and asks nothing.
   test('the toolbar creates, edits and deletes one agent, and the card stays open', async ({
     page,
     request,
@@ -556,15 +567,15 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     await expect(selectedTab(page)).toHaveText(captions[0])
 
     // The toolbar over the list: three slots, and the selected built-in makes the
-    // third one inert with its reason (§6.10) — never hidden, and never silent.
+    // second one inert with its reason (§6.10) — never hidden, and never silent.
     const toolbar = card(page).getByRole('group', { name: 'Agent actions' })
     await expect(slot(page, 'Add agent')).toBeEnabled()
-    await expect(slot(page, 'Save agent')).toBeEnabled()
     await expect(slot(page, 'Delete agent')).toHaveCount(0)
     await expect(inertSlot(page, 'cannot be deleted')).toBeDisabled()
-    // The confirmation pairs are absent from the DOM until they mean something
-    // (§6.17), so the toolbar holds exactly its three verbs.
-    await expect(toolbar.getByRole('button')).toHaveCount(3)
+    // There is no `Save` verb at all, and the confirmation pair is absent from the
+    // DOM until it means something (§6.17), so the toolbar holds exactly its two
+    // verbs.
+    await expect(toolbar.getByRole('button')).toHaveCount(2)
 
     // 1. `Add agent`: the selection clears, the form empties, Label is focused,
     // and **nothing is written** (D4). The list gains no row.
@@ -592,19 +603,15 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     await expect(card(page)).not.toContainText(/New agent/i)
     await expect(messageLine(page)).toHaveAttribute('role', 'status')
     await expect(messageLine(page)).toContainText('must be completed')
-    // §5's signature of the state: save is live, delete is inert because
-    // nothing is stored to delete, and add is inert because a creation is
-    // already being typed.
-    await expect(slot(page, 'Save agent')).toBeEnabled()
-    await expect(inertSlot(page, 'before it can be deleted')).toBeDisabled()
+    // §5's signature of the state: delete is inert because nothing is stored to
+    // delete, and add is inert because a creation is already being typed.
+    await expect(inertSlot(page, 'not stored yet')).toBeDisabled()
     await expect(inertSlot(page, 'Already adding')).toBeDisabled()
 
-    // 2. §9's first new assertion: `Save agent` on an **incomplete** form is
-    // live, refuses, and says so in the card's one line — no write, no close,
-    // and exactly one message anywhere in the card.
-    await expect(slot(page, 'Save agent')).toBeEnabled()
-    await slot(page, 'Save agent').click()
-    await writes.expectNone('a refused save posts nothing')
+    // 2. An **incomplete** form is never posted: auto-save waits for a form the
+    // store would take, so the empty creation earns no write and no 422 — its
+    // sentence stays in the card's one line, and exactly one message is anywhere.
+    await writes.expectNone('an incomplete form posts nothing')
     await expect(card(page)).toBeVisible()
     await expect(messageLine(page)).toContainText('must be completed')
     await expect(messageLine(page)).toContainText('A label is required')
@@ -614,51 +621,65 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     await expect(card(page).locator('.agent-modes-message')).toHaveCount(1)
 
     // 3. §9's second new assertion: clicking a row **discards the creation
-    // without a prompt** — nothing was written, so nothing needs confirming —
-    // and no row was ever added for the half-typed agent.
-    await creation.getByLabel('Label').fill('Half-typed')
+    // without a prompt**, and no row was ever added for it: the form was never
+    // completed, so auto-save owed it nothing.
     await modeTab(page, captions[1]).click()
     await expect(card(page)).toBeVisible()
-    await expect(slot(page, 'Keep editing')).toHaveCount(0)
     await expect(selectedTab(page)).toHaveText(captions[1])
     await expect(tabs).toHaveCount(captions.length)
     await expect(tabs).toHaveText(captions)
     await writes.expectNone('abandoning a creation writes nothing')
 
-    // 4. The same creation, completed and saved: the row exists after its own
-    // save, and the card is **still open on it** (D6).
+    // 4. The same creation, completed: a label alone is a form the store takes, so
+    // the row appears once the form stops changing — while the rest of it is still
+    // being typed — and the card **stays open on it** (D6). The later fields are
+    // written as updates of that row.
     await slot(page, 'Add agent').click()
     const form = visibleSection(page)
+    // A new agent's id is editable while it is new: the slug the Label generated
+    // can still be corrected. Read **before** the label is typed, because `fill`
+    // fires the field's own `change` too — from that keystroke the form is
+    // complete and the debounce is already running towards the write that will
+    // take the field away (a stored row's id cannot be renamed).
+    await expect(
+      form.getByLabel('Id', { exact: true }),
+      "a new agent's id is editable while it is new",
+    ).toBeEditable()
+    const created = agentRoute(page, 'add')
     await form.getByLabel('Label').fill(NEW_LABEL)
-    // The id follows the label on the field's own `change`, so focus has to
-    // leave it before the slug the form settled on can be read.
-    await form.getByLabel('Label').press('Tab')
-
+    const createdResponse = await created
+    expect(createdResponse.status(), 'the create was accepted').toBe(200)
+    // The row is in the list now, selected, and the card never moved.
+    await expect(tabs).toHaveCount(captions.length + 1)
+    await expect(modeTab(page, NEW_LABEL)).toHaveCount(1)
+    await expect(selectedTab(page)).toHaveText(NEW_LABEL)
     // The id is the slug the composable derived from the label — read from the
-    // form, judged against the caps the payload published, never spelled here.
-    const idField = form.getByLabel('Id', { exact: true })
-    await expect(idField, "a new agent's id is editable while it is new").toBeEditable()
-    const newId = await idField.inputValue()
+    // store's answer to this write (the field itself is gone now that the row
+    // exists), judged against the caps the payload published, never spelled here.
+    const newId = (await createdResponse.json()).agents.find(
+      (agent) => agent.label === NEW_LABEL,
+    ).id
     expect(newId).toMatch(new RegExp(before.caps.idPattern))
     expect(before.agents.map((agent) => agent.id)).not.toContain(newId)
 
+    // The rest of the form is written as an update of that row, not a second add.
+    const personaWrite = agentRoute(page, 'save')
     await form.locator('textarea').fill(NEW_PERSONA)
     await expect(form.locator('.agent-modes-persona-count')).toContainText(
       `${Buffer.byteLength(NEW_PERSONA, 'utf8')} / ${before.caps.maxPersonaBytes} bytes`,
     )
-    await form.getByLabel('Model').selectOption(String(model.id))
-    // The form is complete now, so the line that named what was missing is empty
-    // (D11: a message clears when its cause goes away).
-    await expect(messageLine(page)).toHaveText('')
+    await personaWrite
 
-    const created = agentRoute(page, 'add')
-    await slot(page, 'Save agent').click()
-    const createdResponse = await created
-    expect(createdResponse.status(), 'the create was accepted').toBe(200)
+    const modelWrite = agentRoute(page, 'save')
+    await form.getByLabel('Model').selectOption(String(model.id))
+    await modelWrite
+    // The line that named what was missing is empty (D11: a message clears when its
+    // cause goes away).
+    await expect(messageLine(page)).toHaveText('')
     // The write the step was waiting for: the window opens again here, so the
     // "writes nothing" checks below are about what follows, not about this.
     writes.checkpoint()
-    // A save is a write, not an exit: the card stays open, the new agent's row
+    // A write is not an exit: the card stays open, the new agent's row
     // is in the list for the first time, and it is the selected one (D4.6, D6).
     await expect(card(page)).toBeVisible()
     await expect(tabs).toHaveCount(captions.length + 1)
@@ -675,68 +696,53 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     expect(createdRow.systemMessage).toBe(NEW_PERSONA)
     expect(createdRow.deletable, 'a user-created agent can be deleted').toBe(true)
 
-    // 5. Leaving after a write costs **no** extra click: nothing is unsaved, so
-    // `Close` closes at once and the guard's pair is never rendered (D8).
+    // 5. Leaving straight after a write costs no extra click and posts nothing
+    // more: the store already holds what the form holds, so `Close` has nothing
+    // left to flush.
     await slot(page, 'Close').click()
-    await expect(slot(page, 'Keep editing')).toHaveCount(0)
     await expect(card(page)).toHaveCount(0)
+    await writes.expectNone('a close with nothing owed posts nothing')
 
-    // 6. `Close` with unsaved work asks **in place**, and `Keep editing` answers
-    // it by changing nothing — the guarantee the footer's old `Cancel` gave, now
-    // through the card's only exit.
+    // 6. An edit writes itself: typing into an **existing** agent posts a save once
+    // the form stops changing, and the card stays open on it with its tab caption
+    // following the label live. Such a row has no id field (the id cannot be
+    // renamed).
     await openModesDialog(page)
     await modeTab(page, NEW_LABEL).click()
     const editSection = visibleSection(page)
-    await editSection.getByLabel('Label').fill(`${NEW_LABEL} Unsaved`)
-    await slot(page, 'Close').click()
-    await expect(slot(page, 'Keep editing')).toBeVisible()
-    await expect(slot(page, 'Discard and close')).toBeVisible()
-    await expect(card(page)).toBeVisible()
-    // The guard asks in **words** too, in the one message line: two glyphs are not
-    // a sentence, and the consequence here is that leaving throws typing away.
-    await expect(messageLine(page)).toHaveText('There are unsaved changes. Close anyway?')
-    await slot(page, 'Keep editing').click()
-    await expect(card(page)).toBeVisible()
-    await expect(visibleSection(page).getByLabel('Label')).toHaveValue(`${NEW_LABEL} Unsaved`)
-    // The question was the guard's, so it left with the guard (D11: a message
-    // clears when its cause goes away).
-    await expect(messageLine(page)).toHaveText('')
-    await writes.expectNone('the close guard writes nothing')
-    // And the row it was typed over is still the store's own.
-    expect(
-      (await agentsPayload(request)).agents.find((agent) => agent.id === newId).label,
-    ).toBe(NEW_LABEL)
-
-    // 7. Edit the same row for real: it is now an **existing** agent, so it has
-    // no id field any more (the id cannot be renamed), its row follows the label
-    // live, and the save leaves the card open on it again.
+    await expect(editSection.getByLabel('Id', { exact: true })).toHaveCount(0)
+    const firstEdit = agentRoute(page, 'save')
     await editSection.getByLabel('Label').fill(EDITED_LABEL)
-    await expect(modeTab(page, EDITED_LABEL)).toHaveCount(1)
-    const edited = agentRoute(page, 'save')
-    await slot(page, 'Save agent').click()
-    const editedResponse = await edited
+    const editedResponse = await firstEdit
     expect(editedResponse.status(), 'the edit was accepted').toBe(200)
     writes.checkpoint()
     await expect(card(page)).toBeVisible()
     await expect(selectedTab(page)).toHaveText(EDITED_LABEL)
     await expect(tabs).toHaveCount(captions.length + 1)
+    expect(
+      (await agentsPayload(request)).agents.find((agent) => agent.id === newId).label,
+    ).toBe(EDITED_LABEL)
+
+    // 7. A keystroke made just before `Close` is not lost: the close flushes what
+    // is still inside the debounce window and leaves — asking nothing, because
+    // there is no longer any work that leaving would throw away.
+    const finalLabel = `${EDITED_LABEL} Flushed`
+    await editSection.getByLabel('Label').fill(finalLabel)
+    const flushed = agentRoute(page, 'save')
+    await slot(page, 'Close').click()
+    expect((await flushed).status(), 'the flush wrote the last keystroke').toBe(200)
+    writes.checkpoint()
+    await expect(card(page)).toHaveCount(0)
 
     const afterEdit = await agentsPayload(request)
     const editedRow = afterEdit.agents.find((agent) => agent.id === newId)
-    expect(editedRow.label).toBe(EDITED_LABEL)
-    expect(editedRow.systemMessage).toBe(NEW_PERSONA)
+    expect(editedRow.label).toBe(finalLabel)
+    expect(editedRow.systemMessage, 'the flush wrote only the label').toBe(NEW_PERSONA)
 
-    // The unsaved `Unsaved` edit is gone with the form it was typed into: the
-    // write re-baselined the row it touched, and the label it stored is the one
-    // the form holds.
-    await expect(visibleSection(page).getByLabel('Label')).toHaveValue(EDITED_LABEL)
-
-    await closeModesDialog(page)
-
-    // The composer's dropdown reloaded from the write: the new agent is an
+    // The composer's dropdown reloaded from the write: the edited agent is an
     // option, and it can be chosen like any other.
     const select = page.getByLabel('Agent mode')
-    await expect(select.getByRole('option', { name: EDITED_LABEL })).toHaveCount(1)
+    await expect(select.getByRole('option', { name: finalLabel, exact: true })).toHaveCount(1)
     await select.selectOption(newId)
     await expect(select).toHaveValue(newId)
 
@@ -746,20 +752,23 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
     // (D7.4, Q4), and only `Confirm delete` posts.
     await openModesDialog(page)
     const tabsAfter = modeTabs(page)
-    await modeTab(page, EDITED_LABEL).click()
+    await modeTab(page, finalLabel).click()
     await slot(page, 'Delete agent').click()
-    await expect(toolbar.getByRole('button')).toHaveCount(5)
+    // The two verbs plus the pair: the toolbar holds four buttons while the
+    // answer is pending, and never more than that.
+    await expect(toolbar.getByRole('button')).toHaveCount(4)
     await expect(slot(page, 'Cancel delete')).toBeFocused()
     await expect(slot(page, 'Confirm delete')).toBeVisible()
-    // While the answer is pending the three verbs are inert: one destructive
-    // action is decided at a time (D7.3).
-    await expect(inertSlot(page, 'confirmation is pending')).toHaveCount(3)
+    // While the answer is pending both verbs are inert: one destructive action is
+    // decided at a time (D7.3). Two, not three — `Save` used to be the third.
+    await expect(inertSlot(page, 'confirmation is pending')).toHaveCount(2)
     await writes.expectNone('asking for a delete writes nothing')
 
     await slot(page, 'Cancel delete').click()
-    await expect(toolbar.getByRole('button')).toHaveCount(3)
-    await expect(selectedTab(page)).toHaveText(EDITED_LABEL)
-    await expect(visibleSection(page).getByLabel('Label')).toHaveValue(EDITED_LABEL)
+    // The pair is gone from the DOM again, leaving exactly the two verbs.
+    await expect(toolbar.getByRole('button')).toHaveCount(2)
+    await expect(selectedTab(page)).toHaveText(finalLabel)
+    await expect(visibleSection(page).getByLabel('Label')).toHaveValue(finalLabel)
 
     const deleted = agentRoute(page, 'delete')
     await slot(page, 'Delete agent').click()
@@ -777,6 +786,6 @@ test.describe('Agent modes editor: the pencil, the tabs, the writes', () => {
       newId,
     )
     await closeModesDialog(page)
-    await expect(select.getByRole('option', { name: EDITED_LABEL })).toHaveCount(0)
+    await expect(select.getByRole('option', { name: finalLabel, exact: true })).toHaveCount(0)
   })
 })
