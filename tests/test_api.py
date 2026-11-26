@@ -211,9 +211,11 @@ class TestContextWindow:
         assert captured["url"] == "http://ctx-test:9/v1/models"
         assert captured["headers"] == {"Authorization": "Bearer sk-1"}
 
-    def test_falls_back_to_first_entry_when_model_absent(self, monkeypatch):
+    def test_a_model_the_server_does_not_list_is_none(self, monkeypatch):
         self._patch(monkeypatch, {"data": [{"id": "x", "meta": {"n_ctx": 8192}}]})
-        assert routes._context_window("http://ctx-first:9/v1", "", "model-a") == 8192
+        assert routes._context_window("http://ctx-first:9/v1", "", "model-a") is None
+        # The stranger's window must not stick under the requested key either.
+        assert routes._context_window("http://ctx-first:9/v1", "", "model-a") is None
 
     def test_missing_meta_or_bad_server_is_none(self, monkeypatch):
         self._patch(monkeypatch, {"data": [{"id": "model-a"}]})

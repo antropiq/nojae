@@ -17,6 +17,7 @@ import { modelInView, useAppShell } from '../composables/useAppShell'
 import { useBatch } from '../composables/useBatch'
 import {
   NO_MODEL_WARNING,
+  currentMode,
   findingsLine,
   modeHint,
   modeSelectTitle,
@@ -247,9 +248,10 @@ watch(
 
 // Only usable when the model the turn will run on is declared vision-capable.
 // `/api/config` carries the flag **per model**, so it is read off the model in view
-// rather than off "the" connection.
+// rather than off "the" connection — and the model in view is the selected agent's,
+// because that is the agent the next send runs as.
 const supportsVision = computed(
-  () => modelInView(appShellState.config)?.supportsVision === true,
+  () => modelInView(appShellState.config, currentMode())?.supportsVision === true,
 )
 
 const fileInput = ref(null)

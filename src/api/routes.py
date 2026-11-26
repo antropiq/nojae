@@ -967,6 +967,9 @@ def _context_window(server_url: str, api_key: str, model: str) -> Optional[int]:
     Reads ``meta.n_ctx`` from an OpenAI-compatible ``/models`` entry
     (llama.cpp exposes it); a server that omits it is not an error — the
     chat occupancy badge then just shows the used side without a limit.
+
+    Only the entry whose ``id`` is this model counts: a name the server does
+    not list answers None rather than crediting another model's window.
     """
     if not server_url.strip():
         return None
@@ -981,8 +984,6 @@ def _context_window(server_url: str, api_key: str, model: str) -> Optional[int]:
         data = payload.get("data") if isinstance(payload, dict) else None
         entries = [item for item in data or [] if isinstance(item, dict)]
         entry = next((item for item in entries if item.get("id") == model), None)
-        if entry is None and entries:
-            entry = entries[0]
         meta = entry.get("meta") if entry else None
         n_ctx = meta.get("n_ctx") if isinstance(meta, dict) else None
         if isinstance(n_ctx, int) and n_ctx > 0:

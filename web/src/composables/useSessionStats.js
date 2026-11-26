@@ -2,7 +2,8 @@ import { computed } from 'vue'
 import { liveTokenRate, useChat } from './useChat'
 import { modelInView, useAppShell } from './useAppShell'
 import { useBatch } from './useBatch'
-import { inferenceRunning } from '../lib/inference-state'
+import { currentMode, modeById } from './useAgentModes'
+import { inferenceRunning, phaseInFlight } from '../lib/inference-state'
 
 // ---------------------------------------------------------------------------
 // The session meters: one elapsed clock, two counters (token rate, context
@@ -217,8 +218,22 @@ const rateTitle = computed(() =>
 
 // -- context occupancy -------------------------------------------------------
 
+// Which agent's model the cap is read off — the same question the brand's
+// `Running <model> on <server>` line answers, and answered the same way: the
+// agent the turn in flight was **sent** as, not the composer's current selection.
+// A lot is asked of its own pin, which is the agent every task of it carries.
+// With nothing running, the answer is the selection, because that is the model
+// the next turn will land on.
+function modeInPlay() {
+  if (batchState.active) return modeById(batchState.pinnedMode)
+  if (phaseInFlight(chatState.phase)) {
+    return modeById(chatState.session.agentMode)
+  }
+  return currentMode()
+}
+
 const contextWindow = computed(
-  () => modelInView(shellState.config)?.contextWindow ?? null,
+  () => modelInView(shellState.config, modeInPlay())?.contextWindow ?? null,
 )
 
 // Context-window occupancy: the LAST round's prompt + completion (exactly what

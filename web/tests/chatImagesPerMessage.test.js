@@ -66,6 +66,18 @@ function agentsBody() {
         modelId: 1,
         modelName: 'model-1',
       },
+      {
+        id: 'chat',
+        label: 'Chat',
+        mcpEnable: true,
+        lspEnable: true,
+        readonly: false,
+        deletable: true,
+        maxToolIteration: 25,
+        systemMessage: '',
+        modelId: 2,
+        modelName: 'model-2',
+      },
     ],
     caps: { minToolIteration: 1, maxIdChars: 32 },
     findings: [],
@@ -424,6 +436,36 @@ describe('the attach button answers about the list', () => {
     expect(button().find('.chat-attach-badge').exists()).toBe(true)
     // The name stays distinct from the Send button's, which the e2e spec queries.
     expect(button().attributes('aria-label')).not.toContain('Send message')
+
+    w.unmount()
+    host.remove()
+  })
+
+  // The flag is `/api/config`'s **per model**, so the button answers about the
+  // model the next send will run on — the selected agent's. Reading the
+  // catalogue's first entry instead enabled it off another server's model.
+  it('answers about the selected agent model, and follows the switch', async () => {
+    stubRoutes()
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const w = mount(WorkBenchInput, { attachTo: host })
+    appShell.config = {
+      models: [
+        { id: 1, name: 'model-1', supportsVision: true },
+        { id: 2, name: 'model-2', supportsVision: false },
+      ],
+    }
+    await useAgentModes().loadAgentModes()
+    await flushPromises()
+
+    const button = () => w.find('.chat-attach')
+    expect(button().attributes('disabled')).toBeUndefined()
+
+    await w.find('.chat-mode-select').setValue('chat')
+    await flushPromises()
+
+    expect(button().attributes('disabled')).toBeDefined()
+    expect(button().attributes('aria-label')).toBe('Image input not supported')
 
     w.unmount()
     host.remove()

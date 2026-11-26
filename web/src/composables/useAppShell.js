@@ -58,9 +58,11 @@ const state = reactive({
   // connection, in the read's insertion order, exactly as the server answered it.
   servers: [],
   serversLoading: false,
-  // True once a **read** has answered. A write failure does not clear it: the
-  // rows the form is editing are still the store's, so the form must stay
-  // usable and say the write's sentence rather than going inert as unread.
+  // True once a **read** has answered. Neither a failed read nor a failed write
+  // clears it: the rows on screen are still the store's either way, so the form
+  // must stay usable and say the failure's sentence rather than going inert as
+  // unread — a row that is there can be deleted, and the store answers a delete
+  // of a row it no longer holds with its own 404 sentence.
   serversLoaded: false,
   serversError: null,
   // The read's ``caps``: ``{samplerRanges, reasoningLevels}``. The form's
@@ -302,12 +304,23 @@ export function samplerBounds(caps, field) {
 // The model the composer's views read a per-model flag off.
 //
 // `GET /api/config` answers **per model** and deliberately names no default, so
-// "the" model is the composer's answer, not the route's. This answers the first
-// entry until the composer has a real selection, and null for an install with no
-// model — so a flag read off it is `false` rather than a guess.
-export function modelInView(config) {
-  const models = config?.models
-  return Array.isArray(models) && models.length ? models[0] : null
+// "the" model is the composer's answer, not the route's — and the caller has to
+// say which agent it is asking about. `mode` is an agent row (its `modelId` is
+// the pointer); with one held, the answer is that row's model **or null**: a row
+// naming a model the catalogue no longer holds must blank the flag, because
+// falling back to another model would state a cap that belongs to a stranger.
+//
+// `models[0]` answers only when the caller has no agent to name at all — the
+// list has not been read, or the store holds no row — which is the one case where
+// no better answer exists yet.
+export function modelInView(config, mode = null) {
+  const models = Array.isArray(config?.models) ? config.models : []
+  if (!models.length) return null
+  const wanted = mode?.modelId
+  if (wanted !== null && wanted !== undefined) {
+    return models.find((model) => model?.id === wanted) ?? null
+  }
+  return models[0]
 }
 
 //: **Does the dialog hold something the store does not?** — the auto-save's only
@@ -597,7 +610,6 @@ export function useAppShell() {
       const res = await fetchWithRetry('/api/servers')
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        state.serversLoaded = false
         state.serversError = describeError(
           body,
           `Could not load the model connection (${res.status})`,
@@ -607,7 +619,6 @@ export function useAppShell() {
       adoptServers(body)
       state.serversLoaded = true
     } catch (exc) {
-      state.serversLoaded = false
       state.serversError = describeTransportError(exc)
     } finally {
       state.serversLoading = false

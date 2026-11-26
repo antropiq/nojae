@@ -32,9 +32,14 @@ import {
 //: read's ``caps``, which is also what the server refuses against.
 //: ---------------------------------------------------------------------------
 
-//: The three sentences more than one slot says. Spelled once, because a reason
+//: The sentences more than one slot says. Spelled once, because a reason
 //: that reads differently in two tooltips is two reasons.
 const NOT_READ_LABEL = 'The servers have not been read.'
+//: A read in flight over rows that **were** read: the verbs stay inert while the
+//: tree is being replaced (the answer is older data than a write posted during
+//: it), but the rows on screen are the store's, so the reason is the read — not a
+//: read that never happened.
+const READ_IN_FLIGHT_LABEL = 'A read is in flight — wait for it to finish.'
 const WRITE_IN_FLIGHT_LABEL = 'A write is in flight — wait for it to finish.'
 const CONFIRMATION_PENDING_LABEL = 'A confirmation is pending — answer it first.'
 //: A row with no stored id is a form that auto-save could not write — it is
@@ -86,6 +91,7 @@ function slotInertText(text, label) {
 //: passes only what it actually holds.
 function slotContext({
   loaded = true,
+  reading = false,
   saving = false,
   listing = false,
   confirming = false,
@@ -96,6 +102,7 @@ function slotContext({
 } = {}) {
   return {
     loaded: loaded !== false,
+    reading: reading === true,
     saving: saving === true,
     listing: listing === true,
     confirming: confirming === true,
@@ -114,6 +121,7 @@ export function addSlotFor(context = {}) {
   const ctx = slotContext(context)
   if (!ctx.loaded) return slotInert(NOT_READ_LABEL)
   if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
+  if (ctx.reading) return slotInert(READ_IN_FLIGHT_LABEL)
   if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
   if (ctx.page === 'server' && !ctx.serverSaved) {
     return slotInert('Already adding a server — complete its form or select one.')
@@ -140,6 +148,7 @@ export function deleteSlotFor(context = {}) {
     )
   }
   if (ctx.saving) return slotInert(WRITE_IN_FLIGHT_LABEL)
+  if (ctx.reading) return slotInert(READ_IN_FLIGHT_LABEL)
   if (ctx.confirming) return slotInert(CONFIRMATION_PENDING_LABEL)
   return slotLive('Delete')
 }
@@ -175,6 +184,7 @@ export function fetchSlotFor(context = {}) {
   if (ctx.listing) return slotInertText('Fetching…', 'Fetching…')
   if (ctx.saving) return slotInertText('Fetch models', WRITE_IN_FLIGHT_LABEL)
   if (!ctx.loaded) return slotInertText('Fetch models', NOT_READ_LABEL)
+  if (ctx.reading) return slotInertText('Fetch models', READ_IN_FLIGHT_LABEL)
   if (!ctx.serverSaved) return slotInertText('Fetch models', SERVER_NOT_SAVED_LABEL)
   if (!ctx.urlFilled) {
     return slotInertText('Fetch models', 'Fill in the server URL before fetching its models.')
@@ -495,7 +505,11 @@ export function useSettingsServers() {
       state.fetchedModelsLoading === draftKey(state.serverDraft),
   )
   const slotContextFor = computed(() => ({
-    loaded: state.serversLoaded && !state.serversLoading,
+    // `loaded` answers only "has a read ever answered?": the rows on screen are
+    // the store's, and a read in flight does not make that untrue. `reading` is
+    // the separate reason a verb is inert while the tree is being replaced.
+    loaded: state.serversLoaded,
+    reading: state.serversLoading,
     saving: state.settingsSaving,
     listing: listingInFlight.value,
     confirming: state.pendingDelete !== null,

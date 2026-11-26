@@ -4,7 +4,8 @@ import { mount } from '@vue/test-utils'
 
 import SessionClock from '../src/components/SessionClock.vue'
 import { useSessionStats } from '../src/composables/useSessionStats'
-import { useAppShell } from '../src/composables/useAppShell'
+import { modelInView, useAppShell } from '../src/composables/useAppShell'
+import { useAgentModes } from '../src/composables/useAgentModes'
 import { useBatch } from '../src/composables/useBatch'
 import { useChat } from '../src/composables/useChat'
 
@@ -21,8 +22,23 @@ import { useChat } from '../src/composables/useChat'
 
 const stats = useSessionStats()
 const appShell = useAppShell().state
+const agentModes = useAgentModes().state
 const batch = useBatch().state
 const chat = useChat().state
+
+// Two models on two servers, the shape a real install has: an agent's `modelId`
+// is the only thing that says which of them a turn runs on, so a meter that
+// ignores it reads a cap belonging to another model.
+const CATALOGUE = [
+  { id: 11, name: 'big-on-hpz', serverName: 'hpz', contextWindow: 524288 },
+  { id: 2, name: 'small-on-aipc', serverName: 'aipc', contextWindow: 262144 },
+]
+
+const AGENTS = [
+  { id: 'code', label: 'Code', modelId: 11, modelName: 'big-on-hpz' },
+  { id: 'chat', label: 'Chat', modelId: 2, modelName: 'small-on-aipc' },
+  { id: 'bare', label: 'Bare', modelId: null, modelName: null },
+]
 
 function reset() {
   // The cap arrives **per model** now (D5), so the fixture is a model list with
@@ -31,12 +47,19 @@ function reset() {
     models: [{ id: 1, name: 'm', contextWindow: 8192, supportsVision: false }],
     store: { usable: true, sentence: null },
   }
+  // The selection is the agent whose model the cap is read off, so the meters
+  // need a list to resolve it against. `code` points at the fixture model.
+  agentModes.modes = [{ id: 'code', label: 'Code', modelId: 1, modelName: 'm' }]
+  agentModes.current = 'code'
+  agentModes.loaded = true
   batch.active = false
   batch.status = 'idle'
+  batch.pinnedMode = null
   chat.phase = 'idle'
   chat.messages = []
   chat.session.startedAt = 0
   chat.session.spentMs = 0
+  chat.session.agentMode = null
 }
 
 function runningChat() {
@@ -130,6 +153,108 @@ describe('useSessionStats: one clock and two counters, whichever session is live
     expect(stats.contextTitle.value).toContain('75%')
     chat.messages[0].contextTokens = 7400 // 90%: the window is nearly full
     expect(stats.contextClass.value).toBe('red')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The cap is the **agent's**, not the catalogue's first entry.
+//
+// `GET /api/config` answers the window per model and names no default, so the
+// only thing that says which model a turn runs on is the agent row's `modelId`.
+// Reading `models[0]` instead pins the badge to one server whatever the agent is:
+// a 256k model shows `ctx 12.4k / 524.3k`, and the ≥70 % / ≥90 % warnings never
+// fire because the fill is divided by a window twice as wide as the real one.
+// ---------------------------------------------------------------------------
+
+describe('the context cap follows the agent, not the first model of the catalogue', () => {
+  beforeEach(() => {
+    reset()
+    appShell.config = { models: CATALOGUE, store: { usable: true, sentence: null } }
+    agentModes.modes = AGENTS
+    agentModes.current = 'chat'
+  })
+
+  it('reads the selected agent model, and changes with the selection', () => {
+    chat.messages = [measuredReply({ contextTokens: 204800 })]
+    expect(stats.contextWindow.value).toBe(262144)
+    expect(stats.contextText.value).toBe('ctx 204.8k / 262.1k')
+
+    // The reported bug, in one keystroke: the dropdown moved to the other agent.
+    agentModes.current = 'code'
+    expect(stats.contextText.value).toBe('ctx 204.8k / 524.3k')
+  })
+
+  it('fills against the real window, so the warning colour fires', () => {
+    // 204800 of 262144 is 78 % of the window the turn runs on — but 39 % of the
+    // other model's, which is why the badge used to stay green at the edge.
+    chat.messages = [measuredReply({ contextTokens: 204800 })]
+    expect(stats.contextFill.value).toBeCloseTo(0.78125, 5)
+    expect(stats.contextClass.value).toBe('violet')
+    expect(stats.contextTitle.value).toContain('78%')
+  })
+
+  // A turn in flight is answered by the agent it was **sent** as, exactly like
+  // the brand's `Running <model> on <server>` line beside it: the two halves of
+  // the bar cannot name different models for the same stream.
+  it('follows the running turn, not a mid-reply agent switch', () => {
+    chat.messages = [measuredReply({ contextTokens: 204800 })]
+    chat.phase = 'answering'
+    chat.session.startedAt = 1000
+    chat.session.agentMode = 'chat'
+
+    // The dropdown is moved to the other agent while the reply streams: that
+    // change reaches no turn in flight, so the cap stays the running one's.
+    agentModes.current = 'code'
+    expect(stats.contextText.value).toBe('ctx 204.8k / 262.1k')
+  })
+
+  it('reads the agent a running lot was launched with', () => {
+    chat.messages = [measuredReply({ contextTokens: 204800 })]
+    batch.active = true
+    batch.pinnedMode = 'chat'
+    // A lot runs every task under its own pin; the selection is not its answer.
+    agentModes.current = 'code'
+    expect(stats.contextText.value).toBe('ctx 204.8k / 262.1k')
+  })
+
+  // The agent row names a model the catalogue no longer holds (deleted in the
+  // Settings dialog): there is no window to state, so the badge says `ctx 204.8k`
+  // alone. Falling back to another entry is the mistake being fixed here.
+  it('states no cap for an agent whose model is gone', () => {
+    agentModes.modes = [
+      { id: 'ghost', label: 'Ghost', modelId: 99, modelName: 'deleted-model' },
+    ]
+    agentModes.current = 'ghost'
+    chat.messages = [measuredReply({ contextTokens: 204800 })]
+
+    expect(stats.contextWindow.value).toBe(null)
+    expect(stats.contextText.value).toBe('ctx 204.8k')
+    expect(stats.contextFill.value).toBe(null)
+  })
+})
+
+describe('modelInView: the agent row is the pointer', () => {
+  const config = { models: CATALOGUE }
+
+  it('resolves the agent model by id, whatever its place in the list', () => {
+    expect(modelInView(config, AGENTS[0]).id).toBe(11)
+    expect(modelInView(config, AGENTS[1]).id).toBe(2)
+  })
+
+  it('answers null rather than a stranger for a model the catalogue lost', () => {
+    expect(modelInView(config, { id: 'x', modelId: 99 })).toBe(null)
+  })
+
+  it('falls back to the first entry only when no agent is named at all', () => {
+    // Nothing read yet, or a store with no row: there is no better answer, and
+    // the composer refuses the send either way.
+    expect(modelInView(config, null).id).toBe(11)
+    expect(modelInView(config, AGENTS[2]).id).toBe(11)
+  })
+
+  it('answers null for an install with no model', () => {
+    expect(modelInView({ models: [] }, AGENTS[0])).toBe(null)
+    expect(modelInView(null, AGENTS[0])).toBe(null)
   })
 })
 
