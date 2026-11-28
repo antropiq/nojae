@@ -26,7 +26,7 @@ TABLE: List[Tuple[str, List[str], List[str]]] = [
     ("**/x", ["x", "a/x", "a/b/x"], ["xa"]),
     ("**/__pycache__/*", ["a/__pycache__/b.pyc"], ["a/__pycache__"]),
     ("a/**/b", ["a/b", "a/x/b", "a/x/y/b"], ["a", "x/b"]),
-    ("web/**", ["web", "web/index.html", "web/src/api/routes.py"], ["webby"]),
+    ("web/**", ["web", "web/index.html", "web/src/main.js"], ["webby"]),
 ]
 
 

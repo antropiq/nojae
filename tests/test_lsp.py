@@ -20,6 +20,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import routes
+from src.api.routes import chat as api_chat
+from src.api.routes import config as api_config
 from src.api.server import create_app
 from src.core.lsphub import constants as lsp_constants
 from src.core.lsphub import (
@@ -2162,7 +2164,7 @@ class TestLocalReachRefusal:
             mcphub.constants, "MCP_SETTINGS_PATH", servers_dir / "mcp-settings.json"
         )
         monkeypatch.setattr(
-            routes,
+            api_config,
             "load_endpoints_config",
             lambda agent: (
                 SimpleNamespace(
@@ -2553,7 +2555,7 @@ def lsp_client(monkeypatch, tmp_path):
         mcphub.constants, "MCP_SETTINGS_PATH", servers_dir / "mcp-settings.json"
     )
     monkeypatch.setattr(
-        routes,
+        api_config,
         "load_endpoints_config",
         lambda agent: (
             SimpleNamespace(
@@ -2886,7 +2888,7 @@ class TestChatLspWiring:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake_stream)
+        monkeypatch.setattr(api_chat, "stream_chat", fake_stream)
         return captured
 
     def test_lsp_only_lists_every_tool_as_uncapped(self, lsp_client, tmp_path, monkeypatch):

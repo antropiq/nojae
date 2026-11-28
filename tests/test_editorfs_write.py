@@ -2540,7 +2540,10 @@ class TestWritesStayBrowserOnly:
             text = path.read_text(encoding="utf-8")
             if any(name in text for name in writers):
                 callers.append(str(path.relative_to(source_root)))
-        assert callers == [str(Path("api") / "routes.py")]
+        assert sorted(callers) == [
+            str(Path("api") / "routes" / "fs.py"),
+            str(Path("api") / "routes" / "inputs.py"),
+        ]
 
         borrowers = sorted(
             str(path.relative_to(source_root))

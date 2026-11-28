@@ -12,6 +12,11 @@ from fastapi.testclient import TestClient
 from src.api.server import create_app
 from src.core.models import EndpointsConfig
 from src.api import routes
+from src.api.routes import chat as api_chat
+from src.api.routes import config as api_config
+from src.api.routes import connection as api_connection
+from src.api.routes import turn
+from src.config import max_tool_iteration
 from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
 from src.core import appdb
@@ -48,7 +53,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     # The context-window probe hits the configured LLM server: keep the
     # suite hermetic; the real function is unit-tested directly.
     monkeypatch.setattr(
-        routes, "_context_window", lambda server_url, api_key, model: None
+        turn, "_context_window", lambda server_url, api_key, model: None
     )
     # Context-managed so the app event loop lives across requests, which the
     # streaming chat routes need.
@@ -152,7 +157,7 @@ class TestConfigEndpoint:
                 "nojae's settings store at /nowhere cannot be read."
             )
 
-        monkeypatch.setattr(routes.appdb, "load_servers", refuse)
+        monkeypatch.setattr(api_config.appdb, "load_servers", refuse)
 
         response = client.get("/api/config")
 
@@ -193,7 +198,7 @@ class TestContextWindow:
                     raise error
                 return TestContextWindow._Response(payload)
 
-        monkeypatch.setattr(routes.httpx, "Client", FakeClient)
+        monkeypatch.setattr(turn.httpx, "Client", FakeClient)
         return captured
 
     def test_reads_n_ctx_from_the_matching_model_entry(self, monkeypatch):
@@ -206,34 +211,34 @@ class TestContextWindow:
                 ]
             },
         )
-        got = routes._context_window("http://ctx-test:9/v1", "sk-1", "model-a")
+        got = turn._context_window("http://ctx-test:9/v1", "sk-1", "model-a")
         assert got == 262144
         assert captured["url"] == "http://ctx-test:9/v1/models"
         assert captured["headers"] == {"Authorization": "Bearer sk-1"}
 
     def test_a_model_the_server_does_not_list_is_none(self, monkeypatch):
         self._patch(monkeypatch, {"data": [{"id": "x", "meta": {"n_ctx": 8192}}]})
-        assert routes._context_window("http://ctx-first:9/v1", "", "model-a") is None
+        assert turn._context_window("http://ctx-first:9/v1", "", "model-a") is None
         # The stranger's window must not stick under the requested key either.
-        assert routes._context_window("http://ctx-first:9/v1", "", "model-a") is None
+        assert turn._context_window("http://ctx-first:9/v1", "", "model-a") is None
 
     def test_missing_meta_or_bad_server_is_none(self, monkeypatch):
         self._patch(monkeypatch, {"data": [{"id": "model-a"}]})
-        assert routes._context_window("http://ctx-nometa:9/v1", "", "model-a") is None
+        assert turn._context_window("http://ctx-nometa:9/v1", "", "model-a") is None
         self._patch(monkeypatch, None, error=httpx.ConnectError("boom"))
-        assert routes._context_window("http://ctx-down:9/v1", "", "model-a") is None
+        assert turn._context_window("http://ctx-down:9/v1", "", "model-a") is None
 
     def test_success_is_cached_across_failures(self, monkeypatch):
         self._patch(monkeypatch, {"data": [{"id": "m", "meta": {"n_ctx": 32768}}]})
-        assert routes._context_window("http://ctx-cache:9/v1", "", "m") == 32768
+        assert turn._context_window("http://ctx-cache:9/v1", "", "m") == 32768
         self._patch(monkeypatch, None, error=httpx.ConnectError("gone"))
         # Same (url, model) key: the stale success answers while the server is away.
-        assert routes._context_window("http://ctx-cache:9/v1", "", "m") == 32768
+        assert turn._context_window("http://ctx-cache:9/v1", "", "m") == 32768
         # A different key has no cache to fall back on.
-        assert routes._context_window("http://ctx-cache:9/v1", "", "other") is None
+        assert turn._context_window("http://ctx-cache:9/v1", "", "other") is None
 
     def test_empty_server_url_is_none(self, monkeypatch):
-        assert routes._context_window("", "none", "model-a") is None
+        assert turn._context_window("", "none", "model-a") is None
 
 
 class TestTheSettingsSurfaceIsTheStore:
@@ -427,7 +432,7 @@ class TestModelsEndpoint:
         def factory(*args, **kwargs):
             return fake_cls
 
-        monkeypatch.setattr(routes.httpx, "AsyncClient", factory)
+        monkeypatch.setattr(api_connection.httpx, "AsyncClient", factory)
         return captured
 
     def test_lists_models_from_v1_url(self, client, monkeypatch):
@@ -1237,8 +1242,8 @@ def chat_stub(client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     root.mkdir()
     hub = _ChatHubDouble()
     set_workspace_hubs(client.app, root=root, mcp=hub, lsp=_ChatHubDouble())
-    monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
-    monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+    monkeypatch.setattr(turn, "_active_connector_ids", lambda: ["console"])
+    monkeypatch.setattr(turn, "_active_server_ids", lambda: [])
     seen: Dict[str, Any] = {}
     asked: List[Optional[str]] = []
 
@@ -1260,7 +1265,7 @@ def chat_stub(client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
               "tokensEstimated": False})
 
     monkeypatch.setattr(routes.agent_modes, "resolve_mode", spy_resolve)
-    monkeypatch.setattr(routes, "stream_chat", fake)
+    monkeypatch.setattr(api_chat, "stream_chat", fake)
     return WorkspaceClient(client, root), seen, hub, asked
 
 
@@ -1359,7 +1364,7 @@ class TestChatAgentModeField:
             {"type": "function", "function": {"name": "use_console"}}
         ]
         assert callable(seen["tool_executor"])
-        assert seen["max_tool_iterations"] == routes.max_tool_iteration(
+        assert seen["max_tool_iterations"] == max_tool_iteration(
             appdb.resolve_agent("code")[0]
         )
         # The agent itself, asserted separately from the prose that carries it.

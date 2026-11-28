@@ -49,6 +49,7 @@ from src.core.hubpool import HubPool, ceiling_sentence
 #: The one way a test names a folder on a request (clws-01): the hub routes are
 #: workspace-scoped, so every case below asks about a ``tmp_path`` folder.
 from tests.conftest import make_the_install, workspace_params, scoped
+from tests.test_workspace_seam import routes_tree_source
 
 #: The three files the reserved folder gains when a folder is admitted. The LSP
 #: **declaration** is deliberately not among them — it is hand-written, because
@@ -1419,7 +1420,7 @@ class TestThePoolIsTheOnlyThingTheHubRoutesReach:
     read-through stays deleted rather than resurrected by one careless line.
     """
 
-    #: The eight hub routes, as ``routes.py`` registers them.
+    #: The eight hub routes, as the API registers them.
     HUB_ROUTES = {
         ("get", "/mcp"),
         ("post", "/mcp"),
@@ -1433,11 +1434,7 @@ class TestThePoolIsTheOnlyThingTheHubRoutesReach:
 
     @staticmethod
     def _handlers() -> Dict[Tuple[str, str], Any]:
-        from pathlib import Path
-
-        source = (
-            Path(__file__).resolve().parent.parent / "src" / "api" / "routes.py"
-        ).read_text(encoding="utf-8")
+        source = routes_tree_source()
         found: Dict[str, Any] = {}
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

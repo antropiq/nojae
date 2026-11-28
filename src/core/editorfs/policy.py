@@ -184,7 +184,7 @@ def _is_within(parent: str, child: str, *, fold: bool) -> bool:
 
     **Which root's fold answers a deny-list compare.** The sites that compare a
     root against ``lsp_connectors/restricted-paths.txt``
-    (:func:`_check_workspace_root`, ``api/routes.py``, ``lsphub/discovery.py``)
+    (:func:`_check_workspace_root`, ``api/routes/seam.py``, ``lsphub/discovery.py``)
     ask about a pair that may sit on different volumes — a denied credential
     store under one profile home and a workspace on another. Such a compare folds
     when the probe of the **workspace** says its filesystem folds case, so there

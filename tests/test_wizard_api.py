@@ -43,12 +43,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import routes
+from src.api.routes import config as api_config
 from src.api.server import create_app
 from src.config import agent_connection_refusal
 from src.core import appdb
 from src.core.mcphub import constants as mcp_constants
 from src.core.wizard import modelstep
 from tests.conftest import neutralise_store, workspace_params
+from tests.test_workspace_seam import routes_tree_source
 
 #: The one canonical spelling of "fill this in" (§8) — written as a literal so the
 #: test does not read the value it is checking out of the code under test.
@@ -328,13 +330,13 @@ class TestTheConnectionIsResolvedOncePerRequest:
         settings save would exploit.
         """
         calls: List[Dict[str, Any]] = []
-        real = routes.load_endpoints_config
+        real = api_config.load_endpoints_config
 
         def counting(agent: Any) -> Any:
             calls.append(dict(agent))
             return real(agent)
 
-        monkeypatch.setattr(routes, "load_endpoints_config", counting)
+        monkeypatch.setattr(api_config, "load_endpoints_config", counting)
         root = a_project(tmp_path / "project", "main.py")
         seam.answer = {"servers": [a_proposal()]}
 
@@ -1120,10 +1122,9 @@ class TestTheWizardRoutesAreNotAWriteSurface:
     )
 
     def test_no_wizard_handler_names_a_write_or_a_spawn(self):
-        source = Path(routes.__file__).read_text(encoding="utf-8")
-        start = source.index("# -- the connector wizard's routes")
-        end = source.index("# -- the agents routes", start)
-        block = source[start:end]
+        from tests.test_write_surface_isolation import wizard_route_block
+
+        block = wizard_route_block(routes_tree_source())
         for marker in self.FORBIDDEN:
             assert marker not in block, marker
 
@@ -1154,7 +1155,7 @@ class TestTheWizardRoutesAreNotAWriteSurface:
         """
         from tests.test_write_surface_isolation import WRITE_MARKERS, offenders_for
 
-        wizard_package = Path(routes.__file__).parents[1] / "core" / "wizard"
+        wizard_package = Path(routes.__file__).parents[2] / "core" / "wizard"
         assert (wizard_package / "snippet.py").is_file(), wizard_package
         assert offenders_for(WRITE_MARKERS, [wizard_package]) == []
         for _verb, path in _wizard_registrations():
@@ -1163,10 +1164,10 @@ class TestTheWizardRoutesAreNotAWriteSurface:
 
 
 def _wizard_registrations() -> List[Tuple[str, str]]:
-    """Every wizard route ``routes.py`` registers, read out of its decorators."""
+    """Every wizard route the API registers, read out of its decorators."""
     import ast
 
-    source = Path(routes.__file__).read_text(encoding="utf-8")
+    source = routes_tree_source()
     found: List[Tuple[str, str]] = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

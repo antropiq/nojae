@@ -1353,6 +1353,7 @@ def editor_client(monkeypatch, tmp_path):
     real answer rather than a stub's.
     """
     from src.api import routes
+    from src.api.routes import config as api_config
     from src.api.server import create_app
     from src.core import mcphub
     from src.core.lsphub import constants as lsp_constants
@@ -1385,7 +1386,7 @@ def editor_client(monkeypatch, tmp_path):
         mcphub.constants, "MCP_SETTINGS_PATH", servers_dir / "mcp-settings.json"
     )
     monkeypatch.setattr(
-        routes,
+        api_config,
         "load_endpoints_config",
         lambda: (
             SimpleNamespace(
@@ -1494,14 +1495,14 @@ class TestEditorQueryRoute:
         self, editor_client, tmp_path, monkeypatch
     ):
         """It is a read, so the chat lock does not apply to it (§4.14)."""
-        from src.api import routes
+        from src.api.routes import state
 
         client, _app, _manager = editor_client
         (tmp_path / "workspace" / "a.py").write_text("x = 1\n", encoding="utf-8")
         # The in-flight map is keyed **with the workspace** a reply is about
         # (clws-04); this route asks the question of no folder at all, because
         # it is a read.
-        monkeypatch.setattr(routes, "_CHAT_TASKS",
+        monkeypatch.setattr(state, "_CHAT_TASKS",
                             {"a-streaming-reply": str(tmp_path / "workspace")})
 
         response = client.post(
@@ -1620,11 +1621,11 @@ class TestTheTwoGatesThatMustNotApply:
         is running" state — the streaming reply every write route refuses on —
         does not reach this route.
         """
-        from src.api import routes
+        from src.api.routes import state
 
         client, _app, _manager = editor_client
         (tmp_path / "workspace" / "a.py").write_text("x = 1\n", encoding="utf-8")
-        monkeypatch.setattr(routes, "_CHAT_TASKS",
+        monkeypatch.setattr(state, "_CHAT_TASKS",
                             {"a-streaming-reply": str(tmp_path / "workspace")})
 
         response = client.post(

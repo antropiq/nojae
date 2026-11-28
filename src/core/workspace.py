@@ -119,7 +119,7 @@ _CURRENT_ROOT: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 def scope(root: str) -> Iterator[Workspace]:
     """Enter the workspace ``root`` names, for as long as the block runs.
 
-    The API enters it once per request (``src/api/routes.py``) and nothing else
+    The API enters it once per request (``src/api/routes/seam.py``) and nothing else
     does: a scope is the answer to "which folder is this call about", so the
     request that carries the field is the only thing entitled to set it.
 

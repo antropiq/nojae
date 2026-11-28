@@ -13,6 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import routes
+from src.api.routes import chat as api_chat
+from src.api.routes import config as api_config
 from src.api.server import create_app
 from src.core import agent_modes
 from src.core import agent_modes_defaults as modes_defaults
@@ -1108,13 +1110,13 @@ class TestARefusedRoundWaits:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         assert client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         ).status_code == 200
         # Not a number and not a snapshot of one: the route hands over the
         # accessor itself, which is what makes the keys read at the decision.
-        assert seen["retry_budget"] is routes.network_fail_budget
+        assert seen["retry_budget"] is api_chat.network_fail_budget
         assert callable(seen["retry_budget"])
 
     def test_a_wait_crosses_the_sse_channel_without_ending_the_stream(
@@ -1137,10 +1139,11 @@ class TestARefusedRoundWaits:
 
         monkeypatch.setattr("src.core.chat.stream_completion", seam)
         # The real loop this time, so the frames are the ones a browser is sent.
-        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(api_chat, "stream_chat", chat_core.stream_chat)
         # A millisecond budget: the wait is real but costs nothing.
         monkeypatch.setattr(
-            routes, "network_fail_budget", lambda: (1, chat_core.WAIT_SLICE_SECONDS)
+            api_chat, "network_fail_budget",
+            lambda: (1, chat_core.WAIT_SLICE_SECONDS),
         )
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
@@ -1498,7 +1501,7 @@ class _ChatClient:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     app = create_app()
-    monkeypatch.setattr(routes, "load_endpoints_config", lambda agent: (_config(), None))
+    monkeypatch.setattr(api_config, "load_endpoints_config", lambda agent: (_config(), None))
     with TestClient(app) as test_client:
         # Every route is answered about the folder its request names (clws-02),
         # so the suite's client names the test's own ``tmp_path`` on every call.
@@ -1546,7 +1549,7 @@ class TestChatEndpoint:
             emit({"event": "done", "took": 1.0, "ttft": 0.1, "tokens": 3,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
@@ -1569,7 +1572,7 @@ class TestChatEndpoint:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         client.post(
             "/api/chat",
             json={"messages": [
@@ -1594,7 +1597,7 @@ class TestChatEndpoint:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         response = client.post(
             "/api/chat",
             json={"messages": [{
@@ -1622,7 +1625,7 @@ class TestChatEndpoint:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         response = client.post(
             "/api/chat",
             json={"messages": [{
@@ -1691,7 +1694,7 @@ class TestChatIncomingSanitization:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         return seen
 
     def test_reposted_history_arrives_clean_at_the_core(self, client, monkeypatch):
@@ -1967,7 +1970,7 @@ class TestStreamedDisplayIsSanitized:
 
         app = create_app()
         monkeypatch.setattr(
-            routes,
+            api_config,
             "load_endpoints_config",
             lambda agent: (
                 EndpointsConfig(
@@ -1978,7 +1981,7 @@ class TestStreamedDisplayIsSanitized:
                 None,
             ),
         )
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         with TestClient(app) as test_client:
             response = test_client.post(
                 "/api/chat",
@@ -2005,7 +2008,7 @@ class TestStreamedDisplayIsSanitized:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         client.post(
             "/api/chat",
             params=workspace_params(tmp_path),
@@ -2028,7 +2031,7 @@ class TestStreamedDisplayIsSanitized:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         client.post(
             "/api/chat",
             params=workspace_params(tmp_path),
@@ -2059,7 +2062,7 @@ class TestStreamedDisplayIsSanitized:
             )
 
         captured: List[Dict[str, Any]] = []
-        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(api_chat, "stream_chat", chat_core.stream_chat)
         monkeypatch.setattr(
             "src.core.chat.stream_completion",
             lambda **kwargs: captured.append(kwargs) or iter([]),
@@ -2089,7 +2092,7 @@ class TestStreamedDisplayIsSanitized:
                  skills_instructions=None):
             emit({"event": "error", "message": "boom"})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
@@ -2105,7 +2108,7 @@ class TestStreamedDisplayIsSanitized:
                  skills_instructions=None):
             emit({"event": "error", "message": "cut short", "truncated": True})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
@@ -2128,7 +2131,7 @@ class TestStreamedDisplayIsSanitized:
 
     def test_no_model_configured_returns_400(self, client, monkeypatch):
         monkeypatch.setattr(
-            routes, "load_endpoints_config", lambda agent: (_config(None), None)
+            api_config, "load_endpoints_config", lambda agent: (_config(None), None)
         )
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
@@ -2156,9 +2159,9 @@ class TestTheTurnResolvesThroughTheStore:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: [])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: [])
         app = create_app()
         with TestClient(app) as test_client:
             # A chat turn names its folder (clws-02); the second tab below shares
@@ -2248,7 +2251,7 @@ class TestTheTurnResolvesThroughTheStore:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", saving_stream)
+        monkeypatch.setattr(api_chat, "stream_chat", saving_stream)
 
         assert self._post(client).status_code == 200
         assert self._post(client).status_code == 200
@@ -2325,7 +2328,7 @@ class TestTheTurnResolvesThroughTheStore:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", slow_stream)
+        monkeypatch.setattr(api_chat, "stream_chat", slow_stream)
         other_tab = TestClient(client.app)
 
         answered: Dict[str, Any] = {}
@@ -2393,7 +2396,7 @@ class TestChatPauseEndpoint:
                   "contextTokens": 12, "contextEstimated": False})
             emit({"event": "pause_ack", "partial": True})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         def arm_pause():
             # The TestClient buffers a whole SSE body before returning, so the
@@ -2431,7 +2434,7 @@ class TestChatPauseEndpoint:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 1,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
@@ -2443,7 +2446,7 @@ class TestChatPauseEndpoint:
 def _model_per_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give each built-in agent its own model, so two turns can be told apart."""
     monkeypatch.setattr(
-        routes,
+        api_config,
         "load_endpoints_config",
         lambda agent: (_config(f"model-{agent['id']}"), None),
     )
@@ -2496,7 +2499,7 @@ class TestTwoTurnsAtOnce:
                   "tokensEstimated": False})
 
         _model_per_agent(monkeypatch)
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         results: Dict[str, Any] = {}
         errors: Dict[str, BaseException] = {}
@@ -2576,7 +2579,7 @@ class TestTwoTurnsAtOnce:
                   "tokensEstimated": False})
 
         _model_per_agent(monkeypatch)
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         results: Dict[str, Any] = {}
         errors: Dict[str, BaseException] = {}
@@ -2638,7 +2641,7 @@ class TestTwoTurnsAtOnce:
                   "tokensEstimated": False})
 
         _model_per_agent(monkeypatch)
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         answered: Dict[str, Any] = {}
 
@@ -2684,7 +2687,7 @@ class TestTwoTurnsAtOnce:
                   "tokensEstimated": False})
 
         _model_per_agent(monkeypatch)
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         answered: Dict[str, Any] = {}
 
@@ -2818,7 +2821,7 @@ class TestAClosedTabCancelsItsOwnTurnOnly:
             )
 
         _model_per_agent(monkeypatch)
-        monkeypatch.setattr(routes, "stream_chat", captured)
+        monkeypatch.setattr(api_chat, "stream_chat", captured)
         monkeypatch.setattr("src.core.chat.stream_completion", completion)
 
         answered: Dict[str, Any] = {}
@@ -3226,7 +3229,7 @@ class TestAgentModePromptAssembly:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         yield client, tmp_path, seen
 
     @staticmethod
@@ -3375,7 +3378,7 @@ class TestAgentModePromptAssembly:
             "agent_instructions", "skills_instructions",
             "mode_instructions", "batch_instructions",
         ]
-        route_source = inspect.getsource(routes)
+        route_source = inspect.getsource(api_chat)
         # Exactly one call site, passed unconditionally — never through the
         # conditional-kwarg shape the two optional blocks use.
         assert route_source.count(
@@ -3422,9 +3425,9 @@ class TestAgentModePromptAssembly:
         # The double rides on the workspace this fixture pinned, because that is
         # the folder the request is answered about (clws-06).
         set_workspace_hubs(client.app, root, mcp=Hub())
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: ["console"])
         captured: Dict[str, Any] = {}
-        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(api_chat, "stream_chat", chat_core.stream_chat)
         monkeypatch.setattr(
             "src.core.chat.stream_completion",
             lambda **kwargs: captured.update(kwargs) or iter([]),
@@ -3488,7 +3491,7 @@ class TestChatMcpFilter:
 
     @pytest.fixture
     def mcp_setup(self, client, monkeypatch):
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["alpha", "beta"])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: ["alpha", "beta"])
         manager = self.RecordingManager()
         set_workspace_hubs(client.app, client.root, mcp=manager)
 
@@ -3500,7 +3503,7 @@ class TestChatMcpFilter:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         return client, manager, seen
 
     @staticmethod
@@ -3602,8 +3605,8 @@ class TestAgentModeToolGate:
     @pytest.fixture
     def hubs(self, client, monkeypatch):
         """Both hubs live and Settings-activated; nothing is mode-gated yet."""
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: ["console"])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: ["pyright"])
         mcp, lsp = self.Hub(), self.Hub()
         # No pool involvement: these cases call ``_chat_tool_kwargs`` directly and
         # hand it the workspace's set, so the two doubles are the whole world the
@@ -3644,7 +3647,7 @@ class TestAgentModeToolGate:
         # an empty ``lsp_kwargs``: the request has no tool loop at all, so a cap
         # alone would be a ``stream_chat`` call shape no hub asked for.
         client, mcp, lsp = hubs
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: [])
         kwargs = routes._chat_tool_kwargs(
             self.HubSetStub(mcp, lsp), ["console"], mode=self._mode(False, True)
         )
@@ -3683,8 +3686,8 @@ class TestAgentModeToolGate:
         # would break: the mode only ever *narrows*, so both flags being true
         # hands the model nothing that Settings unticked.
         client, mcp, lsp = hubs
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: [])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: [])
         kwargs = routes._chat_tool_kwargs(
             self.HubSetStub(mcp, lsp), mode=self._mode(True, True)
         )
@@ -3697,7 +3700,7 @@ class TestAgentModeToolGate:
         # Settings stays the authority at the finest level too: an open mode
         # does not re-tick a connector this thread switched off.
         client, mcp, lsp = hubs
-        monkeypatch.setattr(routes, "_active_connector_ids",
+        monkeypatch.setattr(routes.turn, "_active_connector_ids",
                             lambda: ["alpha", "beta"])
         kwargs = routes._chat_tool_kwargs(
             self.HubSetStub(mcp, lsp), ["beta"], [], mode=self._mode(True, False)
@@ -3761,9 +3764,9 @@ class TestAgentModeToolGate:
         # The double goes on **this** workspace's set: the client names this
         # folder on every request (clws-02), so this is the answered folder.
         set_workspace_hubs(client.app, tmp_path, mcp=hub)
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: ["console"])
         captured: Dict[str, Any] = {}
-        monkeypatch.setattr(routes, "stream_chat", chat_core.stream_chat)
+        monkeypatch.setattr(api_chat, "stream_chat", chat_core.stream_chat)
         monkeypatch.setattr(
             "src.core.chat.stream_completion",
             lambda **kwargs: captured.update(kwargs) or iter([]),
@@ -3822,7 +3825,7 @@ class TestAgentModeToolGate:
         )
         assert (chat.mcptools, chat.lsptools) == (False, False)
         client, _root, hub, captured = route_client
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: ["pyright"])
         set_workspace_hubs(client.app, _root, lsp=self.Hub())
         response = client.post(
             "/api/chat",
@@ -3918,11 +3921,11 @@ class TestTheSkillsCatalogueRidesTheSystemMessage:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         # Settings activates one connector and no language server, so a case that
         # wants an LSP-only turn says so itself and the default is the MCP one.
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: ["console"])
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: [])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: ["console"])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: [])
         yield client, tmp_path, seen, scans
 
     @staticmethod
@@ -3995,7 +3998,7 @@ class TestTheSkillsCatalogueRidesTheSystemMessage:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", strict)
+        monkeypatch.setattr(api_chat, "stream_chat", strict)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
@@ -4008,8 +4011,8 @@ class TestTheSkillsCatalogueRidesTheSystemMessage:
         # the model to open a file it has no way to open (§5.19).
         client, root, seen, scans = turn
         write_skill(root, "pdf-processing", description="Handles PDF files.")
-        monkeypatch.setattr(routes, "_active_connector_ids", lambda: [])
-        monkeypatch.setattr(routes, "_active_server_ids", lambda: ["pyright"])
+        monkeypatch.setattr(routes.turn, "_active_connector_ids", lambda: [])
+        monkeypatch.setattr(routes.turn, "_active_server_ids", lambda: ["pyright"])
         set_workspace_hubs(client.app, root, mcp=NO_HUB, lsp=self.Hub())
         self._post(client)
         assert seen["skills_instructions"] == ""

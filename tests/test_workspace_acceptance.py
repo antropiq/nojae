@@ -46,11 +46,15 @@ from fastapi.testclient import TestClient
 
 from src import config as config_module
 from src.api import routes
+from src.api.routes import chat as api_chat
+from src.api.routes import config as api_config
+from src.api.routes import turn
 from src.api.server import create_app
 from src.core import editorfs
 from src.core import workspace
 from src.core.models import EndpointsConfig
 from tests.conftest import neutralise_store, workspace_params
+from tests.test_workspace_seam import routes_tree_source
 
 REPO_ROOT = Path(config_module.PROJECT_ROOT).resolve()
 
@@ -70,7 +74,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """
     neutralise_store(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        routes, "_context_window", lambda server_url, api_key, model: None
+        turn, "_context_window", lambda server_url, api_key, model: None
     )
     with TestClient(create_app()) as http:
         yield http
@@ -251,8 +255,8 @@ def two_agent_streams(
             }
         )
 
-    monkeypatch.setattr(routes, "load_endpoints_config", load)
-    monkeypatch.setattr(routes, "stream_chat", fake)
+    monkeypatch.setattr(api_config, "load_endpoints_config", load)
+    monkeypatch.setattr(api_chat, "stream_chat", fake)
 
     results, errors = run_concurrently(
         {
@@ -415,11 +419,11 @@ class TestItemThreeTheWritePerFolder:
             )
 
         monkeypatch.setattr(
-            routes,
+            api_config,
             "load_endpoints_config",
             lambda agent: (connection(agent["id"]), None),
         )
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         threads, results, errors = start_concurrently(
             {"a": lambda: post_chat(client, first, "chat")}
@@ -499,11 +503,11 @@ class TestItemFourPause:
             )
 
         monkeypatch.setattr(
-            routes,
+            api_config,
             "load_endpoints_config",
             lambda agent: (connection(agent["id"]), None),
         )
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         threads, results, errors = start_concurrently(
             {
@@ -662,11 +666,11 @@ class TestItemSixABatchAndAConversation:
             )
 
         monkeypatch.setattr(
-            routes,
+            api_config,
             "load_endpoints_config",
             lambda agent: (connection(agent["id"]), None),
         )
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         results, errors = run_concurrently(
             {
@@ -765,8 +769,8 @@ class TestItemEightAPeerTab:
                 }
             )
 
-        monkeypatch.setattr(routes, "load_endpoints_config", load)
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_config, "load_endpoints_config", load)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         answered_chat = post_chat(client, first, "chat")
         answered_code = post_chat(client, first, "code")
@@ -909,7 +913,7 @@ TAKES_THE_FIELD = frozenset(
 
 
 def route_registrations(source_text: str) -> List[Dict[str, Any]]:
-    """Every route ``routes.py`` registers, as ``{"verb", "path", "handler"}``.
+    """Every route the API registers, as ``{"verb", "path", "handler"}``.
 
     Read out of the decorator call, not matched as a substring, so a docstring
     naming a route cannot satisfy a guard built on this. Same shape as the helper
@@ -972,7 +976,7 @@ def workspace_routes_without_the_field(source_text: str) -> List[str]:
 
 
 def routes_source() -> str:
-    return (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+    return routes_tree_source()
 
 
 class TestInvariantInstallationRoutesNeverTakeTheField:

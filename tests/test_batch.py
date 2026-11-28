@@ -19,14 +19,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import routes
+from src.api.routes import chat as api_chat
+from src.api.routes import config as api_config
 from src.api.server import create_app
 from src.core import batch as batch_core
 from src.core import chat as chat_core
 from src.core import agent_modes_defaults as modes_defaults
 from src.core import workspace as workspace_seam
 from tests.conftest import WorkspaceClient, workspace_params
+from tests.test_workspace_seam import routes_tree_source
 
-#: The checkout, for the one structural case below: it reads ``routes.py`` as
+#: The checkout, for the one structural case below: it reads the API's sources as
 #: text to check that both batch routes go through the seam's reader. Nothing
 #: here touches this checkout's ``todos/`` — every folder under test is a
 #: ``tmp_path`` one (spec: "tests stay hermetic").
@@ -34,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def route_registrations(source_text: str) -> List[Dict[str, Any]]:
-    """Every route ``routes.py`` registers, as ``{"verb", "path", "handler"}``.
+    """Every route the API registers, as ``{"verb", "path", "handler"}``.
 
     Read out of the decorator call rather than matched as a substring, so what is
     judged is the *registration* — a docstring naming a route cannot trip the
@@ -749,7 +752,7 @@ class TestTheLotIsTheFoldersOwn:
         pair is walked rather than sampled. Read as an AST, so a docstring naming
         the helper cannot satisfy it.
         """
-        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        source = routes_tree_source()
         handlers = {
             registration["path"]: registration["handler"]
             for registration in route_registrations(source)
@@ -775,7 +778,7 @@ def _chat_stream_stub(monkeypatch: pytest.MonkeyPatch, seen: Dict[str, Any]):
         emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
               "tokensEstimated": False})
 
-    monkeypatch.setattr(routes, "stream_chat", fake)
+    monkeypatch.setattr(api_chat, "stream_chat", fake)
 
 
 #: The agent every chat turn here names. A lot runs in the agent the composer's
@@ -801,7 +804,7 @@ def chat_client(batch_client, tmp_path, monkeypatch):
                                         encoding="utf-8")
     config = EndpointsConfig(serverUrl="http://localhost:8080/v1",
                              endpoint="model-a", sysprompt="Base prompt.")
-    monkeypatch.setattr(routes, "load_endpoints_config", lambda agent: (config, None))
+    monkeypatch.setattr(api_config, "load_endpoints_config", lambda agent: (config, None))
     return batch_client
 
 
@@ -937,7 +940,7 @@ class TestChatStreamSlotIsFreed:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         def release_reply():
             streaming.wait(timeout=5)
@@ -1007,7 +1010,7 @@ class TestATaskTurnWithAnEndpointWaitStillEndsNormally:
             emit({"event": "done", "took": 31.5, "ttft": 0.4, "tokens": 8,
                   "decode": 1.1, "tokensEstimated": False, "waited": 30.0})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         response = _post_chat(chat_client, {"batchContext": "The lot: 2 tasks."})
 
@@ -1039,7 +1042,7 @@ class TestATaskTurnWithAnEndpointWaitStillEndsNormally:
                              "HTTP 502 (waited 0s over 1 further attempt; "
                              "the model endpoint is still refusing)"})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
 
         response = _post_chat(chat_client, {"batchContext": "The lot: 2 tasks."})
 

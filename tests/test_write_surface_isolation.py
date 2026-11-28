@@ -17,8 +17,9 @@ six ways, each one a different way the promise could rot:
   read-only tool design would notice.
 * **no code path spells a call to one** — a source scan for the write markers
   (``PUT /api/fs``, ``POST /api/fs``, ``DELETE /api/fs`` and the modes file's
-  ``POST /api/agent-modes/save``). They may appear in ``src/api/routes.py``
-  (the definition) and the composables that call them, and nowhere else. The
+  ``POST /api/agent-modes/save``). They may appear in the modules under
+  ``src/api/routes/`` (the definition) and the composables that call them, and
+  nowhere else. The
   read spellings (``GET /api/fs``, ``GET /api/agent-modes/document``) are
   deliberately *not* markers: the read surface's docstrings name their routes,
   and always will.
@@ -63,6 +64,7 @@ from src.core import editorfs
 from src.core.llmkit.client import chat_completions_url, models_url
 from src.core.lsphub import editor as lsp_editor
 from src.core.lsphub import tools as lsp_tools
+from tests.test_workspace_seam import routes_tree_source
 
 REPO_ROOT = Path(editorfs.constants.PROJECT_ROOT)
 
@@ -106,7 +108,13 @@ APP_ROUTE_PREFIX = "/api/"
 
 # Where a write marker is legitimate.
 ALLOWED_HOMES = {
-    Path("src/api/routes.py"),          # the routes are defined here
+    # The routes are defined here: the settings store's own modules, and the
+    # Editor's guarded write surface, which is ``fs.py`` alone.
+    Path("src/api/routes/fs.py"),
+    Path("src/api/routes/config.py"),
+    Path("src/api/routes/prompt_helpers.py"),
+    Path("src/api/routes/connection.py"),
+    Path("src/api/routes/agents.py"),
     Path("web/src/composables/useEditorFiles.js"),   # save / delete
     Path("web/src/composables/useEditorCreate.js"),  # create
     Path("web/src/composables/useEditorRename.js"),  # rename
@@ -268,7 +276,7 @@ def http_import_offenders(roots: List[Path]) -> List[str]:
 
 
 def route_registrations(source_text: str, path_prefix: str) -> List[Dict[str, Any]]:
-    """Every route ``routes.py`` registers on a path under ``path_prefix``.
+    """Every route the API registers on a path under ``path_prefix``.
 
     Each answer is ``{"verb", "path", "handler"}``, read out of the decorator
     call (``@router.get("/agent-modes")``) rather than matched as a substring, so
@@ -500,7 +508,10 @@ class TestNoCodePathCallsThem:
             text = path.read_text(encoding="utf-8")
             if any(name in text for name in writers):
                 callers.append(str(path.relative_to(REPO_ROOT)))
-        assert callers == [str(Path("src") / "api" / "routes.py")]
+        assert sorted(callers) == [
+            str(Path("src") / "api" / "routes" / "fs.py"),
+            str(Path("src") / "api" / "routes" / "inputs.py"),
+        ]
 
         borrowers = sorted(
             str(path.relative_to(REPO_ROOT))
@@ -576,7 +587,7 @@ class TestTheTerminalStaysHumanOnly:
         assert offenders == []
 
     def test_the_terminal_route_is_a_websocket_and_not_a_tool(self):
-        routes = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        routes = routes_tree_source()
         assert '@router.websocket("/terminal")' in routes
         # Nothing outside termhub itself holds a session handle, so no hub or
         # chat path can drive a shell: the registry is reached from the SPA and
@@ -645,10 +656,7 @@ class TestTheAgentRoutesStayPinnedToTheirPaths:
     }
 
     def _registered(self):
-        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
-            encoding="utf-8"
-        )
-        return route_registrations(routes_source, "/agents")
+        return route_registrations(routes_tree_source(), "/agents")
 
     def test_the_reader_path_has_one_verb_and_no_argument(self):
         """The arity is what pins "no ``?path=``", because a signature cannot hide one.
@@ -737,7 +745,7 @@ class TestTheAgentRoutesStayPinnedToTheirPaths:
         no scan of ``/api/fs`` markers would ever notice.
         """
         assert agent_writer_callers(REPO_ROOT / "src") == [
-            str(Path("api") / "routes.py")
+            str(Path("api") / "routes" / "agents.py")
         ]
 
 
@@ -779,10 +787,7 @@ class TestThePromptHelperRoutesStayPinnedToTheirPaths:
     )
 
     def _registered(self):
-        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
-            encoding="utf-8"
-        )
-        return route_registrations(routes_source, "/prompt-helpers")
+        return route_registrations(routes_tree_source(), "/prompt-helpers")
 
     def test_the_surface_is_exactly_the_reader_and_the_three_writes(self):
         by_path: Dict[str, List[str]] = {}
@@ -924,9 +929,7 @@ class TestTheServerAndModelRoutesStayPinnedToTheirPaths:
     )
 
     def _registered(self):
-        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
-            encoding="utf-8"
-        )
+        routes_source = routes_tree_source()
         return route_registrations(routes_source, "/servers") + (
             route_registrations(routes_source, "/models")
         )
@@ -1194,10 +1197,7 @@ class TestTheSearchReaderStaysARead:
     """
 
     def test_no_fs_search_route_accepts_a_mutation(self):
-        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
-            encoding="utf-8"
-        )
-        registered = route_registrations(routes_source, "/fs/search")
+        registered = route_registrations(routes_tree_source(), "/fs/search")
         assert registered, "the search route has to exist for this to mean anything"
         assert [entry["verb"] for entry in registered] == ["get"]
 
@@ -1416,8 +1416,8 @@ class TestTheGuardsActuallyFail:
         one-entry answer a verdict. The store module itself is skipped by the
         shared walker, exactly as it is for the real tree.
         """
-        (tmp_path / "api").mkdir()
-        (tmp_path / "api" / "routes.py").write_text(
+        (tmp_path / "api" / "routes").mkdir(parents=True)
+        (tmp_path / "api" / "routes" / "agents.py").write_text(
             "from src.core import appdb\n\n"
             "def route(body):\n"
             "    return appdb.update_agent(body.id, label=body.label)\n",
@@ -1436,7 +1436,7 @@ class TestTheGuardsActuallyFail:
             encoding="utf-8",
         )
         assert agent_writer_callers(tmp_path) == [
-            str(Path("api") / "routes.py"),
+            str(Path("api") / "routes" / "agents.py"),
             str(Path("core") / "mcphub" / "manager.py"),
         ]
 
@@ -1680,7 +1680,7 @@ def wizard_route_block(source_text: str) -> str:
 
     Read out of the AST — the handlers registered under ``/wizard`` plus the
     private helpers named for it — so the block is the *code*, and neither a
-    docstring elsewhere in ``routes.py`` nor a route added elsewhere can widen or
+    docstring elsewhere in the routes nor a route added elsewhere can widen or
     narrow what is scanned.
     """
     tree = ast.parse(source_text)
@@ -1704,7 +1704,9 @@ def wizard_route_block(source_text: str) -> str:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name in wanted
     ]
-    assert chunks, "no wizard route found in routes.py — the guard has nothing to scan"
+    assert chunks, (
+        "no wizard route found in the routes tree — the guard has nothing to scan"
+    )
     return "\n".join(chunks)
 
 
@@ -1728,7 +1730,7 @@ def wizard_write_offenders(python_files: List[Path], route_block: str) -> List[s
         )
         found.extend(f"{label}: {name}" for name in sorted(spellings & forbidden))
     for name in sorted(python_spellings(route_block) & forbidden):
-        found.append(f"src/api/routes.py (wizard block): {name}")
+        found.append(f"src/api/routes/wizard.py (wizard block): {name}")
     return found
 
 
@@ -1803,11 +1805,8 @@ class TestTheWizardWritesNothingStartsNothingInstallsNothing:
     """
 
     def test_the_wizard_core_and_routes_name_no_writer_and_no_spawn(self):
-        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
-            encoding="utf-8"
-        )
         offenders = wizard_write_offenders(
-            wizard_python_files(), wizard_route_block(routes_source)
+            wizard_python_files(), wizard_route_block(routes_tree_source())
         )
         assert offenders == [], f"the wizard reaches a write or a spawn: {offenders}"
 
@@ -1834,10 +1833,7 @@ class TestTheWizardWritesNothingStartsNothingInstallsNothing:
         ``WRITE_MARKERS`` — the answer must be *no match*, which is what makes "a
         read is invisible to the write scan" a fact rather than an assumption.
         """
-        routes_source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(
-            encoding="utf-8"
-        )
-        by_path = wizard_verbs(routes_source)
+        by_path = wizard_verbs(routes_tree_source())
         assert by_path == WIZARD_VERBS, (
             f"the /wizard surface is {by_path}, expected {WIZARD_VERBS}"
         )
@@ -1941,7 +1937,7 @@ class TestTheWizardGuardActuallyFails:
             "    return subprocess.run(body.candidate['command'])\n"
         )
         assert wizard_write_offenders([], poisoned) == [
-            "src/api/routes.py (wizard block): subprocess"
+            "src/api/routes/wizard.py (wizard block): subprocess"
         ]
 
     def test_the_writer_scan_ignores_prose_that_names_the_forbidden_thing(self):

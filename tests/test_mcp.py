@@ -12,6 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import routes
+from src.api.routes import chat as api_chat
+from src.api.routes import config as api_config
 from src.api.server import create_app
 from src.config import max_tool_iteration
 from src.core import chat as chat_core
@@ -961,7 +963,7 @@ def mcp_client(monkeypatch, tmp_path):
     monkeypatch.setattr(mcphub.constants, "MCP_CONNECTORS_DIR", connectors_dir)
     monkeypatch.setattr(mcphub.constants, "MCP_SETTINGS_PATH", connectors_dir / "mcp-settings.json")
     monkeypatch.setattr(
-        routes,
+        api_config,
         "load_endpoints_config",
         lambda agent: (
             SimpleNamespace(
@@ -1836,7 +1838,7 @@ class TestChatMcpWiring:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake_stream)
+        monkeypatch.setattr(api_chat, "stream_chat", fake_stream)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
                                "agentMode": "code"}
@@ -1860,7 +1862,7 @@ class TestChatMcpWiring:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake_stream)
+        monkeypatch.setattr(api_chat, "stream_chat", fake_stream)
         response = client.post(
             "/api/chat", json={"messages": [{"role": "user", "content": "hi"}],
                                "agentMode": "code"}

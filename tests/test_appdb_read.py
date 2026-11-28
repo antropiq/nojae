@@ -44,6 +44,7 @@ from pydantic import ValidationError
 import src.config as config_module
 from src.core import appdb
 from src.core.models import DEFAULT_LLM_SYSPROMPT, EndpointsConfig
+from tests.test_workspace_seam import routes_tree_source
 
 #: The four built-in ids, in the order the seeder writes them — which is also
 #: the dropdown's order, with the app-owned agent last (§4.4).
@@ -1009,8 +1010,7 @@ class TestTheTurnResolvesThroughTheStore:
     """
 
     def test_the_routes_and_the_chat_route_resolve_through_the_seam(self):
-        root = Path(appdb.__file__).resolve().parents[2]
-        routes_source = (root / "src/api/routes.py").read_text(encoding="utf-8")
+        routes_source = routes_tree_source()
         config_source = Path(config_module.__file__).read_text(encoding="utf-8")
 
         # The seam reads the agent's row, and it is the one builder.

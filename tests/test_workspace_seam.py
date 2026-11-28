@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 
 from src import config as config_module
 from src.api import routes
+from src.api.routes import chat as api_chat
 from src.api.server import create_app
 from src.core import workspace
 from src.core import lsphub
@@ -78,6 +79,21 @@ def scan_roots() -> List[Path]:
     return files
 
 
+def routes_tree_source() -> str:
+    """The text of every ``*.py`` under ``src/api``, sorted and joined.
+
+    The seam's structural guards read the API this way rather than one module,
+    so a registration is seen wherever it lives. The walk is the one
+    :func:`scan_roots` uses.
+    """
+    files = sorted(
+        path
+        for path in (REPO_ROOT / "src" / "api").rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+
 def process_location_offenders(
     files: Iterable[Path], allowed: Tuple[Path, ...] = PROCESS_LOCATION_ALLOWED
 ) -> List[str]:
@@ -106,12 +122,14 @@ def process_location_offenders(
 
 
 def route_registrations(source_text: str) -> List[Dict[str, Any]]:
-    """Every route ``routes.py`` registers, as ``{"verb", "path", "handler"}``.
+    """Every route the API router registers, as ``{"verb", "path", "handler"}``.
 
     Read out of the decorator call (``@router.get("/workspace")``) rather than
     matched as a substring, so what is judged is the *registration*: a docstring
     naming a route cannot trip a guard built on this, and a new route cannot hide
-    from one. Same shape as the helper of that name in
+    from one. Only ``router``'s decorators count — the app's own ``/api/health``
+    is registered on the ``FastAPI`` object and spells its path with the prefix
+    already on it. Same shape as the helper of that name in
     ``tests/test_write_surface_isolation.py``.
     """
     found: List[Dict[str, Any]] = []
@@ -121,6 +139,8 @@ def route_registrations(source_text: str) -> List[Dict[str, Any]]:
         for decorator in node.decorator_list:
             call = decorator if isinstance(decorator, ast.Call) else None
             if call is None or not isinstance(call.func, ast.Attribute):
+                continue
+            if getattr(call.func.value, "id", None) != "router":
                 continue
             if not call.args or not isinstance(call.args[0], ast.Constant):
                 continue
@@ -925,7 +945,7 @@ class TestEveryReadRouteRefusesWithTheSeamsSentence:
         — about the interim default — and the two cases above would only catch
         that for the folders they happen to name.
         """
-        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        source = routes_tree_source()
         handlers = {
             registration["path"]: registration["handler"]
             for registration in route_registrations(source)
@@ -952,7 +972,7 @@ class TestEveryReadRouteRefusesWithTheSeamsSentence:
         a **second** mechanism for the same job — and a worse one, because it
         would make one workspace's answer depend on another tab's traffic.
         """
-        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        source = routes_tree_source()
         offenders = [
             f"/api{registration['path']}"
             for registration in route_registrations(source)
@@ -1038,7 +1058,7 @@ class TestTheFieldIsSpelledInOnePlace:
     """
 
     def test_the_query_name_is_spelled_once_in_the_api(self):
-        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        source = routes_tree_source()
         # The field's name is bound exactly once, as the dependency's ``alias``.
         # Read as an AST rather than as a substring count because the word also
         # appears as a payload key and in prose — a count would flag those and
@@ -1075,7 +1095,7 @@ class TestTheFieldIsSpelledInOnePlace:
         business with — and a tab whose folder had been deleted could no longer
         read the servers, models, agents or bullets it needs to fix itself.
         """
-        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        source = routes_tree_source()
         checked = 0
         for registration in route_registrations(source):
             # The decorators spell their paths without the router's prefix, while
@@ -1124,7 +1144,7 @@ class TestTheFieldIsSpelledInOnePlace:
         itself is rooted at.
         """
         allowed = {
-            str(Path("src/api/routes.py")),
+            str(Path("src/api/routes/seam.py")),
             str(Path("src/api/server.py")),
             str(Path("src/core/hubpool.py")),
         }
@@ -1248,7 +1268,7 @@ class TestEveryWorkspaceScopedRouteNeedsTheField:
     """
 
     def test_the_list_names_every_scoped_http_route(self):
-        source = (REPO_ROOT / "src" / "api" / "routes.py").read_text(encoding="utf-8")
+        source = routes_tree_source()
         assert scoped_http_registrations(source) == set(SCOPED_HTTP_REQUESTS)
 
     @pytest.mark.parametrize(
@@ -1303,7 +1323,7 @@ class TestAChatTurnIsAboutTheFolderItNames:
             emit({"event": "done", "took": 0.0, "ttft": 0.0, "tokens": 0,
                   "tokensEstimated": False})
 
-        monkeypatch.setattr(routes, "stream_chat", fake)
+        monkeypatch.setattr(api_chat, "stream_chat", fake)
         return workspace_client, seen
 
     @staticmethod
