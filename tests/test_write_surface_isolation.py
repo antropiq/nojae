@@ -204,11 +204,16 @@ def offenders_for(markers, roots, allowed=ALLOWED_HOMES) -> List[str]:
     return found
 
 
+def in_store_package(path: Path) -> bool:
+    """Whether ``path`` is one of the store package's files."""
+    return path.parent.name == "appdb"
+
+
 def agent_writer_callers(source_root: Path) -> List[str]:
     """Every file under ``src`` that names the store's agent write accessors.
 
     One implementation, shared by the guard below and by its self-check — the
-    same reason ``offenders_for`` is shared. The store module is skipped (it
+    same reason ``offenders_for`` is shared. The store package is skipped (it
     *defines* them), so what is left is the list of callers: the routes alone, or
     something that should not be there.
 
@@ -218,7 +223,7 @@ def agent_writer_callers(source_root: Path) -> List[str]:
     """
     found: List[str] = []
     for path in source_root.rglob("*.py"):
-        if "__pycache__" in path.parts or path.name == "appdb.py":
+        if "__pycache__" in path.parts or in_store_package(path):
             continue  # this *defines* the writers
         text = path.read_text(encoding="utf-8")
         if any(f"appdb.{name}(" in text for name in ("add_agent", "update_agent",
@@ -519,7 +524,7 @@ class TestNoCodePathCallsThem:
             if path.parent.name != "editorfs"
             and "backup_for_write" in path.read_text(encoding="utf-8")
         )
-        assert borrowers == [str(Path("src") / "core" / "appdb.py")]
+        assert borrowers == [str(Path("src") / "core" / "appdb" / "writes.py")]
 
 
 class TestTheConnectorsWorkspacePolicyChecksStayInTheirLane:
@@ -845,7 +850,7 @@ class TestThePromptHelperRoutesStayPinnedToTheirPaths:
         names = ("add_prompt_helper", "save_prompt_helper", "delete_prompt_helper")
         callers: List[str] = []
         for path in (REPO_ROOT / "src" / "core").rglob("*.py"):
-            if path.name in ("appdb.py", "prompt_helpers.py"):
+            if path.parent.name == "appdb" or path.name == "prompt_helpers.py":
                 continue  # these *define* the accessors
             text = path.read_text(encoding="utf-8")
             if any(name in text for name in names):
@@ -982,14 +987,14 @@ class TestTheServerAndModelRoutesStayPinnedToTheirPaths:
         """Nothing under ``src/core`` names a connection write.
 
         Unlike the bullets, the connection has no wrapper module: the routes call
-        :mod:`src.core.appdb` directly, so the store module itself is the only
-        core file allowed to name these functions — it *defines* them.
+        :mod:`src.core.appdb` directly, so the store package itself is the only
+        core code allowed to name these functions — it *defines* them.
         """
         names = ("add_server", "update_server", "delete_server",
                  "add_model", "update_model", "delete_model")
         callers: List[str] = []
         for path in (REPO_ROOT / "src" / "core").rglob("*.py"):
-            if path.name == "appdb.py":
+            if in_store_package(path):
                 continue
             text = path.read_text(encoding="utf-8")
             if any(f"appdb.{name}(" in text for name in names):
@@ -1413,8 +1418,9 @@ class TestTheGuardsActuallyFail:
 
         A scratch ``src`` tree with the routes and a hub that names the accessor:
         the guard's answer is *both*, which is what makes the real guard's
-        one-entry answer a verdict. The store module itself is skipped by the
-        shared walker, exactly as it is for the real tree.
+        one-entry answer a verdict. The store is skipped by the shared walker as a
+        **package** — a façade plus the domain file that defines the accessors —
+        exactly as it is for the real tree.
         """
         (tmp_path / "api" / "routes").mkdir(parents=True)
         (tmp_path / "api" / "routes" / "agents.py").write_text(
@@ -1430,7 +1436,14 @@ class TestTheGuardsActuallyFail:
             "    return appdb.delete_agent(agent_id)\n",
             encoding="utf-8",
         )
-        (tmp_path / "core" / "appdb.py").write_text(
+        (tmp_path / "core" / "appdb").mkdir(parents=True)
+        (tmp_path / "core" / "appdb" / "__init__.py").write_text(
+            "from .agents import delete_agent, update_agent  # the façade\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "core" / "appdb" / "agents.py").write_text(
+            "# the routes reach these as appdb.update_agent(...) and\n"
+            "# appdb.delete_agent(...): the package *defines* them.\n"
             "def update_agent(*args, **kwargs):\n    return []\n\n"
             "def delete_agent(*args, **kwargs):\n    return []\n",
             encoding="utf-8",

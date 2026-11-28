@@ -37,7 +37,7 @@ const EXECUTABLE_PATH = process.env.PLAYWRIGHT_EXECUTABLE_PATH
 // It used to sit in the installation's reserved `.nojae/`, which made an
 // install-scoped fixture live in a per-workspace folder and kept it out of git;
 // here it is a committed test resource, and no developer's working location
-// decides the lookup. `src/core/appdb.py` reads the same path
+// decides the lookup. `src/core/appdb` reads the same path
 // (`TEST_SETTINGS_DIR`), and `tests/test_appdb_test_fixture.py` pins that the
 // two spellings agree.
 //

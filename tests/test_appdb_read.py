@@ -50,6 +50,12 @@ from tests.test_workspace_seam import routes_tree_source
 #: the dropdown's order, with the app-owned agent last (§4.4).
 BUILT_IN_IDS: Tuple[str, ...] = ("chat", "code", "architect", "todoBuilder")
 
+
+def store_sources() -> List[Path]:
+    """Every ``*.py`` of the store package, the thing the shape guards read."""
+    return sorted(Path(appdb.__file__).resolve().parent.glob("*.py"))
+
+
 #: The read-side names that answer "which connection does **this turn** run on",
 #: or what a turn is bounded by. Nothing may call them until task 09 wires the
 #: seam in, because a turn resolving through the store while every other reader
@@ -292,20 +298,25 @@ class TestTheReadsAreUncached:
         answer a driver error the module has not named, which is the difference
         between a reported store and a traceback in the chat path.
         """
-        tree = ast.parse(Path(appdb.__file__).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name.startswith("_") or node.name == "connection":
-                continue
-            held = [
-                call.func.id
-                for call in ast.walk(node)
-                if isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Name)
-                and call.func.id == "connection"
-            ]
-            assert not held, f"{node.name} opens a handle instead of using _read"
+        for path in store_sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name.startswith("_") or node.name == "connection":
+                    continue
+                held = [
+                    ast.unparse(call.func)
+                    for call in ast.walk(node)
+                    if isinstance(call, ast.Call)
+                    and (
+                        isinstance(call.func, ast.Name)
+                        and call.func.id == "connection"
+                        or isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "connection"
+                    )
+                ]
+                assert not held, f"{node.name} opens a handle instead of using _read"
 
     def test_the_read_path_holds_no_per_root_key(self):
         """The per-root caches of the settings and modes readers are not rebuilt.
@@ -323,7 +334,7 @@ class TestTheReadsAreUncached:
         in it reaches a tab's folder — the same single-owner rule
         ``tests/test_workspace_seam.py`` asserts over the whole of ``src/core``.
         """
-        source = Path(appdb.__file__).read_text(encoding="utf-8")
+        source = "\n".join(p.read_text(encoding="utf-8") for p in store_sources())
 
         assert not re.search(r"\b_CACHE\b|\binvalidate_", source), (
             "D11: the database is the cache, so there is nothing to invalidate"
@@ -1023,7 +1034,7 @@ class TestTheTurnResolvesThroughTheStore:
 
     def test_the_file_based_reader_is_gone(self):
         """Deleted, not deprecated: no compatibility reader, no second builder."""
-        root = Path(appdb.__file__).resolve().parents[2]
+        root = Path(appdb.__file__).resolve().parents[3]
         models_source = (root / "src/core/models.py").read_text(encoding="utf-8")
         config_source = Path(config_module.__file__).read_text(encoding="utf-8")
 
@@ -1043,11 +1054,12 @@ class TestTheTurnResolvesThroughTheStore:
         one out. Prose about where the store lives, and the level-A rule that
         hides it, name neither.
         """
-        root = Path(appdb.__file__).resolve().parents[2]
+        root = Path(appdb.__file__).resolve().parents[3]
+        store_package = (root / "src" / "core" / "appdb").resolve()
         offenders: List[str] = []
         for path in (root / "src").rglob("*.py"):
-            if path.resolve() == Path(appdb.__file__).resolve():
-                continue
+            if store_package in path.resolve().parents:
+                continue  # the store package *is* the one that speaks SQL
             text = path.read_text(encoding="utf-8")
             if re.search(r"^\s*(?:import|from)\s+sqlite3\b", text, re.MULTILINE):
                 offenders.append(f"{path.relative_to(root)}: imports sqlite3")
@@ -1060,7 +1072,7 @@ class TestTheTurnResolvesThroughTheStore:
         # And no *public* core function takes a path to the database: the
         # module's private helpers spell one because they are the ones building
         # it (``_uri``, ``_describe``), which is the seam's own business.
-        store_source = Path(appdb.__file__).read_text(encoding="utf-8")
+        store_source = "\n".join(p.read_text(encoding="utf-8") for p in store_sources())
         public_defs = re.findall(r"^def (\w+)\((.*?)\)", store_source, re.MULTILINE)
         for function, params in public_defs:
             if function.startswith("_"):

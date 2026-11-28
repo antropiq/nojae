@@ -2551,7 +2551,7 @@ class TestWritesStayBrowserOnly:
             if path.parent.name != "editorfs"
             and "backup_for_write" in path.read_text(encoding="utf-8")
         )
-        assert borrowers == [str(Path("core") / "appdb.py")]
+        assert borrowers == [str(Path("core") / "appdb" / "writes.py")]
 
     def test_no_core_module_imports_the_http_layer(self):
         """Core owns logic, the API owns transport — and that is the wall.

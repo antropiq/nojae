@@ -212,7 +212,7 @@ which is what it always was whenever that file left them commented out.
 seeds, saves or rewrites it, so a Settings-dialog save cannot change what the
 suite talks to. It is committed under `web/tests`, beside the config that boots
 it and the specs that read it, and it holds **no secret**: the stub accepts
-anyone's request, so `api_key` is empty by design. `src/core/appdb.py` reads the
+anyone's request, so `api_key` is empty by design. `src/core/appdb/` reads the
 same path, and `tests/test_appdb_test_fixture.py` pins that the two agree.
 
 ```json

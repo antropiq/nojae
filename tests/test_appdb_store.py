@@ -44,7 +44,17 @@ import pytest
 
 from src.core import appdb
 
-REPO_ROOT = Path(appdb.__file__).resolve().parents[2]
+REPO_ROOT = Path(appdb.__file__).resolve().parents[3]
+
+
+def in_the_store_package(relative: Path) -> bool:
+    """Whether ``relative`` is one of the store package's files."""
+    return relative.parts[:3] == ("src", "core", "appdb")
+
+
+def store_sources() -> List[Path]:
+    """Every ``*.py`` of the store package, the thing the shape guards read."""
+    return sorted(Path(appdb.__file__).resolve().parent.glob("*.py"))
 
 
 # -- the fixture: one patch moves the whole store -------------------------------
@@ -158,21 +168,24 @@ class TestThePath:
         spelling the filename with a separator in it (which is what a
         hand-written ``"src/../nojae.db"`` or a ``"~/"`` would look like).
         """
-        tree = ast.parse(Path(appdb.__file__).read_text(encoding="utf-8"))
-
         imported: List[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported += [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.append(node.module)
+        calls: List[str] = []
+        for path in store_sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported += [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.append(node.module)
+            calls += [
+                ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
+            ]
         assert not [
             name
             for name in imported
             if name.split(".")[0] in {"platform", "ntpath", "posixpath"}
         ]
 
-        calls = [ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call)]
         assert not [call for call in calls if "expanduser" in call or "os.path.join" in call]
 
         # The filename is one word, so the join cannot smuggle a path in.
@@ -890,7 +903,7 @@ class TestTheModuleBoundary:
         can bypass it. Parsed, not grepped, so a docstring that mentions the
         driver does not trip it and a function-local import does not pass it.
         """
-        speakers: List[str] = []
+        speakers: List[Path] = []
         for folder in ("src", "mcp_connectors", "lsp_connectors"):
             for path in sorted((REPO_ROOT / folder).rglob("*.py")):
                 if "__pycache__" in path.parts:
@@ -902,17 +915,21 @@ class TestTheModuleBoundary:
                     elif isinstance(node, ast.ImportFrom) and node.module:
                         names.append(node.module)
                 if any(name == "sqlite3" or name.startswith("sqlite3.") for name in names):
-                    speakers.append(str(path.relative_to(REPO_ROOT)))
-        assert speakers == [str(Path("src") / "core" / "appdb.py")]
+                    speakers.append(path.relative_to(REPO_ROOT))
+        outside = [str(speaker) for speaker in speakers
+                   if not in_the_store_package(speaker)]
+        assert outside == [], f"a module outside the store package imports sqlite3: {outside}"
+        assert speakers, "the store package holds no SQL speaker at all"
 
     def test_the_store_module_touches_no_http_layer(self):
         """AGENTS.md: core never touches FastAPI, and nothing under ``core`` imports the API layer."""
         names: List[str] = []
-        for node in ast.walk(ast.parse(Path(appdb.__file__).read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Import):
-                names += [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names.append(node.module)
+        for path in store_sources():
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    names += [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names.append(node.module)
         assert not [
             name for name in names if name.split(".")[0] in {"fastapi", "src.api"}
         ]
@@ -928,14 +945,15 @@ class TestTheModuleBoundary:
         path it was handed (`_describe`, `_uri_quote`) are not a way to redirect
         the store, because nothing outside the module can call them.
         """
-        tree = ast.parse(Path(appdb.__file__).read_text(encoding="utf-8"))
         offenders = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
-                continue
-            arguments = list(node.args.args) + list(node.args.kwonlyargs)
-            if any("path" in str(argument.arg).lower() for argument in arguments):
-                offenders.append(node.name)
+        for path in store_sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
+                    continue
+                arguments = list(node.args.args) + list(node.args.kwonlyargs)
+                if any("path" in str(argument.arg).lower() for argument in arguments):
+                    offenders.append(node.name)
         assert offenders == []
         # And the two that *answer* a path take no argument either.
         assert appdb.database_path.__code__.co_argcount == 0
@@ -965,9 +983,10 @@ class TestTheModuleBoundary:
         spellers: List[str] = []
         for folder in ("src", "mcp_connectors", "lsp_connectors"):
             for path in sorted((REPO_ROOT / folder).rglob("*.py")):
-                if "__pycache__" in path.parts or path.name == "appdb.py":
+                relative = path.relative_to(REPO_ROOT)
+                if "__pycache__" in path.parts or in_the_store_package(relative):
                     continue
-                if str(path.relative_to(REPO_ROOT)) in allowed:
+                if str(relative) in allowed:
                     continue
                 tree = ast.parse(path.read_text(encoding="utf-8"))
                 literals = [
